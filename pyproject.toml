@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codex-team"
+version = "0.1.0"
+description = "Claude-managed team of long-lived Codex sessions"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "krkawzq", email = "2868116803@qq.com" }]
+dependencies = [
+  "pydantic>=2.12",
+  "codex-app-server-sdk>=0.2.0",
+  "tomli>=2.0; python_version<'3.11'",
+]
+
+[project.urls]
+Homepage = "https://github.com/krkawzq/cc-codex-team"
+Repository = "https://github.com/krkawzq/cc-codex-team"
+Issues = "https://github.com/krkawzq/cc-codex-team/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.11"]
+
+[project.scripts]
+codex-team = "codex_team.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codex_team"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "integration: require RUN_CODEX_INTEGRATION=1",
+]

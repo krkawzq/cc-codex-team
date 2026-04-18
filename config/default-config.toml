@@ -1,0 +1,22 @@
+[daemon]
+log_level = "info"
+
+[defaults]
+model = "gpt-5.4"
+sandbox = "danger_full_access"
+approval_policy = "never"
+auto_resume_on_daemon_start = true
+
+[monitor]
+events_max_buffer = 1000
+watchdog_interval_seconds = 1200
+watchdog_stale_minutes = 30
+
+[heartbeat]
+interval_seconds = 60
+turn_stuck_seconds = 600
+self_heal_once = true
+
+[queue]
+max_per_session = 5
+overflow_policy = "warn"

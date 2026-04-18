@@ -1,0 +1,13 @@
+{
+  "name": "cc-codex-team",
+  "version": "0.1.0",
+  "description": "Manage long-lived Codex app-server sessions from Claude Code.",
+  "author": {
+    "name": "krkawzq",
+    "url": "https://github.com/krkawzq"
+  },
+  "homepage": "https://github.com/krkawzq/cc-codex-team",
+  "repository": "https://github.com/krkawzq/cc-codex-team",
+  "license": "Apache-2.0",
+  "keywords": ["codex", "agents", "monitor", "orchestration"]
+}
