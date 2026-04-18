@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -14,6 +15,30 @@ from pathlib import Path
 
 from codex_team.config import load_config, resolve_data_dir, resolve_socket_path
 from codex_team.errors import DaemonNotRunning, wire_to_error
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _diagnose_stale_pid(data_dir: Path) -> tuple[bool, int | None, Path]:
+    """Return (is_stale, pid, pid_path). Stale = pid file exists but points at dead process."""
+    pid_path = data_dir / "daemon.pid"
+    if not pid_path.exists():
+        return False, None, pid_path
+    try:
+        pid = int(pid_path.read_text("utf-8").strip())
+    except (OSError, ValueError):
+        return True, None, pid_path
+    if pid <= 0 or not _pid_alive(pid):
+        return True, pid, pid_path
+    return False, pid, pid_path
 
 
 def _socket_ready(sock_path: Path) -> bool:
@@ -177,18 +202,65 @@ class CliClient:
             return
         if self._sock.exists():
             self._sock.unlink()
-        subprocess.Popen(
-            [sys.executable, "-m", "codex_team.daemon.main"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+
+        cfg = load_config()
+        data_dir = resolve_data_dir(cfg)
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pre-flight: stale pid file is by far the most common failure mode.
+        # Detect and report it before spawning a doomed child.
+        stale, stale_pid, pid_path = _diagnose_stale_pid(data_dir)
+        if stale:
+            raise DaemonNotRunning(
+                f"stale pid file at {pid_path} (pid {stale_pid} is not alive). "
+                f"Remove it with: rm -f {pid_path}",
+                detail={"pid_path": str(pid_path), "stale_pid": stale_pid},
+            )
+
+        # Capture spawned daemon stderr to disk so crash tracebacks are
+        # recoverable (subprocess.DEVNULL would make them invisible).
+        err_path = data_dir / "daemon-startup.err"
+        err_fd = err_path.open("ab", buffering=0)
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "codex_team.daemon.main"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=err_fd,
+                start_new_session=True,
+            )
+        finally:
+            err_fd.close()
+
         for _ in range(50):
             if _socket_ready(self._sock):
                 return
             time.sleep(0.1)
-        raise DaemonNotRunning(f"daemon did not become ready at {self._sock}")
+
+        # Timed out. Pull the last 40 lines of the startup-err file for
+        # the exception detail; that almost always contains the real cause.
+        tail = ""
+        try:
+            if err_path.exists():
+                lines = err_path.read_text("utf-8", errors="replace").splitlines()
+                tail = "\n".join(lines[-40:])
+        except OSError:
+            pass
+
+        hint = (
+            f"daemon did not become ready at {self._sock}. "
+            f"Check {err_path} for the spawned daemon's stderr."
+        )
+        if tail:
+            hint += f"\n--- last stderr lines ---\n{tail}\n--- end ---"
+        raise DaemonNotRunning(
+            hint,
+            detail={
+                "socket_path": str(self._sock),
+                "startup_err_path": str(err_path),
+                "startup_err_tail": tail,
+            },
+        )
 
     def _read_prompt(self, args: argparse.Namespace) -> str:
         if args.stdin:

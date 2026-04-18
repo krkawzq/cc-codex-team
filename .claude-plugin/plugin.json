@@ -1,5 +1,5 @@
 {
-  "name": "cc-codex-team",
+  "name": "codex-team",
   "version": "0.1.0",
   "description": "Manage long-lived Codex app-server sessions from Claude Code.",
   "author": {

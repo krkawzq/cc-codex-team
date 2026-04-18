@@ -406,7 +406,19 @@ class SessionFactory:
 
     def _default_codex_factory(self, **kwargs: Any) -> object:
         if AsyncCodex is None or AppServerConfig is None:
-            raise RuntimeError("codex-app-server-sdk not available")
+            raise RuntimeError(
+                "codex-app-server-sdk is not importable in the daemon's Python "
+                "environment. The bootstrap script attempted to install it from "
+                "the plugin pyproject.toml but did not succeed. "
+                "Fix options: (a) run the plugin's bootstrap script explicitly "
+                "— `${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap-python-env.sh` — and "
+                "check its stderr output; (b) set CODEX_TEAM_SDK_PATH to a local "
+                "codex/sdk/python checkout and re-run bootstrap; (c) install "
+                "manually with `<venv>/bin/pip install codex-app-server-sdk` or "
+                "`pip install -e /path/to/codex/sdk/python`. See "
+                "`configure-codex-team` skill's Environment & dependencies "
+                "section for the full decision tree."
+            )
         return AsyncCodex(**kwargs)
 
     def _data_dir(self) -> Path:

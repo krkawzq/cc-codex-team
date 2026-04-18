@@ -1,5 +1,5 @@
 ---
-description: Interactive, branching walkthrough of the cc-codex-team plugin — uses AskUserQuestion to let the user pick topics and dives deep on the ones they want. Covers architecture, quickstart, monitors, send patterns, recovery, config, and interaction boundaries.
+description: Interactive, branching walkthrough of the codex-team plugin — uses AskUserQuestion to let the user pick topics and dives deep on the ones they want. Covers architecture, quickstart, monitors, send patterns, recovery, config, and interaction boundaries.
 argument-hint: "[topic-shortcut]  optional: jump straight to a section (what|quickstart|monitor|send|recovery|config|boundaries)"
 allowed-tools: Bash, AskUserQuestion
 ---
@@ -103,7 +103,7 @@ Walk through:
 
 ```bash
 # Option 1: one-shot via the command
-/cc-codex-team:bootstrap L-kernels:/path/to/worktree
+/codex-team:bootstrap L-kernels:/path/to/worktree
 
 # Option 2: manually
 codex-team daemon start

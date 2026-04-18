@@ -11,7 +11,7 @@ from pathlib import Path
 from codex_team.config import Config, load_config, resolve_data_dir, resolve_socket_path
 from codex_team.daemon.server import DaemonServer
 from codex_team.errors import DaemonAlreadyRunning
-from codex_team.paths import default_pid_path, xdg_config_dir
+from codex_team.paths import xdg_config_dir
 
 
 def _append_log_line(log_path: Path, message: str) -> None:
@@ -38,7 +38,12 @@ def acquire_pid_lock(pid_path: Path) -> None:
         except ValueError:
             pid = -1
         if pid > 0 and _is_alive(pid):
-            raise DaemonAlreadyRunning(f"pid={pid}")
+            raise DaemonAlreadyRunning(
+                f"another daemon is already running (pid={pid}, pid_file={pid_path}). "
+                f"If this is unexpected, inspect with `ps -fp {pid}` and, if that "
+                f"process is orphaned / not serving, `kill -9 {pid} && rm -f {pid_path}` "
+                f"before restarting."
+            )
         pid_path.unlink()
     pid_path.write_text(str(os.getpid()), "utf-8")
 

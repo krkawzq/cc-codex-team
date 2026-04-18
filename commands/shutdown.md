@@ -41,4 +41,4 @@ Procedure:
 Do not ask Codex to do any summary work as part of shutdown — that is
 the compaction ritual, not shutdown. If the user wants a
 progress-write first, they should run that separately before
-`/cc-codex-team:shutdown`.
+`/codex-team:shutdown`.

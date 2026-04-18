@@ -9,7 +9,7 @@
   },
   "plugins": [
     {
-      "name": "cc-codex-team",
+      "name": "codex-team",
       "source": "./",
       "description": "Manage long-lived Codex app-server sessions from Claude Code.",
       "author": {

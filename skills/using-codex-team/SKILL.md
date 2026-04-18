@@ -82,11 +82,11 @@ Commands (user-triggered shortcuts):
 
 | Command | What it does |
 |---|---|
-| `/cc-codex-team:tutorial` | interactive branching walkthrough for users new to the plugin |
-| `/cc-codex-team:bootstrap` | daemon healthcheck + create/resume N sessions (monitors auto-started by the plugin already) |
-| `/cc-codex-team:brief` | one-screen snapshot of all sessions + latest events |
-| `/cc-codex-team:heal` | try-restart every errored session, report outcome |
-| `/cc-codex-team:shutdown` | close all sessions, stop daemon cleanly |
+| `/codex-team:tutorial` | interactive branching walkthrough for users new to the plugin |
+| `/codex-team:bootstrap` | daemon healthcheck + create/resume N sessions (monitors auto-started by the plugin already) |
+| `/codex-team:brief` | one-screen snapshot of all sessions + latest events |
+| `/codex-team:heal` | try-restart every errored session, report outcome |
+| `/codex-team:shutdown` | close all sessions, stop daemon cleanly |
 
 ## Invariants (do not break)
 

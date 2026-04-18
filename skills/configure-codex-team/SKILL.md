@@ -11,11 +11,126 @@ for building per-role `[profiles.<name>]` entries so that
 `codex-team session create <name> --profile <role>` is all you ever
 need on the command line.
 
+## Environment & dependencies (decision tree)
+
+The plugin ships three separate dependencies and bootstraps them
+differently. Know this before you touch anything:
+
+| Dependency | Kind | Where it lives |
+|---|---|---|
+| Python ≥ 3.10 | system | user-installed, must be on `PATH` as `python3` or pointed at via `PYTHON=...` env |
+| Plugin package (`codex_team`) itself | pip install | bootstrapped into `${CLAUDE_PLUGIN_DATA}/venv` via `pip install -e ${CLAUDE_PLUGIN_ROOT}` at first activation |
+| `codex-app-server-sdk` (Python SDK) | pip install | declared as a plugin dep → normally pulled from PyPI; if that fails bootstrap falls back to a local source tree |
+| `codex` binary (app-server runtime) | external | NOT managed by the plugin; user must install separately (see below) |
+
+The first thing `bin/codex-team` does on any call is invoke
+`scripts/bootstrap-python-env.sh`. That script creates the venv,
+installs the plugin, verifies `import codex_app_server`, and — only if
+that import fails — tries local-source fallbacks in this order:
+
+1. `$CODEX_TEAM_SDK_PATH` (explicit user override)
+2. `${CLAUDE_PLUGIN_ROOT}/../codex/sdk/python` (sibling under `forks/`)
+3. `${CLAUDE_PLUGIN_ROOT}/../../codex/sdk/python` (two levels up)
+4. `${CLAUDE_PLUGIN_ROOT}/vendor/codex-sdk/python` (vendored copy)
+
+If none of those exist, bootstrap exits non-zero with a message
+listing your install options.
+
+### Decision tree — bootstrap or session create fails
+
+```
+                    Something is missing. Which symptom?
+                              │
+           ┌──────────────────┼──────────────────────┐
+           ▼                  ▼                      ▼
+  bootstrap exits     "codex-app-server-sdk   "codex binary not
+  "Python >=3.10"     not available"           found" (E_NO_CODEX_BIN)
+           │                  │                      │
+           ▼                  ▼                      ▼
+  Install python3.10+.  Pick one:                Install the `codex`
+  Set PYTHON=/abs/path      A. PyPI:             CLI externally:
+  in your shell or              pip install           npm install -g
+  config.toml [daemon]          codex-app-server-sdk  @openai/codex
+  codex_bin= ...            B. Local source:     Run `codex login`.
+                                export                Sanity check:
+                                CODEX_TEAM_SDK_       `codex --version`.
+                                PATH=/abs/path
+                            C. Vendor it:
+                                copy codex/sdk/python to
+                                ${PLUGIN_ROOT}/vendor/codex-sdk
+                                (fully sealed install)
+                            Then re-run bootstrap.
+```
+
+If bootstrap-stderr output is missing or truncated, run the script
+manually from a shell to see the real pip output:
+
+```bash
+bash "$(claude plugin path codex-team 2>/dev/null || echo "${CLAUDE_PLUGIN_ROOT}")"/scripts/bootstrap-python-env.sh
+```
+
+The script is idempotent (stamp-file checked on entry) and flock-safe
+(other concurrent callers just wait).
+
+### Verify the environment by hand
+
+To audit a plugin install from the outside (useful for comparing with
+your user `.venv`):
+
+```bash
+VENV="${CLAUDE_PLUGIN_DATA:-${HOME}/.local/share/cc-codex-team-plugin}/venv"
+
+# 1. venv exists and has the plugin
+${VENV}/bin/python -c "import codex_team; print(codex_team.__version__)"
+# 2. SDK is importable
+${VENV}/bin/python -c "import codex_app_server; print(codex_app_server.__version__)"
+# 3. codex binary resolves
+${VENV}/bin/python -c "
+from codex_team.config import load_config, resolve_codex_bin
+print(resolve_codex_bin(load_config()))
+"
+```
+
+All three should print a sensible path/version without raising. If (2)
+raises, bootstrap didn't install the SDK; see the decision tree above.
+If (3) raises `CodexCliMissing`, see `recover-codex-team`
+§"codex binary missing".
+
+---
+
+## External prerequisite: the `codex` binary
+
+This plugin is a front-end; it does **not** ship the `codex` binary.
+The daemon spawns `codex app-server` subprocesses and therefore needs
+the `codex` CLI installed on `PATH` and authenticated. On first
+session creation, the daemon resolves the binary in this order:
+
+1. `[daemon] codex_bin = "..."` in `config.toml`
+2. `CODEX_TEAM_DAEMON_CODEX_BIN` environment variable
+3. `which codex` on `PATH`
+4. The pinned `codex_cli_bin` Python package bundled with the SDK
+   (only present when `codex-app-server-sdk` was installed from a
+   pinned wheel)
+
+If all four fail the daemon raises `E_NO_CODEX_BIN` and the session
+create command exits with code 4. Install / authenticate codex
+externally:
+
+```bash
+npm install -g @openai/codex   # or whichever installer your org uses
+codex login                    # OAuth / API-key setup
+codex --version                # sanity check
+```
+
 ## Config file location
 
 ```
 $XDG_CONFIG_HOME/codex-team/config.toml     # usually ~/.config/codex-team/config.toml
 ```
+
+`config.toml` is **always read from the user's XDG config dir** — even
+when the plugin is active in Claude Code. Put your profiles and
+thresholds here.
 
 If the file is missing, the daemon starts with built-in defaults. You
 only need to write the keys you want to override — unspecified keys
@@ -26,14 +141,35 @@ variable of the form `CODEX_TEAM_<SECTION>_<KEY>` (uppercased,
 underscore-joined). Intended for test scripts and one-off experiments;
 prefer the TOML file for persistent config.
 
+### Data directory: plugin-mode vs standalone
+
+The `data_dir` and `socket_path` defaults behave differently depending
+on how `codex-team` is invoked:
+
+| Mode | `data_dir` default | `socket_path` default |
+|---|---|---|
+| Plugin in Claude Code (`bin/codex-team` wrapper) | `${CLAUDE_PLUGIN_DATA}/data` | `${CLAUDE_PLUGIN_DATA}/runtime/daemon.sock` |
+| Standalone (running `codex-team` in a terminal) | `$XDG_DATA_HOME/codex-team` | `$XDG_RUNTIME_DIR/codex-team/daemon.sock` |
+
+The plugin-mode paths live under Claude Code's persistent plugin data
+directory, so they survive plugin updates. This is intentional —
+session registry and history should not be re-bootstrapped every
+upgrade. You generally do not need to set these in `config.toml`; the
+wrapper injects the right values via `CODEX_TEAM_DAEMON_*` env vars
+before launching the CLI.
+
+Setting `data_dir` explicitly in `config.toml` overrides both modes.
+
 ## Full schema
 
 ```toml
 [daemon]
-socket_path    = ""                  # blank → $XDG_RUNTIME_DIR/codex-team/daemon.sock
-data_dir       = ""                  # blank → $XDG_DATA_HOME/codex-team
+socket_path    = ""                  # blank → plugin-mode: ${CLAUDE_PLUGIN_DATA}/runtime/daemon.sock
+                                      #          standalone: $XDG_RUNTIME_DIR/codex-team/daemon.sock
+data_dir       = ""                  # blank → plugin-mode: ${CLAUDE_PLUGIN_DATA}/data
+                                      #          standalone: $XDG_DATA_HOME/codex-team
 log_level      = "info"              # debug | info | warn | error
-codex_bin      = ""                  # blank → resolved via PATH / codex-cli-bin package
+codex_bin      = ""                  # blank → resolved via PATH / codex_cli_bin package (see "External prerequisite")
 codex_home     = ""                  # blank → ~/.codex
 launch_args_override = []            # extra args forwarded to `codex app-server`
 config_overrides     = []            # extra `--config key=val` forwarded to codex

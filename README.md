@@ -18,7 +18,7 @@ Inside a Claude Code instance, run:
 **Step 2: Install the plugin**
 
 ```text
-/plugin install cc-codex-team
+/plugin install codex-team
 ```
 
 **Step 3: Reload plugins**
@@ -97,7 +97,7 @@ Or install through the local marketplace manifest:
 
 ```bash
 claude plugin marketplace add /path/to/cc-codex-team
-claude plugin install cc-codex-team@cc-codex-team
+claude plugin install codex-team@cc-codex-team
 ```
 
 Run tests:

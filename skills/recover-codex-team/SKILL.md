@@ -32,6 +32,9 @@ intervene manually.
 | subprocess gone but registry says idle | `codex-team health repair` | `session kill` + `session resume` |
 | zombie subprocess (PID alive, UDS not responding) | `codex-team session kill <name>` (SIGKILLs the child) | `session forget` + re-create |
 | daemon unreachable (`daemon status` refused) | see "daemon down" below | — |
+| `E_NO_CODEX_BIN` on any session create / restart | see "codex binary missing" below | — |
+| `E_INTERNAL: codex-app-server-sdk not available` on session create | see "SDK not installed in daemon venv" below | — |
+| Plugin not loaded after install / `E_DAEMON_DOWN` on first use | first-activation bootstrap may have timed out — `/reload-plugins` forces a retry; see "bootstrap timed out" below | manual bootstrap via `bin/codex-team daemon start` |
 
 ## Restart fails
 
@@ -55,6 +58,135 @@ If `codex-team session restart <name>` returns an error:
    first send on the new session should be: *"Read
    docs/refactor/<name>/progress.md to recover context, then continue
    the most recent Next up item."*
+
+## SDK not installed in daemon venv
+
+```
+codex-team session create L-foo --cwd ...
+→ E_INTERNAL: codex-app-server-sdk is not importable in the daemon's Python environment.
+```
+
+The daemon started fine (it does not need the SDK to boot) but
+`SessionFactory.create()` cannot spawn a codex client because
+`import codex_app_server` fails. The bootstrap script declares the SDK
+as a plugin dep, but the PyPI publication of `codex-app-server-sdk` is
+experimental; if your environment cannot resolve it, bootstrap falls
+through without installing it.
+
+Quick triage:
+
+```bash
+# Confirm the plugin's venv path.
+PLUGIN_DATA="${CLAUDE_PLUGIN_DATA:-${HOME}/.local/share/cc-codex-team-plugin}"
+VENV="${PLUGIN_DATA}/venv"
+
+# Is the SDK actually missing?
+${VENV}/bin/python -c "import codex_app_server" && echo "installed" || echo "MISSING"
+```
+
+If missing, pick one path (decision tree is in the
+`configure-codex-team` skill's "Environment & dependencies" section):
+
+**Option A — PyPI (when available):**
+```bash
+${VENV}/bin/pip install codex-app-server-sdk
+```
+
+**Option B — Local source (recommended for dev):** point the bootstrap
+script at a checkout of the Codex SDK, then rerun bootstrap.
+```bash
+export CODEX_TEAM_SDK_PATH=/abs/path/to/codex/sdk/python
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap-python-env.sh"
+```
+Or place the SDK as a sibling under `forks/` (or wherever your plugin
+lives relative to `forks/codex/`) and it will be discovered
+automatically on next bootstrap.
+
+**Option C — Vendor it:** copy the SDK into the plugin directory so
+any install is fully sealed.
+```bash
+mkdir -p ${CLAUDE_PLUGIN_ROOT}/vendor/codex-sdk
+cp -r /abs/path/to/codex/sdk/python ${CLAUDE_PLUGIN_ROOT}/vendor/codex-sdk/
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap-python-env.sh"
+```
+
+After any of these, verify:
+```bash
+${VENV}/bin/python -c "import codex_app_server; print(codex_app_server.__version__)"
+```
+
+Then restart the daemon (`codex-team daemon stop && codex-team daemon start`)
+so the new SDK is picked up in the in-process import.
+
+## codex binary missing
+
+```
+codex-team session create L-foo --cwd ...
+→ E_NO_CODEX_BIN
+```
+
+The daemon failed to locate the upstream `codex` CLI. Resolution order
+is (1) `config.toml [daemon] codex_bin`, (2)
+`CODEX_TEAM_DAEMON_CODEX_BIN` env, (3) `which codex` on `PATH`,
+(4) the pinned `codex_cli_bin` Python package. All four are empty.
+
+Fix outside the plugin (it does not ship `codex`):
+
+```bash
+npm install -g @openai/codex   # standard install path
+codex login                    # authenticate; resolves 403s too
+codex --version                # confirm PATH resolution
+```
+
+Then retry the session command. If `codex` resolves in a plain shell
+but not from within the plugin, add an explicit path to
+`config.toml`:
+
+```toml
+[daemon]
+codex_bin = "/absolute/path/to/codex"
+```
+
+Bounce the daemon (`codex-team daemon stop && codex-team daemon start`)
+to pick up the config.
+
+## Bootstrap timed out
+
+First-time plugin activation runs `scripts/bootstrap-python-env.sh` to
+create a venv and `pip install -e` the plugin. That can take
+30-60 seconds. The `SessionStart` hook has a 300s timeout, but on very
+slow installs (network-constrained PyPI mirror, ancient Python, etc.)
+it can still run out, leaving the daemon un-started.
+
+Symptoms:
+
+- `/plugin list` shows the plugin but `codex-team daemon status`
+  returns `ConnectionRefusedError`.
+- Monitors `codex-team-events` / `codex-team-watchdog` are absent
+  from the task panel or exited immediately.
+- `${CLAUDE_PLUGIN_DATA}/venv/.codex-team-<version>` stamp file does
+  **not** exist, indicating the install never completed.
+
+Recovery:
+
+```bash
+# Run the bootstrap manually from a shell. This is idempotent and
+# uses flock so repeated invocations coexist safely.
+bash "$(claude plugin path codex-team 2>/dev/null || echo \"${CLAUDE_PLUGIN_ROOT}\")"/scripts/bootstrap-python-env.sh
+
+# Then start the daemon.
+codex-team daemon start
+
+# Reload plugins so Claude Code re-spawns the monitors.
+# (run inside Claude Code, not a plain shell)
+# /reload-plugins
+```
+
+If bootstrap keeps failing, run with full output to diagnose:
+
+```bash
+CODEX_TEAM_BOOTSTRAP=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap-python-env.sh"
+```
 
 ## Daemon down
 
