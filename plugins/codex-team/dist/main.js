@@ -2067,8 +2067,8 @@ var AppServerClient = class {
     }
     const payload = await this.request("initialize", {
       clientInfo: {
-        name: "cc-codex-team-node",
-        title: "cc-codex-team-node",
+        name: "codex-team",
+        title: "Codex Team",
         version: "0.1.0"
       },
       capabilities: {
@@ -2947,7 +2947,7 @@ function buildThreadStartParams(resolved) {
     ephemeral: resolved.ephemeral,
     experimentalRawEvents: false,
     persistExtendedHistory: false,
-    serviceName: "cc-codex-team-node"
+    serviceName: "codex-team"
   };
   if (resolved.modelProvider) {
     params.modelProvider = resolved.modelProvider;

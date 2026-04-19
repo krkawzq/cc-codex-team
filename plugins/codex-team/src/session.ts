@@ -829,7 +829,7 @@ function buildThreadStartParams(resolved: {
     ephemeral: resolved.ephemeral,
     experimentalRawEvents: false,
     persistExtendedHistory: false,
-    serviceName: "cc-codex-team-node",
+    serviceName: "codex-team",
   };
   if (resolved.modelProvider) {
     params.modelProvider = resolved.modelProvider;

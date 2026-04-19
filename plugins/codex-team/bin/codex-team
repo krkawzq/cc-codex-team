@@ -3,7 +3,11 @@ set -euo pipefail
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
-if [[ -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
+# Trust CLAUDE_PLUGIN_DATA only when Claude is actually running this plugin
+# (CLAUDE_PLUGIN_ROOT is set) or when the data path clearly belongs to
+# codex-team. This prevents manual absolute-path calls from inheriting another
+# plugin's CLAUDE_PLUGIN_DATA and reusing the wrong daemon socket/registry.
+if [[ -n "${CLAUDE_PLUGIN_DATA:-}" && ( -n "${CLAUDE_PLUGIN_ROOT:-}" || "${CLAUDE_PLUGIN_DATA}" == *codex-team* ) ]]; then
   export CODEX_TEAM_DAEMON_DATA_DIR="${CODEX_TEAM_DAEMON_DATA_DIR:-${CLAUDE_PLUGIN_DATA}/data}"
   export CODEX_TEAM_DAEMON_SOCKET_PATH="${CODEX_TEAM_DAEMON_SOCKET_PATH:-${CLAUDE_PLUGIN_DATA}/runtime/daemon.sock}"
 fi

@@ -243,8 +243,8 @@ export class AppServerClient implements AppServerClientLike {
     }
     const payload = await this.request("initialize", {
       clientInfo: {
-        name: "cc-codex-team-node",
-        title: "cc-codex-team-node",
+        name: "codex-team",
+        title: "Codex Team",
         version: "0.1.0",
       },
       capabilities: {

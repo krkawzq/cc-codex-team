@@ -103,6 +103,7 @@ codex-team daemon stop
 Build the plugin before loading it:
 
 ```bash
+cd plugins/codex-team
 npm install
 npm run typecheck
 npm run build
@@ -112,7 +113,7 @@ npm test
 Run it as a local plugin:
 
 ```bash
-claude --plugin-dir /path/to/cc-codex-team
+claude --plugin-dir /path/to/cc-codex-team/plugins/codex-team
 ```
 
 Or install through the local marketplace manifest:
@@ -125,6 +126,7 @@ claude plugin install codex-team@cc-codex-team
 If you edit TypeScript sources, rebuild before reloading the plugin:
 
 ```bash
+cd plugins/codex-team
 npm run build
 /reload-plugins
 ```
