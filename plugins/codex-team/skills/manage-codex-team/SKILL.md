@@ -209,6 +209,12 @@ codex-team session close <name>
 
 Stops the subprocess, marks session `closed`, **preserves the thread**. `codex-team session resume <name>` re-attaches a fresh subprocess.
 
+If the codex-team registry is gone but you still have the Codex thread id, re-register it with:
+
+```bash
+codex-team session attach <name> --thread-id <codex-thread-id> --cwd <path> [--profile X]
+```
+
 For permanent removal: `codex-team session forget <name>`. → `recover-codex-team` covers when to escalate.
 
 ## Decision on every Monitor wake

@@ -24,6 +24,44 @@ function asString(value: unknown): string {
   return String(value ?? "");
 }
 
+function optionalString(value: unknown): string | null {
+  return value == null ? null : String(value);
+}
+
+function threadIdFromParams(params: Record<string, unknown>): string {
+  return asString(params.threadId ?? params.thread_id).trim();
+}
+
+function sessionOptionsFromParams(params: Record<string, unknown>): {
+  cwd: string | null;
+  model: string | null;
+  modelProvider: string | null;
+  sandbox: string | null;
+  approvalPolicy: string | null;
+  serviceTier: string | null;
+  reasoningEffort: string | null;
+  personality: string | null;
+  baseInstructions: string | null;
+  developerInstructions: string | null;
+  profile: string | null;
+  ephemeral: boolean;
+} {
+  return {
+    cwd: optionalString(params.cwd),
+    model: optionalString(params.model),
+    modelProvider: optionalString(params.modelProvider),
+    sandbox: optionalString(params.sandbox),
+    approvalPolicy: optionalString(params.approvalPolicy),
+    serviceTier: optionalString(params.serviceTier),
+    reasoningEffort: optionalString(params.reasoningEffort),
+    personality: optionalString(params.personality),
+    baseInstructions: optionalString(params.baseInstructions),
+    developerInstructions: optionalString(params.developerInstructions),
+    profile: optionalString(params.profile),
+    ephemeral: Boolean(params.ephemeral),
+  };
+}
+
 export class DaemonServer {
   readonly eventBus: EventBus;
   readonly registry: RegistryStore;
@@ -146,31 +184,33 @@ export class DaemonServer {
       if (!name) {
         throw new InvalidRequest("name required");
       }
-      return await this.withSessionOperationLock(name, async () => {
-        const session = await this.factory.create(name, {
-          cwd: message.params.cwd == null ? null : asString(message.params.cwd),
-          model: message.params.model == null ? null : asString(message.params.model),
-          modelProvider:
-            message.params.modelProvider == null ? null : asString(message.params.modelProvider),
-          sandbox: message.params.sandbox == null ? null : asString(message.params.sandbox),
-          approvalPolicy:
-            message.params.approvalPolicy == null ? null : asString(message.params.approvalPolicy),
-          serviceTier: message.params.serviceTier == null ? null : asString(message.params.serviceTier),
-          reasoningEffort:
-            message.params.reasoningEffort == null ? null : asString(message.params.reasoningEffort),
-          personality: message.params.personality == null ? null : asString(message.params.personality),
-          baseInstructions:
-            message.params.baseInstructions == null ? null : asString(message.params.baseInstructions),
-          developerInstructions:
-            message.params.developerInstructions == null
-              ? null
-              : asString(message.params.developerInstructions),
-          profile: message.params.profile == null ? null : asString(message.params.profile),
-          ephemeral: Boolean(message.params.ephemeral),
-        });
+      const options = sessionOptionsFromParams(message.params);
+      const threadId = threadIdFromParams(message.params);
+      return await this.withSessionAttachLock(name, threadId, async () => {
+        const session = threadId
+          ? await this.factory.attach(name, threadId, options)
+          : await this.factory.create(name, options);
         this.sessions.set(session.name, session);
         const entry = this.registry.get(session.name);
-        return { name: session.name, thread_id: entry.threadId };
+        return { name: session.name, thread_id: entry.threadId, attached: Boolean(threadId) };
+      });
+    });
+
+    this.handlers.set("session.attach", async (message) => {
+      this.refreshConfigFromDisk();
+      const name = asString(message.params.name);
+      if (!name) {
+        throw new InvalidRequest("name required");
+      }
+      const threadId = threadIdFromParams(message.params);
+      if (!threadId) {
+        throw new InvalidRequest("thread_id required");
+      }
+      return await this.withSessionAttachLock(name, threadId, async () => {
+        const session = await this.factory.attach(name, threadId, sessionOptionsFromParams(message.params));
+        this.sessions.set(session.name, session);
+        const entry = this.registry.get(session.name);
+        return { name: session.name, thread_id: entry.threadId, attached: true };
       });
     });
 
@@ -625,6 +665,19 @@ export class DaemonServer {
         this.sessionLocks.delete(name);
       }
     }
+  }
+
+  private async withSessionAttachLock<T>(
+    name: string,
+    threadId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (!threadId) {
+      return await this.withSessionOperationLock(name, fn);
+    }
+    return await this.withSessionOperationLock(`thread:${threadId}`, async () => {
+      return await this.withSessionOperationLock(name, fn);
+    });
   }
 
   async handleMonitorSubscribe(

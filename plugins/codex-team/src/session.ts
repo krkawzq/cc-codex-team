@@ -32,6 +32,36 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+interface SessionCreateOptions {
+  cwd?: string | null;
+  model?: string | null;
+  modelProvider?: string | null;
+  sandbox?: string | null;
+  approvalPolicy?: string | null;
+  serviceTier?: string | null;
+  reasoningEffort?: string | null;
+  personality?: string | null;
+  baseInstructions?: string | null;
+  developerInstructions?: string | null;
+  profile?: string | null;
+  ephemeral?: boolean | null;
+}
+
+interface ResolvedSessionOptions {
+  cwd: string;
+  model: string;
+  modelProvider: string | null;
+  sandbox: string | null;
+  approvalPolicy: string | null;
+  serviceTier: string | null;
+  reasoningEffort: string | null;
+  personality: string | null;
+  baseInstructions: string | null;
+  developerInstructions: string | null;
+  ephemeral: boolean;
+  profile: string | null;
+}
+
 export class Session {
   private readonly queue: SendQueue;
   private activeTurnId: string | null = null;
@@ -661,21 +691,124 @@ export class SessionFactory {
 
   async create(
     name: string,
-    options: {
-      cwd?: string | null;
-      model?: string | null;
-      modelProvider?: string | null;
-      sandbox?: string | null;
-      approvalPolicy?: string | null;
-      serviceTier?: string | null;
-      reasoningEffort?: string | null;
-      personality?: string | null;
-      baseInstructions?: string | null;
-      developerInstructions?: string | null;
-      profile?: string | null;
-      ephemeral?: boolean | null;
-    } = {},
+    options: SessionCreateOptions = {},
   ): Promise<Session> {
+    this.ensureNameAvailable(name);
+    const resolved = this.resolveOptions(options);
+
+    const client = this.clientFactory(this.cfg);
+    await client.start();
+    let threadId = "";
+    try {
+      const response = await client.threadStart(buildThreadStartParams(resolved));
+      const thread = asRecord(response.thread);
+      threadId = String(thread.id ?? "");
+      if (threadId) {
+        await client.threadRead(threadId, false);
+      }
+    } catch (error) {
+      await client.close();
+      throw error;
+    }
+    const entry = buildRegistryEntry(name, threadId, resolved, client.pid);
+    this.registry.create(entry);
+    return new Session(
+      name,
+      this.cfg,
+      this.dataDir(),
+      this.registry,
+      this.eventBus,
+      this.compaction,
+      client,
+      threadId,
+    );
+  }
+
+  async attach(
+    name: string,
+    threadId: string,
+    options: SessionCreateOptions = {},
+  ): Promise<Session> {
+    const targetThreadId = threadId.trim();
+    if (!targetThreadId) {
+      throw new InvalidRequest("thread_id required");
+    }
+    if (options.ephemeral) {
+      throw new InvalidRequest("session attach cannot use --ephemeral for an existing thread");
+    }
+    this.ensureNameAvailable(name);
+    this.ensureThreadUnclaimed(targetThreadId);
+    const resolved = this.resolveOptions({ ...options, ephemeral: false }, { forcePersistent: true });
+
+    const client = this.clientFactory(this.cfg);
+    await client.start();
+    let resumedThreadId = targetThreadId;
+    try {
+      const response = await client.threadResume(targetThreadId, buildThreadResumeParams(resolved));
+      const thread = asRecord(response.thread);
+      resumedThreadId = String(thread.id ?? targetThreadId);
+      this.ensureThreadUnclaimed(resumedThreadId);
+      await client.threadRead(resumedThreadId, false);
+    } catch (error) {
+      await client.close();
+      throw error;
+    }
+    const entry = buildRegistryEntry(name, resumedThreadId, resolved, client.pid);
+    this.registry.create(entry);
+    return new Session(
+      name,
+      this.cfg,
+      this.dataDir(),
+      this.registry,
+      this.eventBus,
+      this.compaction,
+      client,
+      resumedThreadId,
+    );
+  }
+
+  async resume(name: string): Promise<Session> {
+    const entry = this.registry.get(name);
+    if (entry.ephemeral) {
+      throw new InvalidRequest(
+        `session ${name} is ephemeral and cannot be resumed after its app-server exits`,
+      );
+    }
+    const client = this.clientFactory(this.cfg);
+    await client.start();
+    let resumedThreadId = entry.threadId;
+    try {
+      const resolved = sessionOptionsFromRegistryEntry(entry, this.cfg, this.dataDir());
+      const response = await client.threadResume(entry.threadId, buildThreadResumeParams(resolved));
+      const thread = asRecord(response.thread);
+      resumedThreadId = String(thread.id ?? entry.threadId);
+      this.ensureThreadUnclaimed(resumedThreadId, name);
+      await client.threadRead(resumedThreadId, false);
+      if (resumedThreadId !== entry.threadId) {
+        this.registry.update(name, { threadId: resumedThreadId });
+      }
+    } catch (error) {
+      await client.close();
+      throw error;
+    }
+    this.registry.update(name, {
+      status: "idle",
+      errorMessage: null,
+      appServerPid: client.pid,
+    });
+    return new Session(
+      name,
+      this.cfg,
+      this.dataDir(),
+      this.registry,
+      this.eventBus,
+      this.compaction,
+      client,
+      resumedThreadId,
+    );
+  }
+
+  private ensureNameAvailable(name: string): void {
     try {
       this.registry.get(name);
       throw new SessionExists(name);
@@ -684,13 +817,29 @@ export class SessionFactory {
         throw error;
       }
     }
+  }
 
+  private ensureThreadUnclaimed(threadId: string, ownerName: string | null = null): void {
+    const existing = this.registry
+      .list()
+      .find((entry) => entry.threadId === threadId && entry.name !== ownerName);
+    if (existing) {
+      throw new InvalidRequest(
+        `thread ${JSON.stringify(threadId)} is already registered as session ${JSON.stringify(existing.name)}`,
+      );
+    }
+  }
+
+  private resolveOptions(
+    options: SessionCreateOptions,
+    behavior: { forcePersistent?: boolean } = {},
+  ): ResolvedSessionOptions {
     const requestedProfile = options.profile || this.cfg.defaults.profile || "";
     const selectedProfile = requestedProfile ? this.cfg.profiles[requestedProfile] : undefined;
     if (requestedProfile && !selectedProfile) {
       throw new InvalidRequest(`unknown profile: ${requestedProfile}`);
     }
-    const resolved = {
+    return {
       cwd: options.cwd || selectedProfile?.cwd || this.cfg.defaults.cwd || this.dataDir(),
       model: options.model || selectedProfile?.model || this.cfg.defaults.model,
       modelProvider:
@@ -720,116 +869,31 @@ export class SessionFactory {
         selectedProfile?.developerInstructions ||
         this.cfg.defaults.developerInstructions ||
         null,
-      ephemeral: options.ephemeral ?? selectedProfile?.ephemeral ?? false,
+      ephemeral: behavior.forcePersistent ? false : options.ephemeral ?? selectedProfile?.ephemeral ?? false,
       profile: requestedProfile || null,
     };
-
-    const client = this.clientFactory(this.cfg);
-    await client.start();
-    let threadId = "";
-    try {
-      const response = await client.threadStart(buildThreadStartParams(resolved));
-      const thread = asRecord(response.thread);
-      threadId = String(thread.id ?? "");
-      if (threadId) {
-        await client.threadRead(threadId, false);
-      }
-    } catch (error) {
-      await client.close();
-      throw error;
-    }
-    const entry: RegistryEntry = {
-      name,
-      threadId,
-      cwd: resolved.cwd,
-      model: resolved.model,
-      modelProvider: resolved.modelProvider,
-      sandbox: resolved.sandbox || "danger-full-access",
-      approvalPolicy: resolved.approvalPolicy || "never",
-      serviceTier: resolved.serviceTier,
-      reasoningEffort: resolved.reasoningEffort,
-      personality: resolved.personality,
-      profile: resolved.profile,
-      createdAt: nowIso(),
-      lastTurnId: null,
-      lastTurnEndedAt: null,
-      lastPromptText: null,
-      status: "idle",
-      appServerPid: client.pid,
-      ephemeral: resolved.ephemeral,
-      queueLength: 0,
-      tokenUsageInput: 0,
-      contextTokensEstimate: 0,
-      modelContextWindow: null,
-      errorMessage: null,
-    };
-    this.registry.create(entry);
-    return new Session(
-      name,
-      this.cfg,
-      this.dataDir(),
-      this.registry,
-      this.eventBus,
-      this.compaction,
-      client,
-      threadId,
-    );
-  }
-
-  async resume(name: string): Promise<Session> {
-    const entry = this.registry.get(name);
-    if (entry.ephemeral) {
-      throw new InvalidRequest(
-        `session ${name} is ephemeral and cannot be resumed after its app-server exits`,
-      );
-    }
-    const client = this.clientFactory(this.cfg);
-    await client.start();
-    try {
-      await client.threadResume(entry.threadId, { cwd: entry.cwd });
-      await client.threadRead(entry.threadId, false);
-    } catch (error) {
-      await client.close();
-      throw error;
-    }
-    this.registry.update(name, {
-      status: "idle",
-      errorMessage: null,
-      appServerPid: client.pid,
-    });
-    return new Session(
-      name,
-      this.cfg,
-      this.dataDir(),
-      this.registry,
-      this.eventBus,
-      this.compaction,
-      client,
-      entry.threadId,
-    );
   }
 }
 
-function buildThreadStartParams(resolved: {
-  cwd: string;
-  model: string;
-  modelProvider: string | null;
-  sandbox: string | null;
-  approvalPolicy: string | null;
-  serviceTier: string | null;
-  reasoningEffort: string | null;
-  personality: string | null;
-  baseInstructions: string | null;
-  developerInstructions: string | null;
-  ephemeral: boolean;
-}): Record<string, unknown> {
+function buildThreadStartParams(resolved: ResolvedSessionOptions): Record<string, unknown> {
+  const params = buildThreadConfigParams(resolved);
+  params.ephemeral = resolved.ephemeral;
+  params.experimentalRawEvents = false;
+  params.persistExtendedHistory = false;
+  params.serviceName = "codex-team";
+  return params;
+}
+
+function buildThreadResumeParams(resolved: ResolvedSessionOptions): Record<string, unknown> {
+  const params = buildThreadConfigParams(resolved);
+  params.persistExtendedHistory = false;
+  return params;
+}
+
+function buildThreadConfigParams(resolved: ResolvedSessionOptions): Record<string, unknown> {
   const params: Record<string, unknown> = {
     model: resolved.model,
     cwd: resolved.cwd,
-    ephemeral: resolved.ephemeral,
-    experimentalRawEvents: false,
-    persistExtendedHistory: false,
-    serviceName: "codex-team",
   };
   if (resolved.modelProvider) {
     params.modelProvider = resolved.modelProvider;
@@ -856,6 +920,65 @@ function buildThreadStartParams(resolved: {
     params.config = { model_reasoning_effort: resolved.reasoningEffort };
   }
   return params;
+}
+
+function buildRegistryEntry(
+  name: string,
+  threadId: string,
+  resolved: ResolvedSessionOptions,
+  appServerPid: number | null,
+): RegistryEntry {
+  return {
+    name,
+    threadId,
+    cwd: resolved.cwd,
+    model: resolved.model,
+    modelProvider: resolved.modelProvider,
+    sandbox: resolved.sandbox || "danger-full-access",
+    approvalPolicy: resolved.approvalPolicy || "never",
+    serviceTier: resolved.serviceTier,
+    reasoningEffort: resolved.reasoningEffort,
+    personality: resolved.personality,
+    profile: resolved.profile,
+    createdAt: nowIso(),
+    lastTurnId: null,
+    lastTurnEndedAt: null,
+    lastPromptText: null,
+    status: "idle",
+    appServerPid,
+    ephemeral: resolved.ephemeral,
+    queueLength: 0,
+    tokenUsageInput: 0,
+    contextTokensEstimate: 0,
+    modelContextWindow: null,
+    errorMessage: null,
+  };
+}
+
+function sessionOptionsFromRegistryEntry(
+  entry: RegistryEntry,
+  cfg: Config,
+  fallbackDataDir: string,
+): ResolvedSessionOptions {
+  const selectedProfile = entry.profile ? cfg.profiles[entry.profile] : undefined;
+  return {
+    cwd: entry.cwd || selectedProfile?.cwd || cfg.defaults.cwd || fallbackDataDir,
+    model: entry.model || selectedProfile?.model || cfg.defaults.model,
+    modelProvider: entry.modelProvider || selectedProfile?.modelProvider || cfg.defaults.modelProvider || null,
+    sandbox: normalizeSandboxMode(entry.sandbox || selectedProfile?.sandbox || cfg.defaults.sandbox),
+    approvalPolicy: normalizeApprovalPolicy(
+      entry.approvalPolicy || selectedProfile?.approvalPolicy || cfg.defaults.approvalPolicy,
+    ),
+    serviceTier: entry.serviceTier || selectedProfile?.serviceTier || cfg.defaults.serviceTier || null,
+    reasoningEffort:
+      entry.reasoningEffort || selectedProfile?.reasoningEffort || cfg.defaults.reasoningEffort || null,
+    personality: entry.personality || selectedProfile?.personality || cfg.defaults.personality || null,
+    baseInstructions: selectedProfile?.baseInstructions || cfg.defaults.baseInstructions || null,
+    developerInstructions:
+      selectedProfile?.developerInstructions || cfg.defaults.developerInstructions || null,
+    ephemeral: false,
+    profile: entry.profile,
+  };
 }
 
 function buildTurnStartParams(

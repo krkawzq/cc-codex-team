@@ -69,7 +69,9 @@ Both events carry `was_during_turn`, `turn_id`, `turn_age_ms`, `reason` / `heal_
      → hard-reset the child
 4. codex-team session resume <name>
      → re-attach fresh child to stored thread
-5. codex-team session forget <name> && codex-team session create <name> ...
+5. If registry was lost but the Codex thread id is known:
+     codex-team session attach <name> --thread-id <codex-thread-id> --cwd <path> [--profile X]
+6. codex-team session forget <name> && codex-team session create <name> ...
      → only if the thread itself is unusable
 ```
 

@@ -866,6 +866,7 @@ function parseCli(argv) {
         "reasoning-effort",
         "personality",
         "profile",
+        "thread-id",
         "base-instructions-file",
         "developer-instructions-file"
       ]
@@ -935,6 +936,25 @@ function parseCli(argv) {
 }
 function cryptoId() {
   return `cli-${Math.random().toString(16).slice(2)}`;
+}
+function textContentForResponse(parsed, data) {
+  const content = data.content;
+  if (typeof content !== "string") {
+    return null;
+  }
+  if (parsed.group === "history" || parsed.group === "tail") {
+    return content;
+  }
+  if (parsed.group === "daemon" && parsed.action === "logs") {
+    return content;
+  }
+  return null;
+}
+function writeTextContent(content) {
+  process.stdout.write(content);
+  if (content && !content.endsWith("\n")) {
+    process.stdout.write("\n");
+  }
 }
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1050,8 +1070,14 @@ ${tail}
       return response;
     }
     if (response.ok) {
-      process.stdout.write(`${JSON.stringify(response.data || {}, null, 2)}
+      const data = response.data || {};
+      const textContent = textContentForResponse(parsed, data);
+      if (textContent !== null) {
+        writeTextContent(textContent);
+      } else {
+        process.stdout.write(`${JSON.stringify(data, null, 2)}
 `);
+      }
       return 0;
     }
     const error = wireToError(response.error || {});
@@ -1071,7 +1097,7 @@ ${tail}
       if (args.name) {
         params.name = String(args.name);
       }
-      if (parsed.action === "create") {
+      if (parsed.action === "create" || parsed.action === "attach") {
         for (const key of [
           "cwd",
           "model",
@@ -1081,7 +1107,8 @@ ${tail}
           "serviceTier",
           "reasoningEffort",
           "personality",
-          "profile"
+          "profile",
+          "threadId"
         ]) {
           if (args[key] !== void 0) {
             params[key] = args[key];
@@ -2825,37 +2852,8 @@ var SessionFactory = class {
     return this.cfg.daemon.dataDir;
   }
   async create(name, options = {}) {
-    try {
-      this.registry.get(name);
-      throw new SessionExists(name);
-    } catch (error) {
-      if (!(error instanceof SessionNotFound)) {
-        throw error;
-      }
-    }
-    const requestedProfile = options.profile || this.cfg.defaults.profile || "";
-    const selectedProfile = requestedProfile ? this.cfg.profiles[requestedProfile] : void 0;
-    if (requestedProfile && !selectedProfile) {
-      throw new InvalidRequest(`unknown profile: ${requestedProfile}`);
-    }
-    const resolved = {
-      cwd: options.cwd || selectedProfile?.cwd || this.cfg.defaults.cwd || this.dataDir(),
-      model: options.model || selectedProfile?.model || this.cfg.defaults.model,
-      modelProvider: options.modelProvider || selectedProfile?.modelProvider || this.cfg.defaults.modelProvider || null,
-      sandbox: normalizeSandboxMode(
-        options.sandbox || selectedProfile?.sandbox || this.cfg.defaults.sandbox
-      ),
-      approvalPolicy: normalizeApprovalPolicy(
-        options.approvalPolicy || selectedProfile?.approvalPolicy || this.cfg.defaults.approvalPolicy
-      ),
-      serviceTier: options.serviceTier || selectedProfile?.serviceTier || this.cfg.defaults.serviceTier || null,
-      reasoningEffort: options.reasoningEffort || selectedProfile?.reasoningEffort || this.cfg.defaults.reasoningEffort || null,
-      personality: options.personality || selectedProfile?.personality || this.cfg.defaults.personality || null,
-      baseInstructions: options.baseInstructions || selectedProfile?.baseInstructions || this.cfg.defaults.baseInstructions || null,
-      developerInstructions: options.developerInstructions || selectedProfile?.developerInstructions || this.cfg.defaults.developerInstructions || null,
-      ephemeral: options.ephemeral ?? selectedProfile?.ephemeral ?? false,
-      profile: requestedProfile || null
-    };
+    this.ensureNameAvailable(name);
+    const resolved = this.resolveOptions(options);
     const client = this.clientFactory(this.cfg);
     await client.start();
     let threadId = "";
@@ -2870,31 +2868,7 @@ var SessionFactory = class {
       await client.close();
       throw error;
     }
-    const entry = {
-      name,
-      threadId,
-      cwd: resolved.cwd,
-      model: resolved.model,
-      modelProvider: resolved.modelProvider,
-      sandbox: resolved.sandbox || "danger-full-access",
-      approvalPolicy: resolved.approvalPolicy || "never",
-      serviceTier: resolved.serviceTier,
-      reasoningEffort: resolved.reasoningEffort,
-      personality: resolved.personality,
-      profile: resolved.profile,
-      createdAt: nowIso(),
-      lastTurnId: null,
-      lastTurnEndedAt: null,
-      lastPromptText: null,
-      status: "idle",
-      appServerPid: client.pid,
-      ephemeral: resolved.ephemeral,
-      queueLength: 0,
-      tokenUsageInput: 0,
-      contextTokensEstimate: 0,
-      modelContextWindow: null,
-      errorMessage: null
-    };
+    const entry = buildRegistryEntry(name, threadId, resolved, client.pid);
     this.registry.create(entry);
     return new Session(
       name,
@@ -2907,6 +2881,43 @@ var SessionFactory = class {
       threadId
     );
   }
+  async attach(name, threadId, options = {}) {
+    const targetThreadId = threadId.trim();
+    if (!targetThreadId) {
+      throw new InvalidRequest("thread_id required");
+    }
+    if (options.ephemeral) {
+      throw new InvalidRequest("session attach cannot use --ephemeral for an existing thread");
+    }
+    this.ensureNameAvailable(name);
+    this.ensureThreadUnclaimed(targetThreadId);
+    const resolved = this.resolveOptions({ ...options, ephemeral: false }, { forcePersistent: true });
+    const client = this.clientFactory(this.cfg);
+    await client.start();
+    let resumedThreadId = targetThreadId;
+    try {
+      const response = await client.threadResume(targetThreadId, buildThreadResumeParams(resolved));
+      const thread = asRecord(response.thread);
+      resumedThreadId = String(thread.id ?? targetThreadId);
+      this.ensureThreadUnclaimed(resumedThreadId);
+      await client.threadRead(resumedThreadId, false);
+    } catch (error) {
+      await client.close();
+      throw error;
+    }
+    const entry = buildRegistryEntry(name, resumedThreadId, resolved, client.pid);
+    this.registry.create(entry);
+    return new Session(
+      name,
+      this.cfg,
+      this.dataDir(),
+      this.registry,
+      this.eventBus,
+      this.compaction,
+      client,
+      resumedThreadId
+    );
+  }
   async resume(name) {
     const entry = this.registry.get(name);
     if (entry.ephemeral) {
@@ -2916,9 +2927,17 @@ var SessionFactory = class {
     }
     const client = this.clientFactory(this.cfg);
     await client.start();
+    let resumedThreadId = entry.threadId;
     try {
-      await client.threadResume(entry.threadId, { cwd: entry.cwd });
-      await client.threadRead(entry.threadId, false);
+      const resolved = sessionOptionsFromRegistryEntry(entry, this.cfg, this.dataDir());
+      const response = await client.threadResume(entry.threadId, buildThreadResumeParams(resolved));
+      const thread = asRecord(response.thread);
+      resumedThreadId = String(thread.id ?? entry.threadId);
+      this.ensureThreadUnclaimed(resumedThreadId, name);
+      await client.threadRead(resumedThreadId, false);
+      if (resumedThreadId !== entry.threadId) {
+        this.registry.update(name, { threadId: resumedThreadId });
+      }
     } catch (error) {
       await client.close();
       throw error;
@@ -2936,18 +2955,70 @@ var SessionFactory = class {
       this.eventBus,
       this.compaction,
       client,
-      entry.threadId
+      resumedThreadId
     );
+  }
+  ensureNameAvailable(name) {
+    try {
+      this.registry.get(name);
+      throw new SessionExists(name);
+    } catch (error) {
+      if (!(error instanceof SessionNotFound)) {
+        throw error;
+      }
+    }
+  }
+  ensureThreadUnclaimed(threadId, ownerName = null) {
+    const existing = this.registry.list().find((entry) => entry.threadId === threadId && entry.name !== ownerName);
+    if (existing) {
+      throw new InvalidRequest(
+        `thread ${JSON.stringify(threadId)} is already registered as session ${JSON.stringify(existing.name)}`
+      );
+    }
+  }
+  resolveOptions(options, behavior = {}) {
+    const requestedProfile = options.profile || this.cfg.defaults.profile || "";
+    const selectedProfile = requestedProfile ? this.cfg.profiles[requestedProfile] : void 0;
+    if (requestedProfile && !selectedProfile) {
+      throw new InvalidRequest(`unknown profile: ${requestedProfile}`);
+    }
+    return {
+      cwd: options.cwd || selectedProfile?.cwd || this.cfg.defaults.cwd || this.dataDir(),
+      model: options.model || selectedProfile?.model || this.cfg.defaults.model,
+      modelProvider: options.modelProvider || selectedProfile?.modelProvider || this.cfg.defaults.modelProvider || null,
+      sandbox: normalizeSandboxMode(
+        options.sandbox || selectedProfile?.sandbox || this.cfg.defaults.sandbox
+      ),
+      approvalPolicy: normalizeApprovalPolicy(
+        options.approvalPolicy || selectedProfile?.approvalPolicy || this.cfg.defaults.approvalPolicy
+      ),
+      serviceTier: options.serviceTier || selectedProfile?.serviceTier || this.cfg.defaults.serviceTier || null,
+      reasoningEffort: options.reasoningEffort || selectedProfile?.reasoningEffort || this.cfg.defaults.reasoningEffort || null,
+      personality: options.personality || selectedProfile?.personality || this.cfg.defaults.personality || null,
+      baseInstructions: options.baseInstructions || selectedProfile?.baseInstructions || this.cfg.defaults.baseInstructions || null,
+      developerInstructions: options.developerInstructions || selectedProfile?.developerInstructions || this.cfg.defaults.developerInstructions || null,
+      ephemeral: behavior.forcePersistent ? false : options.ephemeral ?? selectedProfile?.ephemeral ?? false,
+      profile: requestedProfile || null
+    };
   }
 };
 function buildThreadStartParams(resolved) {
+  const params = buildThreadConfigParams(resolved);
+  params.ephemeral = resolved.ephemeral;
+  params.experimentalRawEvents = false;
+  params.persistExtendedHistory = false;
+  params.serviceName = "codex-team";
+  return params;
+}
+function buildThreadResumeParams(resolved) {
+  const params = buildThreadConfigParams(resolved);
+  params.persistExtendedHistory = false;
+  return params;
+}
+function buildThreadConfigParams(resolved) {
   const params = {
     model: resolved.model,
-    cwd: resolved.cwd,
-    ephemeral: resolved.ephemeral,
-    experimentalRawEvents: false,
-    persistExtendedHistory: false,
-    serviceName: "codex-team"
+    cwd: resolved.cwd
   };
   if (resolved.modelProvider) {
     params.modelProvider = resolved.modelProvider;
@@ -2974,6 +3045,52 @@ function buildThreadStartParams(resolved) {
     params.config = { model_reasoning_effort: resolved.reasoningEffort };
   }
   return params;
+}
+function buildRegistryEntry(name, threadId, resolved, appServerPid) {
+  return {
+    name,
+    threadId,
+    cwd: resolved.cwd,
+    model: resolved.model,
+    modelProvider: resolved.modelProvider,
+    sandbox: resolved.sandbox || "danger-full-access",
+    approvalPolicy: resolved.approvalPolicy || "never",
+    serviceTier: resolved.serviceTier,
+    reasoningEffort: resolved.reasoningEffort,
+    personality: resolved.personality,
+    profile: resolved.profile,
+    createdAt: nowIso(),
+    lastTurnId: null,
+    lastTurnEndedAt: null,
+    lastPromptText: null,
+    status: "idle",
+    appServerPid,
+    ephemeral: resolved.ephemeral,
+    queueLength: 0,
+    tokenUsageInput: 0,
+    contextTokensEstimate: 0,
+    modelContextWindow: null,
+    errorMessage: null
+  };
+}
+function sessionOptionsFromRegistryEntry(entry, cfg, fallbackDataDir) {
+  const selectedProfile = entry.profile ? cfg.profiles[entry.profile] : void 0;
+  return {
+    cwd: entry.cwd || selectedProfile?.cwd || cfg.defaults.cwd || fallbackDataDir,
+    model: entry.model || selectedProfile?.model || cfg.defaults.model,
+    modelProvider: entry.modelProvider || selectedProfile?.modelProvider || cfg.defaults.modelProvider || null,
+    sandbox: normalizeSandboxMode(entry.sandbox || selectedProfile?.sandbox || cfg.defaults.sandbox),
+    approvalPolicy: normalizeApprovalPolicy(
+      entry.approvalPolicy || selectedProfile?.approvalPolicy || cfg.defaults.approvalPolicy
+    ),
+    serviceTier: entry.serviceTier || selectedProfile?.serviceTier || cfg.defaults.serviceTier || null,
+    reasoningEffort: entry.reasoningEffort || selectedProfile?.reasoningEffort || cfg.defaults.reasoningEffort || null,
+    personality: entry.personality || selectedProfile?.personality || cfg.defaults.personality || null,
+    baseInstructions: selectedProfile?.baseInstructions || cfg.defaults.baseInstructions || null,
+    developerInstructions: selectedProfile?.developerInstructions || cfg.defaults.developerInstructions || null,
+    ephemeral: false,
+    profile: entry.profile
+  };
 }
 function buildTurnStartParams(threadId, text, overrides) {
   const params = {
@@ -3269,6 +3386,28 @@ function splitMarkdownSections(content) {
 function asString(value) {
   return String(value ?? "");
 }
+function optionalString(value) {
+  return value == null ? null : String(value);
+}
+function threadIdFromParams(params) {
+  return asString(params.threadId ?? params.thread_id).trim();
+}
+function sessionOptionsFromParams(params) {
+  return {
+    cwd: optionalString(params.cwd),
+    model: optionalString(params.model),
+    modelProvider: optionalString(params.modelProvider),
+    sandbox: optionalString(params.sandbox),
+    approvalPolicy: optionalString(params.approvalPolicy),
+    serviceTier: optionalString(params.serviceTier),
+    reasoningEffort: optionalString(params.reasoningEffort),
+    personality: optionalString(params.personality),
+    baseInstructions: optionalString(params.baseInstructions),
+    developerInstructions: optionalString(params.developerInstructions),
+    profile: optionalString(params.profile),
+    ephemeral: Boolean(params.ephemeral)
+  };
+}
 var DaemonServer = class {
   constructor(cfg, socketPath, shutdownCallback, clientFactory = (cfg2) => new AppServerClient(cfg2)) {
     this.cfg = cfg;
@@ -3387,24 +3526,30 @@ var DaemonServer = class {
       if (!name) {
         throw new InvalidRequest("name required");
       }
-      return await this.withSessionOperationLock(name, async () => {
-        const session = await this.factory.create(name, {
-          cwd: message.params.cwd == null ? null : asString(message.params.cwd),
-          model: message.params.model == null ? null : asString(message.params.model),
-          modelProvider: message.params.modelProvider == null ? null : asString(message.params.modelProvider),
-          sandbox: message.params.sandbox == null ? null : asString(message.params.sandbox),
-          approvalPolicy: message.params.approvalPolicy == null ? null : asString(message.params.approvalPolicy),
-          serviceTier: message.params.serviceTier == null ? null : asString(message.params.serviceTier),
-          reasoningEffort: message.params.reasoningEffort == null ? null : asString(message.params.reasoningEffort),
-          personality: message.params.personality == null ? null : asString(message.params.personality),
-          baseInstructions: message.params.baseInstructions == null ? null : asString(message.params.baseInstructions),
-          developerInstructions: message.params.developerInstructions == null ? null : asString(message.params.developerInstructions),
-          profile: message.params.profile == null ? null : asString(message.params.profile),
-          ephemeral: Boolean(message.params.ephemeral)
-        });
+      const options = sessionOptionsFromParams(message.params);
+      const threadId = threadIdFromParams(message.params);
+      return await this.withSessionAttachLock(name, threadId, async () => {
+        const session = threadId ? await this.factory.attach(name, threadId, options) : await this.factory.create(name, options);
         this.sessions.set(session.name, session);
         const entry = this.registry.get(session.name);
-        return { name: session.name, thread_id: entry.threadId };
+        return { name: session.name, thread_id: entry.threadId, attached: Boolean(threadId) };
+      });
+    });
+    this.handlers.set("session.attach", async (message) => {
+      this.refreshConfigFromDisk();
+      const name = asString(message.params.name);
+      if (!name) {
+        throw new InvalidRequest("name required");
+      }
+      const threadId = threadIdFromParams(message.params);
+      if (!threadId) {
+        throw new InvalidRequest("thread_id required");
+      }
+      return await this.withSessionAttachLock(name, threadId, async () => {
+        const session = await this.factory.attach(name, threadId, sessionOptionsFromParams(message.params));
+        this.sessions.set(session.name, session);
+        const entry = this.registry.get(session.name);
+        return { name: session.name, thread_id: entry.threadId, attached: true };
       });
     });
     this.handlers.set("session.list", async () => ({
@@ -3823,6 +3968,14 @@ var DaemonServer = class {
         this.sessionLocks.delete(name);
       }
     }
+  }
+  async withSessionAttachLock(name, threadId, fn) {
+    if (!threadId) {
+      return await this.withSessionOperationLock(name, fn);
+    }
+    return await this.withSessionOperationLock(`thread:${threadId}`, async () => {
+      return await this.withSessionOperationLock(name, fn);
+    });
   }
   async handleMonitorSubscribe(stream, sinceSeq, socket) {
     const queue = await this.eventBus.subscribe(stream, sinceSeq);

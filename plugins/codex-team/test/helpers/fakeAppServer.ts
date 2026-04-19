@@ -59,9 +59,11 @@ export class FakeAppServerClient implements AppServerClientLike {
   readonly threadReads: Array<{ threadId: string; includeTurns: boolean }> = [];
   readonly threadResumes: Array<{ threadId: string; params: Record<string, unknown> }> = [];
   nextThreadId = "thr_test";
+  nextResumeThreadId: string | null = null;
   nextTurnId = "tr_test";
   queuedTurnNotifications: RpcNotification[][] = [];
   queuedCompactNotifications: RpcNotification[][] = [];
+  threadReadError: Error | null = null;
   threadReadResult: Record<string, unknown> | null = null;
 
   async start(): Promise<void> {
@@ -97,13 +99,16 @@ export class FakeAppServerClient implements AppServerClientLike {
     this.threadResumes.push({ threadId, params });
     return {
       thread: {
-        id: threadId,
+        id: this.nextResumeThreadId || threadId,
       },
     };
   }
 
   async threadRead(threadId: string, includeTurns = false): Promise<Record<string, unknown>> {
     this.threadReads.push({ threadId, includeTurns });
+    if (this.threadReadError) {
+      throw this.threadReadError;
+    }
     if (this.threadReadResult) {
       return this.threadReadResult;
     }

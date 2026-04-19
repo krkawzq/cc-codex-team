@@ -6,7 +6,7 @@ import path from "node:path";
 import readline from "node:readline";
 import test from "node:test";
 
-import { sendRequest } from "../src/cli";
+import { sendRequest, textContentForResponse } from "../src/cli";
 import { loadConfig } from "../src/config";
 import { DaemonServer } from "../src/server";
 import { FakeAppServerClient } from "./helpers/fakeAppServer";
@@ -58,6 +58,258 @@ test("DaemonServer supports create, read, and doctor over socket", async () => {
     assert.equal(doctor.ok, true);
     const summary = (doctor.data as Record<string, unknown>).summary as Record<string, unknown>;
     assert.equal(summary.total, 1);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("DaemonServer attaches an existing Codex thread as a session", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
+  const cfg = tempConfig(tempDir);
+  const fake = new FakeAppServerClient();
+  const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => fake);
+  await server.start();
+  try {
+    const attached = await sendRequest(cfg.daemon.socketPath, "session.attach", {
+      name: "restored",
+      threadId: "thr_saved",
+      cwd: tempDir,
+      model: "gpt-5.4",
+      modelProvider: "openai",
+      reasoningEffort: "high",
+    });
+    assert.equal(attached.ok, true);
+    assert.deepEqual(fake.threadResumes, [
+      {
+        threadId: "thr_saved",
+        params: {
+          model: "gpt-5.4",
+          cwd: tempDir,
+          modelProvider: "openai",
+          sandbox: "danger-full-access",
+          approvalPolicy: "never",
+          config: { model_reasoning_effort: "high" },
+          persistExtendedHistory: false,
+        },
+      },
+    ]);
+    assert.deepEqual(fake.threadReads, [{ threadId: "thr_saved", includeTurns: false }]);
+
+    const status = await sendRequest(cfg.daemon.socketPath, "session.status", { name: "restored" });
+    assert.equal(status.ok, true);
+    assert.equal((status.data as Record<string, unknown>).threadId, "thr_saved");
+    assert.equal((status.data as Record<string, unknown>).ephemeral, false);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("DaemonServer rejects attaching the same thread twice", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
+  const cfg = tempConfig(tempDir);
+  const fake = new FakeAppServerClient();
+  const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => fake);
+  await server.start();
+  try {
+    const first = await sendRequest(cfg.daemon.socketPath, "session.attach", {
+      name: "restored-one",
+      thread_id: "thr_dup",
+      cwd: tempDir,
+    });
+    assert.equal(first.ok, true);
+
+    const second = await sendRequest(cfg.daemon.socketPath, "session.attach", {
+      name: "restored-two",
+      threadId: "thr_dup",
+      cwd: tempDir,
+    });
+    assert.equal(second.ok, false);
+    assert.equal((second.error as Record<string, unknown>).code, "E_INVALID");
+    assert.equal(fake.threadResumes.length, 1);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("DaemonServer resumes registry sessions with persisted config", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
+  const cfg = tempConfig(tempDir);
+  const clients: FakeAppServerClient[] = [];
+  const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => {
+    const fake = new FakeAppServerClient();
+    fake.nextThreadId = "thr_resume";
+    clients.push(fake);
+    return fake;
+  });
+  await server.start();
+  try {
+    const created = await sendRequest(cfg.daemon.socketPath, "session.create", {
+      name: "resumable",
+      cwd: tempDir,
+      model: "gpt-5.4",
+      modelProvider: "openai",
+      sandbox: "workspace-write",
+      approvalPolicy: "on-request",
+      serviceTier: "flex",
+      reasoningEffort: "xhigh",
+    });
+    assert.equal(created.ok, true);
+
+    const closed = await sendRequest(cfg.daemon.socketPath, "session.close", { name: "resumable" });
+    assert.equal(closed.ok, true);
+
+    const resumed = await sendRequest(cfg.daemon.socketPath, "session.resume", { name: "resumable" });
+    assert.equal(resumed.ok, true);
+    assert.equal(clients.length, 2);
+    assert.deepEqual(clients[1].threadResumes, [
+      {
+        threadId: "thr_resume",
+        params: {
+          model: "gpt-5.4",
+          cwd: tempDir,
+          modelProvider: "openai",
+          sandbox: "workspace-write",
+          approvalPolicy: "on-request",
+          serviceTier: "flex",
+          config: { model_reasoning_effort: "xhigh" },
+          persistExtendedHistory: false,
+        },
+      },
+    ]);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("DaemonServer resumes legacy registry sessions with config fallbacks", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
+  const configHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-config-"));
+  const previous = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = configHome;
+  try {
+    fs.mkdirSync(path.join(configHome, "codex-team"), { recursive: true });
+    fs.writeFileSync(
+      path.join(configHome, "codex-team", "config.toml"),
+      `
+[defaults]
+model = "gpt-default"
+cwd = "${tempDir}"
+sandbox = "workspace-write"
+approval_policy = "never"
+
+[profiles.legacy_profile]
+reasoning_effort = "high"
+personality = "precise"
+base_instructions = "base from profile"
+developer_instructions = "developer from profile"
+`,
+      "utf8",
+    );
+    const cfg = tempConfig(tempDir);
+    cfg.defaults.model = "gpt-default";
+    cfg.defaults.cwd = tempDir;
+    cfg.defaults.sandbox = "workspace-write";
+    cfg.defaults.approvalPolicy = "never";
+    const fake = new FakeAppServerClient();
+    const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => fake);
+    await server.start();
+    try {
+      server.registry.create({
+        name: "legacy",
+        threadId: "thr_legacy",
+        cwd: "",
+        model: "",
+        modelProvider: null,
+        sandbox: "",
+        approvalPolicy: "",
+        serviceTier: null,
+        reasoningEffort: null,
+        personality: null,
+        profile: "legacy_profile",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        lastTurnId: null,
+        lastTurnEndedAt: null,
+        lastPromptText: null,
+        status: "closed",
+        appServerPid: null,
+        ephemeral: false,
+        queueLength: 0,
+        tokenUsageInput: 0,
+        contextTokensEstimate: 0,
+        modelContextWindow: null,
+        errorMessage: null,
+      });
+
+      const resumed = await sendRequest(cfg.daemon.socketPath, "session.resume", { name: "legacy" });
+      assert.equal(resumed.ok, true);
+      assert.deepEqual(fake.threadResumes, [
+        {
+          threadId: "thr_legacy",
+          params: {
+            model: "gpt-default",
+            cwd: tempDir,
+            sandbox: "workspace-write",
+            approvalPolicy: "never",
+            personality: "precise",
+            baseInstructions: "base from profile",
+            developerInstructions: "developer from profile",
+            config: { model_reasoning_effort: "high" },
+            persistExtendedHistory: false,
+          },
+        },
+      ]);
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    if (previous === undefined) {
+      delete process.env.XDG_CONFIG_HOME;
+    } else {
+      process.env.XDG_CONFIG_HOME = previous;
+    }
+  }
+});
+
+test("DaemonServer does not rewrite registry when resumed thread verification fails", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
+  const cfg = tempConfig(tempDir);
+  const fake = new FakeAppServerClient();
+  fake.nextResumeThreadId = "thr_new";
+  fake.threadReadError = new Error("read failed");
+  const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => fake);
+  await server.start();
+  try {
+    server.registry.create({
+      name: "verify-fail",
+      threadId: "thr_old",
+      cwd: tempDir,
+      model: "gpt-5.4",
+      modelProvider: null,
+      sandbox: "danger-full-access",
+      approvalPolicy: "never",
+      serviceTier: null,
+      reasoningEffort: null,
+      personality: null,
+      profile: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastTurnId: null,
+      lastTurnEndedAt: null,
+      lastPromptText: null,
+      status: "closed",
+      appServerPid: null,
+      ephemeral: false,
+      queueLength: 0,
+      tokenUsageInput: 0,
+      contextTokensEstimate: 0,
+      modelContextWindow: null,
+      errorMessage: null,
+    });
+
+    const resumed = await sendRequest(cfg.daemon.socketPath, "session.resume", { name: "verify-fail" });
+    assert.equal(resumed.ok, false);
+    const status = await sendRequest(cfg.daemon.socketPath, "session.status", { name: "verify-fail" });
+    assert.equal(status.ok, true);
+    assert.equal((status.data as Record<string, unknown>).threadId, "thr_old");
   } finally {
     await server.stop();
   }
@@ -218,6 +470,26 @@ test("DaemonServer history.get supports sinceTurnId", async () => {
   } finally {
     await server.stop();
   }
+});
+
+test("CliClient selects plain text output for content commands", () => {
+  const content = "## Turn tr_1\n\nFinal answer: done\n";
+  assert.equal(
+    textContentForResponse({ group: "history", args: {} }, { content }),
+    content,
+  );
+  assert.equal(
+    textContentForResponse({ group: "tail", args: {} }, { content: "stderr\n" }),
+    "stderr\n",
+  );
+  assert.equal(
+    textContentForResponse({ group: "daemon", action: "logs", args: {} }, { content: "log\n" }),
+    "log\n",
+  );
+  assert.equal(
+    textContentForResponse({ group: "session", action: "status", args: {} }, { content }),
+    null,
+  );
 });
 
 test("DaemonServer history.subscribe streams snapshot and appended turns", async () => {

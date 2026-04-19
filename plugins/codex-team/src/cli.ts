@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { loadConfig, resolveDataDir, resolveSocketPath } from "./config";
 import { DaemonNotRunning, wireToError } from "./errors";
 
-type ParsedArgs =
+export type ParsedArgs =
   | { group: "session"; action: string; args: Record<string, unknown> }
   | { group: "send"; args: Record<string, unknown> }
   | { group: "interrupt"; name: string }
@@ -260,6 +260,7 @@ function parseCli(argv: string[]): ParsedArgs {
         "reasoning-effort",
         "personality",
         "profile",
+        "thread-id",
         "base-instructions-file",
         "developer-instructions-file",
       ],
@@ -330,6 +331,27 @@ function parseCli(argv: string[]): ParsedArgs {
 
 function cryptoId(): string {
   return `cli-${Math.random().toString(16).slice(2)}`;
+}
+
+export function textContentForResponse(parsed: ParsedArgs, data: Record<string, unknown>): string | null {
+  const content = data.content;
+  if (typeof content !== "string") {
+    return null;
+  }
+  if (parsed.group === "history" || parsed.group === "tail") {
+    return content;
+  }
+  if (parsed.group === "daemon" && parsed.action === "logs") {
+    return content;
+  }
+  return null;
+}
+
+function writeTextContent(content: string): void {
+  process.stdout.write(content);
+  if (content && !content.endsWith("\n")) {
+    process.stdout.write("\n");
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -452,7 +474,13 @@ export class CliClient {
       return response;
     }
     if (response.ok) {
-      process.stdout.write(`${JSON.stringify(response.data || {}, null, 2)}\n`);
+      const data = (response.data || {}) as Record<string, unknown>;
+      const textContent = textContentForResponse(parsed, data);
+      if (textContent !== null) {
+        writeTextContent(textContent);
+      } else {
+        process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
+      }
       return 0;
     }
     const error = wireToError((response.error || {}) as never);
@@ -471,7 +499,7 @@ export class CliClient {
       if (args.name) {
         params.name = String(args.name);
       }
-      if (parsed.action === "create") {
+      if (parsed.action === "create" || parsed.action === "attach") {
         for (const key of [
           "cwd",
           "model",
@@ -482,6 +510,7 @@ export class CliClient {
           "reasoningEffort",
           "personality",
           "profile",
+          "threadId",
         ]) {
           if (args[key] !== undefined) {
             params[key] = args[key] as string;

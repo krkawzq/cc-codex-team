@@ -59,6 +59,12 @@ codex-team session create reviewer --cwd /path/to/project --profile reviewer
 codex-team session create fixer --cwd /path/to/project --profile fixer
 ```
 
+Restore a saved Codex thread when the codex-team registry is missing:
+
+```bash
+codex-team session attach restored --thread-id <codex-thread-id> --cwd /path/to/project --profile reviewer
+```
+
 Send work:
 
 ```bash
@@ -85,6 +91,8 @@ shows up as `auto-heal-after-crash`.
 codex-team session list
 codex-team session status fixer
 codex-team session read fixer --include-turns
+codex-team session resume fixer
+codex-team session attach restored --thread-id <codex-thread-id> --cwd /path/to/project
 codex-team session dump fixer
 codex-team health report
 codex-team health issues
@@ -146,6 +154,9 @@ npm run build
 - `history` supports incremental reads via `--since-turn-id` for both
   `md` and `jsonl` output, and `--follow` for a simple tail-style
   stream after the initial snapshot.
+- Text-content commands (`history`, `tail --stderr`, `daemon logs`)
+  print their text body directly on stdout. The daemon socket API still
+  returns `{ content }` for callers that need structured JSON.
 - compact operations retry automatically on transient failure; see
   `[compaction].retry_attempts` and `retry_delay_ms` in `config.toml`.
 - `health report` includes an `issues` block so it can be used as a
