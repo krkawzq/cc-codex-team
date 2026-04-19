@@ -10,7 +10,7 @@ fi
 
 ENTRY="${PLUGIN_ROOT}/dist/main.js"
 if [[ ! -f "${ENTRY}" ]]; then
-  echo "codex-team-node is not built yet: ${ENTRY} missing" >&2
+  echo "codex-team is not built yet: ${ENTRY} missing" >&2
   echo "run: cd ${PLUGIN_ROOT} && npm install && npm run build" >&2
   exit 1
 fi

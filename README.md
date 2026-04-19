@@ -112,13 +112,13 @@ npm test
 Run it as a local plugin:
 
 ```bash
-claude --plugin-dir /path/to/cc-codex-team-node
+claude --plugin-dir /path/to/cc-codex-team
 ```
 
 Or install through the local marketplace manifest:
 
 ```bash
-claude plugin marketplace add /path/to/cc-codex-team-node
+claude plugin marketplace add /path/to/cc-codex-team
 claude plugin install codex-team@cc-codex-team
 ```
 

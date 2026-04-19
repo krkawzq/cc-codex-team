@@ -147,7 +147,7 @@ Then `codex-team daemon reload-config`. If the daemon is already unhealthy, do a
 `bin/codex-team` printing `dist/main.js missing` = unbuilt dev checkout:
 
 ```bash
-cd /path/to/cc-codex-team-node
+cd /path/to/cc-codex-team
 npm install
 npm run typecheck
 npm run build
