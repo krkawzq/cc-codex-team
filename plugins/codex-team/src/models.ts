@@ -46,6 +46,9 @@ export interface DigestLine {
   durationMs?: number | null;
   stderrTail?: string | null;
   toolName?: string | null;
+  fullText?: string | null;
+  changeKind?: "A" | "M" | "D" | "R" | null;
+  isFinal?: boolean | null;
 }
 
 export type TurnTier = "trivial" | "normal" | "attn";

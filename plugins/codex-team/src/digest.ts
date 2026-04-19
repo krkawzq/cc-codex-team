@@ -6,6 +6,7 @@ import { ensureDirFor, rotateFileIfNeeded } from "./fileIO";
 import { DigestLine, TurnSummary, TurnTier } from "./models";
 
 const FENCED_BLOCK = /```.*?```/gs;
+type ChangeKind = NonNullable<DigestLine["changeKind"]>;
 
 function truncate(text: string, limit: number): string {
   if (text.length <= limit) {
@@ -24,6 +25,24 @@ function tailLines(text: string, count: number): string {
   return lines.slice(Math.max(0, lines.length - count)).join("\n");
 }
 
+function longestBacktickRun(text: string): number {
+  return (text.match(/`+/g) || []).reduce((longest, run) => Math.max(longest, run.length), 0);
+}
+
+function codeSpan(text: string): string {
+  const delimiter = "`".repeat(longestBacktickRun(text) + 1);
+  if (!text.includes("`")) {
+    return `${delimiter}${text}${delimiter}`;
+  }
+  return `${delimiter} ${text} ${delimiter}`;
+}
+
+function fencedBlock(text: string, language = ""): string {
+  const delimiter = "`".repeat(Math.max(3, longestBacktickRun(text) + 1));
+  const opening = language ? `${delimiter}${language}` : delimiter;
+  return `  ${opening}\n  ${text.split("\n").join("\n  ")}\n  ${delimiter}`;
+}
+
 export function digestItem(item: Record<string, unknown>, cfg: DigestConfig): DigestLine | null {
   const itemType = String(item.type ?? "");
   if (itemType === "commandExecution") {
@@ -33,7 +52,12 @@ export function digestItem(item: Record<string, unknown>, cfg: DigestConfig): Di
     return digestFileChange(item);
   }
   if (itemType === "agentMessage") {
-    return { kind: "agent_message", text: String(item.text ?? "") };
+    const phase = item.phase == null ? null : String(item.phase);
+    return {
+      kind: "agent_message",
+      text: String(item.text ?? ""),
+      isFinal: phase === "final_answer" || phase === null,
+    };
   }
   if (itemType === "reasoning") {
     if (!cfg.reasoningCapture) {
@@ -49,22 +73,25 @@ export function digestItem(item: Record<string, unknown>, cfg: DigestConfig): Di
     return digestToolCall(item, cfg);
   }
   if (itemType === "collabAgentToolCall") {
-    return { kind: "collab_agent", text: `subagent=${String(item.tool ?? "subagent")}` };
+    return { kind: "collab_agent", text: String(item.tool ?? "subagent") };
   }
   return null;
 }
 
 function digestCommand(item: Record<string, unknown>, cfg: DigestConfig): DigestLine {
   const raw = String(item.command ?? "");
-  let shown = firstLine(raw);
-  if (raw.length > cfg.commandTruncateChars || raw.includes("\n")) {
-    shown = truncate(shown, cfg.commandTruncateChars);
-  }
+  const isMultiLine = raw.includes("\n");
+  const inlineText = isMultiLine
+    ? firstLine(raw)
+    : raw.length > cfg.commandTruncateChars
+      ? truncate(raw, cfg.commandTruncateChars)
+      : raw;
   const exitCode = item.exitCode == null ? null : Number(item.exitCode);
   const stderr = String(item.aggregatedOutput ?? "");
   return {
     kind: "command",
-    text: shown,
+    text: inlineText,
+    fullText: isMultiLine ? raw : null,
     exitCode,
     durationMs: item.durationMs == null ? null : Number(item.durationMs),
     stderrTail: exitCode == null || exitCode === 0 ? null : tailLines(stderr, cfg.stderrTailLinesOnFail),
@@ -75,14 +102,41 @@ function digestFileChange(item: Record<string, unknown>): DigestLine {
   const changes = Array.isArray(item.changes) ? item.changes : [];
   const first = (changes[0] as Record<string, unknown> | undefined) || {};
   const pathValue = String(first.path ?? "");
-  const linesAdded = Number(first.linesAdded ?? first.lines_added ?? 0);
-  const linesRemoved = Number(first.linesRemoved ?? first.lines_removed ?? 0);
+  const content = typeof first.content === "string" ? first.content : "";
+  let linesAdded = Number(first.linesAdded ?? first.lines_added ?? 0);
+  let linesRemoved = Number(first.linesRemoved ?? first.lines_removed ?? 0);
+
+  if (linesAdded === 0 && linesRemoved === 0 && content) {
+    linesAdded = content.split(/\r?\n/).length;
+    linesRemoved = 0;
+  }
+
+  const rawKind = String(first.kind ?? "").toLowerCase();
+  const previousPath = first.previousPath ?? first.previous_path ?? null;
+  let changeKind: ChangeKind;
+  if (rawKind === "add" || rawKind === "added" || rawKind === "create" || rawKind === "created") {
+    changeKind = "A";
+  } else if (rawKind === "delete" || rawKind === "deleted" || rawKind === "remove" || rawKind === "removed") {
+    changeKind = "D";
+  } else if (rawKind === "rename" || rawKind === "renamed" || rawKind === "move" || rawKind === "moved") {
+    changeKind = "R";
+  } else if (rawKind === "modify" || rawKind === "modified" || rawKind === "update" || rawKind === "updated") {
+    changeKind = "M";
+  } else if (linesRemoved === 0 && linesAdded > 0 && !previousPath) {
+    changeKind = "A";
+  } else if (linesAdded === 0 && linesRemoved > 0) {
+    changeKind = "D";
+  } else {
+    changeKind = "M";
+  }
+
   return {
     kind: "file_change",
     text: `${pathValue} (+${linesAdded}/-${linesRemoved})`,
     path: pathValue,
     linesAdded,
     linesRemoved,
+    changeKind,
   };
 }
 
@@ -144,20 +198,32 @@ export function buildTurnSummary(input: Omit<TurnSummary, "filesAdded" | "filesR
 function formatLine(line: DigestLine): string {
   if (line.kind === "command") {
     const status = line.exitCode === 0 ? "ok" : `FAIL exit=${line.exitCode}`;
-    const suffix = line.stderrTail ? `\n    stderr: ${line.stderrTail}` : "";
-    return `- [${status} ${line.durationMs || 0}ms] ${line.text}${suffix}`;
+    const duration = line.durationMs || 0;
+    const header = `- **[cmd ${status} ${duration}ms]**`;
+    const stderrSuffix = line.stderrTail
+      ? `\n\n  stderr:\n\n${fencedBlock(line.stderrTail)}`
+      : "";
+    if (line.fullText) {
+      return `${header}\n\n${fencedBlock(line.fullText, "sh")}${stderrSuffix}`;
+    }
+    return `${header} ${codeSpan(line.text)}${stderrSuffix}`;
   }
   if (line.kind === "file_change") {
-    return `- M ${line.path || ""} (+${line.linesAdded || 0}/-${line.linesRemoved || 0})`;
+    return `- **[file ${line.changeKind || "M"}]** ${codeSpan(line.path || "")} (+${line.linesAdded || 0}/-${line.linesRemoved || 0})`;
   }
   if (line.kind === "agent_message") {
-    return `- msg: ${line.text}`;
+    const label = line.isFinal ? "**msg (final):**" : "**msg:**";
+    const body = (line.text || "").trimEnd();
+    return `- ${label}\n\n${fencedBlock(body, "markdown")}`;
   }
   if (line.kind === "tool_call") {
-    return `- tool: ${line.text}`;
+    return `- **[tool]** ${codeSpan(line.toolName || line.text)}`;
   }
   if (line.kind === "web_search") {
-    return `- search: ${line.text}`;
+    return `- **[search]** ${codeSpan(line.text)}`;
+  }
+  if (line.kind === "collab_agent") {
+    return `- **[subagent]** ${codeSpan(line.text)}`;
   }
   return `- ${line.text}`;
 }
@@ -170,27 +236,32 @@ export function writeHistoryMd(filePath: string, summary: TurnSummary, cfg?: Dig
   const parts: string[] = [
     `\n## Turn ${summary.turnId} · ${summary.elapsedMs}ms · status=${summary.status} · tier=${summary.tier}\n`,
   ];
-  const fileLines = summary.lines.filter((line) => line.kind === "file_change");
-  if (fileLines.length > 0) {
-    parts.push("\n### File changes\n");
-    parts.push(fileLines.map(formatLine).join("\n"));
-    parts.push("\n");
+
+  const usageBits: string[] = [];
+  if (summary.usageLastTokens != null) {
+    usageBits.push(`tokens_last=${summary.usageLastTokens}`);
   }
-  const commandLines = summary.lines.filter((line) => line.kind === "command");
-  if (commandLines.length > 0) {
-    parts.push("\n### Commands\n");
-    parts.push(commandLines.map(formatLine).join("\n"));
-    parts.push("\n");
+  if (summary.usageTotalTokens != null) {
+    usageBits.push(`tokens_total=${summary.usageTotalTokens}`);
   }
-  const messageLines = summary.lines.filter((line) => line.kind === "agent_message");
-  if (messageLines.length > 0) {
-    parts.push("\n### Messages\n");
-    parts.push(messageLines.map(formatLine).join("\n"));
-    parts.push("\n");
+  if (summary.filesAdded || summary.filesRemoved) {
+    usageBits.push(`files=+${summary.filesAdded}/-${summary.filesRemoved}`);
   }
-  if (summary.finalMessage) {
-    parts.push("\n### Final answer\n");
-    parts.push(`> ${summary.finalMessage.replace(/\n/g, "\n> ")}\n`);
+  if (usageBits.length > 0 || summary.errorMessage) {
+    parts.push("\n### Usage\n");
+    if (usageBits.length > 0) {
+      parts.push(usageBits.join(" · "));
+      parts.push("\n");
+    }
+    if (summary.errorMessage) {
+      parts.push(`error: ${summary.errorMessage}\n`);
+    }
+  }
+
+  if (summary.lines.length > 0) {
+    parts.push("\n### Timeline\n\n");
+    parts.push(summary.lines.map(formatLine).join("\n"));
+    parts.push("\n");
   }
   fs.appendFileSync(filePath, parts.join(""), "utf8");
 }

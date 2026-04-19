@@ -55,9 +55,11 @@ export interface DigestConfig {
   historyMdEnabled: boolean;
   turnsJsonlEnabled: boolean;
   commandTruncateChars: number;
+  // agent_message is always full-text in 0.4.0; flag retained for forward compat but ignored.
   agentMessageFull: boolean;
   reasoningCapture: boolean;
   stderrTailLinesOnFail: number;
+  // Timeline history emits every file change; flag retained for forward compat but ignored.
   maxFilesListed: number;
   toolArgsTruncateChars: number;
   historyRotationMb: number;
