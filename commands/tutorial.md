@@ -42,7 +42,8 @@ Print this to the user, then ask the main-menu question:
 This plugin lets Claude (you) manage a team of long-lived Codex worker
 sessions. Each session is a real `codex app-server` subprocess;
 Claude drives them through the `codex-team` CLI and gets per-turn
-results pushed back through two auto-started plugin monitors.
+results pushed back through two event streams the orchestrator arms
+with the Monitor tool (they are not auto-started).
 
 You are the orchestrator. Codex does the coding. You schedule, audit,
 and merge.
@@ -77,7 +78,7 @@ Explain, in this order:
    command asynchronously.
 2. The mental model (pull from `using-codex-team` §mental model):
    Claude → CLI → daemon → N app-server subprocesses; and
-   notifications flow back via plugin monitors.
+   notifications flow back via Monitor streams Claude arms itself.
 3. Why one subprocess per session (SDK single-turn-consumer
    constraint; concurrent work needs multiple clients).
 4. Why event-driven (Claude sleeps instead of polling — saves context
@@ -118,8 +119,10 @@ Explain:
 - The `--profile refactor` loads defaults from `[profiles.refactor]`
   in `config.toml` (point at Branch F).
 - `send` is non-blocking — it returns as soon as the turn is queued.
-- Results arrive via the auto-started monitors, not via the CLI's
-  stdout.
+- Results arrive via the Monitor event stream **if you armed it
+  yourself** (see Branch C — arming is opt-in). Without arming, the
+  only ways to observe the turn's outcome are polling
+  `codex-team session status` or reading `history.md`.
 
 `AskUserQuestion`:
 
@@ -135,23 +138,35 @@ Explain:
 
 Key points to cover (see `watch-codex-team` for full content):
 
-1. `monitors/monitors.json` declares two streams:
-   `codex-team-events` and `codex-team-watchdog`.
-2. Claude Code **auto-starts** them when the plugin activates. The
-   user does not call the `Monitor` tool.
-3. `events` is reactive (turn completions, errors, `compact-suggest`,
-   `session-down`, `auto-heal`).
-4. `watchdog` emits every ~20 minutes with an aggregated health
-   snapshot and optional task brief.
-5. If you haven't received any notification for >25 minutes,
-   something is wrong — see Branch E.
+1. Two helper scripts ship in the plugin:
+   - `${CLAUDE_PLUGIN_ROOT}/scripts/monitor-events.sh` — the `events`
+     stream (turn completions, errors, `compact-suggest`,
+     `session-down`, `auto-heal`).
+   - `${CLAUDE_PLUGIN_ROOT}/scripts/monitor-watchdog.sh` — the
+     `watchdog` stream (~20-minute aggregate health + task brief).
+2. **Nothing starts them automatically** — not the plugin activation,
+   not `/codex-team:bootstrap`. The orchestrator decides per stream
+   whether to arm, and calls the `Monitor` tool on the relevant
+   script.
+3. Per-stream decision:
+   - `events` — arm when dispatching async work (almost always).
+   - `watchdog` — opt-in. Worth arming for long / multi-session work
+     where you'd otherwise sleep forever when all sessions idle.
+     Noise for short interactive sessions.
+4. If no notification arrives for >25 minutes *and you armed both*,
+   something is wrong — see Branch E. If you armed only events and
+   all sessions idled, silence is expected (no bug).
 
 `AskUserQuestion`:
 
-- `Show me what a turn-done payload looks like (Recommended)` → quote
-  the JSON sketch from `watch-codex-team`, explain the `tier` field.
-- `How do I debug a silent stream?` → walk through `/plugin list`,
-  `/reload-plugins`, `codex-team daemon status`.
+- `Show me the exact Monitor calls to copy-paste (Recommended)` →
+  show the two `Monitor({...})` invocations from
+  `watch-codex-team`, explain `persistent: true` and the 1-hour
+  `timeout_ms`.
+- `Show me what a turn-done payload looks like` → quote the JSON
+  sketch from `watch-codex-team`, explain the `tier` field.
+- `How do I debug a silent stream?` → walk through task-panel
+  inspection, `codex-team daemon status`, re-arming, `/reload-plugins`.
 - `Back to main menu`
 - `I'm done`
 

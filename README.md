@@ -31,7 +31,7 @@ After install, the `codex-team` command is available to Claude Code's Bash tool.
 
 ## Requirements
 
-- Claude Code **v2.1.105 or later** (plugin monitors require this version; earlier versions will load skills and hooks but ignore the `monitors/monitors.json` entries)
+- Claude Code with plugin support (any recent version with Skill / Monitor tools)
 - Python 3.10+
 - Codex CLI installed and authenticated:
 

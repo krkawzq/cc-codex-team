@@ -1,60 +1,124 @@
 ---
 name: watch-codex-team
-description: Understand and debug the codex-team plugin's background Monitor streams that auto-wake you when Codex finishes a turn. Plugin monitors start automatically when the plugin is active — this skill explains what they emit, how to recover when they go silent, and when to escalate to PushNotification. Use when events stop arriving, when an event payload is unclear, or when onboarding to the plugin.
+description: Arm and understand the codex-team event streams by invoking Claude Code's `Monitor` tool on the plugin's two helper scripts. The plugin does NOT auto-start these monitors — you start them yourself when you are about to dispatch work. Use this skill before your first `codex-team send` so you receive per-turn notifications instead of polling. Also covers payload shapes, how to recover when the streams go silent, and when to fall back to `PushNotification`.
 ---
 
 # Watch codex-team
 
-The codex-team plugin declares two **background monitors** in
-`monitors/monitors.json`. Claude Code auto-starts them when the plugin
-is active (you do not call the `Monitor` tool yourself). Every stdout
-line they emit arrives in your conversation as a notification — that
-is how Codex's per-turn results push back to you while you sleep.
+The plugin ships two shell scripts that stream structured per-turn
+events from the daemon. Nothing starts them for you — you decide when
+to arm them by calling the `Monitor` tool. Without them, you cannot
+wake up when Codex finishes a turn and will have to poll.
 
-This skill explains the two streams, what payloads to expect, and how
-to recover when they go silent. If you are about to run
-`codex-team session status` in a loop "to see if a turn finished,"
-you are polling; stop and trust the streams.
+## The two scripts
 
-## Two streams, two jobs
+Both live in the plugin root and are safe to invoke via `Monitor`
+directly. They bootstrap the Python venv, ensure the daemon is up,
+then exec the appropriate `codex-team monitor ...` subcommand:
 
-| Stream | Cadence | What it carries | Why |
-|---|---|---|---|
-| `events` (`codex-team-events`) | bursty, reactive | Per-turn completion, errors, queue overflow, compaction advisories, session-down, auto-heal | This is how Codex tells you "I finished a thing" |
-| `watchdog` (`codex-team-watchdog`) | every ~20 min, steady | Aggregate health report + the configured task brief | Keeps you woken on schedule regardless of Codex activity; re-grounds you with the original task description |
+| Script | Stream | Purpose |
+|---|---|---|
+| `${CLAUDE_PLUGIN_ROOT}/scripts/monitor-events.sh` | `events` | Per-turn completion, errors, queue overflow, compaction advisories, session-down, auto-heal |
+| `${CLAUDE_PLUGIN_ROOT}/scripts/monitor-watchdog.sh` | `watchdog` | ~20-minute heartbeat with aggregate session status + configured task brief |
 
-Both start when the plugin is enabled and run for the life of the
-session. The `events` stream alone is not enough: if every session
-goes idle, `events` emits nothing and you would sleep forever — the
-watchdog guarantees a periodic wake so you cannot miss
-"all sessions are waiting for me."
+Both stream one JSON object per stdout line. Exit (e.g. daemon shutdown)
+ends the watch.
 
-## Auto-start — no Monitor call needed
+## Decide per stream — both are opt-in
 
-The plugin ships `monitors/monitors.json` with two `always`-triggered
-entries. Claude Code reads this file at plugin activation and spawns
-each `command` as a persistent background process. Their stdout is
-piped into your notification channel the same way the `Monitor` tool
-works — but you did not have to invoke it.
+Arming is **per-stream** and fully opt-in. You do not arm both
+automatically. Ask yourself what you need:
 
-Concretely, at session start the plugin runs:
+| Need | Arm events? | Arm watchdog? |
+|---|---|---|
+| You will dispatch work and wait for results asynchronously | ✅ | depends (see below) |
+| You are doing a single short turn and will block-wait or poll | ❌ | ❌ |
+| You want periodic "task brief re-ground + aggregate health" reminders (long multi-session work) | — | ✅ |
+| All sessions may go idle at some point and you still need to wake (avoid sleeping forever on a dead queue) | ✅ (not enough alone) | ✅ (this is the guard) |
+| You are doing a single session with tight turn-cadence and the user is actively watching | ✅ | ❌ (noise) |
+
+In practice:
+
+- **`events`** is the mostly-always-on stream when using this plugin
+  for anything beyond a single-turn test.
+- **`watchdog`** is genuinely optional. Arm it when (a) you expect
+  long-running / multi-session work with periods of inactivity, or
+  (b) you want the configured task brief re-injected every ~20 min.
+  Skip it for short / interactive / one-shot sessions — the 20-minute
+  heartbeat is noise when the user is already steering.
+
+## How to arm (copy-paste)
+
+Arm only what you need. Use `persistent: true` so the monitor
+survives a `ScheduleWakeup` cycle; a 1-hour `timeout_ms` is
+defense-in-depth if the harness bounds it:
+
+**Events (turn completions, errors, compact advisories, session-down,
+auto-heal):**
 
 ```
-${CLAUDE_PLUGIN_ROOT}/scripts/monitor-events.sh
-${CLAUDE_PLUGIN_ROOT}/scripts/monitor-watchdog.sh
+Monitor({
+  description: "codex-team events: turn completions, errors, compact suggestions",
+  command: "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-events.sh",
+  persistent: true,
+  timeout_ms: 3600000
+})
 ```
 
-Each script first ensures the daemon is up (`codex-team daemon start`)
-then execs `codex-team monitor events` / `monitor watchdog`. The
-daemon's event bus pre-filters to human-meaningful lines, so the
-stream is clean by the time it reaches you — **do not wrap it in
-`grep`** to "reduce noise"; the daemon already did, and over-filtering
-would silently drop failure signals.
+**Watchdog (periodic health + task brief; skip for short sessions):**
 
-If you ever find yourself tempted to start a manual `Monitor({...})`
-for codex-team streams, stop. Either the plugin monitors are already
-running (check the task panel), or something is wrong with the plugin
-activation (see "When events stop arriving" below).
+```
+Monitor({
+  description: "codex-team watchdog: periodic health + task brief",
+  command: "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-watchdog.sh",
+  persistent: true,
+  timeout_ms: 3600000
+})
+```
+
+Arm each stream **once per Claude Code session.** Re-invoking
+`Monitor` with the same command spawns a duplicate; you do not want
+that. If you are unsure whether you already armed one, look at the
+task panel — each live monitor shows up with its `description`.
+
+## When to arm
+
+- **Before the first `codex-team send`** — events start arriving as
+  soon as work begins; no point arming after. Watchdog: arm
+  simultaneously only if the task fits the criteria above.
+- **After a daemon restart** — the `persistent: true` Monitor child
+  keeps running but the underlying daemon connection dropped; re-arm
+  the streams you were using.
+- **After explicitly killing a monitor** (e.g., via `TaskStop`) —
+  only if you still need it.
+
+Do **not** re-arm on every turn, every session create, or every send.
+Once per Claude Code session per stream is correct.
+
+## Critical trade-off: events-only vs both
+
+If you arm only `events` and every session becomes idle (queue empty,
+all turns finished), the stream emits nothing. If you then
+`ScheduleWakeup` and no new event arrives before the wake fires, you
+get a clean wake; no problem. But if you sleep without a wake and no
+event arrives, you sleep forever.
+
+**Rule of thumb:** if you plan to sleep between wakes without
+scheduled self-wakeups, arm the watchdog too. If you are always
+pairing sleeps with `ScheduleWakeup`, events-only is safe.
+
+## Why pre-filter is on the daemon side
+
+The daemon's event bus already drops high-frequency non-actionable
+notifications (every reasoning token, every command-output delta, every
+file-change hunk). What reaches the monitor stream is the distilled
+set: turn done, turn attention, turn error, queue overflow, compaction
+advisory, session down, auto-heal.
+
+Therefore: **do not wrap the `command:` in a `grep`** to "reduce
+noise." That would silently drop failure signals the daemon already
+distilled for you (Monitor's own docs warn about this: a filter must
+match every terminal state). Trust the pre-filtered stream.
 
 ## Event stream payload shapes
 
@@ -72,10 +136,11 @@ what happened. Common kinds:
 | `session-down` | Codex subprocess exited unexpectedly | Wait briefly for `auto-heal`; if none arrives, `recover-codex-team` |
 | `auto-heal` | Daemon successfully resumed a crashed session once | Resume normal sends |
 
-A `turn-done` payload contains `summary` with at least:
+A `turn-done` payload contains at least:
 
 ```
 {
+  "kind": "turn-done",
   "session": "L-kernels",
   "turn_id": "tr_abc",
   "elapsed_ms": 42000,
@@ -149,38 +214,34 @@ Every watchdog block is a chance to sanity-check:
 
 Between wakes you should be **asleep** — either waiting for the user
 or `ScheduleWakeup`-ed. If you find yourself running Bash commands
-just to see what changed, the streams are not running. See the
-next section.
+just to see what changed, you either didn't arm the streams yet or
+they exited. See the next section.
 
 ## When events stop arriving
 
-If you have not received any event (from either stream) for more than
-25 minutes, something is broken. Work this list, top to bottom:
+If you have not received any event for more than 25 minutes, work
+this list top to bottom:
 
-1. **Is the watchdog mute?** It should emit every ~20m regardless. A
-   silent watchdog means the plugin monitor is not running. Confirm
-   the plugin is active with `/plugin list` or check the task panel
-   — you should see `codex-team-events` and `codex-team-watchdog`
-   listed. If either is missing, the plugin failed to activate its
-   monitor; reload plugins with `/reload-plugins` or check
-   `claude --debug` output for monitor startup errors.
-2. **Is the daemon dead?** Run:
+1. **Did you actually arm them?** It is the #1 cause. Check the task
+   panel for entries whose description matches the snippets above. If
+   not present, arm them now with the `Monitor` calls at the top of
+   this skill.
+2. **Did the monitor process exit?** Claude Code will notify you when
+   a Monitor child exits (e.g., daemon crash, script error). If you
+   saw such a notification and ignored it, re-arm.
+3. **Is the daemon dead?** Run:
    ```
    codex-team daemon status
    ```
-   If it reports connection refused, run
-   `codex-team daemon start` (or see `recover-codex-team` for a fuller
-   triage). Once the daemon is up, the plugin's monitor scripts
-   auto-reconnect.
-3. **Did the monitor process auto-stop?** Claude Code auto-kills
+   If it returns connection refused, run
+   `codex-team daemon start` (or see `recover-codex-team` for fuller
+   triage). Then re-arm both monitors — the old Monitor children will
+   have exited when the daemon dropped.
+4. **Did Claude Code auto-stop the monitor?** The harness kills
    monitors that emit too many events. The daemon pre-filters the
-   stream to human-meaningful lines so this should not happen, but if
-   it did you will see a notification saying the monitor stopped.
-   `/reload-plugins` restarts it.
-4. **Is `codex-team monitor events` exit-coded?** Run it directly in
-   a separate Bash call (`timeout 10s codex-team monitor events`) to
-   sniff stderr. Common cause: daemon socket stale after a daemon
-   crash.
+   stream so this should be rare; if it happened, the bug is
+   upstream — re-arm with the same commands (no filter changes) and
+   report.
 
 ## PushNotification — when to bring the human back
 
@@ -207,14 +268,18 @@ event you can handle yourself. Those are your job.
 
 | Thought | Correction |
 |---|---|
-| "I'll just `tail history.md` to see what codex is doing." | That is polling. Notifications arrive via the plugin monitors — trust them or debug why they're silent. |
+| "I'll just `tail history.md` to see what codex is doing." | That is polling. Arm the events stream instead. |
 | "Monitor seems noisy, let me add a grep." | Events are pre-filtered by the daemon. Do not double-filter. |
-| "Let me call `Monitor({...})` to arm this stream." | Plugin monitors auto-start. Calling Monitor manually would create a duplicate. Check the task panel first. |
+| "Let me arm the streams again, just in case." | One arm per Claude Code session. Re-arming creates duplicate processes. |
 | "Watchdog is too frequent, I'll crank to 60m." | 20m is chosen so you cannot sleep through "everyone is idle and waiting." Change only via `config.toml`, not at runtime. |
+| "I'll arm both streams to be safe." | Watchdog is opt-in; if the task is short / interactive / user-watched, it's noise. Skip unless you genuinely need the periodic heartbeat. |
+| "I only armed events; I'll sleep and see what happens." | Events can go silent indefinitely when sessions idle. If you're sleeping without `ScheduleWakeup`, arm the watchdog too — that heartbeat is what prevents infinite sleep. |
 
 ## Cross-references
 
-- First time: `using-codex-team` (bootstrap order)
+- First time: `using-codex-team` (mental model; bootstrap calls out
+  this skill as the "arm the streams" step)
 - Respond to `turn-done`: `manage-codex-team`
 - Respond to `compact-suggest`: `compact-codex-team`
 - Respond to `session-down` / `turn-err`: `recover-codex-team`
+- Tune stream cadence or task brief: `configure-codex-team`

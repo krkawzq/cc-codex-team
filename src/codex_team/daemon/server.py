@@ -488,6 +488,10 @@ async def _h_daemon_status(_message: dict[str, Any], server: DaemonServer) -> di
 
 
 async def _h_daemon_stop(_message: dict[str, Any], server: DaemonServer) -> dict[str, Any]:
+    # Schedule the shutdown signal after the current response has been
+    # flushed. Without this the daemon answers "stopping: true" but never
+    # actually stops (request_shutdown was wired but never invoked).
+    asyncio.get_running_loop().call_later(0.05, server.request_shutdown)
     return {"stopping": True}
 
 

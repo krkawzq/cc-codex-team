@@ -49,19 +49,26 @@ that means the Monitor is not armed, or you forgot it is armed.
 ## The bootstrap order (once per Claude session)
 
 1. Confirm the daemon is up. The plugin's `SessionStart` hook runs
-   `codex-team daemon start` when the plugin activates, and the two
-   plugin monitor scripts also pre-start the daemon. Verify with
-   `codex-team daemon status`.
-2. Confirm the two plugin monitors are live. Claude Code auto-spawns
-   them from `monitors/monitors.json` when the plugin is enabled, so
-   they should appear in the task panel as `codex-team-events` and
-   `codex-team-watchdog`. **You do not call `Monitor({...})`
-   yourself** — these are plugin-owned monitors, not user-armed ones.
-   If either is missing, run `/reload-plugins`; see `watch-codex-team`
-   for deeper diagnosis.
-3. Create whatever sessions you need (`manage-codex-team`).
+   `codex-team daemon start` when the plugin activates. Verify with
+   `codex-team daemon status`. This is the **only** automatic action
+   the plugin takes — everything else is your call.
+2. Create the sessions you need (`manage-codex-team`), or run
+   `/codex-team:bootstrap NAME:/path ...` which wraps the same
+   session-create steps.
+3. **Decide what to watch, then arm only those streams** by invoking
+   the `Monitor` tool yourself. Neither stream is armed by the plugin
+   or by `/codex-team:bootstrap`. Your options:
+   - `events` — arm this whenever you dispatch work you'll receive
+     asynchronously (the usual case).
+   - `watchdog` — arm this only for long / multi-session work where
+     you need a ~20-min heartbeat and the task brief re-injected.
+     Skip it for short interactive sessions (it is noise).
+   See `watch-codex-team` for the exact `Monitor({...})` snippets and
+   the per-stream decision matrix.
 4. Send the first prompts and go to sleep. Subsequent work is
-   event-driven.
+   event-driven if you armed events; otherwise you'll need to pair
+   sends with `ScheduleWakeup` and `codex-team session status`
+   polling (not recommended for anything beyond single turns).
 
 If the user has provided an overall task brief (e.g. a refactor
 instruction doc), record its path — the watchdog reminds you of it
@@ -75,7 +82,7 @@ every 20 minutes so you cannot drift off-course.
 | Read session state, history, queue, or a stderr tail | `inspect-codex-team` |
 | A session is errored, stuck, down, or the daemon is dead | `recover-codex-team` |
 | You saw `[compact-suggest]` on the events stream | `compact-codex-team` |
-| Understand the auto-started monitors, or diagnose silent streams | `watch-codex-team` |
+| Arm the event streams (before first send), or diagnose silence | `watch-codex-team` |
 | Edit `config.toml`, build a profile, or tune a threshold | `configure-codex-team` |
 
 Commands (user-triggered shortcuts):
@@ -83,7 +90,7 @@ Commands (user-triggered shortcuts):
 | Command | What it does |
 |---|---|
 | `/codex-team:tutorial` | interactive branching walkthrough for users new to the plugin |
-| `/codex-team:bootstrap` | daemon healthcheck + create/resume N sessions (monitors auto-started by the plugin already) |
+| `/codex-team:bootstrap` | daemon healthcheck + create/resume N sessions (does NOT arm monitors — see `watch-codex-team`) |
 | `/codex-team:brief` | one-screen snapshot of all sessions + latest events |
 | `/codex-team:heal` | try-restart every errored session, report outcome |
 | `/codex-team:shutdown` | close all sessions, stop daemon cleanly |
@@ -112,8 +119,8 @@ Commands (user-triggered shortcuts):
 
 | Thought | Correction |
 |---|---|
-| "Let me just check if the turn finished." | Events come via the plugin's auto-started monitors. Trust them; if silent, see `watch-codex-team`. |
-| "Let me call `Monitor({...})` to arm the stream." | Plugin monitors auto-start. Calling Monitor manually creates a duplicate. |
+| "Let me just check if the turn finished." | Events come via the Monitor streams you armed. If you never armed them, arm now (`watch-codex-team`); if they went silent, diagnose (`watch-codex-team`). Either way do not poll. |
+| "The plugin will start the monitors for me." | It will not. The only auto-action is `SessionStart → daemon start`. Arm monitors yourself via `Monitor({...})` — see `watch-codex-team`. |
 | "I'll write the code fix myself, it's small." | You are the manager. Delegate via `codex-team send`. |
 | "Compaction is urgent, I'll just run it." | Follow the two-step ritual in `compact-codex-team`. |
 | "The session looks wedged — let me forget + recreate." | Escalation order is `interrupt` → `restart` → `kill` → `forget`. Start at the top. |
