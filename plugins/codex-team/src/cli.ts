@@ -141,7 +141,10 @@ async function streamHistorySubscribe(socketPath: string, params: Record<string,
             continue;
           }
           try {
-            const event = JSON.parse(line) as { payload?: { content?: unknown } };
+            const event = JSON.parse(line) as {
+              payload?: { content?: unknown; matched_since_turn_id?: unknown };
+            };
+            warnIfHistoryAnchorMissing(event.payload || {});
             const content = event.payload?.content;
             if (typeof content === "string" && content) {
               process.stdout.write(content);
@@ -354,6 +357,20 @@ function writeTextContent(content: string): void {
   }
 }
 
+export function historyAnchorWarningForResponse(data: Record<string, unknown>): string | null {
+  if (data.matched_since_turn_id === false) {
+    return "codex-team: since-turn-id was not found; no history content was emitted";
+  }
+  return null;
+}
+
+function warnIfHistoryAnchorMissing(data: Record<string, unknown>): void {
+  const warning = historyAnchorWarningForResponse(data);
+  if (warning) {
+    process.stderr.write(`${warning}\n`);
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -477,6 +494,7 @@ export class CliClient {
       const data = (response.data || {}) as Record<string, unknown>;
       const textContent = textContentForResponse(parsed, data);
       if (textContent !== null) {
+        warnIfHistoryAnchorMissing(data);
         writeTextContent(textContent);
       } else {
         process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);

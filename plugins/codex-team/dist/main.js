@@ -777,6 +777,7 @@ async function streamHistorySubscribe(socketPath, params) {
           }
           try {
             const event = JSON.parse(line);
+            warnIfHistoryAnchorMissing(event.payload || {});
             const content = event.payload?.content;
             if (typeof content === "string" && content) {
               process.stdout.write(content);
@@ -956,6 +957,19 @@ function writeTextContent(content) {
     process.stdout.write("\n");
   }
 }
+function historyAnchorWarningForResponse(data) {
+  if (data.matched_since_turn_id === false) {
+    return "codex-team: since-turn-id was not found; no history content was emitted";
+  }
+  return null;
+}
+function warnIfHistoryAnchorMissing(data) {
+  const warning = historyAnchorWarningForResponse(data);
+  if (warning) {
+    process.stderr.write(`${warning}
+`);
+  }
+}
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1073,6 +1087,7 @@ ${tail}
       const data = response.data || {};
       const textContent = textContentForResponse(parsed, data);
       if (textContent !== null) {
+        warnIfHistoryAnchorMissing(data);
         writeTextContent(textContent);
       } else {
         process.stdout.write(`${JSON.stringify(data, null, 2)}

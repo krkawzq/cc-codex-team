@@ -6,7 +6,7 @@ import path from "node:path";
 import readline from "node:readline";
 import test from "node:test";
 
-import { sendRequest, textContentForResponse } from "../src/cli";
+import { historyAnchorWarningForResponse, sendRequest, textContentForResponse } from "../src/cli";
 import { loadConfig } from "../src/config";
 import { DaemonServer } from "../src/server";
 import { FakeAppServerClient } from "./helpers/fakeAppServer";
@@ -490,6 +490,14 @@ test("CliClient selects plain text output for content commands", () => {
     textContentForResponse({ group: "session", action: "status", args: {} }, { content }),
     null,
   );
+});
+
+test("CliClient exposes a warning for missing history since-turn-id", () => {
+  assert.match(
+    historyAnchorWarningForResponse({ matched_since_turn_id: false }) || "",
+    /since-turn-id was not found/,
+  );
+  assert.equal(historyAnchorWarningForResponse({ matched_since_turn_id: true }), null);
 });
 
 test("DaemonServer history.subscribe streams snapshot and appended turns", async () => {
