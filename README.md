@@ -22,6 +22,7 @@ A Claude Code plugin that lets Claude orchestrate long-lived OpenAI Codex worker
 | **What** | Turns Claude Code into the orchestrator of a team of Codex workers |
 | **Workers** | One `codex app-server` subprocess per session, each with its own thread, queue, and work doc |
 | **Parallelism** | N workers run asynchronously; Claude stays free to schedule, audit, merge |
+| **Playbooks** | 9 multi-agent collaboration patterns bundled — worker+reviewer, map-reduce, pipeline, plan-execute-verify, debate, reflexion, hierarchical, swarm, solo-worker |
 | **Isolation** | One daemon per user / plugin, partitioned into workspaces so projects and Claude Code windows don't cross-talk |
 | **Status updates** | Per-turn events pushed back to Claude through Monitor subscriptions |
 
@@ -126,10 +127,14 @@ The plugin ships a full set of skills Claude loads on demand — you don't norma
 | --- | --- |
 | Browse the mental model | [`skills/using-codex-team/SKILL.md`](plugins/codex-team/skills/using-codex-team/SKILL.md) |
 | Read the collaboration philosophy | [`skills/using-codex-team/philosophy.md`](plugins/codex-team/skills/using-codex-team/philosophy.md) |
+| Pick a multi-agent collaboration pattern (worker+reviewer, map-reduce, debate, …) | [`skills/codex-team-playbooks/SKILL.md`](plugins/codex-team/skills/codex-team-playbooks/SKILL.md) |
+| Tune a session (model, reasoning_effort, personality, cost control) | [`skills/configure-codex-team/codex-tricks.md`](plugins/codex-team/skills/configure-codex-team/codex-tricks.md) |
 | Walk through the plugin interactively | `/codex-team:tutorial` |
 | Configure profiles or watchdog alarms | [`skills/configure-codex-team/SKILL.md`](plugins/codex-team/skills/configure-codex-team/SKILL.md) |
 
 The CLI is self-documenting via `codex-team --help` and each slash command's frontmatter.
+
+See the [release notes](plugins/codex-team/docs/releases/0.4.0.md) for what's new in 0.4.0.
 
 ---
 

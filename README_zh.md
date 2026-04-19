@@ -22,6 +22,7 @@ Claude Code 插件,让 Claude 并行编排多个长期运行的 OpenAI Codex wor
 | **定位** | 把 Claude Code 变成一支 Codex worker 团队的编排者 |
 | **Worker** | 每个 session 对应一个 `codex app-server` 子进程,各自独立的线程、队列、工作文档 |
 | **并行** | N 个 worker 异步并行运行;Claude 腾出手来调度、审计、合并 |
+| **Playbook** | 内置 9 种多 agent 协作模式 —— worker+reviewer、map-reduce、pipeline、plan-execute-verify、debate、reflexion、hierarchical、swarm、solo-worker |
 | **隔离** | 每个用户/插件对应一个 daemon,内部按 workspace 分区,项目之间、窗口之间互不串扰 |
 | **事件回流** | 每个 worker turn 产生一条结构化事件,通过 Monitor 订阅推回给 Claude |
 
@@ -126,10 +127,14 @@ Claude 会下发任务、睡觉、等事件醒来、回报进度。
 | --- | --- |
 | 了解心智模型 | [`skills/using-codex-team/SKILL.md`](plugins/codex-team/skills/using-codex-team/SKILL.md) |
 | 读协作哲学 | [`skills/using-codex-team/philosophy.md`](plugins/codex-team/skills/using-codex-team/philosophy.md) |
+| 挑一个多 agent 协作模式 (worker+reviewer / map-reduce / debate / …) | [`skills/codex-team-playbooks/SKILL.md`](plugins/codex-team/skills/codex-team-playbooks/SKILL.md) |
+| 调 session 的 model / reasoning_effort / personality / 成本 | [`skills/configure-codex-team/codex-tricks.md`](plugins/codex-team/skills/configure-codex-team/codex-tricks.md) |
 | 跑一遍交互式教程 | `/codex-team:tutorial` |
 | 配置 profile / watchdog alarm | [`skills/configure-codex-team/SKILL.md`](plugins/codex-team/skills/configure-codex-team/SKILL.md) |
 
 CLI 本身通过 `codex-team --help` 和每个 slash 命令的 frontmatter 就能查。
+
+0.4.0 新增了什么,见 [release notes](plugins/codex-team/docs/releases/0.4.0.md)。
 
 ---
 
