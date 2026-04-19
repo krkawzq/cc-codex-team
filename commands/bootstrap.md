@@ -1,55 +1,56 @@
 ---
-description: Bring the codex-team plugin into a working state — daemon healthchecked and sessions created/resumed. Idempotent; re-runs safely. The plugin's own monitors auto-start; this command does not arm them.
-argument-hint: "[session-spec...]  e.g. L-kernels:/path/to/wt1 L-bench:/path/to/wt2"
-allowed-tools: Bash
+description: Bring codex-team to a "ready to dispatch work" state — daemon healthchecked, the `events` Monitor stream armed, N sessions created or resumed. Does NOT arm the `watchdog` stream (that's opt-in via `/codex-team:watch`). Idempotent; re-runs safely.
+argument-hint: "[session-spec...]  e.g. <name>:/abs/path <name>:/abs/path:<profile>"
+allowed-tools: Bash, Monitor
 ---
 
-Bring up the codex-team sessions for this Claude session. The two
-background monitors (`codex-team-events`, `codex-team-watchdog`) are
-plugin-declared in `monitors/monitors.json` and start automatically
-when the plugin is active — this command does not touch them.
+Bring up the codex-team environment for this Claude Code session.
 
 Raw user request:
 $ARGUMENTS
 
-Procedure (execute in order; stop at the first failure and report):
+The plugin only auto-runs `codex-team daemon start` at `SessionStart`. Monitor arming, session creation, and recovery are your responsibility. This command is the canonical "I am ready to dispatch work now" step for normal (not long-horizon) work. Stop at the first failure and report — do not clean up partial state.
 
-1. **Daemon.** Run `codex-team daemon status` via `Bash`. If it
-   reports "not running" or connection refused, run
-   `codex-team daemon start`. If `status` returns healthy data, do
-   nothing.
+## Procedure
 
-2. **Sessions.** Parse `$ARGUMENTS`. Each space-separated token has
-   the form `NAME:CWD` and optionally `:PROFILE` suffix
-   (`NAME:CWD:PROFILE`). For each token:
-   - Check if the session already exists: `codex-team session status NAME`.
-   - If it exists and its `status` is `idle` / `running` / `compacting`,
-     skip.
-   - If it exists but `closed` / `errored`, run
-     `codex-team session resume NAME` (for closed) or
-     `codex-team session restart NAME` (for errored).
-   - If it does not exist, run
-     `codex-team session create NAME --cwd CWD [--profile PROFILE]`.
+1. **Daemon.** `codex-team daemon status` via Bash.
+   - Healthy → do nothing.
+   - Not running / connection refused → `codex-team daemon start`.
 
-   If `$ARGUMENTS` is empty, create no sessions — the user wants a
-   daemon healthcheck only. Report that clearly.
+2. **Arm the `events` Monitor stream.** Skip only if the task panel already shows a Monitor with the matching `description`.
 
-3. **Monitor sanity check (optional, do not arm).** The plugin
-   monitors should already be running. If you can see the task panel,
-   confirm `codex-team-events` and `codex-team-watchdog` appear. If
-   they are missing, tell the user to run `/reload-plugins` — do
-   not try to arm them with the `Monitor` tool (that would duplicate).
+   ```
+   Monitor({
+     description: "codex-team events: turn completions, errors, compact suggestions",
+     command: "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-events.sh",
+     persistent: true,
+     timeout_ms: 3600000
+   })
+   ```
 
-4. **Report.** One paragraph to the user:
-   - Daemon status (started fresh / already running)
-   - Sessions created / resumed / restarted / skipped (by name)
-   - A note that plugin monitors are already watching and the user
-     should see `[turn-done]` / `[watchdog-tick]` notifications as
-     soon as work begins.
+   **Do not arm the watchdog here.** If the user's work is long-horizon, they can run `/codex-team:watch` separately.
 
-Do not send any prompts to sessions. Do not compact. Do not start
-work. This command is pure setup.
+3. **Sessions.** Parse `$ARGUMENTS`. Each space-separated token is `NAME:CWD` or `NAME:CWD:PROFILE`.
 
-If any step fails, stop and report the exact error — do not try to
-clean up partial state on your own (that is `recover-codex-team`'s
-job).
+   For each token:
+   - `codex-team session status NAME`.
+   - `idle` / `running` / `compacting` → skip.
+   - `closed` → `codex-team session resume NAME`.
+   - `errored` → `codex-team session restart NAME`.
+   - Not found → `codex-team session create NAME --cwd CWD [--profile PROFILE]`.
+
+   Empty `$ARGUMENTS` → create no sessions; report that clearly.
+
+4. **Report.** One short paragraph:
+   - Daemon status (started now / already running).
+   - Events Monitor (armed now / already active).
+   - Sessions: created / resumed / restarted / skipped (by name).
+   - Note: `[turn-done]` notifications begin once work starts.
+   - If the user's task is long-horizon (overnight, multi-hour, cross-day), suggest `/codex-team:watch` to add a watchdog alarm.
+
+## Do not
+
+- Arm the watchdog stream (see `/codex-team:watch`).
+- Send prompts to sessions.
+- Compact.
+- Recover beyond straightforward resume/restart — escalation belongs to `recover-codex-team`.

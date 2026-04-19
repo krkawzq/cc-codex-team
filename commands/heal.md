@@ -1,44 +1,37 @@
 ---
-description: Attempt to restart every errored codex-team session in order, reporting per-session outcome. Does NOT touch healthy sessions.
+description: Sweep errored codex-team sessions and try to bring them back via restart / kill+resume. Does NOT touch healthy sessions. Does NOT run destructive `forget`.
 allowed-tools: Bash
 ---
 
-Sweep for errored sessions and try to bring them back.
+Bring every errored session back, report per-session outcome.
 
-Procedure:
+## Procedure
 
-1. `codex-team health report` via `Bash` — identify every session with
-   `status == "errored"` or `transport_alive == false` that is not
-   `closed`.
-2. If the list is empty, tell the user "No errored sessions." and
-   stop.
-3. For each errored session, in the order returned:
+1. `codex-team health report` via Bash. Identify sessions with `status == "errored"` OR `transport_alive == false` (excluding `closed`).
 
-   a. `codex-team session dump <name>` — capture the stderr tail and
-      last_error string (do not print unless there is an actual
-      failure).
+2. If the list is empty → "No errored sessions." and stop.
 
-   b. Try `codex-team session restart <name>`.
+3. For each errored session (in order):
 
-   c. If restart succeeds, note "restarted". Move on.
+   a. `codex-team session dump <name>` — capture `stderr_tail` and `last_error`. Keep for the final report; do not print mid-sweep.
 
-   d. If restart fails, try `codex-team session kill <name>` then
-      `codex-team session resume <name>`. If that succeeds, note
-      "killed + resumed".
+   b. `codex-team session restart <name>`.
+      - Success → note "restarted". Continue to next session.
 
-   e. If resume also fails, do NOT `forget` — this command will not
-      take the destructive step. Note "needs manual forget+recreate;
-      stderr: <tail>" and move on.
+   c. On restart failure: `codex-team session kill <name>` then `codex-team session resume <name>`.
+      - Success → note "killed + resumed".
 
-4. Summary report to the user:
-   - How many sessions were errored before the sweep.
-   - Per-session outcome (restarted / killed+resumed / needs-manual).
-   - A final `codex-team health report` line so the user can verify
-     the current state.
+   d. On resume failure: **do NOT `forget`**. Note "needs manual forget+recreate; stderr: <tail>" and move on.
 
-5. If any session still needs manual intervention, direct the user to
-   the `recover-codex-team` skill and point at the specific stderr.
+4. Final report:
+   - Count of errored sessions before the sweep.
+   - Per-session outcome: `restarted` / `killed+resumed` / `needs-manual`.
+   - Final `codex-team health report` summary line.
 
-Do not touch the daemon itself. If `health report` returns
-connection-refused (daemon down), stop and tell the user to run
-`codex-team daemon start` (see `recover-codex-team`).
+5. If any session still needs manual intervention, point at `recover-codex-team` and quote the stderr tail.
+
+## Do not
+
+- Touch the daemon itself. Connection refused on `health report` → stop and tell the user to run `codex-team daemon start` (see `recover-codex-team`).
+- Run `session forget`. That's a decision for the user.
+- Compact, send, or otherwise dispatch work.

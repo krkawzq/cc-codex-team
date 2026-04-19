@@ -1,8 +1,2 @@
-__pycache__/
-*.egg-info/
-.pytest_cache/
-dist/
-build/
-.venv/
-*.pyc
-.coverage
+node_modules/
+*.tsbuildinfo

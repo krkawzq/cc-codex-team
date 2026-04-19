@@ -18,6 +18,7 @@
       },
       "homepage": "https://github.com/krkawzq/cc-codex-team",
       "repository": "https://github.com/krkawzq/cc-codex-team",
+      "license": "MIT",
       "keywords": ["codex", "agents", "monitor", "orchestration"]
     }
   ]

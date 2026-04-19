@@ -1,17 +1,16 @@
 ---
 name: manage-codex-team
-description: Create, send to, and close codex-team sessions. Covers the full session lifecycle, the non-blocking send contract, per-turn overrides, and the send-prompt style that keeps Codex on task. Use whenever you need to start a session, dispatch a unit of work to an existing one, or retire one.
+description: Authoritative source for codex-team session lifecycle (create / send / interrupt / close), the send-prompt style (short + pointing at a brief), the instruction-file pattern, and the known long-context prompt-apply quirk. Trigger when starting a session, dispatching work, responding to a `turn-done` / `turn-attn` event, or retiring a session. Not for: arming monitors (`watch-codex-team`), failure triage (`recover-codex-team`), compaction (`compact-codex-team`).
 ---
 
 # Manage codex-team sessions
 
-This is the main workflow skill. Everything you do *to* a session
-(create, send, interrupt, compact, close) happens through the
-`codex-team` CLI invoked from `Bash`.
+The main workflow skill. Everything you do *to* a session happens through `codex-team` CLI in Bash.
 
-Before reading: you should already know the mental model from
-`using-codex-team` and have both Monitor streams armed (see
-`watch-codex-team`).
+Prerequisites:
+
+- You've internalized the collaboration philosophy. → `using-codex-team` + `philosophy.md`
+- The `events` Monitor stream is armed. → `watch-codex-team`
 
 ## Session lifecycle
 
@@ -20,194 +19,117 @@ Before reading: you should already know the mental model from
      │
      │  codex-team session create <name> --cwd <path> [--profile X]
      ▼
-   idle ◄────────────────────── turn/completed
-     │                              ▲
-     │  codex-team send <name> ...  │
-     ▼                              │
-   running ──────────────────── codex finishes
-     │                              │
-     │  codex-team interrupt <name> │
-     └──────────────────────────────┘
+   idle ◄────────────────── turn/completed
+     │                          ▲
+     │  codex-team send ...     │
+     ▼                          │
+   running ────────────── codex finishes
+     │                          │
+     │  codex-team interrupt    │
+     └──────────────────────────┘
      │
      │  codex-team session close <name>
      ▼
    closed  (thread preserved; can session resume <name>)
 ```
 
-Plus recovery states (`errored`, `compacting`) covered in
-`recover-codex-team` and `compact-codex-team`.
+Recovery states `errored` / `compacting` are handled by `recover-codex-team` and `compact-codex-team`.
 
-## Create a session
+## Create
 
-```
+```bash
 codex-team session create <name> \
     --cwd <absolute-path> \
-    --profile refactor            # omit if you want defaults.model / defaults.sandbox
+    --profile <profile-name>
 ```
 
-The session name is your handle forever; pick something structural
-(e.g. `L-kernels`, `L-bench`), not ad hoc (`test1`).
+Facts:
 
-Key facts:
+- The session name is your forever-handle. Pick something structural that describes the worker's scope.
+- Each session spawns its own `codex app-server` subprocess. Four sessions = four subprocesses. Intentional.
+- `session create` blocks until the thread is readable. No protective sleep needed before the first `send`.
+- `--cwd` is Codex's working directory — typically a git worktree you created beforehand.
+- `--profile <name>` pulls defaults from `[profiles.<name>]`. Prefer profiles over long flag lists.
+- Sandbox defaults to `danger_full_access`, approval to `never`. Workers edit and run commands without asking. This is intentional (see `using-codex-team` §Invariants #6).
 
-- Each session spawns its own `codex app-server` subprocess. Four
-  sessions = four subprocesses; that is intentional.
-- `--cwd` is Codex's working directory, usually a git worktree you
-  created beforehand.
-- `--profile <name>` pulls defaults from `[profiles.<name>]` in
-  `config.toml`. Prefer profiles over long flag lists.
-- Sandbox defaults to `danger_full_access` and approval to `never` —
-  Codex will edit and run commands without asking. This is YOLO mode;
-  the plugin is designed for it. Do not "fix" this to a safer default
-  unless the user explicitly asks.
-- Reasoning effort defaults to `xhigh`. Do not downgrade unless the
-  user explicitly asks.
+## Send (the main loop)
 
-## Send a prompt (the main loop)
-
-```
+```bash
 codex-team send <name> "<prompt>"
 ```
 
-**Default is non-blocking.** The command returns as soon as the turn
-has been queued/started; the turn itself can take minutes. You will
-learn the outcome through the `events` Monitor stream, not through
-this command's stdout.
-
-### When to use `--wait`
-
-Almost never. `--wait` blocks the CLI (and therefore your Bash call)
-until `turn/completed` arrives. That wastes your context window and
-serializes work. Use it only when:
-
-- You are interactively debugging a single session and want a synchronous
-  REPL-like feel.
-- You are running a post-condition in a script that genuinely needs
-  the turn result inline.
-
-For the normal orchestration loop: **send, then sleep**. The next
-event arrives through Monitor.
+**Default is non-blocking.** Returns as soon as the turn is queued/started. The outcome arrives through the `events` Monitor stream, not stdout. `turn-start` maps the returned `pending-*` id to the real `turn_id`.
 
 ### Send-prompt style
 
-Keep send prompts short and by-reference, not self-contained. The
-session already has its own history and its own `progress.md`; do not
-re-describe the task inside the send.
+Two rules:
 
-Bad (too much context, duplicates progress.md):
+1. **Short and pointing.** A send is a dispatch, not a specification. It names the target, the entry point (work doc or brief file), and the expected deliverable — nothing more.
+2. **Concrete direction.** The send or the brief it points at must name the target, constraint, reference, and deliverable. "Strong" ≠ "long"; strong means specific. → `philosophy.md` §6
 
-```
-codex-team send L-kernels "You are working on the kernels refactor.
-Your job is to convert the torch CPU code to numba, following the
-rules in section 4 of the spec. Currently you have completed
-_kernel_nb_logpmf. The next task is _kernel_nb_logcdf. Please..."
-```
-
-Good (short, by-reference):
+Weak send (vague, over-describes):
 
 ```
-codex-team send L-kernels "continue: read docs/refactor/L-kernels/progress.md Next up, tackle the top item, update Progress/Findings/Next up when done"
+codex-team send W "You are working on the refactor. Your job is to convert
+the old pattern to the new pattern across all affected files. Make sure to
+update tests. Please be careful about edge cases."
 ```
 
-When a turn returned with a question you need to answer, the answer
-goes in the next send verbatim — no extra framing:
+Strong send (short, pointing at work doc):
 
 ```
-codex-team send L-kernels "relax the tolerance to 1e-5; re-enable fastmath and re-run the two failing tests"
+codex-team send W "continue: read <work-doc-path>, tackle the top Next up item, update Progress/Findings/Next up when done; reply 'done' with a one-line summary"
 ```
 
-### Prompt sources: `--stdin` and `--prompt-file`
-
-For a multi-line prompt, use stdin or a file instead of embedding
-quotes:
+Answering a question returned by `turn-attn`: the answer goes in the next send verbatim, no framing:
 
 ```
-codex-team send L-kernels --stdin <<'EOF'
-Your task has two parts:
-1. ...
-2. ...
-EOF
-
-# or
-echo "..." > /tmp/prompt.md
-codex-team send L-kernels --prompt-file /tmp/prompt.md
+codex-team send W "relax the tolerance to 1e-5; re-enable fastmath and re-run the two failing tests"
 ```
 
-Use sparingly. Long prompts are a code smell — put the spec in a doc
-and reference it.
+### Instruction-file pattern (for anything longer than a paragraph)
 
-## Per-turn overrides
+If the direction takes more than a paragraph, **write a brief file in the repo and reference its path.** Do not embed it in the send.
 
-Any of these can be passed on a single `send` to override the session
-defaults for that one turn, without recreating the session:
+Brief file shape (the user picks the path; you stick with it):
 
-```
-codex-team send <name> "<prompt>" \
-    --model gpt-5.4-mini \        # switch model for this turn only
-    --cwd /some/other/path \      # run the turn in a different cwd
-    --effort high \               # downgrade reasoning for a trivial turn
-    --personality concise \       # style toggle
-    --summary detailed \          # reasoning-summary verbosity
-    --output-schema-file X.json   # enforce structured output
-```
+```markdown
+# Task brief: <short title>
 
-Do not override lightly. Session defaults exist for good reasons
-(xhigh effort, danger_full_access sandbox, your chosen model). Override
-only when a specific turn genuinely needs something else.
+## Objective
+<what and why>
 
-## Queue behaviour
+## Scope
+- In scope: …
+- Out of scope: …
 
-If you send again while a session is already `running`, the new prompt
-is **queued**, not rejected. The queue is per-session, max length 5 by
-default. When the current turn completes, the daemon automatically
-dispatches the next queued prompt and emits another `turn-done`.
+## Approach
+<your design call, if any>
 
-Consequences:
+## Success criteria
+<tests, benchmarks, work-doc updates, etc.>
 
-- You can pipeline: `send A "step 1"`, then without waiting,
-  `send A "step 2"`. They run sequentially.
-- Queue depth is visible on the watchdog and via
-  `codex-team queue show <name>`.
-- If queue is full the default policy is `warn` (still enqueues,
-  emits a `queue-overflow` event). If you changed the policy to
-  `reject`, your send will fail with `E_QUEUE_FULL` — configure in
-  `config.toml`.
-
-## Interrupt
-
-```
-codex-team interrupt <name>
+## Reference
+<files, prior decisions, similar patterns>
 ```
 
-Cancels the currently running turn at the next safe point. The turn
-emits `turn-done` with status `errored` or partial state, and the
-queue (if any) continues. Use when:
+Corresponding send:
 
-- Codex is looping on a non-productive line of reasoning.
-- You need to redirect after receiving partial results.
-- Cost control: a long high-effort turn has already produced the
-  valuable output and is now polishing.
-
-## Close
-
-```
-codex-team session close <name>
+```bash
+codex-team send W "execute the tasks in <path-to-brief>; update the work doc when done; reply 'done' with a one-line summary"
 ```
 
-Stops the app-server subprocess, marks the session `closed`, but
-**preserves the thread**. You can later `session resume <name>` to
-re-attach a fresh subprocess to the same conversation history.
+Why this pattern: sends stay clean, briefs are revisable without re-dispatching, multiple workers can share a spec, and the user can review the brief *before* you send.
 
-For permanent removal use `session forget <name>` (registry entry
-deleted; Codex-side thread still exists and could be re-attached by
-creating a session with the same `thread_id`).
+See `philosophy.md` §§6,8 for the rationale.
 
-## The per-session progress doc
+### Work-doc discipline
 
-Each session is expected to maintain one append-only Markdown file,
-typically `docs/refactor/<session>/progress.md`, with sections:
+Every session owns **one durable Markdown work doc** in the repo. The user picks the path at session creation; you stick with it. Every send references it.
 
-```
+Shape (adapt section names to the session's nature):
+
+```markdown
 ## Current task
 ## Progress (newest on top)
 ## Findings & decisions
@@ -215,50 +137,131 @@ typically `docs/refactor/<session>/progress.md`, with sections:
 ## Next up
 ```
 
-Your send prompts refer to this file ("continue Next up", "update
-Findings with X", etc.) and the Codex session reads + updates it every
-turn. This lets both sides compact state without you re-typing every
-time.
+If the doc doesn't exist yet, your opening send should instruct the worker to create it at the agreed path.
 
-If the file does not exist when you first create the session, your
-opening send should instruct Codex to create it.
+See `philosophy.md` §7 and `compact-codex-team` for details on shape and compaction anchoring.
 
-## Decision tree on every Monitor wake
+### Prompt sources: `--stdin` and `--prompt-file`
 
-```dot
-digraph wake {
-    "Monitor event received" [shape=doublecircle];
-    "Event kind?" [shape=diamond];
-    "Read summary, decide next prompt" [shape=box];
-    "Answer codex's question" [shape=box];
-    "Go to compact-codex-team" [shape=box];
-    "Go to recover-codex-team" [shape=box];
-    "send next prompt, sleep" [shape=box];
+For a multi-line send that doesn't warrant a brief file in the repo (one-off, throwaway):
 
-    "Monitor event received" -> "Event kind?";
-    "Event kind?" -> "Read summary, decide next prompt" [label="turn-done"];
-    "Event kind?" -> "Answer codex's question" [label="turn-attn with question"];
-    "Event kind?" -> "Go to compact-codex-team" [label="compact-suggest"];
-    "Event kind?" -> "Go to recover-codex-team" [label="session-down / auto-heal / turn-err"];
-    "Read summary, decide next prompt" -> "send next prompt, sleep";
-    "Answer codex's question" -> "send next prompt, sleep";
-}
+```bash
+codex-team send W --stdin <<'EOF'
+…
+EOF
+
+# or
+codex-team send W --prompt-file /tmp/one-off.md
 ```
+
+Use sparingly. Anything reusable belongs in the repo, not `/tmp`.
+
+### `--wait` (almost never)
+
+`--wait` blocks the CLI until `turn/completed` arrives. That wastes your context window and serializes work. Use only when:
+
+- Interactively debugging a single session (REPL feel).
+- A script genuinely needs the turn result inline.
+
+For the normal orchestration loop: **send, then sleep.**
+
+### Per-turn overrides
+
+```bash
+codex-team send <name> "<prompt>" \
+    --model <model> \
+    --cwd /some/other/path \
+    --effort high \
+    --personality concise \
+    --summary detailed \
+    --output-schema-file X.json
+```
+
+Do not override lightly. Session defaults exist for a reason. Per-turn only; with cause.
+
+## Queue behaviour
+
+Sends while a session is `running` **queue** — they do not reject. Per-session queue, max 5 by default.
+
+- Pipeline: `send A "step 1"`, then `send A "step 2"` — they run sequentially.
+- Inspect: `codex-team queue show <name>`.
+- On overflow: default policy `warn` still enqueues + emits `queue-overflow`. Change to `reject` in config for hard failure.
+
+## Interrupt
+
+```bash
+codex-team interrupt <name>
+```
+
+Cancels the current turn at the next safe point. Turn emits `turn-done` with partial state or `errored`. Queue continues.
+
+Use when:
+
+- Worker is looping on non-productive reasoning.
+- You need to redirect after partial results.
+- A long turn has produced the valuable output and is now polishing.
+
+## Close
+
+```bash
+codex-team session close <name>
+```
+
+Stops the subprocess, marks session `closed`, **preserves the thread**. `codex-team session resume <name>` re-attaches a fresh subprocess.
+
+For permanent removal: `codex-team session forget <name>`. → `recover-codex-team` covers when to escalate.
+
+## Decision on every Monitor wake
+
+| Event | Decide |
+|---|---|
+| `turn-done` (normal) | Read summary → pick next prompt → one `send` → sleep |
+| `turn-attn` with question | Answer verbatim in next `send` → sleep |
+| `turn-attn` with failure (command / test) | Fix the input, re-dispatch |
+| `turn-done` but reply doesn't match the prompt | **Known quirk** — see below — re-send same prompt |
+| `compact-suggest` | → `compact-codex-team` ritual |
+| `session-down` / `turn-err` / `auto-heal` | → `recover-codex-team` |
+
+## Known quirks
+
+### Long-context prompt-apply skip (not a recovery case)
+
+After many turns in a single thread, a worker occasionally returns a reply that **doesn't match the prompt you just sent** — the content looks like it came from an earlier turn's context. Signs:
+
+- Reply talks about a file you didn't reference.
+- Reply answers a question you didn't ask.
+- Reply continues old work verbatim instead of acting on the new send.
+
+**Response:** re-send the exact same prompt, unchanged.
+
+**Do not:**
+
+- Climb the escalation ladder. This is not a failure — no `interrupt` / `restart` / `kill`.
+- Rephrase the prompt. That introduces new ambiguity.
+- Assume the session is confused and needs a reset.
+
+One re-send typically resolves it. Two consecutive re-sends with the same bad behavior = genuine problem → `recover-codex-team`.
+
+See `philosophy.md` §5 for why this happens.
 
 ## Red flags
 
 | Thought | Correction |
 |---|---|
-| "I'll use `--wait` to simplify this." | Use the default async; keep the Monitor loop. |
-| "Let me stuff the full task description into the send." | Reference `progress.md` instead. |
-| "Session is slow — maybe I'll switch to `--effort minimal`." | Do not. Defaults are picked deliberately (`xhigh`). Override only if the user asked. |
-| "This session has been running 5 minutes, something must be wrong." | Turns can take tens of minutes at `xhigh`. Wait for `turn-done` or check the heartbeat event for `turn-stuck` first. |
-| "I'll send a new prompt to cancel the current turn." | Send queues. Use `codex-team interrupt <name>` to actually cancel. |
+| "I'll use `--wait` to keep things simple." | Default async. Keep the Monitor loop. |
+| "Let me stuff the full task description into the send." | Point at a brief file instead. → §Instruction-file pattern |
+| "I'll figure out the approach myself, then tell Codex what to type." | Over-specified. Name the target + constraint + reference; let the worker execute. → `philosophy.md` §3 |
+| "I'll just write this small fix inline — faster than sending." | You're the orchestrator. Delegate. → `philosophy.md` §1 |
+| "Session is slow — switch to `--effort minimal`." | Do not override effort casually. Per-turn only, with cause. |
+| "5 minutes running — something must be wrong." | Turns can take minutes. Wait for `turn-done` or `turn-stuck` heartbeat. |
+| "Worker's reply doesn't match my prompt — must be broken." | Long-context skip? Re-send once. → §Known quirks |
+| "I'll send a new prompt to cancel the current turn." | Sends queue. Use `codex-team interrupt`. |
+| "Worker is disagreeing — let me override and force the plan." | Read the pushback seriously. They often see the code better. → `philosophy.md` §4 |
 
 ## Cross-references
 
-- Before sending: `using-codex-team` (mental model) + `watch-codex-team`
-  (monitors armed)
-- After a `turn-done` that needs inspection: `inspect-codex-team`
-- On `[compact-suggest]`: `compact-codex-team`
-- On `[session-down]` / `[turn-err]`: `recover-codex-team`
+- Collaboration principles: `using-codex-team` → `philosophy.md`
+- Prerequisites: `watch-codex-team` (events stream)
+- After `turn-done` needing deeper review: `inspect-codex-team`
+- On `compact-suggest`: `compact-codex-team`
+- On `session-down` / `turn-err` (real failures): `recover-codex-team`

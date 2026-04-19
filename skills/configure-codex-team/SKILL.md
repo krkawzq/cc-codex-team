@@ -1,365 +1,312 @@
 ---
 name: configure-codex-team
-description: Reference for the codex-team `config.toml` schema, profile system, environment-variable overrides, and the plugin's `userConfig` prompts. Use when setting up profiles for new session roles, tuning daemon / digest / monitor / heartbeat / queue parameters, or debugging why a session was created with unexpected defaults.
+description: Authoritative source for the codex-team `config.toml` schema, the profile system, the `watchdog_alarms` multi-alarm schema + template variables, environment-variable overrides, and runtime prerequisites. Trigger when setting up a new profile, defining a watchdog alarm, tuning a daemon / monitor / queue knob, debugging unexpected session defaults, or verifying Node / Codex CLI prerequisites. Not for: session lifecycle (`manage-codex-team`), failure triage (`recover-codex-team`), arming monitors (`watch-codex-team`).
 ---
 
 # Configure codex-team
 
-All session-level defaults and daemon runtime knobs live in a single
-TOML file. This skill documents the schema and the design patterns
-for building per-role `[profiles.<name>]` entries so that
-`codex-team session create <name> --profile <role>` is all you ever
-need on the command line.
+The Node daemon talks directly to `codex app-server` over JSON-RPC. No Python bootstrap, no SDK package. Config is TOML-first; profiles layer on top; env vars override scalar keys at runtime.
 
-## Environment & dependencies (decision tree)
+## Runtime prerequisites
 
-The plugin ships three separate dependencies and bootstraps them
-differently. Know this before you touch anything:
+| Dependency | Role |
+|---|---|
+| Node.js 18+ | Runs `dist/main.js` and the wrapper |
+| `codex` CLI | Daemon spawns `codex app-server --listen stdio://` subprocesses |
 
-| Dependency | Kind | Where it lives |
-|---|---|---|
-| Python ≥ 3.10 | system | user-installed, must be on `PATH` as `python3` or pointed at via `PYTHON=...` env |
-| Plugin package (`codex_team`) itself | pip install | bootstrapped into `${CLAUDE_PLUGIN_DATA}/venv` via `pip install -e ${CLAUDE_PLUGIN_ROOT}` at first activation |
-| `codex-app-server-sdk` (Python SDK) | pip install | declared as a plugin dep → normally pulled from PyPI; if that fails bootstrap falls back to a local source tree |
-| `codex` binary (app-server runtime) | external | NOT managed by the plugin; user must install separately (see below) |
-
-The first thing `bin/codex-team` does on any call is invoke
-`scripts/bootstrap-python-env.sh`. That script creates the venv,
-installs the plugin, verifies `import codex_app_server`, and — only if
-that import fails — tries local-source fallbacks in this order:
-
-1. `$CODEX_TEAM_SDK_PATH` (explicit user override)
-2. `${CLAUDE_PLUGIN_ROOT}/../codex/sdk/python` (sibling under `forks/`)
-3. `${CLAUDE_PLUGIN_ROOT}/../../codex/sdk/python` (two levels up)
-4. `${CLAUDE_PLUGIN_ROOT}/vendor/codex-sdk/python` (vendored copy)
-
-If none of those exist, bootstrap exits non-zero with a message
-listing your install options.
-
-### Decision tree — bootstrap or session create fails
-
-```
-                    Something is missing. Which symptom?
-                              │
-           ┌──────────────────┼──────────────────────┐
-           ▼                  ▼                      ▼
-  bootstrap exits     "codex-app-server-sdk   "codex binary not
-  "Python >=3.10"     not available"           found" (E_NO_CODEX_BIN)
-           │                  │                      │
-           ▼                  ▼                      ▼
-  Install python3.10+.  Pick one:                Install the `codex`
-  Set PYTHON=/abs/path      A. PyPI:             CLI externally:
-  in your shell or              pip install           npm install -g
-  config.toml [daemon]          codex-app-server-sdk  @openai/codex
-  codex_bin= ...            B. Local source:     Run `codex login`.
-                                export                Sanity check:
-                                CODEX_TEAM_SDK_       `codex --version`.
-                                PATH=/abs/path
-                            C. Vendor it:
-                                copy codex/sdk/python to
-                                ${PLUGIN_ROOT}/vendor/codex-sdk
-                                (fully sealed install)
-                            Then re-run bootstrap.
-```
-
-If bootstrap-stderr output is missing or truncated, run the script
-manually from a shell to see the real pip output:
+Verify:
 
 ```bash
-bash "$(claude plugin path codex-team 2>/dev/null || echo "${CLAUDE_PLUGIN_ROOT}")"/scripts/bootstrap-python-env.sh
+node --version
+codex --version
+codex login
+# from plugin checkout:
+npm install && npm run typecheck && npm run build
 ```
 
-The script is idempotent (stamp-file checked on entry) and flock-safe
-(other concurrent callers just wait).
+Common failures:
 
-### Verify the environment by hand
-
-To audit a plugin install from the outside (useful for comparing with
-your user `.venv`):
-
-```bash
-VENV="${CLAUDE_PLUGIN_DATA:-${HOME}/.local/share/cc-codex-team-plugin}/venv"
-
-# 1. venv exists and has the plugin
-${VENV}/bin/python -c "import codex_team; print(codex_team.__version__)"
-# 2. SDK is importable
-${VENV}/bin/python -c "import codex_app_server; print(codex_app_server.__version__)"
-# 3. codex binary resolves
-${VENV}/bin/python -c "
-from codex_team.config import load_config, resolve_codex_bin
-print(resolve_codex_bin(load_config()))
-"
-```
-
-All three should print a sensible path/version without raising. If (2)
-raises, bootstrap didn't install the SDK; see the decision tree above.
-If (3) raises `CodexCliMissing`, see `recover-codex-team`
-§"codex binary missing".
-
----
-
-## External prerequisite: the `codex` binary
-
-This plugin is a front-end; it does **not** ship the `codex` binary.
-The daemon spawns `codex app-server` subprocesses and therefore needs
-the `codex` CLI installed on `PATH` and authenticated. On first
-session creation, the daemon resolves the binary in this order:
-
-1. `[daemon] codex_bin = "..."` in `config.toml`
-2. `CODEX_TEAM_DAEMON_CODEX_BIN` environment variable
-3. `which codex` on `PATH`
-4. The pinned `codex_cli_bin` Python package bundled with the SDK
-   (only present when `codex-app-server-sdk` was installed from a
-   pinned wheel)
-
-If all four fail the daemon raises `E_NO_CODEX_BIN` and the session
-create command exits with code 4. Install / authenticate codex
-externally:
-
-```bash
-npm install -g @openai/codex   # or whichever installer your org uses
-codex login                    # OAuth / API-key setup
-codex --version                # sanity check
-```
+| Symptom | Fix |
+|---|---|
+| `node: command not found` | Install Node 18+ |
+| `dist/main.js missing` | `npm install && npm run build` in plugin checkout |
+| `E_NO_CODEX_BIN` | `npm install -g @openai/codex && codex login`; or pin `[daemon].codex_bin` |
 
 ## Config file location
 
 ```
-$XDG_CONFIG_HOME/codex-team/config.toml     # usually ~/.config/codex-team/config.toml
+$XDG_CONFIG_HOME/codex-team/config.toml      # usually ~/.config/codex-team/config.toml
 ```
 
-`config.toml` is **always read from the user's XDG config dir** — even
-when the plugin is active in Claude Code. Put your profiles and
-thresholds here.
+Missing file → built-in defaults. Write only keys you want to override.
 
-If the file is missing, the daemon starts with built-in defaults. You
-only need to write the keys you want to override — unspecified keys
-fall back to defaults.
+## Env var overrides (runtime)
 
-Every scalar key can also be overridden at runtime by an environment
-variable of the form `CODEX_TEAM_<SECTION>_<KEY>` (uppercased,
-underscore-joined). Intended for test scripts and one-off experiments;
-prefer the TOML file for persistent config.
+```
+CODEX_TEAM_<SECTION>_<KEY>
+```
 
-### Data directory: plugin-mode vs standalone
+Examples:
 
-The `data_dir` and `socket_path` defaults behave differently depending
-on how `codex-team` is invoked:
+```bash
+export CODEX_TEAM_DAEMON_LOGLEVEL=debug
+export CODEX_TEAM_QUEUE_MAXPERSESSION=8
+export CODEX_TEAM_MONITOR_WATCHDOGINTERVALSECONDS=600
+```
 
-| Mode | `data_dir` default | `socket_path` default |
+For test runs and shell-local experiments. Prefer `config.toml` for persistent setup.
+
+## Data-dir resolution
+
+| Mode | `data_dir` | `socket_path` |
 |---|---|---|
-| Plugin in Claude Code (`bin/codex-team` wrapper) | `${CLAUDE_PLUGIN_DATA}/data` | `${CLAUDE_PLUGIN_DATA}/runtime/daemon.sock` |
-| Standalone (running `codex-team` in a terminal) | `$XDG_DATA_HOME/codex-team` | `$XDG_RUNTIME_DIR/codex-team/daemon.sock` |
+| Plugin in Claude Code | `${CLAUDE_PLUGIN_DATA}/data` | `${CLAUDE_PLUGIN_DATA}/runtime/daemon.sock` |
+| Standalone shell | `$XDG_DATA_HOME/codex-team` | `$XDG_RUNTIME_DIR/codex-team/daemon.sock` |
 
-The plugin-mode paths live under Claude Code's persistent plugin data
-directory, so they survive plugin updates. This is intentional —
-session registry and history should not be re-bootstrapped every
-upgrade. You generally do not need to set these in `config.toml`; the
-wrapper injects the right values via `CODEX_TEAM_DAEMON_*` env vars
-before launching the CLI.
+Setting `[daemon].data_dir` or `[daemon].socket_path` explicitly in `config.toml` overrides both modes.
 
-Setting `data_dir` explicitly in `config.toml` overrides both modes.
-
-## Full schema
+## Full schema (authoritative)
 
 ```toml
 [daemon]
-socket_path    = ""                  # blank → plugin-mode: ${CLAUDE_PLUGIN_DATA}/runtime/daemon.sock
-                                      #          standalone: $XDG_RUNTIME_DIR/codex-team/daemon.sock
-data_dir       = ""                  # blank → plugin-mode: ${CLAUDE_PLUGIN_DATA}/data
-                                      #          standalone: $XDG_DATA_HOME/codex-team
-log_level      = "info"              # debug | info | warn | error
-codex_bin      = ""                  # blank → resolved via PATH / codex_cli_bin package (see "External prerequisite")
-codex_home     = ""                  # blank → ~/.codex
-launch_args_override = []            # extra args forwarded to `codex app-server`
-config_overrides     = []            # extra `--config key=val` forwarded to codex
+socket_path = ""                 # blank → wrapper / XDG default
+data_dir = ""                    # blank → wrapper / XDG default
+log_level = "info"               # debug | info | warn | error
+codex_bin = ""                   # blank → PATH / CODEX_TEAM_CODEX_BIN
+codex_home = ""                  # blank → inherit env
+launch_args_override = []        # replaces default app-server args
+config_overrides = []            # repeated `--config key=value` for codex
+rpc_timeout_seconds = 60
 
 [defaults]
-model                       = "gpt-5.4"
-reasoning_effort            = "xhigh"       # minimal | low | medium | high | xhigh
-sandbox                     = "danger_full_access"   # danger_full_access | workspace_write | read_only
-approval_policy             = "never"       # never | on_request | on_failure
-cwd                         = ""            # blank → inherit CLI caller's cwd
+model = "gpt-5.4"
+model_provider = ""
+sandbox = "danger_full_access"   # normalized to danger-full-access
+approval_policy = "never"        # never | on-request | on-failure
+cwd = ""
 auto_resume_on_daemon_start = true
-service_tier                = ""            # "" | priority | flex
-personality                 = ""            # style preset, codex-side enum
-base_instructions           = ""            # system-prompt prefix, raw text
-developer_instructions      = ""            # dev-message prefix, raw text
-profile                     = ""            # default profile if none is passed on create
+service_tier = ""
+reasoning_effort = ""            # blank → codex runtime default
+personality = ""
+base_instructions = ""
+developer_instructions = ""
+profile = ""
 
 [digest]
-history_md_enabled            = true        # per-session history.md on disk
-turns_jsonl_enabled           = true        # machine-readable turn log
-command_truncate_chars        = 120         # long bash commands truncated to this
-agent_message_full            = true        # always show full final_answer text
-reasoning_capture             = false       # keep reasoning items in jsonl (not in monitor)
-stderr_tail_lines_on_fail     = 20          # how many stderr lines to attach on command failure
-max_files_listed              = 8           # in digest, list up to N changed files
-tool_args_truncate_chars      = 80          # MCP/tool call arg preview width
-history_rotation_mb           = 32          # (reserved; not enforced yet)
+history_md_enabled = true
+turns_jsonl_enabled = true
+command_truncate_chars = 120
+agent_message_full = true
+reasoning_capture = false
+stderr_tail_lines_on_fail = 20
+max_files_listed = 8
+tool_args_truncate_chars = 80
+history_rotation_mb = 32         # rotates to .1 when crossed
 
 [compaction]
-threshold_tokens      = 500_000             # [compact-suggest] fires when usage crosses this
-mode                  = "manual"            # currently only "manual" is supported
-progress_doc_template = ""                  # e.g. "docs/refactor/{session_name}/progress.md"
+threshold_tokens = 500000
+mode = "manual"
+progress_doc_template = ""
+retry_attempts = 2
+retry_delay_ms = 1500
 
 [monitor]
-events_max_buffer              = 1000
-watchdog_interval_seconds      = 1200       # 20 min; lower only with reason
-watchdog_task_brief_file       = ""         # blank → watchdog block omits the brief
+events_max_buffer = 1000
+watchdog_interval_seconds = 1200
+watchdog_task_brief_file = ""
 watchdog_task_brief_head_lines = 30
-watchdog_stale_minutes         = 30         # advisory when a session idles past this
-subscriber_queue_max           = 200
+watchdog_stale_minutes = 30
+subscriber_queue_max = 200
+watchdog_emit_idle = false
+watchdog_template = ""
+watchdog_template_file = ""
+
+# Named alarms — see §Watchdog alarms below
+# [monitor.watchdog_alarms.<alarm-name>]
+# enabled = true
+# interval_seconds = 7200
+# task_brief_file = ""
+# task_brief_head_lines = 30
+# emit_idle = false
+# template = ""
+# template_file = ""
 
 [heartbeat]
-interval_seconds         = 60               # health probe cadence
-turn_stuck_seconds       = 600              # a turn running > this → [turn-stuck]
-self_heal_once           = true
-health_timeout_seconds   = 15
+interval_seconds = 60
+turn_stuck_seconds = 600
+self_heal_once = true
+health_timeout_seconds = 15
 health_check_concurrency = 8
-resume_timeout_seconds   = 30
+resume_timeout_seconds = 30
 self_heal_backoff_seconds = 30
 
 [queue]
 max_per_session = 5
-overflow_policy = "warn"                    # warn | reject | drop_oldest
+overflow_policy = "warn"         # warn | reject | drop_oldest
 ```
 
-## Profiles — the recommended way to configure sessions
+## Profiles
 
-A profile is a named bundle of per-session defaults. When you create a
-session with `--profile <name>`, values from `[profiles.<name>]`
-override `[defaults]` for that session. Unset keys fall through.
-
-### Minimal profile
+Recommended way to specialize a session. Profiles layer over `[defaults]`.
 
 ```toml
 [profiles.reviewer]
+model = "gpt-5.4"
 reasoning_effort = "high"
+approval_policy = "never"
 developer_instructions = """
-You review code for security, correctness, and style. Never write
-production code; only comment and propose diffs.
+Review correctness, risk, and tests. Do not commit.
 """
 ```
 
 Usage:
 
 ```bash
-codex-team session create reviewer --cwd /path/to/repo --profile reviewer
+codex-team session create <name> --cwd <abs-path> --profile reviewer
 ```
 
-### Worked examples
-
-**Refactor worker** — write-capable, xhigh reasoning, instructions
-embedded:
+### Suggested shapes
 
 ```toml
-[profiles.refactor]
-model = "gpt-5.4"
-reasoning_effort = "xhigh"
-sandbox = "danger_full_access"
-approval_policy = "never"
-developer_instructions = """
-You execute a specific refactor task. Follow the per-session progress
-file in docs/refactor/<session>/progress.md. Never run git. Never
-touch files outside the current worktree.
-"""
-```
-
-**Read-only auditor** — cannot edit, only reads:
-
-```toml
-[profiles.auditor]
-model = "gpt-5.4"
-reasoning_effort = "xhigh"
-sandbox = "read_only"
-approval_policy = "never"
-developer_instructions = """
-You produce audit reports only. Do not write files or edit anything.
-Your deliverable is a Markdown report streamed as your final message.
-"""
-```
-
-**Test runner** — fast iteration, trivial reasoning:
-
-```toml
-[profiles.test]
+[profiles.quickfix]
 model = "gpt-5.4-mini"
 reasoning_effort = "low"
-sandbox = "workspace_write"
-approval_policy = "never"
+
+[profiles.refactor]
+model = "gpt-5.4"
+reasoning_effort = "high"
 developer_instructions = """
-You run tests and report failures concisely. Do not fix tests; only
-report and move on.
+Keep the work doc current. Prefer small verified edits.
 """
+
+[profiles.scratch]
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
 ```
 
-### Profile design checklist
-
-When adding a new profile, answer these before committing:
-
-1. **Role boundary** — what is this session allowed to do, and what
-   must it refuse? Put the refusal in `developer_instructions`.
-2. **Model tier** — heavy reasoning (gpt-5.4 + xhigh) vs fast iteration
-   (mini + low). Cost and latency scale together.
-3. **Sandbox level** — `danger_full_access` only when the session must
-   edit; use `workspace_write` or `read_only` otherwise to narrow the
-   blast radius.
-4. **Approval policy** — always `never` in this plugin; approval
-   interactions would deadlock the async monitor loop.
-5. **Stable cwd or per-call?** — if the role has a fixed worktree,
-   embed `cwd`; otherwise leave blank and pass `--cwd` on create.
-
-## Environment overrides
-
-Useful patterns:
+Ephemeral scratch:
 
 ```bash
-# Temporarily raise compaction threshold for a heavy session
-CODEX_TEAM_COMPACTION_THRESHOLD_TOKENS=900000 codex-team daemon start
-
-# Point daemon at an alternate codex binary for local dev
-CODEX_TEAM_DAEMON_CODEX_BIN=/opt/codex-dev/bin/codex codex-team daemon start
-
-# Verbose daemon logs while diagnosing
-CODEX_TEAM_DAEMON_LOG_LEVEL=debug codex-team daemon start
-
-# Change watchdog cadence for a test run (short, forces wakes)
-CODEX_TEAM_MONITOR_WATCHDOG_INTERVAL_SECONDS=60 codex-team daemon start
+codex-team session create <name> --cwd <abs-path> --profile scratch --ephemeral
 ```
 
-Env overrides are read once at daemon startup. Changing them after the
-daemon is running has no effect; edit `config.toml` and use
-`codex-team daemon reload-config` (if available) or bounce the daemon.
+Ephemeral sessions die with their app-server; cannot be resumed after daemon shutdown.
+
+## Watchdog alarms
+
+The watchdog stream supports a built-in "default" alarm plus any number of named custom alarms. Each alarm has its own cadence, task brief, template, and idle policy. All alarms share the single `watchdog` Monitor stream; payloads carry `alarm: <name>` so you can distinguish them.
+
+### Schema
+
+```toml
+[monitor.watchdog_alarms.<alarm-name>]
+enabled = true                   # set false to disable without deleting the section
+interval_seconds = 7200          # positive integer; cadence of this alarm
+task_brief_file = ""             # optional; absolute path or relative to cwd
+task_brief_head_lines = 30       # max lines of the brief to inject into payload
+emit_idle = false                # false = skip tick if no signal; true = always fire
+template = ""                    # inline template string; overrides default
+template_file = ""               # file path; wins over `template` if both set
+```
+
+Reload after adding / editing:
+
+```bash
+codex-team daemon reload-config
+```
+
+Or use `/codex-team:watch <name> [--task-brief PATH] [--interval SECS] [--template PATH]` which writes the block and reloads for you.
+
+### `emit_idle` behavior
+
+- `emit_idle = false` (default): the alarm **skips** its tick when there's no signal — i.e., no running session, no advisories, no task brief. Keeps the stream quiet when nothing needs attention.
+- `emit_idle = true`: the alarm **always** emits on cadence. Use when you want a fixed-cadence briefing (morning standup pattern).
+
+### Template variables
+
+The template is rendered with `{{var}}` and `{{#if var}}...{{/if}}`. Available variables:
+
+| Variable | Value |
+|---|---|
+| `{{at}}`, `{{sentAt}}` | ISO timestamp |
+| `{{localTime}}` | Human-readable local time |
+| `{{alarm}}` | Name of the firing alarm |
+| `{{taskBrief}}` | First N lines of `task_brief_file`, or empty |
+| `{{summary.total}}` | Session count |
+| `{{summary.running}}` | Running-now count |
+| `{{summary.errored}}` | Errored count |
+| `{{summary.queued}}` | Queued-items total across sessions |
+| `{{sessionsText}}` | Pre-formatted per-session lines |
+
+`{{#if var}}…{{/if}}` blocks render only when `var` is truthy / non-empty.
+
+### Example alarm configurations
+
+Task-brief reminder (every 2 hours, always emit, show brief):
+
+```toml
+[monitor.watchdog_alarms.task_brief]
+interval_seconds = 7200
+task_brief_file = "/abs/path/to/brief.md"
+emit_idle = true
+```
+
+Silent drift detector (every 30 minutes, only emit on advisory):
+
+```toml
+[monitor.watchdog_alarms.drift]
+interval_seconds = 1800
+emit_idle = false
+```
+
+Fixed-cadence standup with custom template file:
+
+```toml
+[monitor.watchdog_alarms.standup]
+interval_seconds = 28800
+emit_idle = true
+template_file = "/abs/path/to/standup-template.md"
+```
+
+See `watch-codex-team` §Watchdog for usage patterns and when to arm this stream at all.
+
+## Hot-reload behavior
+
+- `session create`, `session resume`, `session restart`, `health repair` refresh `config.toml` from disk before acting. New profiles do **not** require a daemon restart.
+- `daemon reload-config` reapplies heartbeat / watchdog intervals + alarm definitions immediately; no full restart needed for cadence-only changes.
+- `compact` retries automatically on failure — tune with `compaction.retry_attempts` / `compaction.retry_delay_ms`.
+- `history_rotation_mb` enforces rotation for both `history.md` and `turns.jsonl`; over threshold → current file → `.1`, new file starts.
+- `launch_args_override` replaces the default app-server argv entirely. Use `config_overrides` for single-flag tweaks; reach for `launch_args_override` only when you need complete control.
 
 ## When to tune which knob
 
-| You want to… | Change | Section |
-|---|---|---|
-| Run more sessions at once | (no knob) just create more | — |
-| See fewer `[compact-suggest]` events | Raise `threshold_tokens` | `[compaction]` |
-| Force compaction earlier | Lower `threshold_tokens` | `[compaction]` |
-| Get woken more often by the watchdog | Lower `watchdog_interval_seconds` | `[monitor]` |
-| Stop watchdog brief injection | Clear `watchdog_task_brief_file` | `[monitor]` |
-| Capture reasoning chains for audit | Enable `reasoning_capture` | `[digest]` |
-| Drop history.md (keep only jsonl) | Disable `history_md_enabled` | `[digest]` |
-| Reject new sends instead of queuing | Set `overflow_policy = "reject"` | `[queue]` |
-| Detect stuck turns sooner | Lower `turn_stuck_seconds` | `[heartbeat]` |
-| Disable single-shot self-heal | Set `self_heal_once = false` | `[heartbeat]` |
+| Goal | Knob |
+|---|---|
+| Different default model | `[defaults].model` or `[profiles.X].model` |
+| Change session-level effort | `[profiles.X].reasoning_effort` |
+| Lower cost on one turn | `codex-team send ... --effort low` (no config change) |
+| More/fewer parallel queued sends | `[queue].max_per_session` |
+| Stricter queue behavior | `[queue].overflow_policy = "reject"` |
+| Periodic task reminder for long-horizon work | `[monitor.watchdog_alarms.<name>]` with `task_brief_file` |
+| Silent drift detector | `[monitor.watchdog_alarms.<name>]` with `emit_idle = false` |
+| Faster turn-stuck detection | `[heartbeat].turn_stuck_seconds` |
+| Different compact threshold | `[compaction].threshold_tokens` |
+| Pin a specific Codex binary | `[daemon].codex_bin` |
 
 ## Red flags
 
 | Thought | Correction |
 |---|---|
-| "I'll hand-edit defaults for every session create." | Use profiles. One definition, many sessions. |
-| "I'll set `approval_policy = on_request` to be safe." | Async monitor loop has no approval channel. Keep `never` and control via `sandbox`. |
-| "`danger_full_access` is default — that's scary." | It is. But the plugin is designed as a YOLO orchestrator; tune per-role with `read_only` / `workspace_write` profiles instead of changing defaults. |
-| "I'll lower `watchdog_interval_seconds` to 60 for faster feedback." | 20 min is chosen to avoid drowning you in context. Events stream handles fast feedback; don't confuse the two. |
+| "I need to install a Python SDK first." | No. Node talks to app-server directly. |
+| "I'll set `launch_args_override` for a tiny tweak." | Use `config_overrides`. Replace argv only when necessary. |
+| "Cut `watchdog_interval_seconds` to 30 for fast feedback." | Fast feedback = `events` stream. Watchdog is low-frequency reminder. |
+| "Define an alarm so I'll know the moment a session breaks." | That's the `events` stream's job (`session-down`, `turn-err`). Watchdog is reminder + self-check. |
+| "Add `emit_idle = true` to every alarm." | Only for fixed-cadence briefings. Otherwise silence-on-no-signal is a feature. |
+| "Edit config then restart the daemon." | Most changes hot-reload. Try `daemon reload-config` first. |
 
 ## Cross-references
 
-- Create a session using a profile: `manage-codex-team` §create
-- Understanding events/watchdog payloads: `watch-codex-team`
-- Compaction threshold meaning: `compact-codex-team`
-- After editing config: bounce daemon via `recover-codex-team` or
-  reload with `codex-team daemon reload-config`
+- Session lifecycle: `manage-codex-team`
+- When to arm the watchdog stream at all: `watch-codex-team` §Watchdog
+- Quick alarm wiring: `/codex-team:watch`
+- Failure triage: `recover-codex-team`

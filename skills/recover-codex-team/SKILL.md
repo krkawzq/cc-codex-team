@@ -1,301 +1,200 @@
 ---
 name: recover-codex-team
-description: Triage and recover errored, stuck, or down codex-team sessions, and recover from daemon-level failures. Use when the events stream emits `session-down`, `turn-err`, `turn-stuck`, when a session ends up in `errored` status, when a subprocess is zombie, or when the daemon is unreachable.
+description: Authoritative source for the codex-team escalation ladder (`interrupt → restart → kill → forget`) and failure triage. Trigger on `session-down`, `turn-err`, `turn-stuck`, `status=errored`, daemon unreachable, or `E_NO_CODEX_BIN`. Also trigger when a Codex reply twice in a row doesn't match the sent prompt (first occurrence is the known long-context quirk — not this skill). Not for: routine session writes (`manage-codex-team`), inspection without action (`inspect-codex-team`).
 ---
 
 # Recover codex-team
 
-Known-symptom → known-command tree. No guessing. Every row below has
-a deterministic first move; escalate only if that fails.
+Known symptom → known first move. Do not guess. Do not improvise.
 
-## First principle: trust the auto-heal, briefly
+## First: is this actually a failure?
 
-When `session-down` fires, the daemon attempts one automatic
-`thread_resume(thread_id)` in a fresh `AsyncCodex` — you'll see
-`auto-heal` arrive within ~10 seconds if it works. **Wait those 10
-seconds.** If `auto-heal` fires, send the next prompt normally; the
-thread state is preserved.
+Before climbing the ladder, rule out two false positives:
 
-Auto-heal has a built-in backoff. A second immediate crash of the same
-session will *not* auto-heal — you get `session-down` and must
-intervene manually.
+1. **Long-context prompt-apply skip.** A worker reply that doesn't match the prompt you just sent is **not a recovery case** on first occurrence. Re-send the same prompt unchanged; one re-send usually resolves it. Only if two consecutive re-sends behave the same way is it a real problem. → `philosophy.md` §5, `manage-codex-team` §Known quirks.
+
+2. **Worker mid-turn.** Turns can legitimately take minutes. Check `session status` for `currentTurnAgeMs`; only if it exceeds `heartbeat.turn_stuck_seconds` is it a real stuck turn.
+
+If neither, proceed.
+
+## Escalation ladder (authoritative)
+
+Persistent session:
+
+```
+interrupt  →  restart  →  kill  →  forget + create
+```
+
+Ephemeral session:
+
+```
+interrupt  →  restart (only while still live)  →  kill  →  create a fresh one
+```
+
+**Never skip rungs.** `forget` is destructive — it deletes the registry entry; the Codex-side thread persists but you've lost its handle. Start at the lowest rung and climb only on failure.
 
 ## Symptom → action table
 
-| Symptom (what you saw) | First action | If that fails |
+| Symptom | First action | If that fails |
 |---|---|---|
-| `session-down` + 10s elapsed, no `auto-heal` | `codex-team session restart <name>` | see "restart fails" below |
-| `turn-err` with recoverable=yes | `codex-team send <name> "<retry with clarification>"` | `session restart` |
-| `turn-err` with recoverable=no | `codex-team session dump <name>`, read stderr, then `session restart` | `session kill` + `session resume` |
-| `turn-stuck` (turn running > `heartbeat.turn_stuck_seconds`) | `codex-team interrupt <name>` | `session kill` if interrupt returns but turn keeps streaming |
-| session `status = errored` (from health report) | `codex-team session ack-error <name>` (if code is transient), else `session restart` | `session kill` |
-| subprocess gone but registry says idle | `codex-team health repair` | `session kill` + `session resume` |
-| zombie subprocess (PID alive, UDS not responding) | `codex-team session kill <name>` (SIGKILLs the child) | `session forget` + re-create |
-| daemon unreachable (`daemon status` refused) | see "daemon down" below | — |
-| `E_NO_CODEX_BIN` on any session create / restart | see "codex binary missing" below | — |
-| `E_INTERNAL: codex-app-server-sdk not available` on session create | see "SDK not installed in daemon venv" below | — |
-| Plugin not loaded after install / `E_DAEMON_DOWN` on first use | first-activation bootstrap may have timed out — `/reload-plugins` forces a retry; see "bootstrap timed out" below | manual bootstrap via `bin/codex-team daemon start` |
+| `session-down` and no `auto-heal` in ~10s | `codex-team session restart <name>` | See "Restart fails" |
+| `turn-stuck` (age exceeds threshold) | `codex-team interrupt <name>` | `codex-team session kill <name>` |
+| `turn-err` / `status=errored` | `codex-team session dump <name>` then `session restart <name>` | `session kill <name>` |
+| Daemon unreachable | `codex-team daemon doctor` | See "Daemon down" |
+| Stale pid / stale socket suspected | `codex-team daemon doctor` | Remove stale files, then `daemon start` |
+| `E_NO_CODEX_BIN` | Install / repair Codex CLI | Pin `[daemon].codex_bin` in config |
+| `dist/main.js missing` | `npm install && npm run build` in plugin checkout | Reinstall from a built tree |
+| Ephemeral `session read` / `resume` fails after daemon restart | Create a fresh session | Ephemeral state is gone by design — stop retrying |
+| Reply mismatched prompt **twice** in a row | `codex-team interrupt` then dump + inspect | Restart if transport broke |
+
+## First, trust auto-heal briefly
+
+When `session-down` fires, the daemon attempts one automatic `thread/resume` in a fresh `codex app-server` child. Wait ~10 seconds for an `auto-heal` event before intervening.
+
+Exceptions:
+
+- **Ephemeral sessions are not auto-healed.**
+- A second immediate crash of the same session is rate-limited by backoff.
+
+Both events carry `was_during_turn`, `turn_id`, `turn_age_ms`, `reason` / `heal_reason`. Use these to distinguish "worker died mid-turn" from "idle child recycled".
 
 ## Restart fails
 
-If `codex-team session restart <name>` returns an error:
-
-1. `codex-team session dump <name>` — read `transport_alive`,
-   `stderr_tail`. Common culprits:
-   - auth token expired → run `codex login` in a separate shell, then
-     retry.
-   - `codex` binary missing / broken install → re-install (`npm i -g @openai/codex`).
-   - thread state on Codex's side is corrupted (rare) → go to
-     `session forget` path.
-2. `codex-team session kill <name>` — harder reset, SIGKILLs the
-   subprocess and marks the session `errored`.
-3. `codex-team session resume <name>` — re-attach a fresh subprocess
-   to the saved `thread_id`.
-4. If (3) still fails with `SessionNotFound` or a thread error:
-   `codex-team session forget <name>` deletes the registry entry
-   (Codex thread itself is untouched on disk) and then
-   `codex-team session create <name> --cwd ...` starts over. Your
-   first send on the new session should be: *"Read
-   docs/refactor/<name>/progress.md to recover context, then continue
-   the most recent Next up item."*
-
-## SDK not installed in daemon venv
-
 ```
-codex-team session create L-foo --cwd ...
-→ E_INTERNAL: codex-app-server-sdk is not importable in the daemon's Python environment.
+1. codex-team session dump <name>
+     → read transport_alive, stderr_tail, registry fields
+2. codex-team session read <name>
+     → if this succeeds, thread exists; issue is process-side
+3. codex-team session kill <name>
+     → hard-reset the child
+4. codex-team session resume <name>
+     → re-attach fresh child to stored thread
+5. codex-team session forget <name> && codex-team session create <name> ...
+     → only if the thread itself is unusable
 ```
 
-The daemon started fine (it does not need the SDK to boot) but
-`SessionFactory.create()` cannot spawn a codex client because
-`import codex_app_server` fails. The bootstrap script declares the SDK
-as a plugin dep, but the PyPI publication of `codex-app-server-sdk` is
-experimental; if your environment cannot resolve it, bootstrap falls
-through without installing it.
+Ephemeral: steps 2-4 are only valid while the live app-server is still running. After daemon shutdown, the thread is gone by design.
 
-Quick triage:
+## Turn stuck
+
+`turn-stuck` = heartbeat saw a running turn older than `heartbeat.turn_stuck_seconds`.
 
 ```bash
-# Confirm the plugin's venv path.
-PLUGIN_DATA="${CLAUDE_PLUGIN_DATA:-${HOME}/.local/share/cc-codex-team-plugin}"
-VENV="${PLUGIN_DATA}/venv"
-
-# Is the SDK actually missing?
-${VENV}/bin/python -c "import codex_app_server" && echo "installed" || echo "MISSING"
+codex-team interrupt <name>
+codex-team session dump <name>
+codex-team tail <name> --stderr
 ```
 
-If missing, pick one path (decision tree is in the
-`configure-codex-team` skill's "Environment & dependencies" section):
-
-**Option A — PyPI (when available):**
-```bash
-${VENV}/bin/pip install codex-app-server-sdk
-```
-
-**Option B — Local source (recommended for dev):** point the bootstrap
-script at a checkout of the Codex SDK, then rerun bootstrap.
-```bash
-export CODEX_TEAM_SDK_PATH=/abs/path/to/codex/sdk/python
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap-python-env.sh"
-```
-Or place the SDK as a sibling under `forks/` (or wherever your plugin
-lives relative to `forks/codex/`) and it will be discovered
-automatically on next bootstrap.
-
-**Option C — Vendor it:** copy the SDK into the plugin directory so
-any install is fully sealed.
-```bash
-mkdir -p ${CLAUDE_PLUGIN_ROOT}/vendor/codex-sdk
-cp -r /abs/path/to/codex/sdk/python ${CLAUDE_PLUGIN_ROOT}/vendor/codex-sdk/
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap-python-env.sh"
-```
-
-After any of these, verify:
-```bash
-${VENV}/bin/python -c "import codex_app_server; print(codex_app_server.__version__)"
-```
-
-Then restart the daemon (`codex-team daemon stop && codex-team daemon start`)
-so the new SDK is picked up in the in-process import.
-
-## codex binary missing
-
-```
-codex-team session create L-foo --cwd ...
-→ E_NO_CODEX_BIN
-```
-
-The daemon failed to locate the upstream `codex` CLI. Resolution order
-is (1) `config.toml [daemon] codex_bin`, (2)
-`CODEX_TEAM_DAEMON_CODEX_BIN` env, (3) `which codex` on `PATH`,
-(4) the pinned `codex_cli_bin` Python package. All four are empty.
-
-Fix outside the plugin (it does not ship `codex`):
+If the worker keeps streaming after interrupt, or the child is wedged:
 
 ```bash
-npm install -g @openai/codex   # standard install path
-codex login                    # authenticate; resolves 403s too
-codex --version                # confirm PATH resolution
+codex-team session kill <name>
+codex-team session resume <name>
 ```
 
-Then retry the session command. If `codex` resolves in a plain shell
-but not from within the plugin, add an explicit path to
-`config.toml`:
+## Daemon down
+
+Facts first:
+
+```bash
+codex-team daemon doctor
+```
+
+Inspect `socket_exists`, `pid`, `summary`, `log_path`.
+
+Normal recovery:
+
+```bash
+codex-team daemon stop
+codex-team daemon start
+codex-team health report
+```
+
+If startup blocked by stale state:
+
+```bash
+DATA_DIR="${CODEX_TEAM_DAEMON_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/codex-team}"
+SOCKET_PATH="${CODEX_TEAM_DAEMON_SOCKET_PATH:-${XDG_RUNTIME_DIR:-/tmp}/codex-team/daemon.sock}"
+
+rm -f "${DATA_DIR}/daemon.pid"
+rm -f "${SOCKET_PATH}"
+codex-team daemon start
+```
+
+Then **re-arm any Monitor streams you were using**. Persistent Monitor children don't reconnect after the daemon socket disappears.
+
+## Codex binary missing
+
+On `E_NO_CODEX_BIN`:
+
+```bash
+npm install -g @openai/codex
+codex login
+codex --version
+```
+
+If a plain shell finds it but the daemon still fails, pin the path:
 
 ```toml
 [daemon]
 codex_bin = "/absolute/path/to/codex"
 ```
 
-Bounce the daemon (`codex-team daemon stop && codex-team daemon start`)
-to pick up the config.
+Then `codex-team daemon reload-config`. If the daemon is already unhealthy, do a full restart instead.
 
-## Bootstrap timed out
+## Unbuilt checkout
 
-First-time plugin activation runs `scripts/bootstrap-python-env.sh` to
-create a venv and `pip install -e` the plugin. That can take
-30-60 seconds. The `SessionStart` hook has a 300s timeout, but on very
-slow installs (network-constrained PyPI mirror, ancient Python, etc.)
-it can still run out, leaving the daemon un-started.
-
-Symptoms:
-
-- `/plugin list` shows the plugin but `codex-team daemon status`
-  returns `ConnectionRefusedError`.
-- Monitors `codex-team-events` / `codex-team-watchdog` are absent
-  from the task panel or exited immediately.
-- `${CLAUDE_PLUGIN_DATA}/venv/.codex-team-<version>` stamp file does
-  **not** exist, indicating the install never completed.
-
-Recovery:
+`bin/codex-team` printing `dist/main.js missing` = unbuilt dev checkout:
 
 ```bash
-# Run the bootstrap manually from a shell. This is idempotent and
-# uses flock so repeated invocations coexist safely.
-bash "$(claude plugin path codex-team 2>/dev/null || echo \"${CLAUDE_PLUGIN_ROOT}\")"/scripts/bootstrap-python-env.sh
-
-# Then start the daemon.
-codex-team daemon start
-
-# Reload plugins so Claude Code re-spawns the monitors.
-# (run inside Claude Code, not a plain shell)
-# /reload-plugins
-```
-
-If bootstrap keeps failing, run with full output to diagnose:
-
-```bash
-CODEX_TEAM_BOOTSTRAP=0 bash "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap-python-env.sh"
-```
-
-## Daemon down
-
-```
-codex-team daemon status
-→ ConnectionRefusedError
-```
-
-Normal procedure:
-
-```bash
-codex-team daemon stop     # best-effort cleanup of pid file and socket
-codex-team daemon start    # fresh daemon; auto-resumes every non-closed session
-```
-
-If `daemon stop` itself fails (e.g., the process is already gone but a
-stale pid file blocks startup), escalate:
-
-```bash
-# 1. Force-kill any lingering daemon process.
-pkill -TERM -f codex_team.daemon
-sleep 1
-pkill -KILL -f codex_team.daemon 2>/dev/null || true
-
-# 2. Clean up stale socket and pid file.
-rm -f "${XDG_RUNTIME_DIR:-/tmp}/codex-team/daemon.sock"
-rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/codex-team/daemon.pid"
-
-# 3. Start fresh.
+cd /path/to/cc-codex-team-node
+npm install
+npm run typecheck
+npm run build
 codex-team daemon start
 ```
-
-After `daemon start`, verify:
-
-```bash
-codex-team health report
-```
-
-and confirm every session you expected is back in `idle`. The plugin
-monitors should reconnect to the fresh daemon on their own (the
-scripts ensure `daemon start` before execing `monitor events`). If
-events stay silent, run `/reload-plugins` and see `watch-codex-team`.
-
-## The escalation ladder
-
-When recovering a single session, escalate in this order and never
-skip rungs unless the prior one is clearly unavailable:
-
-```
-1. interrupt           (current turn cancelled, thread preserved)
-2. restart             (subprocess refreshed via thread_resume)
-3. kill                (SIGKILL subprocess, thread preserved)
-4. resume              (new subprocess re-attaches thread)
-5. forget + create     (thread orphaned; new session created)
-6. session recreate with --thread-id <old>  [v2 feature — not available yet]
-```
-
-Rung 5 loses the session name binding but the Codex-side thread still
-exists on disk. If you really need to continue the same conversation
-after `forget`, the new session's first send should tell Codex to
-load context from `progress.md` — that is what the progress file
-exists for.
 
 ## Queue state during recovery
 
-When you `restart` a session mid-run, queued sends are preserved in
-memory — they will dispatch once the session returns to `idle`. But
-`kill` or `forget` destroys the queue. Before the destructive steps:
+Queued sends matter. Inspect before destroying.
 
-```
-codex-team queue show <name>
-```
+- `session restart` preserves the in-memory queue only if the current process survives long enough to hand control back.
+- `session kill` / `session close` / `queue clear` / `queue drop-oldest` reject queued waiters with an error (no silent hangs).
+- Useful commands:
+  ```bash
+  codex-team queue show <name>
+  codex-team queue retry-last <name>
+  codex-team queue clear <name>
+  ```
 
-If important prompts are in the queue, jot them down or re-send them
-after the session is back.
+## Ephemeral sessions
 
-## When to give up and recreate the worktree
+`--ephemeral` is intentionally sharp:
 
-Very rare. Only if:
+- Fast scratch pads.
+- Not durable across daemon shutdown.
+- Skipped by `auto_resume_on_daemon_start`.
+- `session resume` after child exit is expected to fail.
 
-- The Codex thread is persistently refusing to start turns, AND
-- The worktree itself is in an unrecoverable state (e.g., merge
-  conflict the session cannot resolve), AND
-- `forget` + `create` has already been tried and failed the same way.
-
-Then:
-
-```bash
-git worktree remove --force <worktree-path>
-git worktree add <worktree-path> -B <branch-name> main
-codex-team session create <name> --cwd <worktree-path> --profile ...
-```
-
-And let Codex re-do the work from `progress.md`.
+Need durability? Don't use `--ephemeral`.
 
 ## Red flags
 
 | Thought | Correction |
 |---|---|
-| "`session restart` didn't work, I'll forget and recreate." | Run `session dump` first. The stderr almost always tells you why. |
-| "Daemon seems stuck — let me just restart everything." | Run `daemon status` first; often only one session is misbehaving. Recover per-session before bouncing the daemon. |
-| "I'll just kill all sessions and start over." | Your progress is in `progress.md` per session; you can usually recover one at a time. |
-| "session-down — I'll restart immediately." | Wait 10 seconds for `auto-heal` first. You'll often save yourself the step. |
-| "The daemon log says X crashed — I should ignore it, it recovered." | Daemon `auto-heal` is single-shot with backoff. Next crash is on you. Open a bug / patch. |
+| "Worker reply doesn't match my prompt — let me restart." | First occurrence: re-send same prompt (long-context skip). Only escalate after two consecutive mismatches. |
+| "Daemon is down; I'll keep retrying `send`." | Diagnose first: `daemon doctor`. |
+| "Ephemeral resume failed; one more retry might work." | No. Thread died with the app-server. Recreate. |
+| "Queue disappeared after `kill` — must be a bug." | Destructive recovery drops queued work by design. Inspect before killing. |
+| "Persistent Monitors will reconnect after `daemon restart`." | They won't. Re-arm. |
+| "`auto-heal` fired, so the problem is gone." | Check `was_during_turn`. If yes, the lost turn may need a re-send. |
+| "`forget` is faster than the ladder." | `forget` is rung 5. If you reach for it first, you've lost data you could have saved. |
+| "Turn has been running 4 minutes — must be stuck." | Not until `turn-stuck` fires or `currentTurnAgeMs > turn_stuck_seconds`. |
 
 ## Cross-references
 
-- Before triaging: `inspect-codex-team` for the initial readout
-- After recovery: `manage-codex-team` to resume sends
-- Monitors silent too? `watch-codex-team` for plugin-monitor diagnosis
-- For daemon-level persistent issues, escalate to the user with
-  `PushNotification` — see `watch-codex-team`.
+- Routine session writes: `manage-codex-team`
+- Known long-context quirk (re-send, not recovery): `philosophy.md` §5, `manage-codex-team` §Known quirks
+- Read-only inspection (first step of triage): `inspect-codex-team`
+- Config / runtime prereqs: `configure-codex-team`
+- Sweep-everything shortcut: `/codex-team:heal`

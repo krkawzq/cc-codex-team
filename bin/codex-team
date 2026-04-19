@@ -6,18 +6,13 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 if [[ -n "${CLAUDE_PLUGIN_DATA:-}" ]]; then
   export CODEX_TEAM_DAEMON_DATA_DIR="${CODEX_TEAM_DAEMON_DATA_DIR:-${CLAUDE_PLUGIN_DATA}/data}"
   export CODEX_TEAM_DAEMON_SOCKET_PATH="${CODEX_TEAM_DAEMON_SOCKET_PATH:-${CLAUDE_PLUGIN_DATA}/runtime/daemon.sock}"
-  export CODEX_TEAM_PLUGIN_VENV="${CODEX_TEAM_PLUGIN_VENV:-${CLAUDE_PLUGIN_DATA}/venv}"
 fi
 
-if [[ "${CODEX_TEAM_BOOTSTRAP:-1}" != "0" ]]; then
-  "${PLUGIN_ROOT}/scripts/bootstrap-python-env.sh" >/dev/null
+ENTRY="${PLUGIN_ROOT}/dist/main.js"
+if [[ ! -f "${ENTRY}" ]]; then
+  echo "codex-team-node is not built yet: ${ENTRY} missing" >&2
+  echo "run: cd ${PLUGIN_ROOT} && npm install && npm run build" >&2
+  exit 1
 fi
 
-if [[ -n "${CODEX_TEAM_PLUGIN_VENV:-}" && -x "${CODEX_TEAM_PLUGIN_VENV}/bin/python" ]]; then
-  PY="${CODEX_TEAM_PLUGIN_VENV}/bin/python"
-else
-  PY="${PYTHON:-python3}"
-fi
-
-export PYTHONPATH="${PLUGIN_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
-exec "${PY}" -m codex_team "$@"
+exec node "${ENTRY}" "$@"

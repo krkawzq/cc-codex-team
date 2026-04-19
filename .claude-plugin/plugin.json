@@ -8,6 +8,6 @@
   },
   "homepage": "https://github.com/krkawzq/cc-codex-team",
   "repository": "https://github.com/krkawzq/cc-codex-team",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "keywords": ["codex", "agents", "monitor", "orchestration"]
 }
