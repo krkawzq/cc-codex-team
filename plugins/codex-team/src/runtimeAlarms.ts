@@ -4,7 +4,7 @@ import path from "node:path";
 import { WatchdogAlarmConfig } from "./config";
 import { InvalidRequest } from "./errors";
 import { isObject } from "./protocol";
-import { alarmsDir, workspaceAlarmsDir } from "./paths";
+import { alarmsDir, workspaceAlarmsDir } from "./platform";
 
 export interface RuntimeAlarmRecord {
   workspace: string;

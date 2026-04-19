@@ -1,9 +1,9 @@
-import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import readline from "node:readline";
 
 import { AsyncQueue } from "../asyncQueue";
 import { Config, resolveCodexBin } from "../config";
 import { TransportError } from "../errors";
+import { ManagedChild, spawnManaged } from "../platform";
 import { isObject } from "../protocol";
 
 export interface RpcNotification {
@@ -64,7 +64,7 @@ function responseErrorMessage(error: unknown): string {
 }
 
 export class AppServerClient implements AppServerClientLike {
-  private proc: ChildProcessWithoutNullStreams | null = null;
+  private proc: ManagedChild | null = null;
   private readonly notifications = new AsyncQueue<RpcNotification>(1000);
   private readonly pending = new Map<string, PendingRequest>();
   private readonly stderrLines: string[] = [];
@@ -100,10 +100,13 @@ export class AppServerClient implements AppServerClientLike {
     if (this.cfg.daemon.codexHome) {
       env.CODEX_HOME = this.cfg.daemon.codexHome;
     }
-    this.proc = spawn(resolveCodexBin(this.cfg), args, {
+    this.proc = spawnManaged({
+      command: resolveCodexBin(this.cfg),
+      args,
       stdio: ["pipe", "pipe", "pipe"],
       cwd: undefined,
       env,
+      detached: true,
     });
     this.proc.stderr.setEncoding("utf8");
     this.proc.stderr.on("data", (chunk: string) => {
@@ -245,7 +248,7 @@ export class AppServerClient implements AppServerClientLike {
       clientInfo: {
         name: "codex-team",
         title: "Codex Team",
-        version: "0.2.0",
+        version: "0.3.0",
       },
       capabilities: {
         experimentalApi: true,
@@ -342,7 +345,10 @@ export class AppServerClient implements AppServerClientLike {
   }
 
   kill(): void {
-    this.proc?.kill("SIGKILL");
+    const proc = this.proc;
+    if (proc?.pid != null) {
+      void proc.killTree(0);
+    }
   }
 
   async close(): Promise<void> {
@@ -363,15 +369,12 @@ export class AppServerClient implements AppServerClientLike {
     if (proc.stdin.writable) {
       proc.stdin.end();
     }
-    if (proc.exitCode == null && !proc.killed) {
-      proc.kill("SIGTERM");
-    }
     const timeout = new Promise<void>((resolve) => {
-      setTimeout(resolve, 1500);
+      setTimeout(resolve, 500);
     });
     await Promise.race([exitPromise, timeout]);
     if (proc.exitCode == null && !proc.killed) {
-      proc.kill("SIGKILL");
+      await proc.killTree(1500);
       await exitPromise.catch(() => undefined);
     }
   }

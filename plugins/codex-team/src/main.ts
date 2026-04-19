@@ -1,9 +1,13 @@
 import { CliClient } from "./cli";
 import { runDaemon } from "./daemon";
+import { runHook } from "./hooks";
 
 async function main(argv: string[]): Promise<number> {
   if (argv[0] === "__daemon") {
     return await runDaemon();
+  }
+  if (argv[0] === "hook") {
+    return await runHook(argv.slice(1));
   }
   return await new CliClient().run(argv);
 }

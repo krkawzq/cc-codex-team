@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/main.js\" hook session-start",
             "timeout": 300
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/session-end.sh",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/main.js\" hook session-end",
             "timeout": 30
           }
         ]

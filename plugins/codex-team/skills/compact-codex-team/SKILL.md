@@ -1,6 +1,7 @@
 ---
 name: compact-codex-team
-description: Authoritative source for the 2-step compaction ritual (have the worker write the work doc first, then compact) and the work-doc template. Trigger when the events stream emits `[compact-suggest]`, or when you proactively decide to compact before a long verbose turn. Not for: routine sends (`manage-codex-team`), triage after a failed compaction (`recover-codex-team`).
+description: >-
+  Authoritative source for the 2-step compaction ritual (have the worker write the work doc first, then compact) and the work-doc template. Trigger when the events stream emits `[compact-suggest]`, or when you proactively decide to compact before a long verbose turn. Not for: routine sends (`manage-codex-team`), triage after a failed compaction (`recover-codex-team`).
 ---
 
 # Compact codex-team

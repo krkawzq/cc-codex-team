@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { Config, loadConfig, resolveDataDir, resolveSocketPath } from "./config";
+import { loadConfig, resolveDataDir, resolveSocketPath } from "./config";
 import { DaemonAlreadyRunning } from "./errors";
+import { installShutdownSignalHandlers, isPidAlive, resolveConfigDir, resolveLogPath, resolvePidPath } from "./platform";
 import { DaemonServer } from "./server";
-import { xdgConfigDir } from "./paths";
 
 function appendLogLine(logPath: string, message: string): void {
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
@@ -12,12 +12,7 @@ function appendLogLine(logPath: string, message: string): void {
 }
 
 function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
+  return isPidAlive(pid);
 }
 
 export function acquirePidLock(pidPath: string): void {
@@ -42,14 +37,14 @@ export function releasePidLock(pidPath: string): void {
 }
 
 export async function runDaemon(configPath?: string): Promise<number> {
-  const cfg = loadConfig(configPath || path.join(xdgConfigDir(), "config.toml"));
+  const cfg = loadConfig(configPath || path.join(resolveConfigDir(), "config.toml"));
   const dataDir = resolveDataDir(cfg);
   const socketPath = resolveSocketPath(cfg);
   cfg.daemon.dataDir = dataDir;
   cfg.daemon.socketPath = socketPath;
   fs.mkdirSync(dataDir, { recursive: true });
-  const pidPath = path.join(dataDir, "daemon.pid");
-  const logPath = path.join(dataDir, "daemon.log");
+  const pidPath = resolvePidPath(cfg.daemon.dataDir);
+  const logPath = resolveLogPath(dataDir);
   acquirePidLock(pidPath);
   appendLogLine(logPath, "daemon starting");
   let stopResolve!: () => void;
@@ -57,9 +52,7 @@ export async function runDaemon(configPath?: string): Promise<number> {
     stopResolve = resolve;
   });
   const server = new DaemonServer(cfg, socketPath, () => stopResolve());
-  const signalHandler = () => stopResolve();
-  process.once("SIGINT", signalHandler);
-  process.once("SIGTERM", signalHandler);
+  const disposeSignals = installShutdownSignalHandlers(() => stopResolve());
   try {
     await server.start();
     if (cfg.defaults.autoResumeOnDaemonStart) {
@@ -94,8 +87,7 @@ export async function runDaemon(configPath?: string): Promise<number> {
     await server.stop();
     appendLogLine(logPath, "daemon stopped");
   } finally {
-    process.removeListener("SIGINT", signalHandler);
-    process.removeListener("SIGTERM", signalHandler);
+    disposeSignals();
     releasePidLock(pidPath);
   }
   return 0;

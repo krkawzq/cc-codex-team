@@ -1,6 +1,7 @@
 ---
 name: watch-codex-team
-description: Authoritative source for arming codex-team event streams. Two streams with different roles — `events` is mandatory whenever you dispatch work and is armed via `/codex-team:bootstrap`; `watchdog` is opt-in, only for long-horizon tasks, and configurable into multiple named per-workspace alarms with custom templates. Trigger before your first `codex-team send`, when deciding whether a task is long enough to warrant watchdog, or when >25 minutes pass with no expected event. Not for: interpreting a specific event (that's the downstream skill).
+description: >-
+  Authoritative source for arming codex-team event streams. Two streams with different roles — `events` is mandatory whenever you dispatch work and is armed via `/codex-team:bootstrap`; `watchdog` is opt-in, only for long-horizon tasks, and configurable into multiple named per-workspace alarms with custom templates. Trigger before your first `codex-team send`, when deciding whether a task is long enough to warrant watchdog, or when >25 minutes pass with no expected event. Not for: interpreting a specific event (that's the downstream skill).
 ---
 
 # Watch codex-team
@@ -25,13 +26,13 @@ This is the stream that makes the async loop work. Each line is one distilled pe
 ```
 Monitor({
   description: "codex-team events: turn completions, errors, compact suggestions",
-  command: "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-events.sh",
+  command: "node \"${CLAUDE_PLUGIN_ROOT}/dist/main.js\" monitor events",
   persistent: true,
   timeout_ms: 3600000
 })
 ```
 
-The script inherits `CODEX_TEAM_WORKSPACE` from the Claude Code session's hook-exported env, so its internal `codex-team monitor events` call is automatically scoped to your workspace.
+The Monitor command inherits `CODEX_TEAM_WORKSPACE` from the Claude Code session's hook-exported env; if that env is absent, the Node entry falls back to `.codex-team/client.env`, so the subscription stays scoped to your workspace.
 
 Arm **once per Claude Code session.** Re-invoking creates duplicates. `/codex-team:bootstrap` does this arming step for you (idempotent check via task panel).
 
@@ -139,7 +140,7 @@ codex-team watch alarm create task_brief \
 # Arm the shared watchdog stream (once per CC session)
 Monitor({
   description: "codex-team watchdog: periodic reminder + self-check",
-  command: "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-watchdog.sh",
+  command: "node \"${CLAUDE_PLUGIN_ROOT}/dist/main.js\" monitor watchdog",
   persistent: true,
   timeout_ms: 3600000
 })

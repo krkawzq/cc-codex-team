@@ -3,10 +3,19 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { InvalidRequest } from "./errors";
+import { InvalidName, InvalidRequest } from "./errors";
 
 export const DEFAULT_WORKSPACE = "default";
 const WORKSPACE_RE = /^[a-zA-Z0-9_.-]{1,64}$/;
+const SESSION_NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,63}$/;
+const WINDOWS_RESERVED_NAMES = new Set([
+  "CON",
+  "PRN",
+  "AUX",
+  "NUL",
+  ...Array.from({ length: 9 }, (_value, index) => `COM${index + 1}`),
+  ...Array.from({ length: 9 }, (_value, index) => `LPT${index + 1}`),
+]);
 
 export function validateWorkspace(value: string): string {
   const workspace = value.trim();
@@ -20,6 +29,24 @@ export function validateWorkspace(value: string): string {
 
 export function safeWorkspace(value: string | null | undefined): string {
   return validateWorkspace(value || DEFAULT_WORKSPACE);
+}
+
+export function validateSessionName(value: string): string {
+  const name = String(value);
+  const upper = name.toUpperCase();
+  if (
+    name !== name.trim() ||
+    !SESSION_NAME_RE.test(name) ||
+    WINDOWS_RESERVED_NAMES.has(upper) ||
+    name.endsWith(".") ||
+    name.endsWith(" ") ||
+    /[\\/:*?"<>|\u0000]/.test(name)
+  ) {
+    throw new InvalidName(
+      `invalid session name ${JSON.stringify(value)}; use 1-64 chars matching ${SESSION_NAME_RE.source}, not a Windows reserved name`,
+    );
+  }
+  return name;
 }
 
 export function deriveProjectWorkspace(projectDir: string): string {

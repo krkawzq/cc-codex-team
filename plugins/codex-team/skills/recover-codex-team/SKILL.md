@@ -1,6 +1,7 @@
 ---
 name: recover-codex-team
-description: Authoritative source for the codex-team escalation ladder (`interrupt → restart → kill → forget`), failure triage, and cross-workspace error handling. Trigger on `session-down`, `turn-err`, `turn-stuck`, `status=errored`, `E_WRONG_WORKSPACE`, daemon unreachable, or `E_NO_CODEX_BIN`. Also trigger when a Codex reply twice in a row doesn't match the sent prompt (first occurrence is the known long-context quirk — not this skill). Not for: routine session writes (`manage-codex-team`), inspection without action (`inspect-codex-team`).
+description: >-
+  Authoritative source for the codex-team escalation ladder (`interrupt → restart → kill → forget`), failure triage, and cross-workspace error handling. Trigger on `session-down`, `turn-err`, `turn-stuck`, `status=errored`, `E_WRONG_WORKSPACE`, daemon unreachable, or `E_NO_CODEX_BIN`. Also trigger when a Codex reply twice in a row doesn't match the sent prompt (first occurrence is the known long-context quirk — not this skill). Not for: routine session writes (`manage-codex-team`), inspection without action (`inspect-codex-team`).
 ---
 
 # Recover codex-team
@@ -43,6 +44,7 @@ interrupt  →  restart (only while still live)  →  kill  →  create a fresh 
 | `turn-stuck` (age exceeds threshold) | `codex-team interrupt <name>` | `codex-team session kill <name>` |
 | `turn-err` / `status=errored` | `codex-team session dump <name>` then `session restart <name>` | `session kill <name>` |
 | `E_WRONG_WORKSPACE` | See §Wrong workspace | — |
+| `E_INVALID_NAME` (create / attach) | Pick a name matching `[a-zA-Z0-9_.-]` ≤ 64 chars, alphanumeric/`_` first, avoiding Windows reserved names and trailing dots/spaces. See `manage-codex-team` §Create | — |
 | Daemon unreachable | `codex-team daemon doctor` | See "Daemon down" |
 | Stale pid / stale socket suspected | `codex-team daemon doctor` | Remove stale files, then `daemon start` |
 | `E_NO_CODEX_BIN` | Install / repair Codex CLI | Pin `[daemon].codex_bin` in config |
@@ -128,7 +130,14 @@ Facts first:
 codex-team daemon doctor
 ```
 
-Inspect `socket_exists`, `pid`, `summary`, `log_path`. Normal recovery:
+Inspect `ipc_kind`, `ipc_ready`, `ipc_endpoint`, `socket_exists`, `pid`, `summary`, `log_path`. Quick reading guide:
+
+- `ipc_ready: true` — daemon is listening and accepting connections. If this is `true` and your CLI still fails, suspect workspace mismatch or a routing bug.
+- `ipc_ready: false` with `ipc_kind: "uds"` + `socket_exists: true` — stale socket file from a crashed daemon; remove and `daemon start` (see stale-state block below).
+- `ipc_ready: false` with `ipc_kind: "pipe"` (Windows) — no named pipe exists; daemon isn't running. Just `daemon start`.
+- `ipc_ready: false` with `socket_exists: false` — daemon isn't running; `daemon start`.
+
+Normal recovery:
 
 ```bash
 codex-team daemon stop
@@ -136,7 +145,7 @@ codex-team daemon start
 codex-team health report
 ```
 
-If startup is blocked by stale state:
+If startup is blocked by stale state (Unix only — Windows named pipes live in the OS namespace, not the filesystem, so there is nothing to `rm`):
 
 ```bash
 DATA_DIR="${CODEX_TEAM_DAEMON_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/codex-team}"
@@ -146,6 +155,8 @@ rm -f "${DATA_DIR}/daemon.pid"
 rm -f "${SOCKET_PATH}"
 codex-team daemon start
 ```
+
+On Windows, if the pid file points at a dead process and `daemon start` still fails, delete `%LOCALAPPDATA%\codex-team\daemon.pid` manually and retry.
 
 Then **re-arm any Monitor streams you were using**. Persistent Monitor children don't reconnect after the daemon socket disappears.
 
@@ -208,7 +219,7 @@ Need durability? Don't use `--ephemeral`.
 
 ## Stale client records
 
-The daemon keeps `<data_dir>/clients/<client-id>.json` per live Claude Code session. A client-sweep loop runs every 60 s and reaps records whose `pid` is dead or whose `startedAt` is older than 7 days. You normally don't need to touch this.
+The daemon keeps `<data_dir>/clients/<client-id>.json` per live Claude Code session. A client-sweep loop runs every 60 s and reaps records whose non-null `pid` is dead or whose `startedAt` is older than 7 days. `pid: null` is intentional when the hook cannot safely identify a long-lived Claude Code parent process. You normally don't need to touch this.
 
 If you suspect a stale client is holding a subscription or alarm:
 

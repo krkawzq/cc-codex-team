@@ -20,6 +20,11 @@ export class InvalidRequest extends CodexTeamError {
   exitCode = 2;
 }
 
+export class InvalidName extends CodexTeamError {
+  code = "E_INVALID_NAME";
+  exitCode = 2;
+}
+
 export class ProtocolError extends CodexTeamError {
   code = "E_PROTOCOL";
   exitCode = 2;
@@ -89,6 +94,7 @@ export interface WireError {
 const errorClasses: Record<string, new (message?: string, detail?: Record<string, unknown>) => CodexTeamError> = {
   E_CONFIG: ConfigError,
   E_INVALID: InvalidRequest,
+  E_INVALID_NAME: InvalidName,
   E_PROTOCOL: ProtocolError,
   E_DAEMON_DOWN: DaemonNotRunning,
   E_DAEMON_UP: DaemonAlreadyRunning,

@@ -8,7 +8,7 @@ Bring every errored session in the **current workspace** back, report per-sessio
 
 ## Procedure
 
-1. `codex-team health report` via Bash (workspace-scoped by default). Identify sessions with `status == "errored"` OR `transport_alive == false` (excluding `closed`).
+1. Run `codex-team health report` (workspace-scoped by default). Identify sessions with `status == "errored"` OR `transport_alive == false` (excluding `closed`).
 
 2. If the list is empty → "No errored sessions in workspace <ws>." and stop. Mention the workspace so the user knows this is scoped.
 

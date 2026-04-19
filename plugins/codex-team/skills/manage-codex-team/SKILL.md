@@ -1,11 +1,12 @@
 ---
 name: manage-codex-team
-description: Authoritative source for codex-team session lifecycle (create / send / interrupt / close), the send-prompt style (short + pointing at a brief), the instruction-file pattern, the per-session work-doc discipline, and the known long-context prompt-apply quirk. Trigger when starting a session, dispatching work, responding to a `turn-done` / `turn-attn` event, or retiring a session. Not for: arming monitors (`watch-codex-team`), failure triage (`recover-codex-team`), compaction (`compact-codex-team`).
+description: >-
+  Authoritative source for codex-team session lifecycle (create / send / interrupt / close), the send-prompt style (short + pointing at a brief), the instruction-file pattern, the per-session work-doc discipline, and the known long-context prompt-apply quirk. Trigger when starting a session, dispatching work, responding to a `turn-done` / `turn-attn` event, or retiring a session. Not for: arming monitors (`watch-codex-team`), failure triage (`recover-codex-team`), compaction (`compact-codex-team`).
 ---
 
 # Manage codex-team sessions
 
-The main workflow skill. Everything you do *to* a session happens through `codex-team` CLI in Bash.
+The main workflow skill. Everything you do *to* a session happens through the `codex-team` CLI.
 
 Prerequisites:
 
@@ -49,6 +50,7 @@ codex-team session create <name> \
 Facts:
 
 - Session names are **unique within a workspace**, not globally. Two workspaces can both have a session called `reviewer`.
+- **Name format** (enforced; invalid → `E_INVALID_NAME`): 1–64 chars, first char alphanumeric or `_`, rest `[a-zA-Z0-9_.-]`. No Windows reserved names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`). No trailing `.` or space. No `/\:*?"<>|`. Good: `reviewer`, `port-module.a`, `L1_bench`. Bad: `CON`, `reviewer/2`, `../escape`, `trailing.`.
 - Pick names that describe the worker's scope (role, module, dimension of the chunking you chose).
 - Each session spawns its own `codex app-server` subprocess. Four sessions = four subprocesses. Intentional.
 - `session create` blocks until the thread is readable. No protective sleep needed before the first `send`.
@@ -90,6 +92,43 @@ Answering a question returned by `turn-attn`: the answer goes in the next send v
 ```
 codex-team send W "relax the tolerance to 1e-5; re-enable fastmath and re-run the two failing tests"
 ```
+
+### Delivery methods (avoid shell-quoting hell)
+
+How you *transport* the prompt to `codex-team send` is independent of *what* the prompt says. Pick the method by the content's shape, not its purpose.
+
+| Prompt shape | Method | Example |
+|---|---|---|
+| Short, single line, no shell metacharacters | **Inline** — direct quoted string | `codex-team send W "continue: read <work-doc>, ..."` |
+| Multi-line, or contains any of `"` `` ` `` `$` `!` `\` newline | **Temp prompt file** via `--prompt-file` | `codex-team send W --prompt-file /tmp/codex-send-<ts>.md` |
+| Reusable spec, multi-worker, revision-worth | **Repo brief file** referenced by a short inline send | See §Instruction-file pattern |
+
+**Rule of thumb: if you're about to escape a quote or backtick, stop and use a file.** The terminal is a minefield of `"`, `` ` ``, `$VAR`, `!`, backslash-escape rules, and heredoc indentation bugs. One mis-escape and you either (a) send garbage to Codex, (b) execute arbitrary shell, or (c) silently truncate. A one-off file has none of these problems.
+
+**Inline — when it's safe:**
+
+```bash
+codex-team send W "continue: read <work-doc>, tackle the top Next up item, update Progress/Findings/Next up when done; reply 'done' with a one-line summary"
+```
+
+Safe because: no inner `"`, no `` ` ``, no `$`, no `!`, no newline. The single quotes around `done` are fine inside double-quoted Bash.
+
+**Temp file — when the content is long or hostile:**
+
+```bash
+# 1. Write the prompt to a temp file (use Write tool; don't heredoc in Bash)
+#    Path should be absolute and uniquely named.
+# 2. Send, pointing at the file.
+codex-team send W --prompt-file /tmp/codex-send-<iso-ts>.md
+```
+
+Conventions:
+
+- Use `/tmp/` on Unix, `%TEMP%` on Windows. Unique filename to avoid collisions with parallel sends.
+- These are throwaway. **Do not reuse** the same temp path for two different sends — delete or pick a new name.
+- Anything the user should be able to review *before* dispatch, or that multiple workers will consume, belongs in the **repo** (§Instruction-file pattern), not `/tmp`.
+
+**Why not heredoc?** You *can* do `codex-team send W --stdin <<'EOF' ... EOF` and the quoted `'EOF'` delimiter suppresses expansion. But: (a) multi-line Bash inside your tool call is harder to review and log; (b) any agent running this loses the ability to see the exact content it sent; (c) file delivery is uniform with the repo-brief pattern. Prefer `--prompt-file` for anything longer than one line.
 
 ### Instruction-file pattern (for anything longer than a paragraph)
 
@@ -142,20 +181,6 @@ Shape (adapt section names to the session's nature):
 If the doc doesn't exist yet, your opening send should instruct the worker to create it at the agreed path.
 
 See `philosophy.md` §7 and `compact-codex-team` for details.
-
-### Prompt sources: `--stdin` and `--prompt-file`
-
-For a multi-line send that doesn't warrant a brief file in the repo (one-off, throwaway):
-
-```bash
-codex-team send W --stdin <<'EOF'
-…
-EOF
-
-codex-team send W --prompt-file /tmp/one-off.md
-```
-
-Use sparingly. Anything reusable belongs in the repo, not `/tmp`.
 
 ### `--wait` (almost never)
 
@@ -253,6 +278,9 @@ See `philosophy.md` §5 for why this happens.
 |---|---|
 | "I'll use `--wait` to keep things simple." | Default async. Keep the Monitor loop. |
 | "Let me stuff the full task description into the send." | Point at a brief file instead. → §Instruction-file pattern |
+| "Let me escape these quotes and backticks in the inline send." | Stop. Switch to `--prompt-file`. Escaping is the wrong fix. → §Delivery methods |
+| "I'll heredoc the multi-line prompt inline in Bash." | Prefer `--prompt-file` — easier to review, easier to log, uniform with the repo-brief pattern. |
+| "This one-off prompt is 20 lines but I'll paste it anyway." | 20 lines goes in `/tmp/codex-send-*.md` via `--prompt-file`, not in the Bash command. |
 | "I'll figure out the approach myself, then tell Codex what to type." | Over-specified. Name the target + constraint + reference; let the worker execute. → `philosophy.md` §3 |
 | "I'll just write this small fix inline — faster than sending." | You're the orchestrator. Delegate. → `philosophy.md` §1 |
 | "Session is slow — switch to `--effort minimal`." | Do not override effort casually. Per-turn only, with cause. |
@@ -262,6 +290,7 @@ See `philosophy.md` §5 for why this happens.
 | "Worker is disagreeing — let me override and force the plan." | Read the pushback seriously. They often see the code better. → `philosophy.md` §4 |
 | "This session name collides with one I saw before — use a number suffix." | Session names are per-workspace unique, not globally. Same name in a different workspace is fine. |
 | "`E_WRONG_WORKSPACE` — the daemon is broken." | A session with that name exists in another workspace. Check `/codex-team:workspaces`; either switch workspace or pick a different name. |
+| "`E_INVALID_NAME` — the daemon is picky about something." | The name fails the format rules (see §Create). Drop `/`, `\`, trailing `.`, Windows reserved names; use `[a-zA-Z0-9_.-]` ≤ 64 chars with an alphanumeric or `_` first char. |
 
 ## Cross-references
 

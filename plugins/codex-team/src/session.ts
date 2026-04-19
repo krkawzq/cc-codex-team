@@ -13,11 +13,11 @@ import { EventBus } from "./eventBus";
 import { InvalidRequest, SessionBusy, SessionExists, SessionNotFound } from "./errors";
 import { ensureDirFor } from "./fileIO";
 import { RegistryEntry, SessionStatus, TurnSummary } from "./models";
-import { sessionDir } from "./paths";
+import { sessionDir } from "./platform";
 import { OverflowPolicy, PendingSend, SendQueue } from "./queue";
 import { RegistryStore } from "./registry";
 import { AppServerClient, AppServerClientLike, RpcNotification } from "./codex/appServerClient";
-import { DEFAULT_WORKSPACE, workspaceDisplayName } from "./workspace";
+import { DEFAULT_WORKSPACE, validateSessionName, workspaceDisplayName } from "./workspace";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -703,6 +703,7 @@ export class SessionFactory {
     options: SessionCreateOptions = {},
     context: { workspace?: string; clientId?: string | null } = {},
   ): Promise<Session> {
+    name = validateSessionName(name);
     const workspace = context.workspace || DEFAULT_WORKSPACE;
     const clientId = context.clientId || null;
     this.ensureNameAvailable(workspace, name);
@@ -743,6 +744,7 @@ export class SessionFactory {
     options: SessionCreateOptions = {},
     context: { workspace?: string; clientId?: string | null } = {},
   ): Promise<Session> {
+    name = validateSessionName(name);
     const workspace = context.workspace || DEFAULT_WORKSPACE;
     const clientId = context.clientId || null;
     const targetThreadId = threadId.trim();

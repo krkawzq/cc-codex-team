@@ -14,7 +14,9 @@ import { FakeAppServerClient } from "./helpers/fakeAppServer";
 function tempConfig(tempDir: string) {
   const cfg = loadConfig(path.join(tempDir, "missing.toml"));
   cfg.daemon.dataDir = tempDir;
-  cfg.daemon.socketPath = path.join(tempDir, "daemon.sock");
+  cfg.daemon.socketPath = process.platform === "win32"
+    ? `\\\\.\\pipe\\codex-team-test-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    : path.join(tempDir, "daemon.sock");
   cfg.monitor.watchdogIntervalSeconds = 3600;
   cfg.heartbeat.intervalSeconds = 3600;
   return cfg;
@@ -56,7 +58,10 @@ test("DaemonServer supports create, read, and doctor over socket", async () => {
 
     const doctor = await sendRequest(cfg.daemon.socketPath, "daemon.doctor", {});
     assert.equal(doctor.ok, true);
-    const summary = (doctor.data as Record<string, unknown>).summary as Record<string, unknown>;
+    const doctorData = doctor.data as Record<string, unknown>;
+    assert.equal(doctorData.ipc_kind, process.platform === "win32" ? "pipe" : "uds");
+    assert.equal(doctorData.ipc_ready, true);
+    const summary = doctorData.summary as Record<string, unknown>;
     assert.equal(summary.total, 1);
   } finally {
     await server.stop();
@@ -636,6 +641,62 @@ test("DaemonServer history.get supports sinceTurnId", async () => {
     assert.match(content, /tr_2/);
     assert.match(content, /tr_3/);
     assert.doesNotMatch(content, /tr_1/);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("DaemonServer rejects unsafe orphan history names before path lookup", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
+  const cfg = tempConfig(tempDir);
+  const fake = new FakeAppServerClient();
+  const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => fake);
+  await server.start();
+  try {
+    const history = await sendRequest(cfg.daemon.socketPath, "history.get", {
+      name: "../escape",
+    });
+    assert.equal(history.ok, false);
+    assert.equal((history.error as Record<string, unknown>).code, "E_INVALID_NAME");
+
+    const stderr = await sendRequest(cfg.daemon.socketPath, "history.tail_stderr", {
+      name: "CON",
+    });
+    assert.equal(stderr.ok, false);
+    assert.equal((stderr.error as Record<string, unknown>).code, "E_INVALID_NAME");
+
+    server.registry.create({
+      workspace: "default",
+      name: "../legacy",
+      createdByClientId: null,
+      threadId: "thr_unsafe",
+      cwd: tempDir,
+      model: "gpt-5.4",
+      modelProvider: null,
+      sandbox: "danger-full-access",
+      approvalPolicy: "never",
+      serviceTier: null,
+      reasoningEffort: null,
+      personality: null,
+      profile: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastTurnId: null,
+      lastTurnEndedAt: null,
+      lastPromptText: null,
+      status: "closed",
+      appServerPid: null,
+      ephemeral: false,
+      queueLength: 0,
+      tokenUsageInput: 0,
+      contextTokensEstimate: 0,
+      modelContextWindow: null,
+      errorMessage: null,
+    });
+    const dump = await sendRequest(cfg.daemon.socketPath, "session.dump", {
+      name: "../legacy",
+    });
+    assert.equal(dump.ok, false);
+    assert.equal((dump.error as Record<string, unknown>).code, "E_INVALID_NAME");
   } finally {
     await server.stop();
   }

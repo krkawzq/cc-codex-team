@@ -28,7 +28,7 @@ Show the state of every workspace on the shared daemon. Read-only: this command 
    - **Your current workspace** (the one your CLI calls land in by default).
    - **Total workspaces on the daemon** and whether any of them belong to another Claude Code window.
    - **Sessions per workspace** (count + list of names).
-   - **Clients per workspace** (count; flag any with a dead pid for the user — the daemon will sweep them automatically every 60s).
+   - **Clients per workspace** (count; if a `pid` is present and dead, note that the daemon will sweep it automatically every 60s).
    - **Alarms per workspace** (name + interval + whether `emit_idle`).
 
    Example shape:
@@ -54,7 +54,7 @@ Show the state of every workspace on the shared daemon. Read-only: this command 
    - "You are alone on this daemon." — one non-`default` workspace, one client.
    - "Another Claude Code is using workspace `<ws>`." — multiple workspaces with active clients.
    - "The `default` workspace has N sessions." — these are sessions using the fallback workspace rather than a project-derived workspace.
-   - "Client `<id>` in workspace `<ws>` shows `pid_alive=false`." — the sweep loop hasn't reaped yet; no action needed.
+   - "Client `<id>` in workspace `<ws>` shows `pid_alive=false`." — the sweep loop hasn't reaped yet; no action needed. A `null` pid means the hook could not safely identify a long-lived parent process.
 
 ## When to run this
 

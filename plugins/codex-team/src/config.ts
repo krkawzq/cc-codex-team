@@ -3,7 +3,12 @@ import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 
 import { CodexCliMissing, ConfigError } from "./errors";
-import { defaultSocketPath, xdgConfigDir, xdgDataDir } from "./paths";
+import {
+  ipcAddressForConfig,
+  resolveConfigDir,
+  resolveDataDir as platformResolveDataDir,
+  whichExecutable,
+} from "./platform";
 import { isObject } from "./protocol";
 
 export interface DaemonConfig {
@@ -191,7 +196,7 @@ const DEFAULT_CONFIG: Config = {
 };
 
 export function defaultConfigPath(): string {
-  return path.join(xdgConfigDir(), "config.toml");
+  return path.join(resolveConfigDir(), "config.toml");
 }
 
 export function loadConfig(configPath: string = defaultConfigPath()): Config {
@@ -626,11 +631,11 @@ function coerceEnvValue(value: string, kind: FieldKind): unknown {
 }
 
 export function resolveDataDir(cfg: Config): string {
-  return cfg.daemon.dataDir || xdgDataDir();
+  return platformResolveDataDir(cfg.daemon.dataDir);
 }
 
 export function resolveSocketPath(cfg: Config): string {
-  return cfg.daemon.socketPath || defaultSocketPath();
+  return ipcAddressForConfig(cfg).address;
 }
 
 export function resolveCodexBin(cfg: Config): string {
@@ -648,22 +653,11 @@ export function resolveCodexBin(cfg: Config): string {
     }
     return fromEnv;
   }
-  const pathValue = which("codex");
+  const pathValue = whichExecutable("codex");
   if (pathValue) {
     return pathValue;
   }
   throw new CodexCliMissing("unable to resolve codex binary");
-}
-
-function which(name: string): string | null {
-  const pathEntries = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
-  for (const entry of pathEntries) {
-    const candidate = path.join(entry, name);
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
 }
 
 export function normalizeSandboxMode(value: string | null | undefined): string | null {

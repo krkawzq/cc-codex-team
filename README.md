@@ -58,10 +58,10 @@ This plugin bridges them:
 ```text
      Claude Code  (the orchestrator — you talk to it)
             │
-            │   codex-team CLI (Bash)         Monitor events ▲
+            │   codex-team CLI                Monitor events ▲
             │                                                 │
             ▼                                                 │
-     codex-team daemon  (Unix socket, multi-tenant)
+     codex-team daemon  (local IPC, multi-tenant)
       │   │   │   │
       N × codex app-server subprocesses  (workers, run in parallel)
 ```
@@ -92,7 +92,7 @@ codex --version
 codex login
 ```
 
-After install, Claude can drive the plugin through the `codex-team` CLI (via Bash) and the bundled slash commands.
+After install, Claude can drive the plugin through the `codex-team` CLI and the bundled slash commands.
 
 ---
 
@@ -138,6 +138,7 @@ The CLI is self-documenting via `codex-team --help` and each slash command's fro
 - Claude Code with plugin support
 - Node.js 18+
 - Codex CLI installed and authenticated
+- Windows 10+, macOS 12+, or Linux
 
 ---
 

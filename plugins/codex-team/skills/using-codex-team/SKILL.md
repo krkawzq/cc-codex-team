@@ -1,6 +1,7 @@
 ---
 name: using-codex-team
-description: Entry and globally-loaded router for the codex-team plugin — a multi-worker, multi-workspace Codex orchestration layer. Trigger whenever the user (a) mentions `codex-team`, a codex-team session, or Codex workers; (b) asks for high concurrency, parallel refactor, bulk review, mass debug, batch porting, or many mechanically-independent subtasks; (c) is about to spawn multiple long-lived code agents; (d) shows you a `[turn-done]` / `[turn-attn]` / `[compact-suggest]` / `[session-down]` / `[watchdog-tick]` event in-chat. Also trigger to decide whether to *propose* the plugin when the user describes work that would benefit from parallelism but hasn't named a tool. Not for: one-shot codex invocations (use the `codex:codex-rescue` subagent).
+description: >-
+  Entry and globally-loaded router for the codex-team plugin — a multi-worker, multi-workspace Codex orchestration layer. Trigger whenever the user (a) mentions `codex-team`, a codex-team session, or Codex workers; (b) asks for high concurrency, parallel refactor, bulk review, mass debug, batch porting, or many mechanically-independent subtasks; (c) is about to spawn multiple long-lived code agents; (d) shows you a `[turn-done]` / `[turn-attn]` / `[compact-suggest]` / `[session-down]` / `[watchdog-tick]` event in-chat. Also trigger to decide whether to *propose* the plugin when the user describes work that would benefit from parallelism but hasn't named a tool. Not for: one-shot codex invocations (use the `codex:codex-rescue` subagent).
 ---
 
 # Using codex-team
@@ -45,10 +46,10 @@ Keep it one sentence. Let the user opt in.
 ```
       Claude (orchestrator)
            │
-    Bash + codex-team CLI   ▲ Monitor notifications
+    codex-team CLI          ▲ Monitor notifications
            │                │
            ▼                │
-      codex-team daemon (Unix socket, multi-tenant)
+      codex-team daemon (local IPC, multi-tenant)
         │   │   │   │
        N × codex app-server subprocesses  (one per named session)
 ```
@@ -69,7 +70,7 @@ One daemon, many workspaces. Every session, subscription, and watchdog alarm bel
 4. Derived from `CLAUDE_PROJECT_DIR` as `proj-<sha1(abs-path)[:8]>`
 5. Literal `default`
 
-The plugin's `SessionStart` hook runs `session-start.sh`, which computes the workspace, registers this Claude Code instance as a *client* of the daemon, and exports the resolved workspace into `$CLAUDE_ENV_FILE` so subsequent Bash invocations in this session see the same value.
+The plugin's `SessionStart` hook runs `codex-team hook session-start`, which computes the workspace, registers this Claude Code instance as a *client* of the daemon, and exports the resolved workspace into `$CLAUDE_ENV_FILE` plus `.codex-team/client.env` so later CLI invocations in this session see the same value.
 
 **You almost never need to set the workspace yourself.** The default derivation is good: all Claude Code sessions in the same project share a workspace automatically; different projects are isolated automatically. Use `CODEX_TEAM_WORKSPACE=<name>` (or write `.codex-team/workspace.env`) only when you want a named workspace unrelated to the project directory, or you want two windows in the same project to be isolated.
 

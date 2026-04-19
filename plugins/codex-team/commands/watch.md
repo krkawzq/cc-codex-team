@@ -39,13 +39,13 @@ $ARGUMENTS
    ```
    Monitor({
      description: "codex-team watchdog: periodic reminder + self-check",
-     command: "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-watchdog.sh",
+     command: "node \"${CLAUDE_PLUGIN_ROOT}/dist/main.js\" monitor watchdog",
      persistent: true,
      timeout_ms: 3600000
    })
    ```
 
-   The script inherits `CODEX_TEAM_WORKSPACE` from the shell; subscription is workspace-scoped.
+   The Monitor command inherits `CODEX_TEAM_WORKSPACE`; if that env is missing, the Node entry reads `.codex-team/client.env` and subscribes scoped to your workspace.
 
 6. **Report.** Short paragraph:
    - Alarm name + workspace.

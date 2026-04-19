@@ -13,9 +13,9 @@ $ARGUMENTS
 
 1. **Scope.** If `$ARGUMENTS` contains `--all-workspaces`, pass it through to every CLI call below. Otherwise the brief is scoped to the current workspace.
 
-2. `codex-team session list [--all-workspaces]` via Bash. Collect names, statuses, queue lengths, `last_turn_ended_at`, and (when `--all-workspaces`) each entry's `workspace`.
+2. Run `codex-team session list [--all-workspaces]`. Collect names, statuses, queue lengths, `last_turn_ended_at`, and (when `--all-workspaces`) each entry's `workspace`.
 
-3. `codex-team health report [--all-workspaces]` via Bash. Collect `transport_alive` and `last_error` per session.
+3. Run `codex-team health report [--all-workspaces]`. Collect `transport_alive` and `last_error` per session.
 
 4. `codex-team workspace show` to report the current workspace (so the user sees which tenant they're in).
 

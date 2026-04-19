@@ -19,9 +19,17 @@ import { WatchdogTimer } from "./watchdog";
 import { AsyncQueue } from "./asyncQueue";
 import { AppServerClient, AppServerClientLike } from "./codex/appServerClient";
 import { filterHistoryMarkdown, filterTurnsJsonl } from "./history";
-import { clientsDir, sessionDir } from "./paths";
+import {
+  clientsDir,
+  ipcAddressFromPath,
+  ipcArtifactExists,
+  ipcListen,
+  ipcReady,
+  removeStaleIpcArtifact,
+  sessionDir,
+} from "./platform";
 import { RuntimeAlarmStore, runtimeAlarmToWire } from "./runtimeAlarms";
-import { DEFAULT_WORKSPACE, makeClientId, workspaceSessionKey } from "./workspace";
+import { DEFAULT_WORKSPACE, makeClientId, validateSessionName, validateWorkspace, workspaceSessionKey } from "./workspace";
 
 type RequestContext = {
   id: string;
@@ -134,16 +142,10 @@ export class DaemonServer {
   }
 
   async start(): Promise<void> {
-    fs.mkdirSync(path.dirname(this.socketPath), { recursive: true });
-    if (fs.existsSync(this.socketPath)) {
-      fs.unlinkSync(this.socketPath);
-    }
-    this.server = net.createServer((socket) => {
+    const address = ipcAddressFromPath(this.socketPath);
+    await removeStaleIpcArtifact(address);
+    this.server = await ipcListen(address, (socket) => {
       void this.handleSocket(socket);
-    });
-    await new Promise<void>((resolve, reject) => {
-      this.server?.once("error", reject);
-      this.server?.listen(this.socketPath, () => resolve());
     });
     this.restartBackgroundLoops();
     for (const workspace of this.activeWorkspaces()) {
@@ -171,9 +173,7 @@ export class DaemonServer {
       await session.shutdown();
     }
     this.sessions.clear();
-    if (fs.existsSync(this.socketPath)) {
-      fs.unlinkSync(this.socketPath);
-    }
+    await removeStaleIpcArtifact(ipcAddressFromPath(this.socketPath));
   }
 
   private stopBackgroundLoops(): void {
@@ -333,16 +333,15 @@ export class DaemonServer {
       if (session) {
         return session.dumpState();
       }
-      const base = sessionDir(this.cfg.daemon.dataDir, entry.workspace, name);
-      const stderrPath = path.join(base, "app-server.stderr.log");
+      const stderrPath = sessionFilePath(this.cfg.daemon.dataDir, entry.workspace, name, "app-server.stderr.log");
       const stderrTail = readLastLines(stderrPath, 20);
       return {
         session: entry,
         queue: [],
         transport_alive: false,
         stderr_tail: stderrTail,
-        history_path: path.join(base, "history.md"),
-        turns_path: path.join(base, "turns.jsonl"),
+        history_path: historyFilePath(this.cfg.daemon.dataDir, entry.workspace, name, "md"),
+        turns_path: historyFilePath(this.cfg.daemon.dataDir, entry.workspace, name, "jsonl"),
       };
     });
 
@@ -686,27 +685,33 @@ export class DaemonServer {
       watchdog_last_seq: this.eventBus.lastSeq("watchdog"),
     }));
 
-    this.handlers.set("daemon.doctor", async () => ({
-      pid: process.pid,
-      socket_path: this.socketPath,
-      socket_exists: fs.existsSync(this.socketPath),
-      data_dir: this.cfg.daemon.dataDir,
-      registry_path: path.join(this.cfg.daemon.dataDir, "registry.json"),
-      log_path: path.join(this.cfg.daemon.dataDir, "daemon.log"),
-      uptime_seconds: Math.floor(process.uptime()),
-      summary: summarizeEntries(this.registry.list(null, true)),
-      workspaces: summarizeWorkspaces(this.registry, this.clients.list(), this.runtimeAlarms, this.cfg),
-      clients_path: clientsDir(this.cfg.daemon.dataDir),
-      clients: this.clients.list(),
-      sessions: this.registry.list(null, true).map((entry) => ({
-        workspace: entry.workspace,
-        name: entry.name,
-        status: entry.status,
-        thread_id: entry.threadId,
-        ephemeral: Boolean(entry.ephemeral),
-        transport_alive: this.getLiveSession(entry.workspace, entry.name)?.isTransportAlive() || false,
-      })),
-    }));
+    this.handlers.set("daemon.doctor", async () => {
+      const ipc = ipcAddressFromPath(this.socketPath);
+      return {
+        pid: process.pid,
+        socket_path: this.socketPath,
+        socket_exists: ipcArtifactExists(ipc),
+        ipc_kind: ipc.kind,
+        ipc_endpoint: ipc.display,
+        ipc_ready: await ipcReady(ipc),
+        data_dir: this.cfg.daemon.dataDir,
+        registry_path: path.join(this.cfg.daemon.dataDir, "registry.json"),
+        log_path: path.join(this.cfg.daemon.dataDir, "daemon.log"),
+        uptime_seconds: Math.floor(process.uptime()),
+        summary: summarizeEntries(this.registry.list(null, true)),
+        workspaces: summarizeWorkspaces(this.registry, this.clients.list(), this.runtimeAlarms, this.cfg),
+        clients_path: clientsDir(this.cfg.daemon.dataDir),
+        clients: this.clients.list(),
+        sessions: this.registry.list(null, true).map((entry) => ({
+          workspace: entry.workspace,
+          name: entry.name,
+          status: entry.status,
+          thread_id: entry.threadId,
+          ephemeral: Boolean(entry.ephemeral),
+          transport_alive: this.getLiveSession(entry.workspace, entry.name)?.isTransportAlive() || false,
+        })),
+      };
+    });
 
     this.handlers.set("daemon.stop", async (message) => {
       const active = this.registry
@@ -1247,7 +1252,7 @@ function historyFilePath(dataDir: string, workspace: string, name: string, forma
 }
 
 function sessionFilePath(dataDir: string, workspace: string, name: string, file: string): string {
-  return path.join(sessionDir(dataDir, workspace, name), file);
+  return path.join(sessionDir(dataDir, validateWorkspace(workspace), validateSessionName(name)), file);
 }
 
 function positiveNumber(value: unknown, fallback: number): number {

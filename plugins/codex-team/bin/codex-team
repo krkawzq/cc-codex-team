@@ -9,23 +9,7 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 # plugin's CLAUDE_PLUGIN_DATA and reusing the wrong daemon socket/registry.
 if [[ -n "${CLAUDE_PLUGIN_DATA:-}" && ( -n "${CLAUDE_PLUGIN_ROOT:-}" || "${CLAUDE_PLUGIN_DATA}" == *codex-team* ) ]]; then
   export CODEX_TEAM_DAEMON_DATA_DIR="${CODEX_TEAM_DAEMON_DATA_DIR:-${CLAUDE_PLUGIN_DATA}/data}"
-  export CODEX_TEAM_DAEMON_SOCKET_PATH="${CODEX_TEAM_DAEMON_SOCKET_PATH:-${CLAUDE_PLUGIN_DATA}/runtime/daemon.sock}"
 fi
-
-if [[ -z "${CODEX_TEAM_WORKSPACE:-}" ]]; then
-  if [[ -n "${CLAUDE_PROJECT_DIR:-}" && -f "${CLAUDE_PROJECT_DIR}/.codex-team/workspace.env" ]]; then
-    CODEX_TEAM_WORKSPACE="$(
-      sed -nE 's/^[[:space:]]*CODEX_TEAM_WORKSPACE[[:space:]]*=[[:space:]]*["'\"']?([^"'\"'[:space:]#]+).*$/\1/p' "${CLAUDE_PROJECT_DIR}/.codex-team/workspace.env" | head -n 1
-    )"
-    export CODEX_TEAM_WORKSPACE
-  fi
-fi
-
-if [[ -z "${CODEX_TEAM_WORKSPACE:-}" && -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
-  export CODEX_TEAM_WORKSPACE="proj-$(node -e 'const crypto=require("crypto"); console.log(crypto.createHash("sha1").update(require("path").resolve(process.argv[1])).digest("hex").slice(0,8))' "${CLAUDE_PROJECT_DIR}")"
-fi
-
-export CODEX_TEAM_WORKSPACE="${CODEX_TEAM_WORKSPACE:-default}"
 
 ENTRY="${PLUGIN_ROOT}/dist/main.js"
 if [[ ! -f "${ENTRY}" ]]; then

@@ -1,6 +1,7 @@
 ---
 name: configure-codex-team
-description: Authoritative source for the codex-team `config.toml` schema, the profile system, the per-workspace watchdog alarm schema, runtime alarm storage, environment-variable overrides, and runtime prerequisites. Trigger when setting up a new profile, defining a persistent watchdog alarm, tuning a daemon / monitor / queue knob, debugging unexpected session defaults, or verifying Node / Codex CLI prerequisites. Not for: session lifecycle (`manage-codex-team`), failure triage (`recover-codex-team`), arming monitors (`watch-codex-team`).
+description: >-
+  Authoritative source for the codex-team `config.toml` schema, the profile system, the per-workspace watchdog alarm schema, runtime alarm storage, environment-variable overrides, and runtime prerequisites. Trigger when setting up a new profile, defining a persistent watchdog alarm, tuning a daemon / monitor / queue knob, debugging unexpected session defaults, or verifying Node / Codex CLI prerequisites. Not for: session lifecycle (`manage-codex-team`), failure triage (`recover-codex-team`), arming monitors (`watch-codex-team`).
 ---
 
 # Configure codex-team
@@ -34,9 +35,10 @@ Common failures:
 
 ## Config file location
 
-```
-$XDG_CONFIG_HOME/codex-team/config.toml      # usually ~/.config/codex-team/config.toml
-```
+| Platform | Config file |
+|---|---|
+| Linux / macOS | `$XDG_CONFIG_HOME/codex-team/config.toml` or `~/.config/codex-team/config.toml` |
+| Windows | `%APPDATA%\codex-team\config.toml` |
 
 Missing file → built-in defaults. Write only keys you want to override.
 
@@ -66,12 +68,13 @@ export CODEX_TEAM_WORKSPACE=<name>          # highest-priority resolver
 
 ## Data-dir resolution
 
-| Mode | `data_dir` | `socket_path` |
+| Mode | `data_dir` | IPC endpoint |
 |---|---|---|
-| Plugin in Claude Code | `${CLAUDE_PLUGIN_DATA}/data` | `${CLAUDE_PLUGIN_DATA}/runtime/daemon.sock` |
-| Standalone shell | `$XDG_DATA_HOME/codex-team` | `$XDG_RUNTIME_DIR/codex-team/daemon.sock` |
+| Plugin in Claude Code, Linux / macOS | `${CLAUDE_PLUGIN_DATA}/data` | `${CLAUDE_PLUGIN_DATA}/runtime/daemon.sock` |
+| Standalone shell, Linux / macOS | `$XDG_DATA_HOME/codex-team` | `$XDG_RUNTIME_DIR/codex-team/daemon.sock` |
+| Windows | `%LOCALAPPDATA%\codex-team` | `\\.\pipe\codex-team-<data-dir-hash>` |
 
-The daemon is one process per `data_dir`; workspaces are virtual tenants *inside* that daemon. Setting `[daemon].data_dir` or `[daemon].socket_path` explicitly in `config.toml` overrides both modes.
+The daemon is one process per `data_dir`; workspaces are virtual tenants *inside* that daemon. Setting `[daemon].data_dir` or `[daemon].socket_path` explicitly in `config.toml` overrides both modes. On Windows, an explicit `socket_path` must be a named pipe path.
 
 ### Under the data dir
 

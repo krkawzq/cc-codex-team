@@ -9,11 +9,11 @@ Bring up the codex-team environment for this Claude Code session, in the **curre
 Raw user request:
 $ARGUMENTS
 
-The plugin's `SessionStart` hook runs `scripts/session-start.sh`, which starts the daemon, resolves the workspace, and registers this Claude Code as a client. Monitor arming and session creation are your responsibility. This command is the canonical "I am ready to dispatch work now" step for normal (not long-horizon) work. Stop at the first failure and report — do not clean up partial state.
+The plugin's `SessionStart` hook runs `codex-team hook session-start`, which starts the daemon, resolves the workspace, and registers this Claude Code as a client. Monitor arming and session creation are your responsibility. This command is the canonical "I am ready to dispatch work now" step for normal (not long-horizon) work. Stop at the first failure and report — do not clean up partial state.
 
 ## Procedure
 
-1. **Daemon.** `codex-team daemon status` via Bash.
+1. **Daemon.** Run `codex-team daemon status`.
    - Healthy → do nothing.
    - Not running / connection refused → `codex-team daemon start`.
 
@@ -24,13 +24,13 @@ The plugin's `SessionStart` hook runs `scripts/session-start.sh`, which starts t
    ```
    Monitor({
      description: "codex-team events: turn completions, errors, compact suggestions",
-     command: "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-events.sh",
+     command: "node \"${CLAUDE_PLUGIN_ROOT}/dist/main.js\" monitor events",
      persistent: true,
      timeout_ms: 3600000
    })
    ```
 
-   The script inherits `CODEX_TEAM_WORKSPACE` automatically and subscribes scoped to your workspace.
+   The Monitor command inherits `CODEX_TEAM_WORKSPACE`; if that env is missing, the Node entry reads `.codex-team/client.env` and subscribes scoped to your workspace.
 
    **Do not arm the watchdog here.** If the user's work is long-horizon, run `/codex-team:watch` separately.
 

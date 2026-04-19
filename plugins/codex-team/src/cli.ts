@@ -1,11 +1,20 @@
 import fs from "node:fs";
-import net from "node:net";
 import path from "node:path";
 import readline from "node:readline";
-import { spawn } from "node:child_process";
 
 import { loadConfig, resolveDataDir, resolveSocketPath } from "./config";
 import { DaemonNotRunning, wireToError } from "./errors";
+import {
+  ipcAddressFromPath,
+  ipcArtifactExists,
+  ipcConnect,
+  ipcReady,
+  isPidAlive,
+  readFallbackClientEnv,
+  removeStaleIpcArtifact,
+  resolvePidPath,
+  spawnManaged,
+} from "./platform";
 import { resolveWorkspace, validateWorkspace } from "./workspace";
 
 export type ParsedArgs =
@@ -41,16 +50,11 @@ interface GlobalArgs {
 }
 
 function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
+  return isPidAlive(pid);
 }
 
 function diagnoseStalePid(dataDir: string): { stale: boolean; pid: number | null; pidPath: string } {
-  const pidPath = path.join(dataDir, "daemon.pid");
+  const pidPath = resolvePidPath(dataDir);
   if (!fs.existsSync(pidPath)) {
     return { stale: false, pid: null, pidPath };
   }
@@ -63,9 +67,13 @@ function diagnoseStalePid(dataDir: string): { stale: boolean; pid: number | null
 }
 
 function defaultRequestMeta(): RequestMeta {
+  const projectDir = process.env.CLAUDE_PROJECT_DIR || process.env.CODEX_TEAM_PROJECT_DIR || null;
+  const fallback = readFallbackClientEnv(projectDir);
   return {
-    workspace: resolveWorkspace(),
-    clientId: process.env.CODEX_TEAM_CLIENT_ID || null,
+    workspace: validateWorkspace(
+      process.env.CODEX_TEAM_WORKSPACE || fallback.CODEX_TEAM_WORKSPACE || resolveWorkspace({ projectDir }),
+    ),
+    clientId: process.env.CODEX_TEAM_CLIENT_ID || fallback.CODEX_TEAM_CLIENT_ID || null,
     allWorkspaces: false,
   };
 }
@@ -98,34 +106,26 @@ function extractGlobalArgs(argv: string[]): GlobalArgs {
 }
 
 function resolveRequestMeta(globals: GlobalArgs): RequestMeta {
+  const projectDir = process.env.CLAUDE_PROJECT_DIR || process.env.CODEX_TEAM_PROJECT_DIR || null;
+  const fallback = readFallbackClientEnv(projectDir);
   return {
-    workspace: validateWorkspace(resolveWorkspace({ explicit: globals.workspaceFlag })),
-    clientId: process.env.CODEX_TEAM_CLIENT_ID || null,
+    workspace: validateWorkspace(
+      globals.workspaceFlag ||
+        process.env.CODEX_TEAM_WORKSPACE ||
+        fallback.CODEX_TEAM_WORKSPACE ||
+        resolveWorkspace({ projectDir }),
+    ),
+    clientId: process.env.CODEX_TEAM_CLIENT_ID || fallback.CODEX_TEAM_CLIENT_ID || null,
     allWorkspaces: globals.allWorkspaces,
   };
 }
 
 async function socketReady(socketPath: string): Promise<boolean> {
-  if (!fs.existsSync(socketPath)) {
+  const address = ipcAddressFromPath(socketPath);
+  if (address.kind === "uds" && !ipcArtifactExists(address)) {
     return false;
   }
-  return await new Promise<boolean>((resolve) => {
-    const socket = net.createConnection(socketPath);
-    const timeout = setTimeout(() => {
-      socket.destroy();
-      resolve(false);
-    }, 100);
-    socket.once("connect", () => {
-      clearTimeout(timeout);
-      socket.destroy();
-      resolve(true);
-    });
-    socket.once("error", () => {
-      clearTimeout(timeout);
-      socket.destroy();
-      resolve(false);
-    });
-  });
+  return await ipcReady(address);
 }
 
 export async function sendRequest(
@@ -135,7 +135,7 @@ export async function sendRequest(
   meta: RequestMeta = defaultRequestMeta(),
 ): Promise<Record<string, unknown>> {
   return await new Promise<Record<string, unknown>>((resolve, reject) => {
-    const socket = net.createConnection(socketPath);
+    const socket = ipcConnect(ipcAddressFromPath(socketPath));
     socket.setEncoding("utf8");
     const rl = readline.createInterface({ input: socket, crlfDelay: Infinity });
     socket.once("error", (error) => {
@@ -166,7 +166,7 @@ export async function sendRequest(
 
 async function streamSubscribe(socketPath: string, cmd: string, meta: RequestMeta): Promise<number> {
   return await new Promise<number>((resolve) => {
-    const socket = net.createConnection(socketPath);
+    const socket = ipcConnect(ipcAddressFromPath(socketPath));
     socket.setEncoding("utf8");
     socket.once("error", () => {
       process.stderr.write("daemon not running\n");
@@ -184,7 +184,7 @@ async function streamSubscribe(socketPath: string, cmd: string, meta: RequestMet
 
 async function streamHistorySubscribe(socketPath: string, params: Record<string, unknown>, meta: RequestMeta): Promise<number> {
   return await new Promise<number>((resolve) => {
-    const socket = net.createConnection(socketPath);
+    const socket = ipcConnect(ipcAddressFromPath(socketPath));
     socket.setEncoding("utf8");
     socket.once("error", () => {
       process.stderr.write("daemon not running\n");
@@ -461,19 +461,17 @@ function sleep(ms: number): Promise<void> {
 }
 
 export class CliClient {
-  private readonly socketPath: string;
+  readonly socketPath: string;
 
   constructor(socketPath?: string) {
     this.socketPath = socketPath || resolveSocketPath(loadConfig());
   }
 
-  private async ensureDaemon(): Promise<void> {
+  async ensureDaemon(): Promise<void> {
     if (await socketReady(this.socketPath)) {
       return;
     }
-    if (fs.existsSync(this.socketPath)) {
-      fs.unlinkSync(this.socketPath);
-    }
+    await removeStaleIpcArtifact(ipcAddressFromPath(this.socketPath));
     const cfg = loadConfig();
     const dataDir = resolveDataDir(cfg);
     cfg.daemon.dataDir = dataDir;
@@ -492,7 +490,14 @@ export class CliClient {
     const errPath = path.join(dataDir, "daemon-startup.err");
     const errFd = fs.openSync(errPath, "a");
     try {
-      const child = spawn(process.execPath, [process.argv[1] || "", "__daemon"], {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: [process.argv[1] || "", "__daemon"],
+        env: {
+          ...process.env,
+          CODEX_TEAM_DAEMON_DATA_DIR: dataDir,
+          CODEX_TEAM_DAEMON_SOCKET_PATH: this.socketPath,
+        },
         detached: true,
         stdio: ["ignore", "ignore", errFd],
       });
@@ -548,11 +553,13 @@ export class CliClient {
     const globals = extractGlobalArgs(argv);
     const meta = resolveRequestMeta(globals);
     const parsed = parseCli(globals.argv);
+    const noAutostart = process.env.CODEX_TEAM_NO_AUTOSTART === "1";
     if (parsed.group === "monitor") {
-      await this.ensureDaemon();
+      if (!noAutostart) {
+        await this.ensureDaemon();
+      }
       return await streamSubscribe(this.socketPath, `monitor.${parsed.action}.subscribe`, meta);
     }
-    const noAutostart = process.env.CODEX_TEAM_NO_AUTOSTART === "1";
     if (!noAutostart && !(parsed.group === "daemon" && (parsed.action === "start" || parsed.action === "restart"))) {
       await this.ensureDaemon();
     }

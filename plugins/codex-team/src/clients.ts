@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { InvalidRequest } from "./errors";
 import { isObject } from "./protocol";
-import { clientsDir } from "./paths";
+import { clientsDir, isPidAlive } from "./platform";
 
 export interface ClientRecord {
   clientId: string;
@@ -112,10 +112,5 @@ function normalizeClient(raw: Record<string, unknown>): ClientRecord {
 }
 
 function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
+  return isPidAlive(pid);
 }

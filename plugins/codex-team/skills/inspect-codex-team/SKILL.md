@@ -1,6 +1,7 @@
 ---
 name: inspect-codex-team
-description: Read-only reference for querying codex-team state — registry, per-session status, history, queue, stderr, aggregate health, workspaces, clients, and runtime alarms. Trigger when a Monitor event pointed you at a session needing deeper review, when diagnosing drift during a watchdog tick, when auditing a session's work before a merge, or when debugging "which other workspace is using this daemon." Not for: dispatching work (`manage-codex-team`), recovery actions (`recover-codex-team`), or arming monitors (`watch-codex-team`).
+description: >-
+  Read-only reference for querying codex-team state — registry, per-session status, history, queue, stderr, aggregate health, workspaces, clients, and runtime alarms. Trigger when a Monitor event pointed you at a session needing deeper review, when diagnosing drift during a watchdog tick, when auditing a session's work before a merge, or when debugging "which other workspace is using this daemon." Not for: dispatching work (`manage-codex-team`), recovery actions (`recover-codex-team`), or arming monitors (`watch-codex-team`).
 ---
 
 # Inspect codex-team
@@ -26,6 +27,7 @@ Read-only queries. Nothing here starts, cancels, or compacts anything. The `even
 | Tail of Codex's stderr for a session? | `codex-team tail <name> --stderr` |
 | Queue contents? | `codex-team queue show <name>` |
 | Daemon's own log? | `codex-team daemon logs [--follow]` |
+| Daemon + IPC + workspace diagnostic snapshot? | `codex-team daemon doctor` |
 | Workspace summary (all workspaces + session/client counts)? | `codex-team workspace list` |
 | Details for one workspace? | `codex-team workspace show [<name>]` |
 | Who is connected right now (live clients)? | `codex-team client list` |
@@ -43,6 +45,7 @@ Read-only queries. Nothing here starts, cancels, or compacts anything. The `even
 - `history --format jsonl --since-turn-id X` — incremental; don't re-read processed turns.
 - `tail <name> --stderr` — `session-down` fired; you need to know *why* (OOM, auth expiry, crash).
 - `daemon logs` — the *daemon* is misbehaving (sessions won't resume, UDS errors).
+- `daemon doctor` — one-shot "everything at a glance" of the daemon: `ipc_kind` (`uds` on Linux/macOS, `pipe` on Windows), `ipc_endpoint`, `ipc_ready`, `socket_exists` (UDS only), `pid`, workspace/session summary, client list. Start here when triage needs facts.
 - `workspace list` — you want to know if you're alone on this daemon or there's cross-window sharing.
 - `client list` — diagnose "is a zombie subscriber holding my monitor from draining," or count active Claude Code sessions.
 - `watch alarm list` — audit which watchdog alarms are scheduled in your workspace.

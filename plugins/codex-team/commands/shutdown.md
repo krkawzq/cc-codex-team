@@ -42,6 +42,7 @@ $ARGUMENTS
      codex-team daemon stop
      ```
      (The daemon may auto-stop when all clients detach and no non-closed sessions remain. Running `daemon stop` explicitly is defense-in-depth.)
+   - If `daemon stop` returns `E_INVALID_REQUEST` with "non-closed session(s) across workspaces" — a session somewhere failed to close in step 2 (maybe yours, maybe another workspace's). Inspect: `codex-team session list --all-workspaces`. If the straggler is in your workspace, retry `session close` on it and re-run step 4. If it's in another workspace, the user has to decide: leave the daemon running (default, safe) or pass `--global` to force.
 
 5. **Report.** Short summary:
    - Workspace name.

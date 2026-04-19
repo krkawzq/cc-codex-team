@@ -1,6 +1,6 @@
 {
   "name": "codex-team",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Claude-managed team of long-lived Codex app-server sessions",
   "license": "MIT",
