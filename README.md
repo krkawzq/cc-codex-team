@@ -1,36 +1,100 @@
 # cc-codex-team
 
-A Claude Code plugin for running a team of long-lived Codex workers.
-Each worker is a named `codex app-server` session with its own thread
-state, queue, health checks, monitor events, and local history.
+[简体中文](./README_zh.md)
 
-This is the Node/TypeScript rewrite. It does **not** depend on the
-official Python SDK. The daemon talks to `codex app-server` directly
-over JSON-RPC.
+> **Give Claude Code a Codex team.** A Claude Code plugin that lets Claude orchestrate a team of long-lived OpenAI Codex workers in parallel.
+
+## What this is
+
+Claude Code is great at conversation, context, planning, and code review. OpenAI Codex is great at long-running autonomous code execution. But each is single-track by default: one Claude session, one Codex thread.
+
+This plugin turns Claude Code into the **orchestrator** of a **team** of Codex worker sessions:
+
+- You describe work to Claude; Claude decomposes it into independent subtasks.
+- Claude spawns one Codex worker per subtask (each a real `codex app-server` subprocess).
+- Workers run in **parallel, asynchronously**. Claude stays free to schedule, audit, merge.
+- Claude is notified through an event stream when a worker finishes a turn, needs attention, errors, or crosses a token threshold.
+
+In short: **Claude decides. Codex executes. In parallel.**
+
+## When this is worth setting up
+
+- Refactor / port / review across many files, modules, or repositories (≥3 independent subtasks).
+- Bulk review or mass debug of the same class of problem.
+- Long-horizon coding work you want to leave running.
+- Any situation where a single Claude or a single Codex is the bottleneck and the work naturally parallelizes.
+
+Single-file one-shot fixes don't need this — the setup cost isn't worth it.
+
+## Architecture
+
+```
+      Claude Code  (the orchestrator — you talk to it)
+             │
+             │   codex-team CLI (Bash)            Monitor events ▲
+             │                                                    │
+             ▼                                                    │
+      codex-team daemon (Unix socket, multi-tenant)
+       │   │   │   │
+      N × codex app-server subprocesses  (workers, run in parallel)
+```
+
+- **Daemon** — one local Node process per `CLAUDE_PLUGIN_DATA`, partitioned into **workspaces** so different projects / Claude Code windows don't see each other.
+- **Workers** — each a real `codex app-server` subprocess with its own thread, history, queue, and work doc.
+- **Events** — Claude subscribes to a workspace-scoped event stream; each worker turn produces one structured notification.
+
+The orchestration discipline and collaboration norms are documented in `plugins/codex-team/skills/using-codex-team/philosophy.md`.
 
 ## Install
 
-Inside a Claude Code instance, run:
-
-**Step 1: Add the marketplace**
+Inside a Claude Code session:
 
 ```text
 /plugin marketplace add krkawzq/cc-codex-team
-```
-
-**Step 2: Install the plugin**
-
-```text
 /plugin install codex-team
-```
-
-**Step 3: Reload plugins**
-
-```text
 /reload-plugins
 ```
 
-After install, `codex-team` is available to Claude Code's Bash tool.
+Then verify dependencies:
+
+```bash
+node --version       # 18+
+codex --version
+codex login
+```
+
+After install, Claude can drive the plugin through the `codex-team` CLI (via the Bash tool) and the bundled slash commands.
+
+## Your first task, end to end
+
+In a Claude Code chat:
+
+```
+/codex-team:bootstrap reviewer:/abs/path/to/repo fixer:/abs/path/to/repo
+```
+
+This starts the daemon, arms the event stream, and creates two workers in the current workspace. Then tell Claude what you want:
+
+> "Have `reviewer` audit the auth module for risk. Have `fixer` pick the highest-risk issue and fix it. I'll review the PRs."
+
+Claude dispatches the work, sleeps, wakes when events arrive, and reports back.
+
+When the task is finished:
+
+```
+/codex-team:shutdown
+```
+
+## Learn more
+
+The plugin ships a full set of skills Claude loads on demand — you don't normally need to read them yourself. If you want to:
+
+- Browse the mental model → `plugins/codex-team/skills/using-codex-team/SKILL.md`
+- Read the collaboration philosophy → `plugins/codex-team/skills/using-codex-team/philosophy.md`
+- Run a guided walkthrough → `/codex-team:tutorial`
+- Configure profiles / watchdog alarms → `plugins/codex-team/skills/configure-codex-team/SKILL.md`
+
+The CLI itself is self-documenting via `codex-team --help` and each slash command's frontmatter.
 
 ## Requirements
 
@@ -38,81 +102,7 @@ After install, `codex-team` is available to Claude Code's Bash tool.
 - Node.js 18+
 - Codex CLI installed and authenticated
 
-```bash
-node --version
-codex --version
-codex login
-```
-
-## Quickstart
-
-Start the daemon:
-
-```bash
-codex-team daemon start
-```
-
-Create named workers:
-
-```bash
-codex-team session create reviewer --cwd /path/to/project --profile reviewer
-codex-team session create fixer --cwd /path/to/project --profile fixer
-```
-
-Sessions are scoped to the current workspace. By default the workspace is derived
-from `CLAUDE_PROJECT_DIR`; override with `CODEX_TEAM_WORKSPACE=<name>` or
-`--workspace <name>`. Use `--all-workspaces` only for admin inspection.
-
-Restore a saved Codex thread when the codex-team registry is missing:
-
-```bash
-codex-team session attach restored --thread-id <codex-thread-id> --cwd /path/to/project --profile reviewer
-```
-
-Send work:
-
-```bash
-codex-team send reviewer "Review the daemon lifecycle and list risks."
-codex-team send fixer "Fix the highest-risk issue and run relevant tests."
-```
-
-Watch results:
-
-```bash
-codex-team monitor events
-codex-team monitor watchdog
-```
-
-The `events` stream now emits a `turn-start` record that maps the
-CLI-returned `pending-*` id to the real Codex `turn_id`.
-Recovery events are also more explicit: idle child recycling shows up
-as `subprocess-recycled`, while turn-time transport failure recovery
-shows up as `auto-heal-after-crash`.
-
-## Common Commands
-
-```bash
-codex-team session list
-codex-team session status fixer
-codex-team session read fixer --include-turns
-codex-team session resume fixer
-codex-team session attach restored --thread-id <codex-thread-id> --cwd /path/to/project
-codex-team session dump fixer
-codex-team health report
-codex-team health issues
-codex-team daemon reload-config
-codex-team history fixer --format md
-codex-team history fixer --format jsonl --since-turn-id tr_123
-codex-team history fixer --format jsonl --since-turn-id tr_123 --follow
-codex-team tail fixer --stderr --lines 200
-codex-team queue show fixer
-codex-team daemon doctor
-codex-team daemon stop --force   # admin reset only; prefer /codex-team:shutdown
-```
-
-## Local Development
-
-Build the plugin before loading it:
+## Local development
 
 ```bash
 cd plugins/codex-team
@@ -122,78 +112,20 @@ npm run build
 npm test
 ```
 
-Run it as a local plugin:
+Install from this checkout:
 
 ```bash
-claude --plugin-dir /path/to/cc-codex-team/plugins/codex-team
-```
-
-Or install through the local marketplace manifest:
-
-```bash
-claude plugin marketplace add /path/to/cc-codex-team
+claude plugin marketplace add /abs/path/to/cc-codex-team
 claude plugin install codex-team@cc-codex-team
 ```
 
-If you edit TypeScript sources, rebuild before reloading the plugin:
+Or run Claude Code with the plugin directory directly:
 
 ```bash
-cd plugins/codex-team
-npm run build
-/reload-plugins
+claude --plugin-dir /abs/path/to/cc-codex-team/plugins/codex-team
 ```
 
-## Notes
-
-- The plugin auto-starts only the daemon on Claude Code `SessionStart`.
-- Monitor streams are explicit: arm both before dispatching async work.
-- Plugin monitors are not started automatically. Arm `events` via
-  `/codex-team:bootstrap`, and arm `watchdog` only via `/codex-team:watch`.
-- Persistent sessions can auto-resume after daemon restart.
-- `--ephemeral` sessions are intentionally not durable across daemon
-  shutdown.
-- `session create`, `session resume`, and `session restart` refresh
-  `config.toml` from disk before acting, so new profiles and defaults
-  do not require a daemon restart.
-- `daemon reload-config` reapplies watchdog / heartbeat intervals
-  immediately.
-- `history` supports incremental reads via `--since-turn-id` for both
-  `md` and `jsonl` output, and `--follow` for a simple tail-style
-  stream after the initial snapshot.
-- Text-content commands (`history`, `tail --stderr`, `daemon logs`)
-  print their text body directly on stdout. The daemon socket API still
-  returns `{ content }` for callers that need structured JSON.
-- compact operations retry automatically on transient failure; see
-  `[compaction].retry_attempts` and `retry_delay_ms` in `config.toml`.
-- `health report` includes an `issues` block so it can be used as a
-  triage surface rather than a second copy of `session list`.
-- When a task is finished, run `/codex-team:shutdown` or
-  close the workspace sessions and then run `codex-team daemon stop` only after
-  confirming no non-closed sessions remain in any workspace. SessionEnd only
-  detaches the current client; it does not close work that another Claude Code
-  session may be using.
-- Watchdog emits an initial snapshot on daemon start, then suppresses
-  idle periodic ticks by default. Set `monitor.watchdog_emit_idle =
-  true` if you want heartbeat noise even when nothing needs attention.
-- Watchdog reminder messages include send time by default:
-  `sent_at` (ISO) and `local_time` (terminal locale). Custom templates
-  can use `{{sentAt}}` and `{{localTime}}`.
-- Watchdog supports multiple named alarms with different intervals and
-  prompts. Runtime alarms are easiest for task-specific reminders:
-  ```bash
-  codex-team watch alarm create fast --interval-seconds 300 --template "Fast check {{sentAt}}\n{{sessionsText}}"
-  ```
-  Persistent config alarms are workspace-keyed:
-  ```toml
-  [monitor.watchdog_alarms.proj-example.fast]
-  interval_seconds = 300
-  template = "Fast check {{sentAt}}\n{{sessionsText}}"
-
-  [monitor.watchdog_alarms.proj-example.deep]
-  interval_seconds = 1800
-  task_brief_file = "docs/team/current.md"
-  template_file = "docs/team/deep-watchdog-template.md"
-  ```
+Rebuild and `/reload-plugins` after editing TypeScript.
 
 ## Repository
 
