@@ -23,6 +23,8 @@ test("HealthMonitor emits turn-stuck once per stuck turn", async () => {
 
   const registry = new RegistryStore(path.join(tempDir, "registry.json"));
   registry.create({
+    workspace: "default",
+    createdByClientId: null,
     name: "alpha",
     threadId: "thr_1",
     ephemeral: false,
@@ -82,6 +84,8 @@ test("HealthMonitor does not auto-heal ephemeral sessions", async () => {
   const cfg = tempConfig(tempDir);
   const registry = new RegistryStore(path.join(tempDir, "registry.json"));
   registry.create({
+    workspace: "default",
+    createdByClientId: null,
     name: "eph",
     threadId: "thr_eph",
     ephemeral: true,
@@ -125,6 +129,8 @@ test("HealthMonitor emits subprocess-recycled for idle heal", async () => {
   const cfg = tempConfig(tempDir);
   const registry = new RegistryStore(path.join(tempDir, "registry.json"));
   registry.create({
+    workspace: "default",
+    createdByClientId: null,
     name: "alpha",
     threadId: "thr_1",
     ephemeral: false,
@@ -170,6 +176,8 @@ test("HealthMonitor migrates queued sends into resumed session", async () => {
   const cfg = tempConfig(tempDir);
   const registry = new RegistryStore(path.join(tempDir, "registry.json"));
   registry.create({
+    workspace: "default",
+    createdByClientId: null,
     name: "alpha",
     threadId: "thr_1",
     ephemeral: false,

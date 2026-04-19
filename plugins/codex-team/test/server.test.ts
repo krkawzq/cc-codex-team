@@ -63,6 +63,171 @@ test("DaemonServer supports create, read, and doctor over socket", async () => {
   }
 });
 
+test("DaemonServer isolates session list by workspace", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
+  const cfg = tempConfig(tempDir);
+  let next = 0;
+  const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => {
+    const fake = new FakeAppServerClient();
+    fake.nextThreadId = `thr_ws_${next}`;
+    next += 1;
+    return fake;
+  });
+  await server.start();
+  try {
+    await sendRequest(
+      cfg.daemon.socketPath,
+      "session.create",
+      { name: "same", cwd: tempDir },
+      { workspace: "ws-a", clientId: "client-a", allWorkspaces: false },
+    );
+    await sendRequest(
+      cfg.daemon.socketPath,
+      "session.create",
+      { name: "same", cwd: tempDir },
+      { workspace: "ws-b", clientId: "client-b", allWorkspaces: false },
+    );
+
+    const listA = await sendRequest(
+      cfg.daemon.socketPath,
+      "session.list",
+      {},
+      { workspace: "ws-a", clientId: "client-a", allWorkspaces: false },
+    );
+    const sessionsA = (listA.data as Record<string, unknown>).sessions as Array<Record<string, unknown>>;
+    assert.equal(sessionsA.length, 1);
+    assert.equal(sessionsA[0].workspace, "ws-a");
+
+    const all = await sendRequest(
+      cfg.daemon.socketPath,
+      "session.list",
+      {},
+      { workspace: "ws-a", clientId: "admin", allWorkspaces: true },
+    );
+    assert.equal(((all.data as Record<string, unknown>).sessions as unknown[]).length, 2);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("DaemonServer creates and deletes workspace runtime watchdog alarms", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
+  const cfg = tempConfig(tempDir);
+  const fake = new FakeAppServerClient();
+  const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => fake);
+  await server.start();
+  try {
+    const created = await sendRequest(
+      cfg.daemon.socketPath,
+      "watch.alarm.create",
+      { name: "standup", intervalSeconds: 600, template: "hello" },
+      { workspace: "ws-a", clientId: "client-a", allWorkspaces: false },
+    );
+    assert.equal(created.ok, true);
+    const listed = await sendRequest(
+      cfg.daemon.socketPath,
+      "watch.alarm.list",
+      {},
+      { workspace: "ws-a", clientId: "client-a", allWorkspaces: false },
+    );
+    const alarms = (listed.data as Record<string, unknown>).alarms as Array<Record<string, unknown>>;
+    assert.equal(alarms.length, 1);
+    assert.equal(alarms[0].workspace, "ws-a");
+    assert.equal(alarms[0].name, "standup");
+
+    const deleted = await sendRequest(
+      cfg.daemon.socketPath,
+      "watch.alarm.delete",
+      { name: "standup" },
+      { workspace: "ws-a", clientId: "client-a", allWorkspaces: false },
+    );
+    assert.equal(deleted.ok, true);
+    assert.equal((deleted.data as Record<string, unknown>).deleted, true);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("DaemonServer includes alarms in workspace show", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
+  const cfg = tempConfig(tempDir);
+  const fake = new FakeAppServerClient();
+  const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => fake);
+  await server.start();
+  try {
+    await sendRequest(
+      cfg.daemon.socketPath,
+      "watch.alarm.create",
+      { name: "visible", intervalSeconds: 600 },
+      { workspace: "ws-visible", clientId: "client-a", allWorkspaces: false },
+    );
+    const shown = await sendRequest(
+      cfg.daemon.socketPath,
+      "workspace.show",
+      { name: "ws-visible" },
+      { workspace: "ws-visible", clientId: "client-a", allWorkspaces: false },
+    );
+    assert.equal(shown.ok, true);
+    const alarms = (shown.data as Record<string, unknown>).alarms as Array<Record<string, unknown>>;
+    assert.equal(alarms.length, 1);
+    assert.equal(alarms[0].name, "visible");
+  } finally {
+    await server.stop();
+  }
+});
+
+test("DaemonServer refuses daemon.stop when active sessions exist unless forced", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
+  const cfg = tempConfig(tempDir);
+  const fake = new FakeAppServerClient();
+  const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => fake);
+  await server.start();
+  try {
+    const created = await sendRequest(cfg.daemon.socketPath, "session.create", {
+      name: "active",
+      cwd: tempDir,
+    });
+    assert.equal(created.ok, true);
+
+    const refused = await sendRequest(cfg.daemon.socketPath, "daemon.stop", {});
+    assert.equal(refused.ok, false);
+    assert.equal((refused.error as Record<string, unknown>).code, "E_INVALID");
+
+    const forced = await sendRequest(cfg.daemon.socketPath, "daemon.stop", { force: true });
+    assert.equal(forced.ok, true);
+  } finally {
+    await server.stop().catch(() => undefined);
+  }
+});
+
+test("DaemonServer detaches clients by session id when client id is unavailable", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
+  const cfg = tempConfig(tempDir);
+  const fake = new FakeAppServerClient();
+  const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => fake);
+  await server.start();
+  try {
+    const registered = await sendRequest(
+      cfg.daemon.socketPath,
+      "client.register",
+      { clientId: "client-session", sessionId: "sess-1" },
+      { workspace: "ws-a", clientId: null, allWorkspaces: false },
+    );
+    assert.equal(registered.ok, true);
+
+    const detached = await sendRequest(
+      cfg.daemon.socketPath,
+      "client.detach",
+      { sessionId: "sess-1" },
+      { workspace: "ws-a", clientId: null, allWorkspaces: false },
+    );
+    assert.equal(detached.ok, true);
+    assert.deepEqual((detached.data as Record<string, unknown>).detached_clients, ["client-session"]);
+  } finally {
+    await server.stop();
+  }
+});
+
 test("DaemonServer attaches an existing Codex thread as a session", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
   const cfg = tempConfig(tempDir);
@@ -181,7 +346,7 @@ test("DaemonServer resumes registry sessions with persisted config", async () =>
   }
 });
 
-test("DaemonServer resumes legacy registry sessions with config fallbacks", async () => {
+test("DaemonServer resumes registry sessions with config fallbacks", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-server-"));
   const configHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-config-"));
   const previous = process.env.XDG_CONFIG_HOME;
@@ -197,7 +362,7 @@ cwd = "${tempDir}"
 sandbox = "workspace-write"
 approval_policy = "never"
 
-[profiles.legacy_profile]
+[profiles.profiled]
 reasoning_effort = "high"
 personality = "precise"
 base_instructions = "base from profile"
@@ -215,8 +380,10 @@ developer_instructions = "developer from profile"
     await server.start();
     try {
       server.registry.create({
-        name: "legacy",
-        threadId: "thr_legacy",
+        workspace: "default",
+        name: "profiled",
+        createdByClientId: null,
+        threadId: "thr_profiled",
         cwd: "",
         model: "",
         modelProvider: null,
@@ -225,7 +392,7 @@ developer_instructions = "developer from profile"
         serviceTier: null,
         reasoningEffort: null,
         personality: null,
-        profile: "legacy_profile",
+        profile: "profiled",
         createdAt: "2026-01-01T00:00:00.000Z",
         lastTurnId: null,
         lastTurnEndedAt: null,
@@ -240,11 +407,11 @@ developer_instructions = "developer from profile"
         errorMessage: null,
       });
 
-      const resumed = await sendRequest(cfg.daemon.socketPath, "session.resume", { name: "legacy" });
+      const resumed = await sendRequest(cfg.daemon.socketPath, "session.resume", { name: "profiled" });
       assert.equal(resumed.ok, true);
       assert.deepEqual(fake.threadResumes, [
         {
-          threadId: "thr_legacy",
+          threadId: "thr_profiled",
           params: {
             model: "gpt-default",
             cwd: tempDir,
@@ -280,7 +447,9 @@ test("DaemonServer does not rewrite registry when resumed thread verification fa
   await server.start();
   try {
     server.registry.create({
+      workspace: "default",
       name: "verify-fail",
+      createdByClientId: null,
       threadId: "thr_old",
       cwd: tempDir,
       model: "gpt-5.4",
@@ -445,7 +614,7 @@ test("DaemonServer history.get supports sinceTurnId", async () => {
   const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => fake);
   await server.start();
   try {
-    const historyDir = path.join(tempDir, "sessions", "hist-alpha");
+    const historyDir = path.join(tempDir, "sessions", "default", "hist-alpha");
     fs.mkdirSync(historyDir, { recursive: true });
     fs.writeFileSync(
       path.join(historyDir, "turns.jsonl"),
@@ -507,7 +676,7 @@ test("DaemonServer history.subscribe streams snapshot and appended turns", async
   const server = new DaemonServer(cfg, cfg.daemon.socketPath, undefined, () => fake);
   await server.start();
   try {
-    const historyDir = path.join(tempDir, "sessions", "stream-alpha");
+    const historyDir = path.join(tempDir, "sessions", "default", "stream-alpha");
     const turnsPath = path.join(historyDir, "turns.jsonl");
     fs.mkdirSync(historyDir, { recursive: true });
     fs.writeFileSync(turnsPath, `${JSON.stringify({ turnId: "tr_1" })}\n`, "utf8");
@@ -518,8 +687,12 @@ test("DaemonServer history.subscribe streams snapshot and appended turns", async
     await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
     socket.write(
       `${JSON.stringify({
+        v: 2,
         id: "hist-1",
         cmd: "history.subscribe",
+        workspace: "default",
+        clientId: "client-hist",
+        allWorkspaces: false,
         params: { name: "stream-alpha", format: "jsonl", sinceTurnId: "tr_missing" },
       })}\n`,
     );
@@ -558,7 +731,7 @@ test("DaemonServer health.issues surfaces queue and running problems", async () 
     });
     assert.equal(created.ok, true);
 
-    const live = server.sessions.get("issue-alpha");
+    const live = server.sessions.get("default\u0000issue-alpha") || server.sessions.get("issue-alpha");
     assert.ok(live);
     (live as unknown as { isRunning: () => boolean }).isRunning = () => true;
     (live as unknown as { currentTurnId: () => string | null }).currentTurnId = () => "tr_issue";

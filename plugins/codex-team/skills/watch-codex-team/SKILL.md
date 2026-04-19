@@ -1,6 +1,6 @@
 ---
 name: watch-codex-team
-description: Authoritative source for arming codex-team event streams. Two streams with different roles — `events` is mandatory whenever you dispatch work; `watchdog` is opt-in, only for long-horizon tasks, and configurable into multiple named alarms with custom templates. Trigger before your first `codex-team send`, when deciding whether a task is long enough to warrant watchdog, or when >25 minutes pass with no expected event. Not for: interpreting a specific event (that's the downstream skill).
+description: Authoritative source for arming codex-team event streams. Two streams with different roles — `events` is mandatory whenever you dispatch work and is armed via `/codex-team:bootstrap`; `watchdog` is opt-in, only for long-horizon tasks, and configurable into multiple named per-workspace alarms with custom templates. Trigger before your first `codex-team send`, when deciding whether a task is long enough to warrant watchdog, or when >25 minutes pass with no expected event. Not for: interpreting a specific event (that's the downstream skill).
 ---
 
 # Watch codex-team
@@ -9,16 +9,16 @@ The plugin exposes two event streams. They are not symmetric — they serve diff
 
 | Stream | Role | Default behavior |
 |---|---|---|
-| `events` | Turn-by-turn outcomes and failures; the backbone of the async loop | **Always arm when dispatching work** |
-| `watchdog` | Reminder + self-check for the orchestrator on long-horizon tasks | **Opt-in; do not arm by default** |
+| `events` | Turn-by-turn outcomes and failures; the backbone of the async loop | **Always arm when dispatching work.** Arm explicitly via `/codex-team:bootstrap` or a `Monitor({...})` call. The plugin does not auto-start it. |
+| `watchdog` | Reminder + self-check for the orchestrator on long-horizon tasks | **Opt-in per workspace; do not arm by default.** One or more named alarms per workspace. |
 
-Arming the wrong one or arming both "just in case" creates noise. Read the two sections below separately.
+Both streams are workspace-filtered: subscribers see only events/alarm ticks for the workspace the CLI call was made in. Arming the wrong stream or arming for another workspace is prevented by default.
 
 ---
 
 ## The `events` stream (always arm when dispatching)
 
-This is the stream that makes the async loop work. Each line is one distilled per-turn record.
+This is the stream that makes the async loop work. Each line is one distilled per-turn record, scoped to your workspace.
 
 ### Arm
 
@@ -31,9 +31,11 @@ Monitor({
 })
 ```
 
-Arm **once per Claude Code session.** Re-invoking creates duplicates.
+The script inherits `CODEX_TEAM_WORKSPACE` from the Claude Code session's hook-exported env, so its internal `codex-team monitor events` call is automatically scoped to your workspace.
 
-### When
+Arm **once per Claude Code session.** Re-invoking creates duplicates. `/codex-team:bootstrap` does this arming step for you (idempotent check via task panel).
+
+### When to arm
 
 - Before the first `codex-team send` of the session.
 - After a daemon restart (the persistent Monitor child keeps running, but its socket is dead — re-arm).
@@ -60,6 +62,7 @@ Do **not** re-arm on every turn or every session create.
 ```json
 {
   "kind": "turn-done",
+  "workspace": "proj-abcd1234",
   "session": "<name>",
   "turn_id": "tr_abc",
   "elapsed_ms": 42000,
@@ -73,6 +76,8 @@ Do **not** re-arm on every turn or every session create.
   "usage_total_tokens": 192000
 }
 ```
+
+`workspace` is always present; double-check that it matches yours as a sanity guard.
 
 `usage_last_tokens` = current context-window snapshot (the number that matters for compaction).
 `usage_total_tokens` = cumulative across the thread; will look scary-large on long threads — **do not** use it to decide compaction.
@@ -93,9 +98,9 @@ The daemon already drops high-frequency chatter (reasoning tokens, command-outpu
 
 ---
 
-## The `watchdog` stream (opt-in)
+## The `watchdog` stream (opt-in, per-workspace alarms)
 
-The watchdog is a **periodic reminder + self-check** channel for the orchestrator. It fires on a cron-like interval, snapshots all sessions, optionally injects a task brief, and pushes one JSON line through a `Monitor`. It is **not** a health monitor — that job is handled by the `events` stream (`session-down`, `turn-err`, `turn-stuck` come there).
+The watchdog is a **periodic reminder + self-check** channel for the orchestrator. An alarm fires on a cron-like interval, snapshots the current workspace's sessions, optionally injects a task brief, and pushes one JSON line through the shared `watchdog` Monitor stream. It is **not** a health monitor — that job is the `events` stream (`session-down`, `turn-err`).
 
 ### Purpose
 
@@ -112,27 +117,26 @@ Two uses, both aimed at the orchestrator (you), not Codex:
 - Overnight / cross-day / multi-day → arm it
 - Short iterations, interactive sessions, one-off fixes → **don't arm it** (pure noise)
 
-**When not to arm** (default):
-
-- You'll be actively dispatching every few minutes anyway.
-- The user is present and will notice drift.
-- The task is small enough that `events` alone is sufficient.
-
-The daemon is **silent by default** — an alarm with `emit_idle: false` (the default) only fires when there's a signal (task brief set, running turn, advisories, errored session). So a misconfigured watchdog usually goes quiet on its own, but the correct posture is still "arm only when you'll use it."
-
 ### How to arm
 
-Use the slash command:
+The recommended path is the slash command:
 
 ```
-/codex-team:watch <alarm-name> [--task-brief <path>] [--interval <secs>] [--template <path>]
+/codex-team:watch <alarm-name> [--task-brief FILE] [--interval-seconds N] [--template-file FILE] [--emit-idle]
 ```
 
-The command writes (or updates) a `[monitor.watchdog_alarms.<alarm-name>]` block in `config.toml`, calls `codex-team daemon reload-config`, and arms the `watchdog` Monitor stream if not already.
+It creates a **runtime alarm** (stored under the daemon's data dir, not in `config.toml`) in the current workspace, and arms the shared `watchdog` Monitor stream once per Claude Code session.
 
-Or manually: edit `config.toml` (→ `configure-codex-team`), then `codex-team daemon reload-config`, then arm the Monitor:
+Manual equivalent:
 
-```
+```bash
+# Register the alarm in the current workspace
+codex-team watch alarm create task_brief \
+  --interval-seconds 7200 \
+  --task-brief-file <abs-path-to-brief> \
+  --emit-idle
+
+# Arm the shared watchdog stream (once per CC session)
 Monitor({
   description: "codex-team watchdog: periodic reminder + self-check",
   command: "${CLAUDE_PLUGIN_ROOT}/scripts/monitor-watchdog.sh",
@@ -141,58 +145,47 @@ Monitor({
 })
 ```
 
-Arm the Monitor **once** even if you have multiple alarms. All alarms share the same stream; each emission carries an `alarm: <name>` field.
+Arm the Monitor **once** per Claude Code session regardless of how many alarms you define. All alarms in your workspace publish to the same stream; each payload carries `alarm: <name>` so you can tell them apart.
 
-### Alarm config shape
+### `emit_idle` behavior
 
-```toml
-[monitor.watchdog_alarms.<alarm-name>]
-enabled = true
-interval_seconds = 7200            # 2h; pick for your task horizon
-task_brief_file = ""               # optional; head N lines get injected
-task_brief_head_lines = 30
-emit_idle = false                  # false = silent when no signal; true = always fire
-template = ""                      # inline; overrides default
-template_file = ""                 # file; wins over `template` if both set
-```
-
-Every key is independent per alarm. You can have several alarms with different cadence / brief / template.
+- `emit_idle = false` (default): the alarm **skips** its tick when there's no signal — i.e., no running session, no advisories, no task brief. Keeps the stream quiet when nothing needs attention.
+- `emit_idle = true`: the alarm **always** emits on cadence. Use when you want a fixed-cadence briefing (morning standup pattern).
 
 ### Multi-alarm patterns
 
-Pick one or combine. Each serves a distinct purpose.
+Define multiple alarms in the same workspace with different cadence / purpose.
 
-**Pattern A — task-brief reminder (most common)**
+**Pattern A — task-brief reminder (most common for long-horizon tasks)**
 
-```toml
-[monitor.watchdog_alarms.task_brief]
-interval_seconds = 7200   # every 2h
-task_brief_file = "<path to the brief doc>"
-emit_idle = true
+```bash
+codex-team watch alarm create task_brief \
+  --interval-seconds 7200 \
+  --task-brief-file /abs/path/to/brief.md \
+  --emit-idle
 ```
 
-Use when: you want to be re-anchored to the task every few hours, even if nothing is happening. Overnight refactor, weekend port.
+Use when: you want to be re-anchored to the task every few hours, even if nothing is happening.
 
-**Pattern B — drift detector (silent unless something's off)**
+**Pattern B — silent drift detector**
 
-```toml
-[monitor.watchdog_alarms.drift]
-interval_seconds = 1800   # every 30m
-emit_idle = false
+```bash
+codex-team watch alarm create drift \
+  --interval-seconds 1800
 ```
 
-Use when: you're actively orchestrating but want a safety net for stuck turns / idle sessions / queue backups. Tick stays silent unless advisories exist.
+Use when: you're actively orchestrating but want a safety net for stuck turns / idle sessions / queue backups. Tick stays silent unless advisories exist (`emit_idle` defaults to false).
 
-**Pattern C — morning standup**
+**Pattern C — fixed-cadence standup**
 
-```toml
-[monitor.watchdog_alarms.standup]
-interval_seconds = 28800  # approximately 8h
-emit_idle = true
-template_file = "<path to a custom template>"
+```bash
+codex-team watch alarm create standup \
+  --interval-seconds 28800 \
+  --emit-idle \
+  --template-file /abs/path/to/standup-template.md
 ```
 
-Use when: you want a daily/periodic fixed-cadence briefing regardless of state. Pair with a custom template that highlights what you care about.
+Use when: you want a periodic briefing regardless of state, with a custom template.
 
 ### Custom template
 
@@ -203,17 +196,18 @@ The template is rendered with Handlebars-style `{{var}}` and `{{#if var}}...{{/i
 | `{{at}}`, `{{sentAt}}` | ISO timestamp |
 | `{{localTime}}` | Human-readable local time |
 | `{{alarm}}` | Name of the firing alarm |
+| `{{workspace}}` | Workspace name |
 | `{{taskBrief}}` | First N lines of `task_brief_file`, or empty |
-| `{{summary.total}}` | Session count |
+| `{{summary.total}}` | Session count (current workspace) |
 | `{{summary.running}}` | Running-now count |
 | `{{summary.errored}}` | Errored count |
-| `{{summary.queued}}` | Total queued items across sessions |
+| `{{summary.queued}}` | Queued-items total across workspace sessions |
 | `{{sessionsText}}` | Pre-formatted per-session lines |
 
 Minimal custom template:
 
 ```
-[{{alarm}} @ {{localTime}}] {{summary.running}}/{{summary.total}} running, {{summary.errored}} errored
+[{{alarm}}/{{workspace}} @ {{localTime}}] {{summary.running}}/{{summary.total}} running, {{summary.errored}} errored
 {{#if taskBrief}}
 Task: {{taskBrief}}
 {{/if}}
@@ -222,7 +216,7 @@ Task: {{taskBrief}}
 Task-guidance template (pair with Pattern A):
 
 ```
-🔔 Watchdog reminder ({{alarm}}) — {{localTime}}
+🔔 Watchdog reminder ({{alarm}}, workspace {{workspace}}) — {{localTime}}
 
 You are running: {{summary.total}} sessions ({{summary.running}} running, {{summary.errored}} errored, {{summary.queued}} queued).
 
@@ -248,6 +242,7 @@ Sessions:
 {
   "kind": "watchdog-tick",
   "alarm": "<alarm-name>",
+  "workspace": "<ws>",
   "at": "<iso>",
   "sentAt": "<iso>",
   "localTime": "<local>",
@@ -281,6 +276,16 @@ Sessions:
 4. If `taskBrief` is present, compare it to what your sessions are actually working on. Drift? Nudge the off-course session with a re-anchoring send.
 5. Sleep.
 
+### Manage existing alarms
+
+```bash
+codex-team watch alarm list                      # current workspace
+codex-team watch alarm list --all-workspaces     # all (admin)
+codex-team watch alarm delete <name>             # remove from current workspace
+```
+
+Alarms can also be defined statically in `config.toml` under `[monitor.watchdog_alarms.<workspace>.<name>]`. Runtime alarms (via CLI) are preferred for ephemeral task-specific reminders; config alarms are for permanent setups. → `configure-codex-team`
+
 ---
 
 ## When events stop arriving
@@ -292,9 +297,10 @@ For `events`, >25 minutes with no expected `turn-done`:
 1. **Did you actually arm it?** #1 cause. Check the task panel for the Monitor `description`.
 2. **Did the Monitor child exit?** Claude Code notifies you when one does. If ignored, re-arm.
 3. **Is the daemon dead?** `codex-team daemon status` — connection refused → `codex-team daemon start`, then **re-arm**. Old socket is gone.
-4. **Did the harness auto-stop the monitor for flooding?** Rare (daemon pre-filters). Re-arm with the same command.
+4. **Workspace mismatch?** If the Monitor was armed under a different workspace (e.g., `CLAUDE_PROJECT_DIR` changed, or `CODEX_TEAM_WORKSPACE` was re-exported mid-session), you may be subscribed to the wrong tenant. Verify `codex-team workspace show` matches what you expect, then re-arm.
+5. **Did the harness auto-stop the monitor for flooding?** Rare (daemon pre-filters). Re-arm with the same command.
 
-For `watchdog` silence: likely fine. Check `emit_idle` on your alarm — if `false` with no signal, silence is expected.
+For `watchdog` silence: likely fine. Check `emit_idle` on your alarm — if `false` with no signal, silence is expected. Run `codex-team watch alarm list` to confirm the alarm is registered + enabled.
 
 ## Red flags
 
@@ -308,6 +314,8 @@ For `watchdog` silence: likely fine. Check `emit_idle` on your alarm — if `fal
 | "`auto-heal` fired — session is broken." | Check `was_during_turn` and `heal_reason`. Idle recycle ≠ crash. |
 | "Watchdog is for monitoring session health." | No. That's `events` (`session-down`, `turn-err`). Watchdog is reminder + self-check. |
 | "I'll set `emit_idle = true` on every alarm so I don't miss ticks." | Only when you want a fixed-cadence briefing. Otherwise silent-on-no-signal is better. |
+| "The alarm is in a different workspace — the daemon will merge it." | No. Alarms are workspace-scoped. One alarm, one workspace. Define a separate alarm for each workspace that needs one. |
+| "I'll edit `config.toml` for a one-off reminder." | Use the runtime CLI (`watch alarm create`). Config alarms are for permanent setups. |
 
 ## Cross-references
 
@@ -315,5 +323,6 @@ For `watchdog` silence: likely fine. Check `emit_idle` on your alarm — if `fal
 - Respond to `turn-done` / `turn-attn`: `manage-codex-team`
 - Respond to `compact-suggest`: `compact-codex-team`
 - Respond to `session-down` / `turn-err`: `recover-codex-team`
-- Alarm config schema: `configure-codex-team` §`[monitor.watchdog_alarms.*]`
-- Quick arm: `/codex-team:watch`
+- Alarm config schema + template variables: `configure-codex-team` §Watchdog alarms
+- Quick arm / runtime alarm: `/codex-team:watch`
+- Inspect all alarms / workspaces: `/codex-team:workspaces`

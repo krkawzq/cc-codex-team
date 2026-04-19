@@ -17,6 +17,7 @@ import { sessionDir } from "./paths";
 import { OverflowPolicy, PendingSend, SendQueue } from "./queue";
 import { RegistryStore } from "./registry";
 import { AppServerClient, AppServerClientLike, RpcNotification } from "./codex/appServerClient";
+import { DEFAULT_WORKSPACE, workspaceDisplayName } from "./workspace";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -73,6 +74,7 @@ export class Session {
   private stderrFlushedCount = 0;
 
   constructor(
+    readonly workspace: string,
     readonly name: string,
     private cfg: Config,
     private readonly dataDir: string,
@@ -119,9 +121,10 @@ export class Session {
         if (enqueueResult.dropped) {
           this.rejectPending(enqueueResult.dropped, new Error(`queued send ${enqueueResult.dropped.id} was dropped`));
         }
-        this.registry.update(this.name, { queueLength: this.queue.length });
+        this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
         if (enqueueResult.overflowed) {
           this.eventBus.publish("events", {
+            workspace: this.workspace,
             kind: "queue-overflow",
             session: this.name,
             policy: this.cfg.queue.overflowPolicy,
@@ -131,7 +134,7 @@ export class Session {
         return;
       }
       this.running = true;
-      this.registry.update(this.name, { status: "running" });
+      this.registry.update(this.name, { status: "running" }, this.workspace);
       void this.runTurn(placeholderId, text, resolveWait, rejectWait, options.overrides || null);
     });
 
@@ -156,7 +159,7 @@ export class Session {
       this.activeTurnStartedAtMs = null;
       this.rejectQueuedWaiters(new Error(reason));
       this.queue.clear();
-      this.registry.update(this.name, { queueLength: 0, appServerPid: null });
+      this.registry.update(this.name, { queueLength: 0, appServerPid: null }, this.workspace);
     });
     this.client.kill();
     await this.client.close();
@@ -165,11 +168,11 @@ export class Session {
       appServerPid: null,
       queueLength: 0,
       errorMessage: reason,
-    });
+    }, this.workspace);
   }
 
   async ackError(): Promise<void> {
-    this.registry.update(this.name, { status: "idle", errorMessage: null });
+    this.registry.update(this.name, { status: "idle", errorMessage: null }, this.workspace);
   }
 
   async compact(): Promise<void> {
@@ -178,19 +181,20 @@ export class Session {
         throw new SessionBusy(`session ${this.name} is running; compact after the active turn finishes`);
       }
       this.running = true;
-      this.registry.update(this.name, { status: "compacting" });
+      this.registry.update(this.name, { status: "compacting" }, this.workspace);
     });
     const attempts = Math.max(1, this.cfg.compaction.retryAttempts + 1);
     let lastError: Error | null = null;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
         const result = await this.runCompactAttempt();
-        this.compaction?.clear(this.name);
+        this.compaction?.clear(this.name, this.workspace);
         this.registry.update(this.name, {
           status: "idle",
           tokenUsageInput: result.usageTotal ?? 0,
           contextTokensEstimate: result.contextTokensEstimate ?? 0,
-          modelContextWindow: result.modelContextWindow ?? this.registry.get(this.name).modelContextWindow ?? null,
+          modelContextWindow:
+            result.modelContextWindow ?? this.registry.get(this.name, this.workspace).modelContextWindow ?? null,
           errorMessage: null,
         });
         await this.dispatchNextQueued();
@@ -201,6 +205,7 @@ export class Session {
           break;
         }
         this.eventBus.publish("events", {
+          workspace: this.workspace,
           kind: "compact-retry",
           session: this.name,
           attempt,
@@ -213,7 +218,7 @@ export class Session {
     this.registry.update(this.name, {
       status: "errored",
       errorMessage: lastError?.message || "compact failed",
-    });
+    }, this.workspace);
     await this.withStateLock(async () => {
       this.running = false;
     });
@@ -279,9 +284,9 @@ export class Session {
   }
 
   dumpState(): Record<string, unknown> {
-    const sessionPath = sessionDir(this.dataDir, this.name);
+    const sessionPath = sessionDir(this.dataDir, this.workspace, this.name);
     return {
-      session: this.registry.get(this.name),
+      session: this.registry.get(this.name, this.workspace),
       queue: this.snapshotQueueJson(),
       transport_alive: this.isTransportAlive(),
       stderr_tail: this.stderrTail(20),
@@ -311,7 +316,7 @@ export class Session {
       this.registry.update(this.name, {
         queueLength: 0,
         appServerPid: null,
-      });
+      }, this.workspace);
     });
     await this.client.close();
     return queued;
@@ -328,15 +333,15 @@ export class Session {
           this.rejectPending(enqueueResult.dropped, new Error(`queued send ${enqueueResult.dropped.id} was dropped`));
         }
       }
-      this.registry.update(this.name, { queueLength: this.queue.length });
+      this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
       if (!this.running) {
         const next = this.queue.pop();
-        this.registry.update(this.name, { queueLength: this.queue.length });
+        this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
         if (!next) {
           return;
         }
         this.running = true;
-        this.registry.update(this.name, { status: "running" });
+        this.registry.update(this.name, { status: "running" }, this.workspace);
         void this.runTurn(next.id, next.text, next.waitResolver, next.waitRejecter, next.overrides || null);
       }
     });
@@ -345,7 +350,7 @@ export class Session {
   clearQueue(): void {
     this.rejectQueuedWaiters(new Error(`queue for ${this.name} was cleared`));
     this.queue.clear();
-    this.registry.update(this.name, { queueLength: 0 });
+    this.registry.update(this.name, { queueLength: 0 }, this.workspace);
   }
 
   dropOldest(): PendingSend | undefined {
@@ -353,7 +358,7 @@ export class Session {
     if (dropped) {
       this.rejectPending(dropped, new Error(`queued send ${dropped.id} was dropped`));
     }
-    this.registry.update(this.name, { queueLength: this.queue.length });
+    this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
     return dropped;
   }
 
@@ -366,10 +371,10 @@ export class Session {
       this.activeTurnStartedAtMs = null;
       this.rejectQueuedWaiters(new Error(`session ${this.name} was closed`));
       this.queue.clear();
-      this.registry.update(this.name, { queueLength: 0, appServerPid: null });
+      this.registry.update(this.name, { queueLength: 0, appServerPid: null }, this.workspace);
     });
     await this.shutdownTransport();
-    this.registry.update(this.name, { status: "closed", appServerPid: null, queueLength: 0 });
+    this.registry.update(this.name, { status: "closed", appServerPid: null, queueLength: 0 }, this.workspace);
   }
 
   async shutdown(): Promise<void> {
@@ -381,10 +386,10 @@ export class Session {
       this.activeTurnStartedAtMs = null;
       this.rejectQueuedWaiters(new Error(`session ${this.name} is shutting down`));
       this.queue.clear();
-      this.registry.update(this.name, { queueLength: 0, appServerPid: null });
+      this.registry.update(this.name, { queueLength: 0, appServerPid: null }, this.workspace);
     });
     await this.shutdownTransport();
-    const current = this.registry.get(this.name);
+    const current = this.registry.get(this.name, this.workspace);
     if (current.status === "closed") {
       return;
     }
@@ -392,7 +397,7 @@ export class Session {
       status: current.errorMessage ? "errored" : "idle",
       appServerPid: null,
       queueLength: 0,
-    });
+    }, this.workspace);
   }
 
   async healthCheck(): Promise<void> {
@@ -439,7 +444,7 @@ export class Session {
     if (pending.length === 0) {
       return;
     }
-    const filePath = path.join(sessionDir(this.dataDir, this.name), "app-server.stderr.log");
+    const filePath = path.join(sessionDir(this.dataDir, this.workspace, this.name), "app-server.stderr.log");
     ensureDirFor(filePath);
     fs.appendFileSync(filePath, `${pending.join("\n")}\n`, "utf8");
     this.stderrFlushedCount = lines.length;
@@ -491,13 +496,14 @@ export class Session {
     let modelContextWindow: number | null = null;
     const started = Date.now();
     let waitSettled = false;
-    this.registry.update(this.name, { lastPromptText: text });
+    this.registry.update(this.name, { lastPromptText: text }, this.workspace);
     try {
       const response = await this.client.turnStart(buildTurnStartParams(this.threadId, text, overrides));
       turnId = String(asRecord(response.turn).id ?? turnId);
       this.activeTurnId = turnId;
       this.activeTurnStartedAtMs = Date.now();
       this.eventBus.publish("events", {
+        workspace: this.workspace,
         kind: "turn-start",
         session: this.name,
         queued_or_turn_id: pendingTurnId,
@@ -555,6 +561,7 @@ export class Session {
 
     const completedAt = nowIso();
     const summary = buildTurnSummary({
+      workspace: this.workspace,
       session: this.name,
       turnId,
       elapsedMs: Date.now() - started,
@@ -569,7 +576,7 @@ export class Session {
       completedAt,
     });
 
-    const sessionPath = sessionDir(this.dataDir, this.name);
+    const sessionPath = sessionDir(this.dataDir, this.workspace, this.name);
     if (this.cfg.digest.historyMdEnabled) {
       writeHistoryMd(path.join(sessionPath, "history.md"), summary, this.cfg.digest);
     }
@@ -578,6 +585,7 @@ export class Session {
     }
     if (usageTotal != null || contextTokensEstimate != null) {
       await this.compaction?.observeUsage(this.name, {
+        workspace: this.workspace,
         contextTokensEstimate,
         modelContextWindow,
         cumulativeUsageTokens: usageTotal,
@@ -600,8 +608,9 @@ export class Session {
       modelContextWindow,
       errorMessage,
       appServerPid: this.client.pid,
-    });
+    }, this.workspace);
     this.eventBus.publish("events", {
+      workspace: this.workspace,
       kind: summary.tier === "attn" ? "turn-attn" : "turn-done",
       session: this.name,
       ...summaryToWire(summary),
@@ -621,12 +630,12 @@ export class Session {
     let next: PendingSend | undefined;
     await this.withStateLock(async () => {
       next = this.queue.pop();
-      this.registry.update(this.name, { queueLength: this.queue.length });
+      this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
       if (!next) {
         this.running = false;
       } else {
         this.running = true;
-        this.registry.update(this.name, { status: "running" });
+        this.registry.update(this.name, { status: "running" }, this.workspace);
       }
     });
     if (next) {
@@ -692,8 +701,11 @@ export class SessionFactory {
   async create(
     name: string,
     options: SessionCreateOptions = {},
+    context: { workspace?: string; clientId?: string | null } = {},
   ): Promise<Session> {
-    this.ensureNameAvailable(name);
+    const workspace = context.workspace || DEFAULT_WORKSPACE;
+    const clientId = context.clientId || null;
+    this.ensureNameAvailable(workspace, name);
     const resolved = this.resolveOptions(options);
 
     const client = this.clientFactory(this.cfg);
@@ -710,9 +722,10 @@ export class SessionFactory {
       await client.close();
       throw error;
     }
-    const entry = buildRegistryEntry(name, threadId, resolved, client.pid);
+    const entry = buildRegistryEntry(workspace, name, threadId, resolved, client.pid, clientId);
     this.registry.create(entry);
     return new Session(
+      workspace,
       name,
       this.cfg,
       this.dataDir(),
@@ -728,7 +741,10 @@ export class SessionFactory {
     name: string,
     threadId: string,
     options: SessionCreateOptions = {},
+    context: { workspace?: string; clientId?: string | null } = {},
   ): Promise<Session> {
+    const workspace = context.workspace || DEFAULT_WORKSPACE;
+    const clientId = context.clientId || null;
     const targetThreadId = threadId.trim();
     if (!targetThreadId) {
       throw new InvalidRequest("thread_id required");
@@ -736,8 +752,8 @@ export class SessionFactory {
     if (options.ephemeral) {
       throw new InvalidRequest("session attach cannot use --ephemeral for an existing thread");
     }
-    this.ensureNameAvailable(name);
-    this.ensureThreadUnclaimed(targetThreadId);
+    this.ensureNameAvailable(workspace, name);
+    this.ensureThreadUnclaimed(workspace, targetThreadId);
     const resolved = this.resolveOptions({ ...options, ephemeral: false }, { forcePersistent: true });
 
     const client = this.clientFactory(this.cfg);
@@ -747,15 +763,16 @@ export class SessionFactory {
       const response = await client.threadResume(targetThreadId, buildThreadResumeParams(resolved));
       const thread = asRecord(response.thread);
       resumedThreadId = String(thread.id ?? targetThreadId);
-      this.ensureThreadUnclaimed(resumedThreadId);
+      this.ensureThreadUnclaimed(workspace, resumedThreadId);
       await client.threadRead(resumedThreadId, false);
     } catch (error) {
       await client.close();
       throw error;
     }
-    const entry = buildRegistryEntry(name, resumedThreadId, resolved, client.pid);
+    const entry = buildRegistryEntry(workspace, name, resumedThreadId, resolved, client.pid, clientId);
     this.registry.create(entry);
     return new Session(
+      workspace,
       name,
       this.cfg,
       this.dataDir(),
@@ -767,8 +784,8 @@ export class SessionFactory {
     );
   }
 
-  async resume(name: string): Promise<Session> {
-    const entry = this.registry.get(name);
+  async resume(name: string, workspace = DEFAULT_WORKSPACE): Promise<Session> {
+    const entry = this.registry.get(name, workspace);
     if (entry.ephemeral) {
       throw new InvalidRequest(
         `session ${name} is ephemeral and cannot be resumed after its app-server exits`,
@@ -782,10 +799,10 @@ export class SessionFactory {
       const response = await client.threadResume(entry.threadId, buildThreadResumeParams(resolved));
       const thread = asRecord(response.thread);
       resumedThreadId = String(thread.id ?? entry.threadId);
-      this.ensureThreadUnclaimed(resumedThreadId, name);
+      this.ensureThreadUnclaimed(workspace, resumedThreadId, name);
       await client.threadRead(resumedThreadId, false);
       if (resumedThreadId !== entry.threadId) {
-        this.registry.update(name, { threadId: resumedThreadId });
+        this.registry.update(name, { threadId: resumedThreadId }, workspace);
       }
     } catch (error) {
       await client.close();
@@ -795,8 +812,9 @@ export class SessionFactory {
       status: "idle",
       errorMessage: null,
       appServerPid: client.pid,
-    });
+    }, workspace);
     return new Session(
+      workspace,
       name,
       this.cfg,
       this.dataDir(),
@@ -808,10 +826,10 @@ export class SessionFactory {
     );
   }
 
-  private ensureNameAvailable(name: string): void {
+  private ensureNameAvailable(workspace: string, name: string): void {
     try {
-      this.registry.get(name);
-      throw new SessionExists(name);
+      this.registry.get(name, workspace);
+      throw new SessionExists(`${workspaceDisplayName(workspace, name)} already exists`);
     } catch (error) {
       if (!(error instanceof SessionNotFound)) {
         throw error;
@@ -819,9 +837,9 @@ export class SessionFactory {
     }
   }
 
-  private ensureThreadUnclaimed(threadId: string, ownerName: string | null = null): void {
+  private ensureThreadUnclaimed(workspace: string, threadId: string, ownerName: string | null = null): void {
     const existing = this.registry
-      .list()
+      .list(workspace)
       .find((entry) => entry.threadId === threadId && entry.name !== ownerName);
     if (existing) {
       throw new InvalidRequest(
@@ -923,13 +941,17 @@ function buildThreadConfigParams(resolved: ResolvedSessionOptions): Record<strin
 }
 
 function buildRegistryEntry(
+  workspace: string,
   name: string,
   threadId: string,
   resolved: ResolvedSessionOptions,
   appServerPid: number | null,
+  createdByClientId: string | null,
 ): RegistryEntry {
   return {
+    workspace,
     name,
+    createdByClientId,
     threadId,
     cwd: resolved.cwd,
     model: resolved.model,

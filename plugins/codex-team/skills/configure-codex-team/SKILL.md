@@ -1,6 +1,6 @@
 ---
 name: configure-codex-team
-description: Authoritative source for the codex-team `config.toml` schema, the profile system, the `watchdog_alarms` multi-alarm schema + template variables, environment-variable overrides, and runtime prerequisites. Trigger when setting up a new profile, defining a watchdog alarm, tuning a daemon / monitor / queue knob, debugging unexpected session defaults, or verifying Node / Codex CLI prerequisites. Not for: session lifecycle (`manage-codex-team`), failure triage (`recover-codex-team`), arming monitors (`watch-codex-team`).
+description: Authoritative source for the codex-team `config.toml` schema, the profile system, the per-workspace watchdog alarm schema, runtime alarm storage, environment-variable overrides, and runtime prerequisites. Trigger when setting up a new profile, defining a persistent watchdog alarm, tuning a daemon / monitor / queue knob, debugging unexpected session defaults, or verifying Node / Codex CLI prerequisites. Not for: session lifecycle (`manage-codex-team`), failure triage (`recover-codex-team`), arming monitors (`watch-codex-team`).
 ---
 
 # Configure codex-team
@@ -42,11 +42,13 @@ Missing file → built-in defaults. Write only keys you want to override.
 
 ## Env var overrides (runtime)
 
+Two kinds of env vars matter:
+
+**Plugin-wide** (affect daemon + CLI):
+
 ```
 CODEX_TEAM_<SECTION>_<KEY>
 ```
-
-Examples:
 
 ```bash
 export CODEX_TEAM_DAEMON_LOGLEVEL=debug
@@ -54,7 +56,13 @@ export CODEX_TEAM_QUEUE_MAXPERSESSION=8
 export CODEX_TEAM_MONITOR_WATCHDOGINTERVALSECONDS=600
 ```
 
-For test runs and shell-local experiments. Prefer `config.toml` for persistent setup.
+**Workspace** (affect which tenant the CLI sees):
+
+```bash
+export CODEX_TEAM_WORKSPACE=<name>          # highest-priority resolver
+```
+
+→ `using-codex-team` §Workspaces for the full resolution order.
 
 ## Data-dir resolution
 
@@ -63,7 +71,27 @@ For test runs and shell-local experiments. Prefer `config.toml` for persistent s
 | Plugin in Claude Code | `${CLAUDE_PLUGIN_DATA}/data` | `${CLAUDE_PLUGIN_DATA}/runtime/daemon.sock` |
 | Standalone shell | `$XDG_DATA_HOME/codex-team` | `$XDG_RUNTIME_DIR/codex-team/daemon.sock` |
 
-Setting `[daemon].data_dir` or `[daemon].socket_path` explicitly in `config.toml` overrides both modes.
+The daemon is one process per `data_dir`; workspaces are virtual tenants *inside* that daemon. Setting `[daemon].data_dir` or `[daemon].socket_path` explicitly in `config.toml` overrides both modes.
+
+### Under the data dir
+
+```
+<data_dir>/
+├── registry.json                     # multi-workspace session registry
+├── daemon.pid
+├── daemon.log
+├── sessions/
+│   └── <workspace>/<name>/           # per-session work
+│       ├── history.md
+│       ├── turns.jsonl
+│       └── app-server.stderr.log
+├── clients/
+│   └── c-<client-id>.json            # one file per live Claude Code
+└── alarms/
+    └── <workspace>/<alarm-name>.json # runtime watchdog alarms
+```
+
+You don't normally read these files — use `codex-team` commands. Useful to know when debugging.
 
 ## Full schema (authoritative)
 
@@ -101,7 +129,7 @@ reasoning_capture = false
 stderr_tail_lines_on_fail = 20
 max_files_listed = 8
 tool_args_truncate_chars = 80
-history_rotation_mb = 32         # rotates to .1 when crossed
+history_rotation_mb = 32
 
 [compaction]
 threshold_tokens = 500000
@@ -109,6 +137,7 @@ mode = "manual"
 progress_doc_template = ""
 retry_attempts = 2
 retry_delay_ms = 1500
+timeout_seconds = 120
 
 [monitor]
 events_max_buffer = 1000
@@ -121,15 +150,11 @@ watchdog_emit_idle = false
 watchdog_template = ""
 watchdog_template_file = ""
 
-# Named alarms — see §Watchdog alarms below
-# [monitor.watchdog_alarms.<alarm-name>]
+# Persistent per-workspace alarms — see §Watchdog alarms below
+# [monitor.watchdog_alarms.<workspace>.<alarm-name>]
 # enabled = true
 # interval_seconds = 7200
-# task_brief_file = ""
-# task_brief_head_lines = 30
-# emit_idle = false
-# template = ""
-# template_file = ""
+# ...
 
 [heartbeat]
 interval_seconds = 60
@@ -194,28 +219,56 @@ Ephemeral sessions die with their app-server; cannot be resumed after daemon shu
 
 ## Watchdog alarms
 
-The watchdog stream supports a built-in "default" alarm plus any number of named custom alarms. Each alarm has its own cadence, task brief, template, and idle policy. All alarms share the single `watchdog` Monitor stream; payloads carry `alarm: <name>` so you can distinguish them.
+The watchdog stream carries one named alarm at a time; each alarm is scoped to exactly one workspace. **Alarms come from two places:**
 
-### Schema
+### Persistent (config.toml)
+
+For alarms you want stable across daemon restarts and across every Claude Code session in a given workspace:
 
 ```toml
-[monitor.watchdog_alarms.<alarm-name>]
+[monitor.watchdog_alarms.<workspace>.<alarm-name>]
 enabled = true                   # set false to disable without deleting the section
-interval_seconds = 7200          # positive integer; cadence of this alarm
-task_brief_file = ""             # optional; absolute path or relative to cwd
-task_brief_head_lines = 30       # max lines of the brief to inject into payload
-emit_idle = false                # false = skip tick if no signal; true = always fire
-template = ""                    # inline template string; overrides default
-template_file = ""               # file path; wins over `template` if both set
+interval_seconds = 7200          # positive integer
+task_brief_file = ""             # optional; head N lines injected
+task_brief_head_lines = 30
+emit_idle = false                # false = silent on no signal
+template = ""                    # inline template string
+template_file = ""               # file path; wins over `template`
 ```
 
-Reload after adding / editing:
+After editing config:
 
 ```bash
 codex-team daemon reload-config
 ```
 
-Or use `/codex-team:watch <name> [--task-brief PATH] [--interval SECS] [--template PATH]` which writes the block and reloads for you.
+Or:
+
+```bash
+codex-team --workspace <ws> watch alarm create ... # runtime-registered, does not touch config.toml
+```
+
+### Runtime (CLI-registered, stored under data dir)
+
+Preferred for one-off task-specific alarms you don't want polluting `config.toml`:
+
+```bash
+codex-team watch alarm create <alarm-name> \
+  [--interval-seconds N] \
+  [--task-brief-file PATH] \
+  [--task-brief-head-lines N] \
+  [--template-file PATH | --template "inline text"] \
+  [--emit-idle] \
+  [--disabled]
+
+codex-team watch alarm list                   # current workspace
+codex-team watch alarm list --all-workspaces  # all (audit)
+codex-team watch alarm delete <alarm-name>    # current workspace
+```
+
+Runtime alarms are stored at `<data_dir>/alarms/<workspace>/<alarm-name>.json` and survive daemon restarts.
+
+The slash command `/codex-team:watch` wraps `alarm create` and arms the Monitor stream in one step.
 
 ### `emit_idle` behavior
 
@@ -231,8 +284,9 @@ The template is rendered with `{{var}}` and `{{#if var}}...{{/if}}`. Available v
 | `{{at}}`, `{{sentAt}}` | ISO timestamp |
 | `{{localTime}}` | Human-readable local time |
 | `{{alarm}}` | Name of the firing alarm |
+| `{{workspace}}` | Workspace name |
 | `{{taskBrief}}` | First N lines of `task_brief_file`, or empty |
-| `{{summary.total}}` | Session count |
+| `{{summary.total}}` | Session count (workspace-scoped) |
 | `{{summary.running}}` | Running-now count |
 | `{{summary.errored}}` | Errored count |
 | `{{summary.queued}}` | Queued-items total across sessions |
@@ -242,38 +296,37 @@ The template is rendered with `{{var}}` and `{{#if var}}...{{/if}}`. Available v
 
 ### Example alarm configurations
 
-Task-brief reminder (every 2 hours, always emit, show brief):
+Task-brief reminder (every 2 hours, always emit, show brief) — persistent:
 
 ```toml
-[monitor.watchdog_alarms.task_brief]
+[monitor.watchdog_alarms.proj-abcd1234.task_brief]
 interval_seconds = 7200
 task_brief_file = "/abs/path/to/brief.md"
 emit_idle = true
 ```
 
-Silent drift detector (every 30 minutes, only emit on advisory):
+Silent drift detector (every 30 minutes, only emit on advisory) — runtime:
 
-```toml
-[monitor.watchdog_alarms.drift]
-interval_seconds = 1800
-emit_idle = false
+```bash
+codex-team watch alarm create drift --interval-seconds 1800
 ```
 
-Fixed-cadence standup with custom template file:
+Fixed-cadence standup with custom template — persistent:
 
 ```toml
-[monitor.watchdog_alarms.standup]
+[monitor.watchdog_alarms.proj-abcd1234.standup]
 interval_seconds = 28800
 emit_idle = true
 template_file = "/abs/path/to/standup-template.md"
 ```
 
-See `watch-codex-team` §Watchdog for usage patterns and when to arm this stream at all.
+See `watch-codex-team` for when to arm at all.
 
 ## Hot-reload behavior
 
 - `session create`, `session resume`, `session restart`, `health repair` refresh `config.toml` from disk before acting. New profiles do **not** require a daemon restart.
 - `daemon reload-config` reapplies heartbeat / watchdog intervals + alarm definitions immediately; no full restart needed for cadence-only changes.
+- Runtime alarms (`watch alarm create|delete`) restart background loops automatically.
 - `compact` retries automatically on failure — tune with `compaction.retry_attempts` / `compaction.retry_delay_ms`.
 - `history_rotation_mb` enforces rotation for both `history.md` and `turns.jsonl`; over threshold → current file → `.1`, new file starts.
 - `launch_args_override` replaces the default app-server argv entirely. Use `config_overrides` for single-flag tweaks; reach for `launch_args_override` only when you need complete control.
@@ -287,8 +340,9 @@ See `watch-codex-team` §Watchdog for usage patterns and when to arm this stream
 | Lower cost on one turn | `codex-team send ... --effort low` (no config change) |
 | More/fewer parallel queued sends | `[queue].max_per_session` |
 | Stricter queue behavior | `[queue].overflow_policy = "reject"` |
-| Periodic task reminder for long-horizon work | `[monitor.watchdog_alarms.<name>]` with `task_brief_file` |
-| Silent drift detector | `[monitor.watchdog_alarms.<name>]` with `emit_idle = false` |
+| One-off task reminder | `codex-team watch alarm create ...` (runtime) |
+| Permanent project-wide reminder | `[monitor.watchdog_alarms.<ws>.<name>]` (config) |
+| Silent drift detector | Any alarm with `emit_idle = false` (the default) |
 | Faster turn-stuck detection | `[heartbeat].turn_stuck_seconds` |
 | Different compact threshold | `[compaction].threshold_tokens` |
 | Pin a specific Codex binary | `[daemon].codex_bin` |
@@ -302,11 +356,14 @@ See `watch-codex-team` §Watchdog for usage patterns and when to arm this stream
 | "Cut `watchdog_interval_seconds` to 30 for fast feedback." | Fast feedback = `events` stream. Watchdog is low-frequency reminder. |
 | "Define an alarm so I'll know the moment a session breaks." | That's the `events` stream's job (`session-down`, `turn-err`). Watchdog is reminder + self-check. |
 | "Add `emit_idle = true` to every alarm." | Only for fixed-cadence briefings. Otherwise silence-on-no-signal is a feature. |
+| "I'll write a runtime alarm that spans multiple workspaces." | Alarms are workspace-scoped by design. Create one per workspace. |
 | "Edit config then restart the daemon." | Most changes hot-reload. Try `daemon reload-config` first. |
+| "I'll put one-off task reminders in `config.toml`." | Use the runtime CLI (`watch alarm create`). Config alarms are for permanent, multi-session setups. |
 
 ## Cross-references
 
 - Session lifecycle: `manage-codex-team`
 - When to arm the watchdog stream at all: `watch-codex-team` §Watchdog
-- Quick alarm wiring: `/codex-team:watch`
+- Quick runtime alarm + Monitor arming: `/codex-team:watch`
+- Workspace resolution + concept: `using-codex-team` §Workspaces
 - Failure triage: `recover-codex-team`

@@ -1,14 +1,20 @@
-import { InvalidRequest, WireError } from "./errors";
+import { InvalidRequest, ProtocolError, WireError } from "./errors";
 
 export interface RequestMessage {
+  v: number;
   id: string;
   cmd: string;
+  workspace: string;
+  clientId: string | null;
+  allWorkspaces: boolean;
   params: Record<string, unknown>;
 }
 
 export interface ResponseMessage {
+  v?: number;
   id: string;
   ok: boolean;
+  workspace?: string;
   data?: Record<string, unknown>;
   error?: WireError;
 }
@@ -29,9 +35,20 @@ export function decodeRequest(line: string): RequestMessage {
   if (typeof payload.id !== "string" || typeof payload.cmd !== "string") {
     throw new InvalidRequest("request must include string id and cmd");
   }
+  const v = Number(payload.v);
+  if (v !== 2) {
+    throw new ProtocolError("request must include protocol v=2");
+  }
+  if (typeof payload.workspace !== "string" || !payload.workspace) {
+    throw new ProtocolError("request must include workspace");
+  }
   return {
+    v,
     id: payload.id,
     cmd: payload.cmd,
+    workspace: payload.workspace,
+    clientId: payload.clientId == null ? null : String(payload.clientId),
+    allWorkspaces: Boolean(payload.allWorkspaces),
     params: isObject(payload.params) ? payload.params : {},
   };
 }

@@ -23,9 +23,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/cli.ts
-var import_node_fs2 = __toESM(require("fs"));
+var import_node_fs3 = __toESM(require("fs"));
 var import_node_net = __toESM(require("net"));
-var import_node_path3 = __toESM(require("path"));
+var import_node_path4 = __toESM(require("path"));
 var import_node_readline = __toESM(require("readline"));
 var import_node_child_process = require("child_process");
 
@@ -53,6 +53,10 @@ var InvalidRequest = class extends CodexTeamError {
   code = "E_INVALID";
   exitCode = 2;
 };
+var ProtocolError = class extends CodexTeamError {
+  code = "E_PROTOCOL";
+  exitCode = 2;
+};
 var DaemonNotRunning = class extends CodexTeamError {
   code = "E_DAEMON_DOWN";
   exitCode = 4;
@@ -67,6 +71,10 @@ var SessionNotFound = class extends CodexTeamError {
 };
 var SessionExists = class extends CodexTeamError {
   code = "E_EXISTS";
+  exitCode = 3;
+};
+var WrongWorkspace = class extends CodexTeamError {
+  code = "E_WRONG_WORKSPACE";
   exitCode = 3;
 };
 var SessionBusy = class extends CodexTeamError {
@@ -96,10 +104,12 @@ var CodexCliMissing = class extends CodexTeamError {
 var errorClasses = {
   E_CONFIG: ConfigError,
   E_INVALID: InvalidRequest,
+  E_PROTOCOL: ProtocolError,
   E_DAEMON_DOWN: DaemonNotRunning,
   E_DAEMON_UP: DaemonAlreadyRunning,
   E_NOT_FOUND: SessionNotFound,
   E_EXISTS: SessionExists,
+  E_WRONG_WORKSPACE: WrongWorkspace,
   E_BUSY: SessionBusy,
   E_ERRORED: SessionErrored,
   E_QUEUE_FULL: QueueFull,
@@ -147,8 +157,17 @@ function xdgRuntimeDir() {
 function defaultSocketPath() {
   return import_node_path.default.join(xdgRuntimeDir(), "daemon.sock");
 }
-function sessionDir(dataDir, name) {
-  return import_node_path.default.join(dataDir, "sessions", name);
+function sessionDir(dataDir, workspace, name) {
+  return import_node_path.default.join(dataDir, "sessions", workspace, name);
+}
+function clientsDir(dataDir) {
+  return import_node_path.default.join(dataDir, "clients");
+}
+function alarmsDir(dataDir) {
+  return import_node_path.default.join(dataDir, "alarms");
+}
+function workspaceAlarmsDir(dataDir, workspace) {
+  return import_node_path.default.join(alarmsDir(dataDir), workspace);
 }
 
 // src/protocol.ts
@@ -161,9 +180,20 @@ function decodeRequest(line) {
   if (typeof payload.id !== "string" || typeof payload.cmd !== "string") {
     throw new InvalidRequest("request must include string id and cmd");
   }
+  const v = Number(payload.v);
+  if (v !== 2) {
+    throw new ProtocolError("request must include protocol v=2");
+  }
+  if (typeof payload.workspace !== "string" || !payload.workspace) {
+    throw new ProtocolError("request must include workspace");
+  }
   return {
+    v,
     id: payload.id,
     cmd: payload.cmd,
+    workspace: payload.workspace,
+    clientId: payload.clientId == null ? null : String(payload.clientId),
+    allWorkspaces: Boolean(payload.allWorkspaces),
     params: isObject(payload.params) ? payload.params : {}
   };
 }
@@ -242,7 +272,8 @@ var DEFAULT_CONFIG = {
     watchdogEmitIdle: false,
     watchdogTemplate: "",
     watchdogTemplateFile: "",
-    watchdogAlarms: {}
+    watchdogAlarms: {},
+    watchdogWorkspaceAlarms: {}
   },
   heartbeat: {
     intervalSeconds: 60,
@@ -292,11 +323,7 @@ function mergeConfig(base, raw) {
   if (isObject(raw.monitor)) {
     const alarmsRaw = isObject(raw.monitor.watchdog_alarms) ? raw.monitor.watchdog_alarms : isObject(raw.monitor.watchdogAlarms) ? raw.monitor.watchdogAlarms : null;
     if (alarmsRaw) {
-      for (const [name, value] of Object.entries(alarmsRaw)) {
-        const alarm = cloneAlarm();
-        applySection(alarm, value, watchdogAlarmFieldKinds);
-        base.monitor.watchdogAlarms[name] = alarm;
-      }
+      applyWatchdogAlarms(base.monitor, alarmsRaw);
     }
   }
   applySection(base.heartbeat, raw.heartbeat, heartbeatFieldKinds);
@@ -335,6 +362,22 @@ function cloneAlarm() {
     template: "",
     templateFile: ""
   };
+}
+function applyWatchdogAlarms(monitor, raw) {
+  for (const [workspace, value] of Object.entries(raw)) {
+    if (!isObject(value)) {
+      continue;
+    }
+    monitor.watchdogWorkspaceAlarms[workspace] = monitor.watchdogWorkspaceAlarms[workspace] || {};
+    for (const [alarmName, alarmValue] of Object.entries(value)) {
+      if (!isObject(alarmValue)) {
+        continue;
+      }
+      const alarm = cloneAlarm();
+      applySection(alarm, alarmValue, watchdogAlarmFieldKinds);
+      monitor.watchdogWorkspaceAlarms[workspace][alarmName] = alarm;
+    }
+  }
 }
 var daemonFieldKinds = {
   socketPath: "string",
@@ -402,7 +445,8 @@ var monitorFieldKinds = {
   watchdogEmitIdle: "boolean",
   watchdogTemplate: "string",
   watchdogTemplateFile: "string",
-  watchdogAlarms: "object"
+  watchdogAlarms: "object",
+  watchdogWorkspaceAlarms: "object"
 };
 var watchdogAlarmFieldKinds = {
   enabled: "boolean",
@@ -433,6 +477,9 @@ function applySection(target, source, fieldKinds) {
   for (const [key, value] of Object.entries(source)) {
     const normalizedKey = resolveFieldKey(key, fieldKinds);
     if (!normalizedKey) {
+      continue;
+    }
+    if (normalizedKey === "watchdogAlarms" || normalizedKey === "watchdogWorkspaceAlarms") {
       continue;
     }
     const kind = fieldKinds[normalizedKey];
@@ -538,6 +585,21 @@ function validateConfig(cfg) {
     }
     assertPositiveInt(alarm.intervalSeconds, `monitor.watchdog_alarms.${name}.interval_seconds`);
     assertPositiveInt(alarm.taskBriefHeadLines, `monitor.watchdog_alarms.${name}.task_brief_head_lines`);
+  }
+  for (const [workspace, alarms] of Object.entries(cfg.monitor.watchdogWorkspaceAlarms)) {
+    if (!workspace.trim() || workspace === "*") {
+      throw new ConfigError(`invalid watchdog workspace: ${workspace}`);
+    }
+    for (const [name, alarm] of Object.entries(alarms)) {
+      if (!name.trim()) {
+        throw new ConfigError(`watchdog alarm name cannot be empty in workspace ${workspace}`);
+      }
+      if (name === "default") {
+        throw new ConfigError(`watchdog alarm name 'default' is reserved in workspace ${workspace}`);
+      }
+      assertPositiveInt(alarm.intervalSeconds, `monitor.watchdog_alarms.${workspace}.${name}.interval_seconds`);
+      assertPositiveInt(alarm.taskBriefHeadLines, `monitor.watchdog_alarms.${workspace}.${name}.task_brief_head_lines`);
+    }
   }
   assertPositiveInt(cfg.heartbeat.intervalSeconds, "heartbeat.interval_seconds");
   assertPositiveInt(cfg.heartbeat.turnStuckSeconds, "heartbeat.turn_stuck_seconds");
@@ -664,6 +726,84 @@ function normalizeApprovalPolicy(value) {
   return normalized ? normalized.replace(/_/g, "-") : null;
 }
 
+// src/workspace.ts
+var import_node_crypto = __toESM(require("crypto"));
+var import_node_fs2 = __toESM(require("fs"));
+var import_node_os2 = __toESM(require("os"));
+var import_node_path3 = __toESM(require("path"));
+var DEFAULT_WORKSPACE = "default";
+var WORKSPACE_RE = /^[a-zA-Z0-9_.-]{1,64}$/;
+function validateWorkspace(value) {
+  const workspace = value.trim();
+  if (!workspace || workspace === "*" || !WORKSPACE_RE.test(workspace)) {
+    throw new InvalidRequest(
+      `invalid workspace ${JSON.stringify(value)}; expected ${WORKSPACE_RE.source} and not "*"`
+    );
+  }
+  return workspace;
+}
+function safeWorkspace(value) {
+  return validateWorkspace(value || DEFAULT_WORKSPACE);
+}
+function deriveProjectWorkspace(projectDir) {
+  const digest = import_node_crypto.default.createHash("sha1").update(import_node_path3.default.resolve(projectDir)).digest("hex").slice(0, 8);
+  return `proj-${digest}`;
+}
+function workspaceEnvPath(projectDir) {
+  return import_node_path3.default.join(projectDir, ".codex-team", "workspace.env");
+}
+function readWorkspaceEnvFile(projectDir) {
+  if (!projectDir) {
+    return null;
+  }
+  const filePath = workspaceEnvPath(projectDir);
+  if (!import_node_fs2.default.existsSync(filePath)) {
+    return null;
+  }
+  const raw = import_node_fs2.default.readFileSync(filePath, "utf8");
+  for (const line of raw.split(/\r?\n/)) {
+    const match = line.match(/^\s*CODEX_TEAM_WORKSPACE\s*=\s*["']?([^"'\s#]+)["']?\s*(?:#.*)?$/);
+    if (match) {
+      return validateWorkspace(match[1]);
+    }
+  }
+  return null;
+}
+function resolveWorkspace(input = {}) {
+  const env = input.env || process.env;
+  if (input.explicit) {
+    return validateWorkspace(input.explicit);
+  }
+  if (env.CODEX_TEAM_WORKSPACE) {
+    return validateWorkspace(env.CODEX_TEAM_WORKSPACE);
+  }
+  const projectDir = input.projectDir || env.CLAUDE_PROJECT_DIR || "";
+  const fromFile = readWorkspaceEnvFile(projectDir);
+  if (fromFile) {
+    return fromFile;
+  }
+  if (projectDir) {
+    return deriveProjectWorkspace(projectDir);
+  }
+  return DEFAULT_WORKSPACE;
+}
+function workspaceSessionKey(workspace, name) {
+  return `${workspace}\0${name}`;
+}
+function workspaceDisplayName(workspace, name) {
+  return `${workspace}/${name}`;
+}
+function makeClientId(input) {
+  const seed = [
+    input.workspace,
+    input.sessionId || "",
+    input.hostname || import_node_os2.default.hostname(),
+    String(input.pid || process.pid),
+    String(input.startedAtMs || Date.now())
+  ].join("|");
+  return `c-${import_node_crypto.default.createHash("sha1").update(seed).digest("hex").slice(0, 12)}`;
+}
+
 // src/cli.ts
 function pidAlive(pid) {
   try {
@@ -674,19 +814,59 @@ function pidAlive(pid) {
   }
 }
 function diagnoseStalePid(dataDir) {
-  const pidPath = import_node_path3.default.join(dataDir, "daemon.pid");
-  if (!import_node_fs2.default.existsSync(pidPath)) {
+  const pidPath = import_node_path4.default.join(dataDir, "daemon.pid");
+  if (!import_node_fs3.default.existsSync(pidPath)) {
     return { stale: false, pid: null, pidPath };
   }
-  const raw = import_node_fs2.default.readFileSync(pidPath, "utf8").trim();
+  const raw = import_node_fs3.default.readFileSync(pidPath, "utf8").trim();
   const pid = Number(raw);
   if (!Number.isFinite(pid) || pid <= 0 || !pidAlive(pid)) {
     return { stale: true, pid: Number.isFinite(pid) ? pid : null, pidPath };
   }
   return { stale: false, pid, pidPath };
 }
+function defaultRequestMeta() {
+  return {
+    workspace: resolveWorkspace(),
+    clientId: process.env.CODEX_TEAM_CLIENT_ID || null,
+    allWorkspaces: false
+  };
+}
+function extractGlobalArgs(argv) {
+  const out = [];
+  let workspaceFlag = null;
+  let allWorkspaces = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === "--all-workspaces") {
+      allWorkspaces = true;
+      continue;
+    }
+    if (token === "--workspace") {
+      index += 1;
+      workspaceFlag = argv[index] || "";
+      continue;
+    }
+    if (token.startsWith("--workspace=")) {
+      workspaceFlag = token.slice("--workspace=".length);
+      continue;
+    }
+    out.push(token);
+  }
+  if (workspaceFlag && allWorkspaces) {
+    throw new Error("--workspace and --all-workspaces are mutually exclusive");
+  }
+  return { argv: out, workspaceFlag, allWorkspaces };
+}
+function resolveRequestMeta(globals) {
+  return {
+    workspace: validateWorkspace(resolveWorkspace({ explicit: globals.workspaceFlag })),
+    clientId: process.env.CODEX_TEAM_CLIENT_ID || null,
+    allWorkspaces: globals.allWorkspaces
+  };
+}
 async function socketReady(socketPath) {
-  if (!import_node_fs2.default.existsSync(socketPath)) {
+  if (!import_node_fs3.default.existsSync(socketPath)) {
     return false;
   }
   return await new Promise((resolve) => {
@@ -707,7 +887,7 @@ async function socketReady(socketPath) {
     });
   });
 }
-async function sendRequest(socketPath, cmd, params) {
+async function sendRequest(socketPath, cmd, params, meta = defaultRequestMeta()) {
   return await new Promise((resolve, reject) => {
     const socket = import_node_net.default.createConnection(socketPath);
     socket.setEncoding("utf8");
@@ -717,7 +897,7 @@ async function sendRequest(socketPath, cmd, params) {
       reject(new DaemonNotRunning(`no daemon at ${socketPath}: ${error.message}`));
     });
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ id: cryptoId(), cmd, params })}
+      socket.write(`${JSON.stringify({ v: 2, id: cryptoId(), cmd, workspace: meta.workspace, clientId: meta.clientId, allWorkspaces: meta.allWorkspaces, params })}
 `);
     });
     void (async () => {
@@ -738,7 +918,7 @@ async function sendRequest(socketPath, cmd, params) {
     })();
   });
 }
-async function streamSubscribe(socketPath, cmd) {
+async function streamSubscribe(socketPath, cmd, meta) {
   return await new Promise((resolve) => {
     const socket = import_node_net.default.createConnection(socketPath);
     socket.setEncoding("utf8");
@@ -747,7 +927,7 @@ async function streamSubscribe(socketPath, cmd) {
       resolve(4);
     });
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ id: cryptoId(), cmd, params: {} })}
+      socket.write(`${JSON.stringify({ v: 2, id: cryptoId(), cmd, workspace: meta.workspace, clientId: meta.clientId, allWorkspaces: meta.allWorkspaces, params: {} })}
 `);
     });
     socket.on("data", (chunk) => {
@@ -756,7 +936,7 @@ async function streamSubscribe(socketPath, cmd) {
     socket.once("close", () => resolve(0));
   });
 }
-async function streamHistorySubscribe(socketPath, params) {
+async function streamHistorySubscribe(socketPath, params, meta) {
   return await new Promise((resolve) => {
     const socket = import_node_net.default.createConnection(socketPath);
     socket.setEncoding("utf8");
@@ -765,7 +945,7 @@ async function streamHistorySubscribe(socketPath, params) {
       resolve(4);
     });
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ id: cryptoId(), cmd: "history.subscribe", params })}
+      socket.write(`${JSON.stringify({ v: 2, id: cryptoId(), cmd: "history.subscribe", workspace: meta.workspace, clientId: meta.clientId, allWorkspaces: meta.allWorkspaces, params })}
 `);
     });
     const rl = import_node_readline.default.createInterface({ input: socket, crlfDelay: Infinity });
@@ -795,21 +975,21 @@ async function streamHistorySubscribe(socketPath, params) {
   });
 }
 async function followFile(filePath, startAtEnd = false) {
-  import_node_fs2.default.mkdirSync(import_node_path3.default.dirname(filePath), { recursive: true });
-  if (!import_node_fs2.default.existsSync(filePath)) {
-    import_node_fs2.default.writeFileSync(filePath, "", "utf8");
+  import_node_fs3.default.mkdirSync(import_node_path4.default.dirname(filePath), { recursive: true });
+  if (!import_node_fs3.default.existsSync(filePath)) {
+    import_node_fs3.default.writeFileSync(filePath, "", "utf8");
   }
-  let offset = startAtEnd ? import_node_fs2.default.statSync(filePath).size : 0;
+  let offset = startAtEnd ? import_node_fs3.default.statSync(filePath).size : 0;
   while (true) {
-    const size = import_node_fs2.default.statSync(filePath).size;
+    const size = import_node_fs3.default.statSync(filePath).size;
     if (size > offset) {
-      const fd = import_node_fs2.default.openSync(filePath, "r");
+      const fd = import_node_fs3.default.openSync(filePath, "r");
       try {
         const buffer = Buffer.alloc(size - offset);
-        import_node_fs2.default.readSync(fd, buffer, 0, buffer.length, offset);
+        import_node_fs3.default.readSync(fd, buffer, 0, buffer.length, offset);
         process.stdout.write(buffer.toString("utf8"));
       } finally {
-        import_node_fs2.default.closeSync(fd);
+        import_node_fs3.default.closeSync(fd);
       }
       offset = size;
     }
@@ -926,9 +1106,34 @@ function parseCli(argv) {
   }
   if (group === "daemon") {
     const opts = parseOptions(rest, {
-      boolean: ["follow"]
+      boolean: ["follow", "force"]
     });
     return { group, action, args: opts };
+  }
+  if (group === "workspace") {
+    return { group, action, args: { name: rest[0] || "", _: rest } };
+  }
+  if (group === "client") {
+    const opts = parseOptions(rest, {
+      string: ["client-id", "session-id", "hostname", "pid", "project-dir", "started-at"]
+    });
+    return { group, action, args: { ...opts, id: opts._[0] || "" } };
+  }
+  if (group === "watch" && action === "alarm") {
+    const [subaction, ...alarmRest] = rest;
+    const opts = parseOptions(alarmRest, {
+      boolean: ["emit-idle", "disabled"],
+      string: [
+        "interval",
+        "interval-seconds",
+        "task-brief",
+        "task-brief-file",
+        "task-brief-head-lines",
+        "template",
+        "template-file"
+      ]
+    });
+    return { group, action, subaction: subaction || "list", args: { ...opts, name: opts._[0] } };
   }
   if (group === "monitor" && (action === "events" || action === "watchdog")) {
     return { group, action };
@@ -982,17 +1187,17 @@ var CliClient = class {
     if (await socketReady(this.socketPath)) {
       return;
     }
-    if (import_node_fs2.default.existsSync(this.socketPath)) {
-      import_node_fs2.default.unlinkSync(this.socketPath);
+    if (import_node_fs3.default.existsSync(this.socketPath)) {
+      import_node_fs3.default.unlinkSync(this.socketPath);
     }
     const cfg = loadConfig();
     const dataDir = resolveDataDir(cfg);
     cfg.daemon.dataDir = dataDir;
-    import_node_fs2.default.mkdirSync(dataDir, { recursive: true });
+    import_node_fs3.default.mkdirSync(dataDir, { recursive: true });
     const stale = diagnoseStalePid(dataDir);
     if (stale.stale) {
       try {
-        import_node_fs2.default.unlinkSync(stale.pidPath);
+        import_node_fs3.default.unlinkSync(stale.pidPath);
       } catch (error) {
         throw new DaemonNotRunning(
           `stale pid file at ${stale.pidPath} could not be removed automatically: ${error.message}`,
@@ -1000,8 +1205,8 @@ var CliClient = class {
         );
       }
     }
-    const errPath = import_node_path3.default.join(dataDir, "daemon-startup.err");
-    const errFd = import_node_fs2.default.openSync(errPath, "a");
+    const errPath = import_node_path4.default.join(dataDir, "daemon-startup.err");
+    const errFd = import_node_fs3.default.openSync(errPath, "a");
     try {
       const child = (0, import_node_child_process.spawn)(process.execPath, [process.argv[1] || "", "__daemon"], {
         detached: true,
@@ -1009,7 +1214,7 @@ var CliClient = class {
       });
       child.unref();
     } finally {
-      import_node_fs2.default.closeSync(errFd);
+      import_node_fs3.default.closeSync(errFd);
     }
     for (let attempt = 0; attempt < 50; attempt += 1) {
       if (await socketReady(this.socketPath)) {
@@ -1017,7 +1222,7 @@ var CliClient = class {
       }
       await sleep(100);
     }
-    const tail = import_node_fs2.default.existsSync(errPath) ? import_node_fs2.default.readFileSync(errPath, "utf8").split(/\r?\n/).slice(-40).join("\n") : "";
+    const tail = import_node_fs3.default.existsSync(errPath) ? import_node_fs3.default.readFileSync(errPath, "utf8").split(/\r?\n/).slice(-40).join("\n") : "";
     let hint = `daemon did not become ready at ${this.socketPath}. Check ${errPath} for the daemon stderr.`;
     if (tail) {
       hint += `
@@ -1043,7 +1248,7 @@ ${tail}
       });
     }
     if (typeof args.promptFile === "string" && args.promptFile) {
-      return import_node_fs2.default.readFileSync(args.promptFile, "utf8");
+      return import_node_fs3.default.readFileSync(args.promptFile, "utf8");
     }
     return String(args.text || "");
   }
@@ -1051,15 +1256,18 @@ ${tail}
     if (typeof value !== "string" || !value) {
       return null;
     }
-    return import_node_fs2.default.readFileSync(value, "utf8");
+    return import_node_fs3.default.readFileSync(value, "utf8");
   }
   async run(argv = process.argv.slice(2)) {
-    const parsed = parseCli(argv);
+    const globals = extractGlobalArgs(argv);
+    const meta = resolveRequestMeta(globals);
+    const parsed = parseCli(globals.argv);
     if (parsed.group === "monitor") {
       await this.ensureDaemon();
-      return await streamSubscribe(this.socketPath, `monitor.${parsed.action}.subscribe`);
+      return await streamSubscribe(this.socketPath, `monitor.${parsed.action}.subscribe`, meta);
     }
-    if (!(parsed.group === "daemon" && (parsed.action === "start" || parsed.action === "restart"))) {
+    const noAutostart = process.env.CODEX_TEAM_NO_AUTOSTART === "1";
+    if (!noAutostart && !(parsed.group === "daemon" && (parsed.action === "start" || parsed.action === "restart"))) {
       await this.ensureDaemon();
     }
     let response;
@@ -1068,7 +1276,7 @@ ${tail}
       response = { ok: true, data: { started: true } };
     } else if (parsed.group === "daemon" && parsed.action === "restart") {
       try {
-        await sendRequest(this.socketPath, "daemon.stop", {});
+        await sendRequest(this.socketPath, "daemon.stop", { force: true }, meta);
       } catch {
       }
       await sleep(300);
@@ -1076,9 +1284,9 @@ ${tail}
       response = { ok: true, data: { restarted: true } };
     } else if (parsed.group === "daemon" && parsed.action === "logs" && parsed.args.follow) {
       const cfg = loadConfig();
-      return await followFile(import_node_path3.default.join(resolveDataDir(cfg), "daemon.log"));
+      return await followFile(import_node_path4.default.join(resolveDataDir(cfg), "daemon.log"));
     } else {
-      response = await this.handle(parsed);
+      response = await this.handle(parsed, meta);
     }
     if (typeof response === "number") {
       return response;
@@ -1104,7 +1312,7 @@ ${tail}
     }
     return error.exitCode;
   }
-  async handle(parsed) {
+  async handle(parsed, meta) {
     if (parsed.group === "session") {
       const args = parsed.args;
       const cmd = `session.${parsed.action.replace(/-/g, "_")}`;
@@ -1135,10 +1343,10 @@ ${tail}
       } else if (parsed.action === "read") {
         params.includeTurns = Boolean(args.includeTurns);
       }
-      return await sendRequest(this.socketPath, cmd, params);
+      return await sendRequest(this.socketPath, cmd, params, meta);
     }
     if (parsed.group === "send") {
-      const outputSchema = typeof parsed.args.outputSchemaFile === "string" && parsed.args.outputSchemaFile ? JSON.parse(import_node_fs2.default.readFileSync(parsed.args.outputSchemaFile, "utf8")) : null;
+      const outputSchema = typeof parsed.args.outputSchemaFile === "string" && parsed.args.outputSchemaFile ? JSON.parse(import_node_fs3.default.readFileSync(parsed.args.outputSchemaFile, "utf8")) : null;
       return await sendRequest(this.socketPath, "send", {
         name: parsed.args.name,
         text: await this.readPrompt(parsed.args),
@@ -1150,13 +1358,13 @@ ${tail}
         serviceTier: parsed.args.serviceTier,
         summary: parsed.args.summary,
         outputSchema
-      });
+      }, meta);
     }
     if (parsed.group === "interrupt") {
-      return await sendRequest(this.socketPath, "interrupt", { name: parsed.name });
+      return await sendRequest(this.socketPath, "interrupt", { name: parsed.name }, meta);
     }
     if (parsed.group === "compact") {
-      return await sendRequest(this.socketPath, "compact", { name: parsed.name });
+      return await sendRequest(this.socketPath, "compact", { name: parsed.name }, meta);
     }
     if (parsed.group === "history") {
       if (parsed.args.follow) {
@@ -1166,7 +1374,7 @@ ${tail}
           since: parsed.args.since,
           sinceTurnId: parsed.args.sinceTurnId,
           format: parsed.args.format || "md"
-        });
+        }, meta);
       }
       return await sendRequest(this.socketPath, "history.get", {
         name: parsed.args.name,
@@ -1174,40 +1382,189 @@ ${tail}
         since: parsed.args.since,
         sinceTurnId: parsed.args.sinceTurnId,
         format: parsed.args.format || "md"
-      });
+      }, meta);
     }
     if (parsed.group === "tail") {
       return await sendRequest(this.socketPath, "history.tail_stderr", {
         name: parsed.args.name,
         lines: Number(parsed.args.lines || 200)
-      });
+      }, meta);
     }
     if (parsed.group === "queue") {
       return await sendRequest(this.socketPath, `queue.${parsed.action.replace(/-/g, "_")}`, {
         name: parsed.args.name,
         wait: Boolean(parsed.args.wait)
-      });
+      }, meta);
     }
     if (parsed.group === "health") {
-      return await sendRequest(this.socketPath, `health.${parsed.action}`, {});
+      return await sendRequest(this.socketPath, `health.${parsed.action}`, {}, meta);
+    }
+    if (parsed.group === "workspace") {
+      if (parsed.action === "list") {
+        return await sendRequest(this.socketPath, "workspace.list", {}, { ...meta, allWorkspaces: true });
+      }
+      return await sendRequest(this.socketPath, "workspace.show", { name: parsed.args.name }, meta);
+    }
+    if (parsed.group === "client") {
+      if (parsed.action === "list") {
+        return await sendRequest(this.socketPath, "client.list", {}, { ...meta, allWorkspaces: true });
+      }
+      if (parsed.action === "register") {
+        return await sendRequest(this.socketPath, "client.register", {
+          clientId: parsed.args.clientId,
+          sessionId: parsed.args.sessionId,
+          hostname: parsed.args.hostname,
+          pid: parsed.args.pid == null ? null : Number(parsed.args.pid),
+          claudeProjectDir: parsed.args.projectDir,
+          startedAt: parsed.args.startedAt
+        }, meta);
+      }
+      if (parsed.action === "detach") {
+        return await sendRequest(this.socketPath, "client.detach", {
+          clientId: parsed.args.id || parsed.args.clientId,
+          sessionId: parsed.args.sessionId
+        }, meta);
+      }
+    }
+    if (parsed.group === "watch") {
+      if (parsed.subaction === "list") {
+        return await sendRequest(this.socketPath, "watch.alarm.list", {}, meta);
+      }
+      if (parsed.subaction === "create") {
+        return await sendRequest(this.socketPath, "watch.alarm.create", {
+          name: parsed.args.name,
+          enabled: !Boolean(parsed.args.disabled),
+          intervalSeconds: parsed.args.intervalSeconds == null && parsed.args.interval == null ? void 0 : Number(parsed.args.intervalSeconds ?? parsed.args.interval),
+          taskBriefFile: parsed.args.taskBriefFile || parsed.args.taskBrief,
+          taskBriefHeadLines: parsed.args.taskBriefHeadLines == null ? void 0 : Number(parsed.args.taskBriefHeadLines),
+          emitIdle: Boolean(parsed.args.emitIdle),
+          template: parsed.args.template,
+          templateFile: parsed.args.templateFile
+        }, meta);
+      }
+      if (parsed.subaction === "delete") {
+        return await sendRequest(this.socketPath, "watch.alarm.delete", {
+          name: parsed.args.name
+        }, meta);
+      }
     }
     if (parsed.group === "daemon") {
-      return await sendRequest(this.socketPath, `daemon.${parsed.action.replace(/-/g, "_")}`, {});
+      return await sendRequest(this.socketPath, `daemon.${parsed.action.replace(/-/g, "_")}`, {
+        force: Boolean(parsed.args.force)
+      }, meta);
     }
     throw new Error("unreachable");
   }
 };
 
 // src/daemon.ts
-var import_node_fs9 = __toESM(require("fs"));
-var import_node_path8 = __toESM(require("path"));
+var import_node_fs12 = __toESM(require("fs"));
+var import_node_path11 = __toESM(require("path"));
 
 // src/server.ts
-var import_node_fs8 = __toESM(require("fs"));
+var import_node_fs11 = __toESM(require("fs"));
 var import_node_net2 = __toESM(require("net"));
-var import_node_path7 = __toESM(require("path"));
+var import_node_path10 = __toESM(require("path"));
 var import_node_readline3 = __toESM(require("readline"));
 var import_node_events = require("events");
+var import_node_os4 = __toESM(require("os"));
+
+// src/clients.ts
+var import_node_fs4 = __toESM(require("fs"));
+var import_node_os3 = __toESM(require("os"));
+var import_node_path5 = __toESM(require("path"));
+var ClientStore = class {
+  constructor(dataDir) {
+    this.dataDir = dataDir;
+  }
+  dataDir;
+  dir() {
+    return clientsDir(this.dataDir);
+  }
+  filePath(clientId) {
+    return import_node_path5.default.join(this.dir(), `${safeClientId(clientId)}.json`);
+  }
+  register(record) {
+    import_node_fs4.default.mkdirSync(this.dir(), { recursive: true });
+    import_node_fs4.default.writeFileSync(this.filePath(record.clientId), JSON.stringify(record), "utf8");
+    return record;
+  }
+  detach(clientId) {
+    const filePath = this.filePath(clientId);
+    if (!import_node_fs4.default.existsSync(filePath)) {
+      return false;
+    }
+    import_node_fs4.default.unlinkSync(filePath);
+    return true;
+  }
+  detachBySession(workspace, sessionId) {
+    const detached = [];
+    for (const record of this.list()) {
+      if (record.workspace === workspace && record.sessionId === sessionId && this.detach(record.clientId)) {
+        detached.push(record);
+      }
+    }
+    return detached;
+  }
+  list() {
+    if (!import_node_fs4.default.existsSync(this.dir())) {
+      return [];
+    }
+    const records = [];
+    for (const file of import_node_fs4.default.readdirSync(this.dir())) {
+      if (!file.endsWith(".json")) {
+        continue;
+      }
+      const raw = import_node_fs4.default.readFileSync(import_node_path5.default.join(this.dir(), file), "utf8");
+      try {
+        const parsed = JSON.parse(raw);
+        if (isObject(parsed)) {
+          records.push(normalizeClient(parsed));
+        }
+      } catch {
+      }
+    }
+    return records;
+  }
+  sweepStale(now = Date.now()) {
+    const stale = [];
+    for (const record of this.list()) {
+      const started = Date.parse(record.startedAt);
+      const olderThanSevenDays = Number.isFinite(started) && now - started > 7 * 24 * 60 * 60 * 1e3;
+      const pidDead = record.pid != null && record.pid > 0 && !pidAlive2(record.pid);
+      if (pidDead || olderThanSevenDays) {
+        this.detach(record.clientId);
+        stale.push(record);
+      }
+    }
+    return stale;
+  }
+};
+function safeClientId(clientId) {
+  if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(clientId)) {
+    throw new InvalidRequest(`invalid client id: ${clientId}`);
+  }
+  return clientId;
+}
+function normalizeClient(raw) {
+  return {
+    clientId: String(raw.clientId ?? raw.client_id ?? ""),
+    workspace: String(raw.workspace ?? "default"),
+    hostname: String(raw.hostname ?? import_node_os3.default.hostname()),
+    pid: raw.pid == null ? null : Number(raw.pid),
+    startedAt: String(raw.startedAt ?? raw.started_at ?? (/* @__PURE__ */ new Date()).toISOString()),
+    claudeProjectDir: raw.claudeProjectDir == null && raw.claude_project_dir == null ? null : String(raw.claudeProjectDir ?? raw.claude_project_dir),
+    sessionId: raw.sessionId == null && raw.session_id == null ? null : String(raw.sessionId ?? raw.session_id)
+  };
+}
+function pidAlive2(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
 
 // src/compaction.ts
 var CompactionMonitor = class {
@@ -1228,12 +1585,14 @@ var CompactionMonitor = class {
       return;
     }
     const level = Math.max(1, Math.floor(metric / threshold));
-    const previousLevel = this.suggestedLevel.get(name) || 0;
+    const key = `${usage.workspace || "default"}\0${name}`;
+    const previousLevel = this.suggestedLevel.get(key) || 0;
     if (level <= previousLevel) {
       return;
     }
-    this.suggestedLevel.set(name, level);
+    this.suggestedLevel.set(key, level);
     this.eventBus.publish("events", {
+      workspace: usage.workspace || "default",
       kind: "compact-suggest",
       session: name,
       tokens: metric,
@@ -1245,8 +1604,8 @@ var CompactionMonitor = class {
       threshold
     });
   }
-  clear(name) {
-    this.suggestedLevel.delete(name);
+  clear(name, workspace = "default") {
+    this.suggestedLevel.delete(`${workspace}\0${name}`);
   }
 };
 
@@ -1338,15 +1697,23 @@ var EventBus = class {
       buffer.splice(0, buffer.length - this.maxBuffer);
     }
     this.buffers.set(stream, buffer);
-    for (const queue of this.subs.get(stream) || []) {
-      queue.push(event);
+    for (const sub of this.subs.get(stream) || []) {
+      if (eventMatchesSubscriber(event, sub)) {
+        sub.queue.push(event);
+      }
     }
     return event;
   }
-  async subscribe(stream, sinceSeq = 0) {
+  async subscribe(stream, sinceSeq = 0, options = {}) {
     const queue = new AsyncQueue(this.subscriberQueueMax);
+    const sub = {
+      queue,
+      workspace: options.workspace || null,
+      clientId: options.clientId || null,
+      allWorkspaces: Boolean(options.allWorkspaces)
+    };
     for (const event of this.buffers.get(stream) || []) {
-      if (event.seq > sinceSeq) {
+      if (event.seq > sinceSeq && eventMatchesSubscriber(event, sub)) {
         queue.push(event);
       }
     }
@@ -1355,46 +1722,74 @@ var EventBus = class {
       subs = /* @__PURE__ */ new Set();
       this.subs.set(stream, subs);
     }
-    subs.add(queue);
+    subs.add(sub);
     return queue;
   }
   async unsubscribe(stream, queue) {
-    this.subs.get(stream)?.delete(queue);
+    const subs = this.subs.get(stream);
+    if (subs) {
+      for (const sub of subs) {
+        if (sub.queue === queue) {
+          subs.delete(sub);
+          break;
+        }
+      }
+    }
     queue.close();
+  }
+  async detachClient(clientId) {
+    let detached = 0;
+    for (const subs of this.subs.values()) {
+      for (const sub of [...subs]) {
+        if (sub.clientId === clientId) {
+          subs.delete(sub);
+          sub.queue.close(new Error(`client ${clientId} detached`));
+          detached += 1;
+        }
+      }
+    }
+    return detached;
   }
   lastSeq(stream) {
     return this.seqs.get(stream) || 0;
   }
 };
+function eventMatchesSubscriber(event, sub) {
+  if (sub.allWorkspaces || !sub.workspace) {
+    return true;
+  }
+  const eventWorkspace = String(event.payload.workspace ?? "default");
+  return eventWorkspace === sub.workspace;
+}
 
 // src/fileIO.ts
-var import_node_fs3 = __toESM(require("fs"));
-var import_node_path4 = __toESM(require("path"));
+var import_node_fs5 = __toESM(require("fs"));
+var import_node_path6 = __toESM(require("path"));
 function ensureDirFor(filePath) {
-  import_node_fs3.default.mkdirSync(import_node_path4.default.dirname(filePath), { recursive: true });
+  import_node_fs5.default.mkdirSync(import_node_path6.default.dirname(filePath), { recursive: true });
 }
 function rotateFileIfNeeded(filePath, maxMb) {
-  if (maxMb <= 0 || !import_node_fs3.default.existsSync(filePath)) {
+  if (maxMb <= 0 || !import_node_fs5.default.existsSync(filePath)) {
     return;
   }
   const maxBytes = maxMb * 1024 * 1024;
-  const stat = import_node_fs3.default.statSync(filePath);
+  const stat = import_node_fs5.default.statSync(filePath);
   if (stat.size < maxBytes) {
     return;
   }
   const rotated = `${filePath}.1`;
-  if (import_node_fs3.default.existsSync(rotated)) {
-    import_node_fs3.default.unlinkSync(rotated);
+  if (import_node_fs5.default.existsSync(rotated)) {
+    import_node_fs5.default.unlinkSync(rotated);
   }
-  import_node_fs3.default.renameSync(filePath, rotated);
+  import_node_fs5.default.renameSync(filePath, rotated);
 }
 function readLastLines(filePath, lineCount) {
-  if (lineCount <= 0 || !import_node_fs3.default.existsSync(filePath)) {
+  if (lineCount <= 0 || !import_node_fs5.default.existsSync(filePath)) {
     return "";
   }
-  const fd = import_node_fs3.default.openSync(filePath, "r");
+  const fd = import_node_fs5.default.openSync(filePath, "r");
   try {
-    const stat = import_node_fs3.default.fstatSync(fd);
+    const stat = import_node_fs5.default.fstatSync(fd);
     if (stat.size === 0) {
       return "";
     }
@@ -1406,14 +1801,14 @@ function readLastLines(filePath, lineCount) {
       const size = Math.min(chunkSize, position);
       position -= size;
       const chunk = Buffer.alloc(size);
-      import_node_fs3.default.readSync(fd, chunk, 0, size, position);
+      import_node_fs5.default.readSync(fd, chunk, 0, size, position);
       buffer = `${chunk.toString("utf8")}${buffer}`;
       lines = buffer.split(/\r?\n/);
     }
     const trimmed = lines.filter((line) => line.length > 0);
     return trimmed.slice(Math.max(0, trimmed.length - lineCount)).join("\n");
   } finally {
-    import_node_fs3.default.closeSync(fd);
+    import_node_fs5.default.closeSync(fd);
   }
 }
 function readJsonlTail(filePath, lineCount) {
@@ -1441,7 +1836,7 @@ var HealthMonitor = class {
     this.cfg = cfg;
   }
   async tickOnce() {
-    const entries = this.registry.list();
+    const entries = this.registry.list(null, true);
     const concurrency = Math.max(1, this.cfg.heartbeat.healthCheckConcurrency);
     let index = 0;
     const workers = Array.from({ length: Math.min(concurrency, entries.length || 1) }, async () => {
@@ -1454,17 +1849,18 @@ var HealthMonitor = class {
     await Promise.all(workers);
   }
   async checkEntry(entry) {
+    const key = sessionKey(entry.workspace, entry.name);
     if (entry.status === "closed") {
-      this.stuckTurnNotified.delete(entry.name);
+      this.stuckTurnNotified.delete(key);
       return;
     }
-    const session = this.sessions.get(entry.name);
+    const session = this.sessions.get(key) || this.sessions.get(entry.name);
     if (!session) {
-      this.stuckTurnNotified.delete(entry.name);
-      await this.onDown(entry.name);
+      this.stuckTurnNotified.delete(key);
+      await this.onDown(entry.workspace, entry.name);
       return;
     }
-    this.maybeEmitTurnStuck(entry.name, session);
+    this.maybeEmitTurnStuck(entry.workspace, entry.name, session);
     try {
       if (!session.isTransportAlive()) {
         throw new Error("transport is not alive");
@@ -1474,33 +1870,35 @@ var HealthMonitor = class {
       this.registry.update(entry.name, {
         status: "errored",
         errorMessage: error.message
-      });
-      await this.onDown(entry.name, session);
+      }, entry.workspace);
+      await this.onDown(entry.workspace, entry.name, session);
     }
   }
-  maybeEmitTurnStuck(name, session) {
+  maybeEmitTurnStuck(workspace, name, session) {
+    const key = sessionKey(workspace, name);
     if (!session.isRunning()) {
-      this.stuckTurnNotified.delete(name);
+      this.stuckTurnNotified.delete(key);
       return;
     }
     const turnId = session.currentTurnId();
     const ageMs = session.currentTurnAgeMs();
     if (!turnId || ageMs == null) {
-      this.stuckTurnNotified.delete(name);
+      this.stuckTurnNotified.delete(key);
       return;
     }
     const thresholdMs = this.cfg.heartbeat.turnStuckSeconds * 1e3;
     if (ageMs < thresholdMs) {
-      if (this.stuckTurnNotified.get(name) !== turnId) {
-        this.stuckTurnNotified.delete(name);
+      if (this.stuckTurnNotified.get(key) !== turnId) {
+        this.stuckTurnNotified.delete(key);
       }
       return;
     }
-    if (this.stuckTurnNotified.get(name) === turnId) {
+    if (this.stuckTurnNotified.get(key) === turnId) {
       return;
     }
-    this.stuckTurnNotified.set(name, turnId);
+    this.stuckTurnNotified.set(key, turnId);
     this.eventBus.publish("events", {
+      workspace,
       kind: "turn-stuck",
       session: name,
       turn_id: turnId,
@@ -1508,38 +1906,40 @@ var HealthMonitor = class {
       threshold_ms: thresholdMs
     });
   }
-  async onDown(name, session) {
-    const entry = this.registry.get(name);
-    const lastHealedAt = this.healedAt.get(name);
+  async onDown(workspace, name, session) {
+    const key = sessionKey(workspace, name);
+    const entry = this.registry.get(name, workspace);
+    const lastHealedAt = this.healedAt.get(key);
     const duringTurn = session?.isRunning() || entry.status === "running";
     const activeTurnId = session?.currentTurnId() || entry.lastTurnId || null;
     const turnAgeMs = session?.currentTurnAgeMs() ?? null;
     const migratedQueue = session ? await session.detachForRecovery("auto-heal queue migration") : [];
     if (session) {
+      this.sessions.delete(key);
       this.sessions.delete(name);
     }
     const canAttemptHeal = this.cfg.heartbeat.selfHealOnce && !entry.ephemeral && (lastHealedAt == null || Date.now() - lastHealedAt >= this.cfg.heartbeat.selfHealBackoffSeconds * 1e3);
     if (canAttemptHeal) {
-      this.healedAt.set(name, Date.now());
+      this.healedAt.set(key, Date.now());
       try {
         const resumed = await withTimeout(
-          this.factory.resume(name),
+          this.factory.resume(name, workspace),
           this.cfg.heartbeat.resumeTimeoutSeconds * 1e3
         );
         await resumed.absorbQueue(migratedQueue);
-        this.sessions.set(name, resumed);
+        this.sessions.set(key, resumed);
         this.registry.update(name, {
           status: "idle",
           errorMessage: null
-        });
+        }, workspace);
         this.eventBus.publish("events", {
+          workspace,
           kind: duringTurn ? "auto-heal-after-crash" : "subprocess-recycled",
           session: name,
           heal_reason: duringTurn ? "transport_down_during_turn" : "transport_down_idle",
           was_during_turn: duringTurn,
           turn_id: activeTurnId,
-          turn_age_ms: turnAgeMs,
-          legacy_kind: "auto-heal"
+          turn_age_ms: turnAgeMs
         });
         return;
       } catch (error) {
@@ -1549,7 +1949,7 @@ var HealthMonitor = class {
         this.registry.update(name, {
           status: "errored",
           errorMessage: error.message
-        });
+        }, workspace);
       }
     }
     if (!canAttemptHeal) {
@@ -1558,6 +1958,7 @@ var HealthMonitor = class {
       }
     }
     this.eventBus.publish("events", {
+      workspace,
       kind: "session-down",
       session: name,
       reason: duringTurn ? "transport_down_during_turn" : "transport_down_idle",
@@ -1570,6 +1971,9 @@ var HealthMonitor = class {
     });
   }
 };
+function sessionKey(workspace, name) {
+  return workspaceSessionKey(workspace || DEFAULT_WORKSPACE, name);
+}
 async function withTimeout(promise, timeoutMs) {
   return await Promise.race([
     promise,
@@ -1580,8 +1984,8 @@ async function withTimeout(promise, timeoutMs) {
 }
 
 // src/registry.ts
-var import_node_fs4 = __toESM(require("fs"));
-var import_node_path5 = __toESM(require("path"));
+var import_node_fs6 = __toESM(require("fs"));
+var import_node_path7 = __toESM(require("path"));
 var RegistryStore = class {
   constructor(filePath) {
     this.filePath = filePath;
@@ -1590,10 +1994,10 @@ var RegistryStore = class {
   filePath;
   entries = /* @__PURE__ */ new Map();
   load() {
-    if (!import_node_fs4.default.existsSync(this.filePath)) {
+    if (!import_node_fs6.default.existsSync(this.filePath)) {
       return;
     }
-    const raw = import_node_fs4.default.readFileSync(this.filePath, "utf8").trim();
+    const raw = import_node_fs6.default.readFileSync(this.filePath, "utf8").trim();
     if (!raw) {
       return;
     }
@@ -1602,60 +2006,125 @@ var RegistryStore = class {
       return;
     }
     const sessions = isObject(parsed.sessions) ? parsed.sessions : {};
-    for (const [name, value] of Object.entries(sessions)) {
-      if (isObject(value)) {
-        this.entries.set(name, normalizeEntry(name, value));
+    let migrated = false;
+    for (const [key, value] of Object.entries(sessions)) {
+      if (!isObject(value)) {
+        continue;
       }
+      const entry = normalizeEntry(key, value);
+      if (value.createdByClientId === void 0) {
+        migrated = true;
+      }
+      this.entries.set(entryKey(entry.workspace, entry.name), entry);
+    }
+    if (migrated) {
+      this.save();
     }
   }
   save() {
-    import_node_fs4.default.mkdirSync(import_node_path5.default.dirname(this.filePath), { recursive: true });
+    import_node_fs6.default.mkdirSync(import_node_path7.default.dirname(this.filePath), { recursive: true });
     const payload = { sessions: Object.fromEntries(this.entries.entries()) };
     const tmpPath = `${this.filePath}.tmp`;
-    import_node_fs4.default.writeFileSync(tmpPath, JSON.stringify(payload), "utf8");
-    import_node_fs4.default.renameSync(tmpPath, this.filePath);
+    import_node_fs6.default.writeFileSync(tmpPath, JSON.stringify(payload), "utf8");
+    import_node_fs6.default.renameSync(tmpPath, this.filePath);
   }
   create(entry) {
-    if (this.entries.has(entry.name)) {
-      throw new SessionExists(`session ${JSON.stringify(entry.name)} already exists`);
+    const normalized = normalizeEntry(entry.name, entry);
+    const key = entryKey(normalized.workspace, normalized.name);
+    if (this.entries.has(key)) {
+      throw new SessionExists(
+        `session ${JSON.stringify(normalized.name)} already exists in workspace ${JSON.stringify(normalized.workspace)}`
+      );
     }
-    this.entries.set(entry.name, cloneEntry(entry));
+    this.entries.set(key, cloneEntry(normalized));
     this.save();
   }
-  get(name) {
-    const entry = this.entries.get(name);
+  get(name, workspace = DEFAULT_WORKSPACE) {
+    const entry = this.entries.get(entryKey(workspace, name));
     if (!entry) {
-      throw new SessionNotFound(`session ${JSON.stringify(name)} not found`);
+      throw new SessionNotFound(
+        `session ${JSON.stringify(name)} not found in workspace ${JSON.stringify(workspace)}`
+      );
     }
     return cloneEntry(entry);
   }
-  list() {
-    return [...this.entries.values()].map(cloneEntry);
-  }
-  update(name, fields) {
-    const current = this.entries.get(name);
-    if (!current) {
+  find(name, workspace, allWorkspaces = false) {
+    if (!allWorkspaces) {
+      const requested = workspace || DEFAULT_WORKSPACE;
+      try {
+        return this.get(name, requested);
+      } catch (error) {
+        if (error instanceof SessionNotFound) {
+          const other = [...this.entries.values()].find((entry) => entry.name === name);
+          if (other) {
+            throw new WrongWorkspace(
+              `session ${JSON.stringify(name)} is in workspace ${JSON.stringify(other.workspace)}, not ${JSON.stringify(requested)}`
+            );
+          }
+        }
+        throw error;
+      }
+    }
+    const matches = [...this.entries.values()].filter((entry) => entry.name === name);
+    if (matches.length === 0) {
       throw new SessionNotFound(`session ${JSON.stringify(name)} not found`);
     }
-    const updated = { ...current, ...fields };
-    this.entries.set(name, updated);
+    if (matches.length > 1) {
+      throw new SessionNotFound(
+        `session ${JSON.stringify(name)} exists in multiple workspaces; pass --workspace`
+      );
+    }
+    return cloneEntry(matches[0]);
+  }
+  list(workspace, allWorkspaces = false) {
+    const entries = [...this.entries.values()];
+    const filtered = allWorkspaces || !workspace ? entries : entries.filter((entry) => entry.workspace === workspace);
+    return filtered.map(cloneEntry);
+  }
+  workspaces() {
+    return [...new Set([...this.entries.values()].map((entry) => entry.workspace))].sort();
+  }
+  update(name, fields, workspace = DEFAULT_WORKSPACE) {
+    const key = entryKey(workspace, name);
+    const current = this.entries.get(key);
+    if (!current) {
+      throw new SessionNotFound(
+        `session ${JSON.stringify(name)} not found in workspace ${JSON.stringify(workspace)}`
+      );
+    }
+    const updated = { ...current, ...fields, workspace: current.workspace, name: current.name };
+    this.entries.set(key, updated);
     this.save();
     return cloneEntry(updated);
   }
-  delete(name) {
-    if (!this.entries.has(name)) {
-      throw new SessionNotFound(`session ${JSON.stringify(name)} not found`);
+  delete(name, workspace = DEFAULT_WORKSPACE) {
+    const key = entryKey(workspace, name);
+    if (!this.entries.has(key)) {
+      throw new SessionNotFound(
+        `session ${JSON.stringify(name)} not found in workspace ${JSON.stringify(workspace)}`
+      );
     }
-    this.entries.delete(name);
+    this.entries.delete(key);
     this.save();
   }
 };
+function entryKey(workspace, name) {
+  return workspaceSessionKey(workspace, name);
+}
 function cloneEntry(entry) {
   return JSON.parse(JSON.stringify(entry));
 }
-function normalizeEntry(name, raw) {
+function normalizeEntry(key, raw) {
+  const parsedKey = parseKey(key);
+  const name = String(raw.name ?? parsedKey.name);
+  if (raw.workspace == null && parsedKey.workspace == null) {
+    throw new Error(`registry entry ${JSON.stringify(key)} is missing workspace`);
+  }
+  const workspace = safeWorkspace(String(raw.workspace ?? parsedKey.workspace));
   return {
+    workspace,
     name,
+    createdByClientId: raw.createdByClientId == null ? null : String(raw.createdByClientId),
     threadId: String(raw.threadId ?? ""),
     ephemeral: raw.ephemeral == null ? false : Boolean(raw.ephemeral),
     cwd: String(raw.cwd ?? ""),
@@ -1680,14 +2149,21 @@ function normalizeEntry(name, raw) {
     errorMessage: raw.errorMessage == null ? null : String(raw.errorMessage)
   };
 }
+function parseKey(key) {
+  const nul = key.indexOf("\0");
+  if (nul > 0) {
+    return { workspace: key.slice(0, nul), name: key.slice(nul + 1) };
+  }
+  return { workspace: null, name: key };
+}
 
 // src/session.ts
-var import_node_fs6 = __toESM(require("fs"));
-var import_node_path6 = __toESM(require("path"));
-var import_node_crypto = __toESM(require("crypto"));
+var import_node_fs8 = __toESM(require("fs"));
+var import_node_path8 = __toESM(require("path"));
+var import_node_crypto2 = __toESM(require("crypto"));
 
 // src/digest.ts
-var import_node_fs5 = __toESM(require("fs"));
+var import_node_fs7 = __toESM(require("fs"));
 var FENCED_BLOCK = /```.*?```/gs;
 function truncate(text, limit) {
   if (text.length <= limit) {
@@ -1863,14 +2339,14 @@ function writeHistoryMd(filePath, summary, cfg) {
     parts.push(`> ${summary.finalMessage.replace(/\n/g, "\n> ")}
 `);
   }
-  import_node_fs5.default.appendFileSync(filePath, parts.join(""), "utf8");
+  import_node_fs7.default.appendFileSync(filePath, parts.join(""), "utf8");
 }
 function writeTurnsJsonl(filePath, summary, cfg) {
   ensureDirFor(filePath);
   if (cfg) {
     rotateFileIfNeeded(filePath, cfg.historyRotationMb);
   }
-  import_node_fs5.default.appendFileSync(filePath, `${JSON.stringify(summary)}
+  import_node_fs7.default.appendFileSync(filePath, `${JSON.stringify(summary)}
 `, "utf8");
 }
 
@@ -2293,13 +2769,14 @@ function nowIso() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
 function pendingId() {
-  return `pending-${import_node_crypto.default.randomUUID().slice(0, 8)}`;
+  return `pending-${import_node_crypto2.default.randomUUID().slice(0, 8)}`;
 }
 function asRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
 }
 var Session = class {
-  constructor(name, cfg, dataDir, registry, eventBus, compaction, client, threadId) {
+  constructor(workspace, name, cfg, dataDir, registry, eventBus, compaction, client, threadId) {
+    this.workspace = workspace;
     this.name = name;
     this.cfg = cfg;
     this.dataDir = dataDir;
@@ -2310,6 +2787,7 @@ var Session = class {
     this.threadId = threadId;
     this.queue = new SendQueue(cfg.queue.maxPerSession, cfg.queue.overflowPolicy);
   }
+  workspace;
   name;
   cfg;
   dataDir;
@@ -2355,9 +2833,10 @@ var Session = class {
         if (enqueueResult.dropped) {
           this.rejectPending(enqueueResult.dropped, new Error(`queued send ${enqueueResult.dropped.id} was dropped`));
         }
-        this.registry.update(this.name, { queueLength: this.queue.length });
+        this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
         if (enqueueResult.overflowed) {
           this.eventBus.publish("events", {
+            workspace: this.workspace,
             kind: "queue-overflow",
             session: this.name,
             policy: this.cfg.queue.overflowPolicy,
@@ -2367,7 +2846,7 @@ var Session = class {
         return;
       }
       this.running = true;
-      this.registry.update(this.name, { status: "running" });
+      this.registry.update(this.name, { status: "running" }, this.workspace);
       void this.runTurn(placeholderId, text, resolveWait, rejectWait, options.overrides || null);
     });
     if (waitPromise) {
@@ -2389,7 +2868,7 @@ var Session = class {
       this.activeTurnStartedAtMs = null;
       this.rejectQueuedWaiters(new Error(reason));
       this.queue.clear();
-      this.registry.update(this.name, { queueLength: 0, appServerPid: null });
+      this.registry.update(this.name, { queueLength: 0, appServerPid: null }, this.workspace);
     });
     this.client.kill();
     await this.client.close();
@@ -2398,10 +2877,10 @@ var Session = class {
       appServerPid: null,
       queueLength: 0,
       errorMessage: reason
-    });
+    }, this.workspace);
   }
   async ackError() {
-    this.registry.update(this.name, { status: "idle", errorMessage: null });
+    this.registry.update(this.name, { status: "idle", errorMessage: null }, this.workspace);
   }
   async compact() {
     await this.withStateLock(async () => {
@@ -2409,19 +2888,19 @@ var Session = class {
         throw new SessionBusy(`session ${this.name} is running; compact after the active turn finishes`);
       }
       this.running = true;
-      this.registry.update(this.name, { status: "compacting" });
+      this.registry.update(this.name, { status: "compacting" }, this.workspace);
     });
     const attempts = Math.max(1, this.cfg.compaction.retryAttempts + 1);
     let lastError = null;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
         const result = await this.runCompactAttempt();
-        this.compaction?.clear(this.name);
+        this.compaction?.clear(this.name, this.workspace);
         this.registry.update(this.name, {
           status: "idle",
           tokenUsageInput: result.usageTotal ?? 0,
           contextTokensEstimate: result.contextTokensEstimate ?? 0,
-          modelContextWindow: result.modelContextWindow ?? this.registry.get(this.name).modelContextWindow ?? null,
+          modelContextWindow: result.modelContextWindow ?? this.registry.get(this.name, this.workspace).modelContextWindow ?? null,
           errorMessage: null
         });
         await this.dispatchNextQueued();
@@ -2432,6 +2911,7 @@ var Session = class {
           break;
         }
         this.eventBus.publish("events", {
+          workspace: this.workspace,
           kind: "compact-retry",
           session: this.name,
           attempt,
@@ -2444,7 +2924,7 @@ var Session = class {
     this.registry.update(this.name, {
       status: "errored",
       errorMessage: lastError?.message || "compact failed"
-    });
+    }, this.workspace);
     await this.withStateLock(async () => {
       this.running = false;
     });
@@ -2502,14 +2982,14 @@ var Session = class {
     }));
   }
   dumpState() {
-    const sessionPath = sessionDir(this.dataDir, this.name);
+    const sessionPath = sessionDir(this.dataDir, this.workspace, this.name);
     return {
-      session: this.registry.get(this.name),
+      session: this.registry.get(this.name, this.workspace),
       queue: this.snapshotQueueJson(),
       transport_alive: this.isTransportAlive(),
       stderr_tail: this.stderrTail(20),
-      history_path: import_node_path6.default.join(sessionPath, "history.md"),
-      turns_path: import_node_path6.default.join(sessionPath, "turns.jsonl")
+      history_path: import_node_path8.default.join(sessionPath, "history.md"),
+      turns_path: import_node_path8.default.join(sessionPath, "turns.jsonl")
     };
   }
   async read(includeTurns = false) {
@@ -2531,7 +3011,7 @@ var Session = class {
       this.registry.update(this.name, {
         queueLength: 0,
         appServerPid: null
-      });
+      }, this.workspace);
     });
     await this.client.close();
     return queued;
@@ -2547,15 +3027,15 @@ var Session = class {
           this.rejectPending(enqueueResult.dropped, new Error(`queued send ${enqueueResult.dropped.id} was dropped`));
         }
       }
-      this.registry.update(this.name, { queueLength: this.queue.length });
+      this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
       if (!this.running) {
         const next = this.queue.pop();
-        this.registry.update(this.name, { queueLength: this.queue.length });
+        this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
         if (!next) {
           return;
         }
         this.running = true;
-        this.registry.update(this.name, { status: "running" });
+        this.registry.update(this.name, { status: "running" }, this.workspace);
         void this.runTurn(next.id, next.text, next.waitResolver, next.waitRejecter, next.overrides || null);
       }
     });
@@ -2563,14 +3043,14 @@ var Session = class {
   clearQueue() {
     this.rejectQueuedWaiters(new Error(`queue for ${this.name} was cleared`));
     this.queue.clear();
-    this.registry.update(this.name, { queueLength: 0 });
+    this.registry.update(this.name, { queueLength: 0 }, this.workspace);
   }
   dropOldest() {
     const dropped = this.queue.dropOldest();
     if (dropped) {
       this.rejectPending(dropped, new Error(`queued send ${dropped.id} was dropped`));
     }
-    this.registry.update(this.name, { queueLength: this.queue.length });
+    this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
     return dropped;
   }
   async close() {
@@ -2582,10 +3062,10 @@ var Session = class {
       this.activeTurnStartedAtMs = null;
       this.rejectQueuedWaiters(new Error(`session ${this.name} was closed`));
       this.queue.clear();
-      this.registry.update(this.name, { queueLength: 0, appServerPid: null });
+      this.registry.update(this.name, { queueLength: 0, appServerPid: null }, this.workspace);
     });
     await this.shutdownTransport();
-    this.registry.update(this.name, { status: "closed", appServerPid: null, queueLength: 0 });
+    this.registry.update(this.name, { status: "closed", appServerPid: null, queueLength: 0 }, this.workspace);
   }
   async shutdown() {
     await this.withStateLock(async () => {
@@ -2596,10 +3076,10 @@ var Session = class {
       this.activeTurnStartedAtMs = null;
       this.rejectQueuedWaiters(new Error(`session ${this.name} is shutting down`));
       this.queue.clear();
-      this.registry.update(this.name, { queueLength: 0, appServerPid: null });
+      this.registry.update(this.name, { queueLength: 0, appServerPid: null }, this.workspace);
     });
     await this.shutdownTransport();
-    const current = this.registry.get(this.name);
+    const current = this.registry.get(this.name, this.workspace);
     if (current.status === "closed") {
       return;
     }
@@ -2607,7 +3087,7 @@ var Session = class {
       status: current.errorMessage ? "errored" : "idle",
       appServerPid: null,
       queueLength: 0
-    });
+    }, this.workspace);
   }
   async healthCheck() {
     await this.read(false);
@@ -2646,9 +3126,9 @@ var Session = class {
     if (pending.length === 0) {
       return;
     }
-    const filePath = import_node_path6.default.join(sessionDir(this.dataDir, this.name), "app-server.stderr.log");
+    const filePath = import_node_path8.default.join(sessionDir(this.dataDir, this.workspace, this.name), "app-server.stderr.log");
     ensureDirFor(filePath);
-    import_node_fs6.default.appendFileSync(filePath, `${pending.join("\n")}
+    import_node_fs8.default.appendFileSync(filePath, `${pending.join("\n")}
 `, "utf8");
     this.stderrFlushedCount = lines.length;
   }
@@ -2688,13 +3168,14 @@ var Session = class {
     let modelContextWindow = null;
     const started = Date.now();
     let waitSettled = false;
-    this.registry.update(this.name, { lastPromptText: text });
+    this.registry.update(this.name, { lastPromptText: text }, this.workspace);
     try {
       const response = await this.client.turnStart(buildTurnStartParams(this.threadId, text, overrides));
       turnId = String(asRecord(response.turn).id ?? turnId);
       this.activeTurnId = turnId;
       this.activeTurnStartedAtMs = Date.now();
       this.eventBus.publish("events", {
+        workspace: this.workspace,
         kind: "turn-start",
         session: this.name,
         queued_or_turn_id: pendingTurnId,
@@ -2751,6 +3232,7 @@ var Session = class {
     }
     const completedAt = nowIso();
     const summary = buildTurnSummary({
+      workspace: this.workspace,
       session: this.name,
       turnId,
       elapsedMs: Date.now() - started,
@@ -2764,15 +3246,16 @@ var Session = class {
       errorMessage,
       completedAt
     });
-    const sessionPath = sessionDir(this.dataDir, this.name);
+    const sessionPath = sessionDir(this.dataDir, this.workspace, this.name);
     if (this.cfg.digest.historyMdEnabled) {
-      writeHistoryMd(import_node_path6.default.join(sessionPath, "history.md"), summary, this.cfg.digest);
+      writeHistoryMd(import_node_path8.default.join(sessionPath, "history.md"), summary, this.cfg.digest);
     }
     if (this.cfg.digest.turnsJsonlEnabled) {
-      writeTurnsJsonl(import_node_path6.default.join(sessionPath, "turns.jsonl"), summary, this.cfg.digest);
+      writeTurnsJsonl(import_node_path8.default.join(sessionPath, "turns.jsonl"), summary, this.cfg.digest);
     }
     if (usageTotal != null || contextTokensEstimate != null) {
       await this.compaction?.observeUsage(this.name, {
+        workspace: this.workspace,
         contextTokensEstimate,
         modelContextWindow,
         cumulativeUsageTokens: usageTotal
@@ -2795,8 +3278,9 @@ var Session = class {
       modelContextWindow,
       errorMessage,
       appServerPid: this.client.pid
-    });
+    }, this.workspace);
     this.eventBus.publish("events", {
+      workspace: this.workspace,
       kind: summary.tier === "attn" ? "turn-attn" : "turn-done",
       session: this.name,
       ...summaryToWire(summary)
@@ -2814,12 +3298,12 @@ var Session = class {
     let next;
     await this.withStateLock(async () => {
       next = this.queue.pop();
-      this.registry.update(this.name, { queueLength: this.queue.length });
+      this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
       if (!next) {
         this.running = false;
       } else {
         this.running = true;
-        this.registry.update(this.name, { status: "running" });
+        this.registry.update(this.name, { status: "running" }, this.workspace);
       }
     });
     if (next) {
@@ -2866,8 +3350,10 @@ var SessionFactory = class {
   dataDir() {
     return this.cfg.daemon.dataDir;
   }
-  async create(name, options = {}) {
-    this.ensureNameAvailable(name);
+  async create(name, options = {}, context = {}) {
+    const workspace = context.workspace || DEFAULT_WORKSPACE;
+    const clientId = context.clientId || null;
+    this.ensureNameAvailable(workspace, name);
     const resolved = this.resolveOptions(options);
     const client = this.clientFactory(this.cfg);
     await client.start();
@@ -2883,9 +3369,10 @@ var SessionFactory = class {
       await client.close();
       throw error;
     }
-    const entry = buildRegistryEntry(name, threadId, resolved, client.pid);
+    const entry = buildRegistryEntry(workspace, name, threadId, resolved, client.pid, clientId);
     this.registry.create(entry);
     return new Session(
+      workspace,
       name,
       this.cfg,
       this.dataDir(),
@@ -2896,7 +3383,9 @@ var SessionFactory = class {
       threadId
     );
   }
-  async attach(name, threadId, options = {}) {
+  async attach(name, threadId, options = {}, context = {}) {
+    const workspace = context.workspace || DEFAULT_WORKSPACE;
+    const clientId = context.clientId || null;
     const targetThreadId = threadId.trim();
     if (!targetThreadId) {
       throw new InvalidRequest("thread_id required");
@@ -2904,8 +3393,8 @@ var SessionFactory = class {
     if (options.ephemeral) {
       throw new InvalidRequest("session attach cannot use --ephemeral for an existing thread");
     }
-    this.ensureNameAvailable(name);
-    this.ensureThreadUnclaimed(targetThreadId);
+    this.ensureNameAvailable(workspace, name);
+    this.ensureThreadUnclaimed(workspace, targetThreadId);
     const resolved = this.resolveOptions({ ...options, ephemeral: false }, { forcePersistent: true });
     const client = this.clientFactory(this.cfg);
     await client.start();
@@ -2914,15 +3403,16 @@ var SessionFactory = class {
       const response = await client.threadResume(targetThreadId, buildThreadResumeParams(resolved));
       const thread = asRecord(response.thread);
       resumedThreadId = String(thread.id ?? targetThreadId);
-      this.ensureThreadUnclaimed(resumedThreadId);
+      this.ensureThreadUnclaimed(workspace, resumedThreadId);
       await client.threadRead(resumedThreadId, false);
     } catch (error) {
       await client.close();
       throw error;
     }
-    const entry = buildRegistryEntry(name, resumedThreadId, resolved, client.pid);
+    const entry = buildRegistryEntry(workspace, name, resumedThreadId, resolved, client.pid, clientId);
     this.registry.create(entry);
     return new Session(
+      workspace,
       name,
       this.cfg,
       this.dataDir(),
@@ -2933,8 +3423,8 @@ var SessionFactory = class {
       resumedThreadId
     );
   }
-  async resume(name) {
-    const entry = this.registry.get(name);
+  async resume(name, workspace = DEFAULT_WORKSPACE) {
+    const entry = this.registry.get(name, workspace);
     if (entry.ephemeral) {
       throw new InvalidRequest(
         `session ${name} is ephemeral and cannot be resumed after its app-server exits`
@@ -2948,10 +3438,10 @@ var SessionFactory = class {
       const response = await client.threadResume(entry.threadId, buildThreadResumeParams(resolved));
       const thread = asRecord(response.thread);
       resumedThreadId = String(thread.id ?? entry.threadId);
-      this.ensureThreadUnclaimed(resumedThreadId, name);
+      this.ensureThreadUnclaimed(workspace, resumedThreadId, name);
       await client.threadRead(resumedThreadId, false);
       if (resumedThreadId !== entry.threadId) {
-        this.registry.update(name, { threadId: resumedThreadId });
+        this.registry.update(name, { threadId: resumedThreadId }, workspace);
       }
     } catch (error) {
       await client.close();
@@ -2961,8 +3451,9 @@ var SessionFactory = class {
       status: "idle",
       errorMessage: null,
       appServerPid: client.pid
-    });
+    }, workspace);
     return new Session(
+      workspace,
       name,
       this.cfg,
       this.dataDir(),
@@ -2973,18 +3464,18 @@ var SessionFactory = class {
       resumedThreadId
     );
   }
-  ensureNameAvailable(name) {
+  ensureNameAvailable(workspace, name) {
     try {
-      this.registry.get(name);
-      throw new SessionExists(name);
+      this.registry.get(name, workspace);
+      throw new SessionExists(`${workspaceDisplayName(workspace, name)} already exists`);
     } catch (error) {
       if (!(error instanceof SessionNotFound)) {
         throw error;
       }
     }
   }
-  ensureThreadUnclaimed(threadId, ownerName = null) {
-    const existing = this.registry.list().find((entry) => entry.threadId === threadId && entry.name !== ownerName);
+  ensureThreadUnclaimed(workspace, threadId, ownerName = null) {
+    const existing = this.registry.list(workspace).find((entry) => entry.threadId === threadId && entry.name !== ownerName);
     if (existing) {
       throw new InvalidRequest(
         `thread ${JSON.stringify(threadId)} is already registered as session ${JSON.stringify(existing.name)}`
@@ -3061,9 +3552,11 @@ function buildThreadConfigParams(resolved) {
   }
   return params;
 }
-function buildRegistryEntry(name, threadId, resolved, appServerPid) {
+function buildRegistryEntry(workspace, name, threadId, resolved, appServerPid, createdByClientId) {
   return {
+    workspace,
     name,
+    createdByClientId,
     threadId,
     cwd: resolved.cwd,
     model: resolved.model,
@@ -3148,7 +3641,7 @@ function summaryToWire(summary) {
 }
 
 // src/watchdog.ts
-var import_node_fs7 = __toESM(require("fs"));
+var import_node_fs9 = __toESM(require("fs"));
 var WatchdogTimer = class {
   constructor(cfg, registry, eventBus, sessions) {
     this.cfg = cfg;
@@ -3162,24 +3655,25 @@ var WatchdogTimer = class {
   sessions;
   readBrief(alarm) {
     const filePath = alarm?.taskBriefFile || this.cfg.monitor.watchdogTaskBriefFile;
-    if (!filePath || !import_node_fs7.default.existsSync(filePath)) {
+    if (!filePath || !import_node_fs9.default.existsSync(filePath)) {
       return "";
     }
     const headLines = alarm?.taskBriefHeadLines || this.cfg.monitor.watchdogTaskBriefHeadLines;
-    return import_node_fs7.default.readFileSync(filePath, "utf8").split(/\r?\n/).slice(0, headLines).join("\n");
+    return import_node_fs9.default.readFileSync(filePath, "utf8").split(/\r?\n/).slice(0, headLines).join("\n");
   }
   readTemplate(alarm) {
     const filePath = alarm?.templateFile || this.cfg.monitor.watchdogTemplateFile;
-    if (filePath && import_node_fs7.default.existsSync(filePath)) {
-      return import_node_fs7.default.readFileSync(filePath, "utf8");
+    if (filePath && import_node_fs9.default.existsSync(filePath)) {
+      return import_node_fs9.default.readFileSync(filePath, "utf8");
     }
     return alarm?.template || this.cfg.monitor.watchdogTemplate || defaultWatchdogTemplate();
   }
   async tickOnce(options = {}) {
+    const workspace = options.workspace || DEFAULT_WORKSPACE;
     const now = /* @__PURE__ */ new Date();
     const sentAt = now.toISOString();
     const localTime = formatLocalTime(now);
-    const sessions = this.registry.list().map((entry) => {
+    const sessions = this.registry.list(workspace).map((entry) => {
       const advisories = [];
       const compactionMetric = entry.contextTokensEstimate ?? entry.tokenUsageInput;
       if (compactionMetric >= this.cfg.compaction.thresholdTokens) {
@@ -3191,7 +3685,7 @@ var WatchdogTimer = class {
       if (entry.queueLength > 0) {
         advisories.push(`queue=${entry.queueLength}`);
       }
-      const live = this.sessions.get(entry.name);
+      const live = this.sessions.get(workspaceSessionKey(entry.workspace, entry.name));
       if (live) {
         if (!live.isTransportAlive()) {
           advisories.push("transport-down");
@@ -3246,11 +3740,13 @@ var WatchdogTimer = class {
       sentAt,
       localTime,
       alarm: alarmName,
+      workspace,
       taskBrief,
       summary,
       sessions
     });
     this.eventBus.publish("watchdog", {
+      workspace,
       kind: "watchdog-tick",
       at: sentAt,
       sentAt,
@@ -3293,6 +3789,7 @@ function renderWatchdogTemplate(template, input) {
     sentAt: input.sentAt,
     localTime: input.localTime,
     alarm: input.alarm,
+    workspace: input.workspace,
     taskBrief: input.taskBrief || "",
     sessionsText,
     "summary.total": String(input.summary.total),
@@ -3397,6 +3894,122 @@ function splitMarkdownSections(content) {
   });
 }
 
+// src/runtimeAlarms.ts
+var import_node_fs10 = __toESM(require("fs"));
+var import_node_path9 = __toESM(require("path"));
+var RuntimeAlarmStore = class {
+  constructor(dataDir) {
+    this.dataDir = dataDir;
+  }
+  dataDir;
+  upsert(record) {
+    const normalized = normalizeRecord(record);
+    const dir = workspaceAlarmsDir(this.dataDir, normalized.workspace);
+    import_node_fs10.default.mkdirSync(dir, { recursive: true });
+    import_node_fs10.default.writeFileSync(this.filePath(normalized.workspace, normalized.name), JSON.stringify(normalized), "utf8");
+    return normalized;
+  }
+  delete(workspace, name) {
+    const filePath = this.filePath(workspace, name);
+    if (!import_node_fs10.default.existsSync(filePath)) {
+      return false;
+    }
+    import_node_fs10.default.unlinkSync(filePath);
+    return true;
+  }
+  deleteByClient(clientId) {
+    let count = 0;
+    for (const record of this.list(null, true)) {
+      if (record.clientId === clientId && this.delete(record.workspace, record.name)) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+  list(workspace, allWorkspaces = false) {
+    const root = alarmsDir(this.dataDir);
+    if (!import_node_fs10.default.existsSync(root)) {
+      return [];
+    }
+    const workspaces = allWorkspaces || !workspace ? import_node_fs10.default.readdirSync(root) : [workspace];
+    const records = [];
+    for (const ws of workspaces) {
+      const dir = workspaceAlarmsDir(this.dataDir, ws);
+      if (!import_node_fs10.default.existsSync(dir)) {
+        continue;
+      }
+      for (const file of import_node_fs10.default.readdirSync(dir)) {
+        if (!file.endsWith(".json")) {
+          continue;
+        }
+        try {
+          const parsed = JSON.parse(import_node_fs10.default.readFileSync(import_node_path9.default.join(dir, file), "utf8"));
+          if (isObject(parsed)) {
+            records.push(normalizeRecord(parsed));
+          }
+        } catch {
+        }
+      }
+    }
+    return records;
+  }
+  filePath(workspace, name) {
+    return import_node_path9.default.join(workspaceAlarmsDir(this.dataDir, safePart(workspace)), `${safePart(name)}.json`);
+  }
+};
+function runtimeAlarmToWire(record) {
+  return {
+    workspace: record.workspace,
+    name: record.name,
+    client_id: record.clientId,
+    created_at: record.createdAt,
+    updated_at: record.updatedAt,
+    ...alarmToWire(record.alarm)
+  };
+}
+function normalizeRecord(raw) {
+  return {
+    workspace: safePart(String(raw.workspace ?? "default")),
+    name: safePart(String(raw.name ?? "")),
+    clientId: raw.clientId == null && raw.client_id == null ? null : String(raw.clientId ?? raw.client_id),
+    alarm: normalizeAlarm(isObject(raw.alarm) ? raw.alarm : raw),
+    createdAt: String(raw.createdAt ?? raw.created_at ?? (/* @__PURE__ */ new Date()).toISOString()),
+    updatedAt: String(raw.updatedAt ?? raw.updated_at ?? (/* @__PURE__ */ new Date()).toISOString())
+  };
+}
+function normalizeAlarm(raw) {
+  return {
+    enabled: raw.enabled == null ? true : Boolean(raw.enabled),
+    intervalSeconds: numberValue(raw.intervalSeconds ?? raw.interval_seconds, 1200),
+    taskBriefFile: String(raw.taskBriefFile ?? raw.task_brief_file ?? ""),
+    taskBriefHeadLines: numberValue(raw.taskBriefHeadLines ?? raw.task_brief_head_lines, 30),
+    emitIdle: raw.emitIdle == null && raw.emit_idle == null ? false : Boolean(raw.emitIdle ?? raw.emit_idle),
+    template: String(raw.template ?? ""),
+    templateFile: String(raw.templateFile ?? raw.template_file ?? "")
+  };
+}
+function alarmToWire(alarm) {
+  return {
+    enabled: alarm.enabled,
+    interval_seconds: alarm.intervalSeconds,
+    task_brief_file: alarm.taskBriefFile,
+    task_brief_head_lines: alarm.taskBriefHeadLines,
+    emit_idle: alarm.emitIdle,
+    template: alarm.template,
+    template_file: alarm.templateFile
+  };
+}
+function numberValue(value, fallback) {
+  const parsed = Number(value ?? fallback);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+function safePart(value) {
+  if (!/^[a-zA-Z0-9_.-]{1,64}$/.test(value) || value === "*") {
+    throw new InvalidRequest(`invalid alarm path component: ${value}`);
+  }
+  return value;
+}
+
 // src/server.ts
 function asString(value) {
   return String(value ?? "");
@@ -3423,6 +4036,12 @@ function sessionOptionsFromParams(params) {
     ephemeral: Boolean(params.ephemeral)
   };
 }
+function sessionKey2(workspace, name) {
+  return workspaceSessionKey(workspace, name);
+}
+function targetEntries(registry, workspace, allWorkspaces) {
+  return registry.list(workspace, allWorkspaces);
+}
 var DaemonServer = class {
   constructor(cfg, socketPath, shutdownCallback, clientFactory = (cfg2) => new AppServerClient(cfg2)) {
     this.cfg = cfg;
@@ -3430,7 +4049,9 @@ var DaemonServer = class {
     this.shutdownCallback = shutdownCallback;
     this.clientFactory = clientFactory;
     this.eventBus = new EventBus(cfg.monitor.eventsMaxBuffer, cfg.monitor.subscriberQueueMax);
-    this.registry = new RegistryStore(import_node_path7.default.join(cfg.daemon.dataDir, "registry.json"));
+    this.registry = new RegistryStore(import_node_path10.default.join(cfg.daemon.dataDir, "registry.json"));
+    this.clients = new ClientStore(cfg.daemon.dataDir);
+    this.runtimeAlarms = new RuntimeAlarmStore(cfg.daemon.dataDir);
     this.compaction = new CompactionMonitor(cfg, this.registry, this.eventBus);
     this.factory = new SessionFactory(cfg, this.registry, this.eventBus, this.compaction, this.clientFactory);
     this.watchdog = new WatchdogTimer(cfg, this.registry, this.eventBus, this.sessions);
@@ -3443,6 +4064,8 @@ var DaemonServer = class {
   clientFactory;
   eventBus;
   registry;
+  clients;
+  runtimeAlarms;
   factory;
   sessions = /* @__PURE__ */ new Map();
   compaction;
@@ -3453,6 +4076,7 @@ var DaemonServer = class {
   server = null;
   watchdogTimers = [];
   heartbeatTimer = null;
+  clientSweepTimer = null;
   replaceConfig(cfg) {
     cfg.daemon.dataDir = cfg.daemon.dataDir || this.cfg.daemon.dataDir;
     cfg.daemon.socketPath = cfg.daemon.socketPath || this.cfg.daemon.socketPath;
@@ -3468,9 +4092,9 @@ var DaemonServer = class {
     }
   }
   async start() {
-    import_node_fs8.default.mkdirSync(import_node_path7.default.dirname(this.socketPath), { recursive: true });
-    if (import_node_fs8.default.existsSync(this.socketPath)) {
-      import_node_fs8.default.unlinkSync(this.socketPath);
+    import_node_fs11.default.mkdirSync(import_node_path10.default.dirname(this.socketPath), { recursive: true });
+    if (import_node_fs11.default.existsSync(this.socketPath)) {
+      import_node_fs11.default.unlinkSync(this.socketPath);
     }
     this.server = import_node_net2.default.createServer((socket) => {
       void this.handleSocket(socket);
@@ -3480,11 +4104,16 @@ var DaemonServer = class {
       this.server?.listen(this.socketPath, () => resolve());
     });
     this.restartBackgroundLoops();
-    await this.watchdog.tickOnce({ force: true, alarmName: "default" });
-    for (const [name, alarm] of Object.entries(this.cfg.monitor.watchdogAlarms)) {
-      if (alarm.enabled) {
-        await this.watchdog.tickOnce({ force: true, alarmName: name, alarm });
-      }
+    for (const workspace of this.activeWorkspaces()) {
+      await this.watchdog.tickOnce({ force: true, alarmName: "default", workspace });
+    }
+    for (const item of this.scheduledAlarms()) {
+      await this.watchdog.tickOnce({
+        force: true,
+        alarmName: item.name,
+        alarm: item.alarm,
+        workspace: item.workspace
+      });
     }
   }
   async stop() {
@@ -3499,8 +4128,8 @@ var DaemonServer = class {
       await session.shutdown();
     }
     this.sessions.clear();
-    if (import_node_fs8.default.existsSync(this.socketPath)) {
-      import_node_fs8.default.unlinkSync(this.socketPath);
+    if (import_node_fs11.default.existsSync(this.socketPath)) {
+      import_node_fs11.default.unlinkSync(this.socketPath);
     }
   }
   stopBackgroundLoops() {
@@ -3512,27 +4141,37 @@ var DaemonServer = class {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+    if (this.clientSweepTimer) {
+      clearInterval(this.clientSweepTimer);
+      this.clientSweepTimer = null;
+    }
   }
   restartBackgroundLoops() {
     this.stopBackgroundLoops();
     this.watchdogTimers.push(
       setInterval(() => {
-        void this.watchdog.tickOnce({ alarmName: "default" });
+        for (const workspace of this.activeWorkspaces()) {
+          void this.watchdog.tickOnce({ alarmName: "default", workspace });
+        }
       }, this.cfg.monitor.watchdogIntervalSeconds * 1e3)
     );
-    for (const [name, alarm] of Object.entries(this.cfg.monitor.watchdogAlarms)) {
-      if (!alarm.enabled) {
-        continue;
-      }
+    for (const item of this.scheduledAlarms()) {
       this.watchdogTimers.push(
         setInterval(() => {
-          void this.watchdog.tickOnce({ alarmName: name, alarm });
-        }, alarm.intervalSeconds * 1e3)
+          void this.watchdog.tickOnce({
+            alarmName: item.name,
+            alarm: item.alarm,
+            workspace: item.workspace
+          });
+        }, item.alarm.intervalSeconds * 1e3)
       );
     }
     this.heartbeatTimer = setInterval(() => {
       void this.health.tickOnce();
     }, this.cfg.heartbeat.intervalSeconds * 1e3);
+    this.clientSweepTimer = setInterval(() => {
+      void this.sweepStaleClients();
+    }, 6e4);
   }
   installHandlers() {
     this.handlers.set("session.create", async (message) => {
@@ -3544,10 +4183,16 @@ var DaemonServer = class {
       const options = sessionOptionsFromParams(message.params);
       const threadId = threadIdFromParams(message.params);
       return await this.withSessionAttachLock(name, threadId, async () => {
-        const session = threadId ? await this.factory.attach(name, threadId, options) : await this.factory.create(name, options);
-        this.sessions.set(session.name, session);
-        const entry = this.registry.get(session.name);
-        return { name: session.name, thread_id: entry.threadId, attached: Boolean(threadId) };
+        const session = threadId ? await this.factory.attach(name, threadId, options, {
+          workspace: message.workspace,
+          clientId: message.clientId
+        }) : await this.factory.create(name, options, {
+          workspace: message.workspace,
+          clientId: message.clientId
+        });
+        this.setLiveSession(session);
+        const entry = this.registry.get(session.name, session.workspace);
+        return { workspace: session.workspace, name: session.name, thread_id: entry.threadId, attached: Boolean(threadId) };
       });
     });
     this.handlers.set("session.attach", async (message) => {
@@ -3561,26 +4206,31 @@ var DaemonServer = class {
         throw new InvalidRequest("thread_id required");
       }
       return await this.withSessionAttachLock(name, threadId, async () => {
-        const session = await this.factory.attach(name, threadId, sessionOptionsFromParams(message.params));
-        this.sessions.set(session.name, session);
-        const entry = this.registry.get(session.name);
-        return { name: session.name, thread_id: entry.threadId, attached: true };
+        const session = await this.factory.attach(name, threadId, sessionOptionsFromParams(message.params), {
+          workspace: message.workspace,
+          clientId: message.clientId
+        });
+        this.setLiveSession(session);
+        const entry = this.registry.get(session.name, session.workspace);
+        return { workspace: session.workspace, name: session.name, thread_id: entry.threadId, attached: true };
       });
     });
-    this.handlers.set("session.list", async () => ({
-      sessions: this.registry.list()
+    this.handlers.set("session.list", async (message) => ({
+      workspace: message.allWorkspaces ? "*" : message.workspace,
+      sessions: targetEntries(this.registry, message.workspace, message.allWorkspaces)
     }));
-    this.handlers.set("session.status", async (message) => ({
-      ...this.registry.get(asString(message.params.name))
-    }));
+    this.handlers.set("session.status", async (message) => {
+      const entry = this.registry.find(asString(message.params.name), message.workspace, message.allWorkspaces);
+      return { ...entry };
+    });
     this.handlers.set("session.read", async (message) => {
       const name = asString(message.params.name);
       const includeTurns = Boolean(message.params.includeTurns);
-      const live = this.sessions.get(name);
+      const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
+      const live = this.getLiveSession(entry.workspace, name);
       if (live) {
         return await live.read(includeTurns);
       }
-      const entry = this.registry.get(name);
       if (entry.ephemeral) {
         throw new InvalidRequest(
           `session ${name} is ephemeral and can only be read while its app-server is still alive`
@@ -3597,62 +4247,65 @@ var DaemonServer = class {
     this.handlers.set("session.close", async (message) => {
       const name = asString(message.params.name);
       return await this.withSessionOperationLock(name, async () => {
-        const session = this.sessions.get(name);
+        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
+        const session = this.getLiveSession(entry.workspace, name);
         if (session) {
           await session.close();
-          this.sessions.delete(name);
+          this.deleteLiveSession(entry.workspace, name);
         } else {
-          this.registry.update(name, { status: "closed", appServerPid: null, queueLength: 0 });
+          this.registry.update(name, { status: "closed", appServerPid: null, queueLength: 0 }, entry.workspace);
         }
-        return { name, closed: true };
+        return { workspace: entry.workspace, name, closed: true };
       });
     });
     this.handlers.set("session.ack_error", async (message) => {
       const name = asString(message.params.name);
       return await this.withSessionOperationLock(name, async () => {
-        const session = this.sessions.get(name);
+        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
+        const session = this.getLiveSession(entry.workspace, name);
         if (session) {
           await session.ackError();
         } else {
-          this.registry.update(name, { status: "idle", errorMessage: null });
+          this.registry.update(name, { status: "idle", errorMessage: null }, entry.workspace);
         }
-        return { name, acked: true };
+        return { workspace: entry.workspace, name, acked: true };
       });
     });
     this.handlers.set("session.dump", async (message) => {
       const name = asString(message.params.name);
-      const session = this.sessions.get(name);
+      const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
+      const session = this.getLiveSession(entry.workspace, name);
       if (session) {
         return session.dumpState();
       }
-      const entry = this.registry.get(name);
-      const base = import_node_path7.default.join(this.cfg.daemon.dataDir, "sessions", name);
-      const stderrPath = import_node_path7.default.join(base, "app-server.stderr.log");
+      const base = sessionDir(this.cfg.daemon.dataDir, entry.workspace, name);
+      const stderrPath = import_node_path10.default.join(base, "app-server.stderr.log");
       const stderrTail = readLastLines(stderrPath, 20);
       return {
         session: entry,
         queue: [],
         transport_alive: false,
         stderr_tail: stderrTail,
-        history_path: import_node_path7.default.join(base, "history.md"),
-        turns_path: import_node_path7.default.join(base, "turns.jsonl")
+        history_path: import_node_path10.default.join(base, "history.md"),
+        turns_path: import_node_path10.default.join(base, "turns.jsonl")
       };
     });
     this.handlers.set("session.resume", async (message) => {
       this.refreshConfigFromDisk();
       const name = asString(message.params.name);
       return await this.withSessionOperationLock(name, async () => {
-        const session = await this.factory.resume(name);
-        this.sessions.set(name, session);
-        return { name, resumed: true };
+        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
+        const session = await this.factory.resume(name, entry.workspace);
+        this.setLiveSession(session);
+        return { workspace: session.workspace, name, resumed: true };
       });
     });
     this.handlers.set("session.restart", async (message) => {
       this.refreshConfigFromDisk();
       const name = asString(message.params.name);
       return await this.withSessionOperationLock(name, async () => {
-        const entry = this.registry.get(name);
-        const existing = this.sessions.get(name);
+        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
+        const existing = this.getLiveSession(entry.workspace, name);
         if (entry.ephemeral) {
           if (!existing) {
             throw new InvalidRequest(
@@ -3660,8 +4313,8 @@ var DaemonServer = class {
             );
           }
           await existing.kill("restarting ephemeral session");
-          this.sessions.delete(name);
-          this.registry.delete(name);
+          this.deleteLiveSession(entry.workspace, name);
+          this.registry.delete(name, entry.workspace);
           const recreated = await this.factory.create(name, {
             cwd: entry.cwd,
             model: entry.model,
@@ -3673,38 +4326,39 @@ var DaemonServer = class {
             personality: entry.personality,
             profile: entry.profile,
             ephemeral: true
-          });
-          this.sessions.set(name, recreated);
-          return { name, restarted: true, recreated: true, ephemeral: true };
+          }, { workspace: entry.workspace, clientId: message.clientId });
+          this.setLiveSession(recreated);
+          return { workspace: entry.workspace, name, restarted: true, recreated: true, ephemeral: true };
         }
         if (existing) {
           await existing.close();
-          this.sessions.delete(name);
+          this.deleteLiveSession(entry.workspace, name);
         }
-        const session = await this.factory.resume(name);
-        this.sessions.set(name, session);
-        return { name, restarted: true };
+        const session = await this.factory.resume(name, entry.workspace);
+        this.setLiveSession(session);
+        return { workspace: entry.workspace, name, restarted: true };
       });
     });
     this.handlers.set("session.kill", async (message) => {
       const name = asString(message.params.name);
       return await this.withSessionOperationLock(name, async () => {
-        const session = this.sessions.get(name);
+        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
+        const session = this.getLiveSession(entry.workspace, name);
         if (!session) {
           throw new SessionNotFound(name);
         }
         await session.kill("killed by operator");
-        this.sessions.delete(name);
-        return { name, killed: true };
+        this.deleteLiveSession(entry.workspace, name);
+        return { workspace: entry.workspace, name, killed: true };
       });
     });
     this.handlers.set("session.forget", async (message) => {
       const name = asString(message.params.name);
       return await this.withSessionOperationLock(name, async () => {
-        const session = this.sessions.get(name);
+        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
+        const session = this.getLiveSession(entry.workspace, name);
         let archived = false;
         if (session) {
-          const entry = this.registry.get(name);
           if (!entry.ephemeral) {
             try {
               await session.archiveThread();
@@ -3713,9 +4367,8 @@ var DaemonServer = class {
             }
           }
           await session.close();
-          this.sessions.delete(name);
+          this.deleteLiveSession(entry.workspace, name);
         } else {
-          const entry = this.registry.get(name);
           if (!entry.ephemeral) {
             const temp = this.clientFactory(this.cfg);
             try {
@@ -3729,15 +4382,15 @@ var DaemonServer = class {
           }
         }
         try {
-          this.registry.delete(name);
+          this.registry.delete(name, entry.workspace);
         } catch {
         }
-        return { name, forgotten: true, archived_thread: archived };
+        return { workspace: entry.workspace, name, forgotten: true, archived_thread: archived };
       });
     });
     this.handlers.set("send", async (message) => {
       const name = asString(message.params.name);
-      const session = this.sessions.get(name);
+      const session = this.getLiveSession(message.workspace, name);
       if (!session) {
         throw new SessionNotFound(name);
       }
@@ -3753,65 +4406,67 @@ var DaemonServer = class {
       });
       const result = await session.send(asString(message.params.text), { wait, overrides });
       if (typeof result === "string") {
-        return { name, queued_or_turn_id: result };
+        return { workspace: message.workspace, name, queued_or_turn_id: result };
       }
-      return { name, summary: result };
+      return { workspace: message.workspace, name, summary: result };
     });
     this.handlers.set("interrupt", async (message) => {
       const name = asString(message.params.name);
-      const session = this.sessions.get(name);
+      const session = this.getLiveSession(message.workspace, name);
       if (!session) {
         throw new SessionNotFound(name);
       }
       await session.interrupt();
-      return { name, interrupted: true };
+      return { workspace: message.workspace, name, interrupted: true };
     });
     this.handlers.set("compact", async (message) => {
       const name = asString(message.params.name);
       return await this.withSessionOperationLock(name, async () => {
-        const session = this.sessions.get(name);
+        const session = this.getLiveSession(message.workspace, name);
         if (!session) {
           throw new SessionNotFound(name);
         }
-        const before = this.registry.get(name).tokenUsageInput;
+        const before = this.registry.get(name, message.workspace).tokenUsageInput;
         await session.compact();
-        const after = this.registry.get(name).tokenUsageInput;
+        const after = this.registry.get(name, message.workspace).tokenUsageInput;
         this.eventBus.publish("events", {
+          workspace: message.workspace,
           kind: "compact-done",
           session: name,
           before,
           after
         });
-        return { name, compacted: true };
+        return { workspace: message.workspace, name, compacted: true };
       });
     });
     this.handlers.set("history.get", async (message) => {
       const name = asString(message.params.name);
+      let workspace = message.workspace;
+      try {
+        workspace = this.registry.find(name, message.workspace, message.allWorkspaces).workspace;
+      } catch {
+      }
       const format = message.params.format === "jsonl" ? "jsonl" : "md";
-      const filePath = import_node_path7.default.join(
-        this.cfg.daemon.dataDir,
-        "sessions",
-        name,
-        format === "md" ? "history.md" : "turns.jsonl"
-      );
-      if (!import_node_fs8.default.existsSync(filePath)) {
-        return { name, content: "" };
+      const filePath = historyFilePath(this.cfg.daemon.dataDir, workspace, name, format);
+      if (!import_node_fs11.default.existsSync(filePath)) {
+        return { workspace, name, content: "" };
       }
       const sinceTurnId = message.params.sinceTurnId == null ? "" : asString(message.params.sinceTurnId);
       if (format === "md") {
-        const filtered2 = filterHistoryMarkdown(import_node_fs8.default.readFileSync(filePath, "utf8"), {
+        const filtered2 = filterHistoryMarkdown(import_node_fs11.default.readFileSync(filePath, "utf8"), {
           lastN: Number(message.params.lastN || 0),
           sinceTurnId: sinceTurnId || void 0
         });
         return {
           name,
+          workspace,
           content: filtered2.content,
           matched_since_turn_id: filtered2.matchedSinceTurnId
         };
       }
       const lastN = Number(message.params.lastN || 0);
       const since = message.params.since == null ? "" : asString(message.params.since);
-      const source = lastN > 0 && !since && !sinceTurnId ? readJsonlTail(filePath, lastN).join("\n") : import_node_fs8.default.readFileSync(filePath, "utf8");
+      const source = lastN > 0 && !since && !sinceTurnId ? readJsonlTail(filePath, lastN).join("\n") : import_node_fs11.default.readFileSync(filePath, "utf8");
       const filtered = filterTurnsJsonl(source, {
         lastN,
         since: since || void 0,
@@ -3819,6 +4474,7 @@ var DaemonServer = class {
       });
       return {
         name,
+        workspace,
         content: filtered.content,
         matched_since_turn_id: filtered.matchedSinceTurnId
       };
@@ -3826,107 +4482,122 @@ var DaemonServer = class {
     this.handlers.set("history.tail_stderr", async (message) => {
       const name = asString(message.params.name);
       const lines = Number(message.params.lines || 200);
-      const filePath = import_node_path7.default.join(this.cfg.daemon.dataDir, "sessions", name, "app-server.stderr.log");
-      if (!import_node_fs8.default.existsSync(filePath)) {
-        return { name, content: "" };
+      let workspace = message.workspace;
+      try {
+        workspace = this.registry.find(name, message.workspace, message.allWorkspaces).workspace;
+      } catch {
+      }
+      const filePath = sessionFilePath(this.cfg.daemon.dataDir, workspace, name, "app-server.stderr.log");
+      if (!import_node_fs11.default.existsSync(filePath)) {
+        return { workspace, name, content: "" };
       }
       return {
+        workspace,
         name,
         content: readLastLines(filePath, lines)
       };
     });
     this.handlers.set("queue.show", async (message) => {
       const name = asString(message.params.name);
-      const session = this.sessions.get(name);
+      const session = this.getLiveSession(message.workspace, name);
       if (!session) {
         throw new SessionNotFound(name);
       }
       const items = session.snapshotQueueJson();
-      return { name, length: items.length, items };
+      return { workspace: message.workspace, name, length: items.length, items };
     });
     this.handlers.set("queue.clear", async (message) => {
       const name = asString(message.params.name);
       return await this.withSessionOperationLock(name, async () => {
-        const session = this.sessions.get(name);
+        const session = this.getLiveSession(message.workspace, name);
         if (!session) {
           throw new SessionNotFound(name);
         }
         session.clearQueue();
-        return { name, cleared: true };
+        return { workspace: message.workspace, name, cleared: true };
       });
     });
     this.handlers.set("queue.drop_oldest", async (message) => {
       const name = asString(message.params.name);
       return await this.withSessionOperationLock(name, async () => {
-        const session = this.sessions.get(name);
+        const session = this.getLiveSession(message.workspace, name);
         if (!session) {
           throw new SessionNotFound(name);
         }
         const dropped = session.dropOldest();
-        return { name, dropped: dropped?.id ?? null };
+        return { workspace: message.workspace, name, dropped: dropped?.id ?? null };
       });
     });
     this.handlers.set("queue.retry_last", async (message) => {
       const name = asString(message.params.name);
-      const session = this.sessions.get(name);
+      const session = this.getLiveSession(message.workspace, name);
       if (!session) {
         throw new SessionNotFound(name);
       }
-      const entry = this.registry.get(name);
+      const entry = this.registry.get(name, message.workspace);
       if (!entry.lastPromptText) {
         throw new InvalidRequest(`session ${name} has no last prompt to retry`);
       }
       const result = await session.send(entry.lastPromptText, { wait: Boolean(message.params.wait) });
-      return { name, retried: true, result };
+      return { workspace: message.workspace, name, retried: true, result };
     });
-    this.handlers.set("health.check", async () => {
+    this.handlers.set("health.check", async (message) => {
       await this.health.tickOnce();
-      return { checked: true, sessions: this.registry.list().length };
+      return {
+        workspace: message.allWorkspaces ? "*" : message.workspace,
+        checked: true,
+        sessions: targetEntries(this.registry, message.workspace, message.allWorkspaces).length
+      };
     });
-    this.handlers.set("health.issues", async () => ({
-      issues: collectIssues(this.registry.list(), this.sessions)
+    this.handlers.set("health.issues", async (message) => ({
+      workspace: message.allWorkspaces ? "*" : message.workspace,
+      issues: collectIssues(targetEntries(this.registry, message.workspace, message.allWorkspaces), this.sessions)
     }));
-    this.handlers.set("health.report", async () => ({
-      summary: summarizeEntries(this.registry.list()),
-      issues: collectIssues(this.registry.list(), this.sessions),
-      sessions: this.registry.list().map((entry) => ({
+    this.handlers.set("health.report", async (message) => ({
+      workspace: message.allWorkspaces ? "*" : message.workspace,
+      summary: summarizeEntries(targetEntries(this.registry, message.workspace, message.allWorkspaces)),
+      issues: collectIssues(targetEntries(this.registry, message.workspace, message.allWorkspaces), this.sessions),
+      sessions: targetEntries(this.registry, message.workspace, message.allWorkspaces).map((entry) => ({
+        workspace: entry.workspace,
         name: entry.name,
         status: entry.status,
         queue_length: entry.queueLength,
         app_server_pid: entry.appServerPid,
         last_turn_id: entry.lastTurnId,
         last_error: entry.errorMessage,
-        transport_alive: this.sessions.get(entry.name)?.isTransportAlive() || false,
+        transport_alive: this.getLiveSession(entry.workspace, entry.name)?.isTransportAlive() || false,
         ephemeral: Boolean(entry.ephemeral)
       }))
     }));
-    this.handlers.set("health.repair", async () => {
+    this.handlers.set("health.repair", async (message) => {
       this.refreshConfigFromDisk();
-      for (const entry of this.registry.list()) {
+      for (const entry of targetEntries(this.registry, message.workspace, message.allWorkspaces)) {
         await this.withSessionOperationLock(entry.name, async () => {
-          const latest = this.registry.get(entry.name);
+          const latest = this.registry.get(entry.name, entry.workspace);
           if (latest.status !== "errored") {
             return;
           }
           if (latest.ephemeral) {
             this.registry.update(latest.name, {
               errorMessage: "ephemeral session cannot be repaired after its app-server exits"
-            });
+            }, latest.workspace);
             return;
           }
           try {
-            const session = await this.factory.resume(latest.name);
-            this.sessions.set(latest.name, session);
+            const session = await this.factory.resume(latest.name, latest.workspace);
+            this.setLiveSession(session);
           } catch (error) {
-            this.registry.update(latest.name, { errorMessage: error.message });
+            this.registry.update(latest.name, { errorMessage: error.message }, latest.workspace);
           }
         });
       }
-      return { repaired: true };
+      return { workspace: message.allWorkspaces ? "*" : message.workspace, repaired: true };
     });
     this.handlers.set("daemon.status", async () => ({
-      sessions: this.registry.list().length,
-      summary: summarizeEntries(this.registry.list()),
+      sessions: this.registry.list(null, true).length,
+      summary: summarizeEntries(this.registry.list(null, true)),
+      workspaces: summarizeWorkspaces(this.registry, this.clients.list(), this.runtimeAlarms, this.cfg),
+      clients: this.clients.list().length,
       pid: process.pid,
       socket_path: this.socketPath,
       data_dir: this.cfg.daemon.dataDir,
@@ -3936,28 +4607,145 @@ var DaemonServer = class {
     this.handlers.set("daemon.doctor", async () => ({
       pid: process.pid,
       socket_path: this.socketPath,
-      socket_exists: import_node_fs8.default.existsSync(this.socketPath),
+      socket_exists: import_node_fs11.default.existsSync(this.socketPath),
       data_dir: this.cfg.daemon.dataDir,
-      registry_path: import_node_path7.default.join(this.cfg.daemon.dataDir, "registry.json"),
-      log_path: import_node_path7.default.join(this.cfg.daemon.dataDir, "daemon.log"),
+      registry_path: import_node_path10.default.join(this.cfg.daemon.dataDir, "registry.json"),
+      log_path: import_node_path10.default.join(this.cfg.daemon.dataDir, "daemon.log"),
       uptime_seconds: Math.floor(process.uptime()),
-      summary: summarizeEntries(this.registry.list()),
-      sessions: this.registry.list().map((entry) => ({
+      summary: summarizeEntries(this.registry.list(null, true)),
+      workspaces: summarizeWorkspaces(this.registry, this.clients.list(), this.runtimeAlarms, this.cfg),
+      clients_path: clientsDir(this.cfg.daemon.dataDir),
+      clients: this.clients.list(),
+      sessions: this.registry.list(null, true).map((entry) => ({
+        workspace: entry.workspace,
         name: entry.name,
         status: entry.status,
         thread_id: entry.threadId,
         ephemeral: Boolean(entry.ephemeral),
-        transport_alive: this.sessions.get(entry.name)?.isTransportAlive() || false
+        transport_alive: this.getLiveSession(entry.workspace, entry.name)?.isTransportAlive() || false
       }))
     }));
-    this.handlers.set("daemon.stop", async () => ({ stopping: true }));
+    this.handlers.set("daemon.stop", async (message) => {
+      const active = this.registry.list(null, true).filter((entry) => entry.status !== "closed");
+      if (active.length > 0 && !message.params.force) {
+        throw new InvalidRequest(
+          `daemon stop would affect ${active.length} non-closed session(s) across workspaces; rerun with --force after confirming`,
+          {
+            active_sessions: active.map((entry) => ({
+              workspace: entry.workspace,
+              name: entry.name,
+              status: entry.status,
+              queue_length: entry.queueLength
+            }))
+          }
+        );
+      }
+      return { stopping: true, active_sessions: active.length, forced: Boolean(message.params.force) };
+    });
     this.handlers.set("daemon.logs", async () => {
-      const filePath = import_node_path7.default.join(this.cfg.daemon.dataDir, "daemon.log");
-      return { content: import_node_fs8.default.existsSync(filePath) ? import_node_fs8.default.readFileSync(filePath, "utf8") : "" };
+      const filePath = import_node_path10.default.join(this.cfg.daemon.dataDir, "daemon.log");
+      return { content: import_node_fs11.default.existsSync(filePath) ? import_node_fs11.default.readFileSync(filePath, "utf8") : "" };
     });
     this.handlers.set("daemon.reload_config", async () => {
       this.refreshConfigFromDisk();
       return { reloaded: true };
+    });
+    this.handlers.set("workspace.list", async () => ({
+      workspaces: summarizeWorkspaces(this.registry, this.clients.list(), this.runtimeAlarms, this.cfg)
+    }));
+    this.handlers.set("workspace.show", async (message) => {
+      const workspace = asString(message.params.name || message.workspace) || message.workspace;
+      const sessions = this.registry.list(workspace);
+      const clients = this.clients.list().filter((client) => client.workspace === workspace);
+      return {
+        workspace,
+        sessions,
+        clients,
+        alarms: alarmsForWorkspace(workspace, this.runtimeAlarms, this.cfg)
+      };
+    });
+    this.handlers.set("client.register", async (message) => {
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const requestedId = asString(message.params.clientId || message.clientId);
+      const record = {
+        clientId: requestedId || makeClientId({
+          workspace: message.workspace,
+          sessionId: optionalString(message.params.sessionId),
+          hostname: optionalString(message.params.hostname),
+          pid: message.params.pid == null ? null : Number(message.params.pid),
+          startedAtMs: Date.now()
+        }),
+        workspace: message.workspace,
+        hostname: optionalString(message.params.hostname) || import_node_os4.default.hostname(),
+        pid: message.params.pid == null ? null : Number(message.params.pid),
+        startedAt: optionalString(message.params.startedAt) || now,
+        claudeProjectDir: optionalString(message.params.claudeProjectDir),
+        sessionId: optionalString(message.params.sessionId)
+      };
+      this.clients.register(record);
+      return recordToWire(record);
+    });
+    this.handlers.set("client.list", async () => ({ clients: this.clients.list().map(recordToWire) }));
+    this.handlers.set("client.detach", async (message) => {
+      const clientId = asString(message.params.clientId || message.clientId);
+      const sessionId = asString(message.params.sessionId || message.params.session_id);
+      if (!clientId && sessionId) {
+        const result = await this.detachClientBySession(message.workspace, sessionId);
+        return {
+          session_id: sessionId,
+          workspace: message.workspace,
+          detached: true,
+          detached_clients: result.clients,
+          detached_subscribers: result.subscribers
+        };
+      }
+      if (!clientId) {
+        throw new InvalidRequest("client_id or session_id required");
+      }
+      const detached_subscribers = await this.detachClient(clientId);
+      return { client_id: clientId, detached: true, detached_subscribers };
+    });
+    this.handlers.set("watch.alarm.create", async (message) => {
+      const name = asString(message.params.name).trim();
+      if (!name) {
+        throw new InvalidRequest("alarm name required");
+      }
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const record = this.runtimeAlarms.upsert({
+        workspace: message.workspace,
+        name,
+        clientId: message.clientId,
+        createdAt: now,
+        updatedAt: now,
+        alarm: {
+          enabled: message.params.enabled == null ? true : Boolean(message.params.enabled),
+          intervalSeconds: positiveNumber(message.params.intervalSeconds ?? message.params.interval_seconds, 1200),
+          taskBriefFile: asString(message.params.taskBriefFile ?? message.params.task_brief_file),
+          taskBriefHeadLines: positiveNumber(message.params.taskBriefHeadLines ?? message.params.task_brief_head_lines, 30),
+          emitIdle: Boolean(message.params.emitIdle ?? message.params.emit_idle),
+          template: asString(message.params.template),
+          templateFile: asString(message.params.templateFile ?? message.params.template_file)
+        }
+      });
+      if (this.server) {
+        this.restartBackgroundLoops();
+      }
+      return { alarm: runtimeAlarmToWire(record) };
+    });
+    this.handlers.set("watch.alarm.list", async (message) => ({
+      workspace: message.allWorkspaces ? "*" : message.workspace,
+      alarms: this.runtimeAlarms.list(message.workspace, message.allWorkspaces).map(runtimeAlarmToWire)
+    }));
+    this.handlers.set("watch.alarm.delete", async (message) => {
+      const name = asString(message.params.name).trim();
+      if (!name) {
+        throw new InvalidRequest("alarm name required");
+      }
+      const deleted = this.runtimeAlarms.delete(message.workspace, name);
+      if (deleted && this.server) {
+        this.restartBackgroundLoops();
+      }
+      return { workspace: message.workspace, name, deleted };
     });
   }
   refreshConfigFromDisk() {
@@ -3965,6 +4753,73 @@ var DaemonServer = class {
     reloaded.daemon.dataDir = this.cfg.daemon.dataDir;
     reloaded.daemon.socketPath = this.cfg.daemon.socketPath;
     this.replaceConfig(reloaded);
+  }
+  getLiveSession(workspace, name) {
+    return this.sessions.get(sessionKey2(workspace, name));
+  }
+  setLiveSession(session) {
+    this.sessions.set(sessionKey2(session.workspace, session.name), session);
+  }
+  deleteLiveSession(workspace, name) {
+    this.sessions.delete(sessionKey2(workspace, name));
+  }
+  activeWorkspaces() {
+    const names = new Set(this.registry.workspaces());
+    for (const client of this.clients.list()) {
+      names.add(client.workspace);
+    }
+    if (names.size === 0) {
+      names.add(DEFAULT_WORKSPACE);
+    }
+    return [...names].sort();
+  }
+  scheduledAlarms() {
+    const items = [];
+    for (const [workspace, alarms] of Object.entries(this.cfg.monitor.watchdogWorkspaceAlarms)) {
+      for (const [name, alarm] of Object.entries(alarms)) {
+        if (alarm.enabled) {
+          items.push({ workspace, name, alarm });
+        }
+      }
+    }
+    for (const record of this.runtimeAlarms.list(null, true)) {
+      if (record.alarm.enabled) {
+        items.push({ workspace: record.workspace, name: record.name, alarm: record.alarm });
+      }
+    }
+    return items;
+  }
+  async sweepStaleClients() {
+    for (const record of this.clients.sweepStale()) {
+      await this.detachClient(record.clientId);
+    }
+  }
+  async detachClient(clientId) {
+    this.clients.detach(clientId);
+    const detached = await this.eventBus.detachClient(clientId);
+    const deletedAlarms = this.runtimeAlarms.deleteByClient(clientId);
+    if (deletedAlarms > 0 && this.server) {
+      this.restartBackgroundLoops();
+    }
+    if (!hasNonClosedSessions(this.registry)) {
+      setImmediate(() => this.shutdownCallback?.());
+    }
+    return detached;
+  }
+  async detachClientBySession(workspace, sessionId) {
+    const records = this.clients.detachBySession(workspace, sessionId);
+    let subscribers = 0;
+    for (const record of records) {
+      subscribers += await this.eventBus.detachClient(record.clientId);
+      const deletedAlarms = this.runtimeAlarms.deleteByClient(record.clientId);
+      if (deletedAlarms > 0 && this.server) {
+        this.restartBackgroundLoops();
+      }
+    }
+    if (!hasNonClosedSessions(this.registry)) {
+      setImmediate(() => this.shutdownCallback?.());
+    }
+    return { clients: records.map((record) => record.clientId), subscribers };
   }
   async withSessionOperationLock(name, fn) {
     const previous = this.sessionLocks.get(name) || Promise.resolve();
@@ -3992,8 +4847,8 @@ var DaemonServer = class {
       return await this.withSessionOperationLock(name, fn);
     });
   }
-  async handleMonitorSubscribe(stream, sinceSeq, socket) {
-    const queue = await this.eventBus.subscribe(stream, sinceSeq);
+  async handleMonitorSubscribe(stream, sinceSeq, options, socket) {
+    const queue = await this.eventBus.subscribe(stream, sinceSeq, options);
     const onClosed = () => {
       queue.close(new Error("monitor socket closed"));
     };
@@ -4025,17 +4880,20 @@ var DaemonServer = class {
       await this.eventBus.unsubscribe(stream, queue);
     }
   }
-  async handleHistorySubscribe(params, socket) {
+  async handleHistorySubscribe(params, options, socket) {
     const name = asString(params.name);
+    let workspace = options.workspace;
+    try {
+      workspace = this.registry.find(name, options.workspace, options.allWorkspaces).workspace;
+    } catch {
+    }
     const format = params.format === "jsonl" ? "jsonl" : "md";
-    const filePath = import_node_path7.default.join(
-      this.cfg.daemon.dataDir,
-      "sessions",
-      name,
-      format === "md" ? "history.md" : "turns.jsonl"
-    );
-    const queue = await this.eventBus.subscribe("events", this.eventBus.lastSeq("events"));
-    const snapshot = this.readHistorySnapshot(name, filePath, format, params);
+    const filePath = historyFilePath(this.cfg.daemon.dataDir, workspace, name, format);
+    const queue = await this.eventBus.subscribe("events", this.eventBus.lastSeq("events"), {
+      ...options,
+      workspace
+    });
+    const snapshot = this.readHistorySnapshot(workspace, name, filePath, format, params);
     let seq = 0;
     socket.write(
       JSON.stringify({
@@ -4044,6 +4902,7 @@ var DaemonServer = class {
         seq,
         payload: {
           kind: "history-snapshot",
+          workspace,
           session: name,
           format,
           ...snapshot.payload
@@ -4059,26 +4918,26 @@ var DaemonServer = class {
     try {
       while (!socket.destroyed) {
         const event = await queue.shift();
-        if (event.payload.session !== name) {
+        if (event.payload.session !== name || String(event.payload.workspace ?? DEFAULT_WORKSPACE) !== workspace) {
           continue;
         }
         if (!["turn-done", "turn-attn"].includes(String(event.payload.kind))) {
           continue;
         }
         let content = "";
-        if (import_node_fs8.default.existsSync(filePath)) {
-          const size = import_node_fs8.default.statSync(filePath).size;
+        if (import_node_fs11.default.existsSync(filePath)) {
+          const size = import_node_fs11.default.statSync(filePath).size;
           if (size < cursor) {
             cursor = 0;
           }
           if (size > cursor) {
-            const fd = import_node_fs8.default.openSync(filePath, "r");
+            const fd = import_node_fs11.default.openSync(filePath, "r");
             try {
               const buffer = Buffer.alloc(size - cursor);
-              import_node_fs8.default.readSync(fd, buffer, 0, buffer.length, cursor);
+              import_node_fs11.default.readSync(fd, buffer, 0, buffer.length, cursor);
               content = buffer.toString("utf8");
             } finally {
-              import_node_fs8.default.closeSync(fd);
+              import_node_fs11.default.closeSync(fd);
             }
             cursor = size;
           }
@@ -4091,6 +4950,7 @@ var DaemonServer = class {
             seq,
             payload: {
               kind: "history-append",
+              workspace,
               session: name,
               format,
               content,
@@ -4113,15 +4973,15 @@ var DaemonServer = class {
       await this.eventBus.unsubscribe("events", queue);
     }
   }
-  readHistorySnapshot(name, filePath, format, params) {
-    if (!import_node_fs8.default.existsSync(filePath)) {
-      return { cursor: 0, payload: { name, content: "", matched_since_turn_id: true } };
+  readHistorySnapshot(workspace, name, filePath, format, params) {
+    if (!import_node_fs11.default.existsSync(filePath)) {
+      return { cursor: 0, payload: { workspace, name, content: "", matched_since_turn_id: true } };
     }
-    const cursor = import_node_fs8.default.statSync(filePath).size;
+    const cursor = import_node_fs11.default.statSync(filePath).size;
     const lastN = Number(params.lastN || 0);
     const sinceTurnId = params.sinceTurnId == null ? "" : asString(params.sinceTurnId);
     if (format === "md") {
-      const filtered2 = filterHistoryMarkdown(import_node_fs8.default.readFileSync(filePath, "utf8"), {
+      const filtered2 = filterHistoryMarkdown(import_node_fs11.default.readFileSync(filePath, "utf8"), {
         lastN,
         sinceTurnId: sinceTurnId || void 0
       });
@@ -4129,13 +4989,14 @@ var DaemonServer = class {
         cursor,
         payload: {
           name,
+          workspace,
           content: filtered2.content,
           matched_since_turn_id: filtered2.matchedSinceTurnId
         }
       };
     }
     const since = params.since == null ? "" : asString(params.since);
-    const source = lastN > 0 && !since && !sinceTurnId ? readJsonlTail(filePath, lastN).join("\n") : import_node_fs8.default.readFileSync(filePath, "utf8");
+    const source = lastN > 0 && !since && !sinceTurnId ? readJsonlTail(filePath, lastN).join("\n") : import_node_fs11.default.readFileSync(filePath, "utf8");
     const filtered = filterTurnsJsonl(source, {
       lastN,
       since: since || void 0,
@@ -4145,6 +5006,7 @@ var DaemonServer = class {
       cursor,
       payload: {
         name,
+        workspace,
         content: filtered.content,
         matched_since_turn_id: filtered.matchedSinceTurnId
       }
@@ -4175,15 +5037,27 @@ var DaemonServer = class {
           continue;
         }
         if (request.cmd === "monitor.events.subscribe") {
-          await this.handleMonitorSubscribe("events", Number(request.params.sinceSeq || 0), socket);
+          await this.handleMonitorSubscribe("events", Number(request.params.sinceSeq || 0), {
+            workspace: request.workspace,
+            clientId: request.clientId,
+            allWorkspaces: request.allWorkspaces
+          }, socket);
           return;
         }
         if (request.cmd === "monitor.watchdog.subscribe") {
-          await this.handleMonitorSubscribe("watchdog", Number(request.params.sinceSeq || 0), socket);
+          await this.handleMonitorSubscribe("watchdog", Number(request.params.sinceSeq || 0), {
+            workspace: request.workspace,
+            clientId: request.clientId,
+            allWorkspaces: request.allWorkspaces
+          }, socket);
           return;
         }
         if (request.cmd === "history.subscribe") {
-          await this.handleHistorySubscribe(request.params, socket);
+          await this.handleHistorySubscribe(request.params, {
+            workspace: request.workspace,
+            clientId: request.clientId,
+            allWorkspaces: request.allWorkspaces
+          }, socket);
           return;
         }
         const handler = this.handlers.get(request.cmd);
@@ -4199,7 +5073,7 @@ var DaemonServer = class {
         }
         try {
           const data = await handler(request);
-          socket.write(encodeMessage({ id: request.id, ok: true, data }));
+          socket.write(encodeMessage({ v: 2, id: request.id, ok: true, workspace: request.workspace, data }));
           if (request.cmd === "daemon.stop") {
             setImmediate(() => {
               this.shutdownCallback?.();
@@ -4210,6 +5084,7 @@ var DaemonServer = class {
             encodeMessage({
               id: request.id,
               ok: false,
+              workspace: request.workspace,
               error: errorToWire(asCodexTeamError(error))
             })
           );
@@ -4225,6 +5100,19 @@ function compactObject(input) {
   return Object.fromEntries(
     Object.entries(input).filter(([, value]) => value !== void 0 && value !== null && value !== "")
   );
+}
+function historyFilePath(dataDir, workspace, name, format) {
+  return sessionFilePath(dataDir, workspace, name, format === "md" ? "history.md" : "turns.jsonl");
+}
+function sessionFilePath(dataDir, workspace, name, file) {
+  return import_node_path10.default.join(sessionDir(dataDir, workspace, name), file);
+}
+function positiveNumber(value, fallback) {
+  const parsed = Number(value ?? fallback);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+function hasNonClosedSessions(registry) {
+  return registry.list(null, true).some((entry) => entry.status !== "closed");
 }
 function summarizeEntries(entries) {
   const summary = {
@@ -4244,12 +5132,68 @@ function summarizeEntries(entries) {
   }
   return summary;
 }
+function summarizeWorkspaces(registry, clients, runtimeAlarms, cfg) {
+  const names = new Set(registry.workspaces());
+  for (const client of clients) {
+    names.add(client.workspace);
+  }
+  for (const alarm of runtimeAlarms.list(null, true)) {
+    names.add(alarm.workspace);
+  }
+  for (const workspace of Object.keys(cfg.monitor.watchdogWorkspaceAlarms)) {
+    names.add(workspace);
+  }
+  return [...names].sort().map((workspace) => {
+    const sessions = registry.list(workspace);
+    const alarms = alarmsForWorkspace(workspace, runtimeAlarms, cfg);
+    return {
+      workspace,
+      sessions: sessions.length,
+      clients: clients.filter((client) => client.workspace === workspace).length,
+      alarms: alarms.length,
+      summary: summarizeEntries(sessions)
+    };
+  });
+}
+function alarmsForWorkspace(workspace, runtimeAlarms, cfg) {
+  const configured = Object.entries(cfg.monitor.watchdogWorkspaceAlarms[workspace] || {}).map(([name, alarm]) => ({
+    source: "config",
+    workspace,
+    name,
+    ...runtimeAlarmToWire({
+      workspace,
+      name,
+      clientId: null,
+      createdAt: "",
+      updatedAt: "",
+      alarm
+    })
+  }));
+  const runtime = runtimeAlarms.list(workspace).map((record) => ({
+    source: "runtime",
+    ...runtimeAlarmToWire(record)
+  }));
+  return [...configured, ...runtime];
+}
+function recordToWire(record) {
+  return {
+    client_id: record.clientId,
+    workspace: record.workspace,
+    hostname: record.hostname,
+    pid: record.pid,
+    started_at: record.startedAt,
+    claude_project_dir: record.claudeProjectDir,
+    session_id: record.sessionId
+  };
+}
 function collectIssues(entries, sessions) {
   const issues = [];
   for (const entry of entries) {
-    const live = sessions.get(entry.name);
+    const workspace = entry.workspace || DEFAULT_WORKSPACE;
+    const live = sessions.get(sessionKey2(workspace, entry.name));
     if (entry.status === "errored") {
       issues.push({
+        workspace,
         session: entry.name,
         kind: "errored",
         last_error: entry.errorMessage
@@ -4258,6 +5202,7 @@ function collectIssues(entries, sessions) {
     }
     if (entry.queueLength > 0) {
       issues.push({
+        workspace,
         session: entry.name,
         kind: "queue-backlog",
         queue_length: entry.queueLength
@@ -4267,6 +5212,7 @@ function collectIssues(entries, sessions) {
       const ageMs = live.currentTurnAgeMs();
       if (ageMs != null) {
         issues.push({
+          workspace,
           session: entry.name,
           kind: "running",
           turn_id: live.currentTurnId(),
@@ -4276,6 +5222,7 @@ function collectIssues(entries, sessions) {
       }
     } else if (live && !live.isTransportAlive()) {
       issues.push({
+        workspace,
         session: entry.name,
         kind: "transport-down"
       });
@@ -4286,8 +5233,8 @@ function collectIssues(entries, sessions) {
 
 // src/daemon.ts
 function appendLogLine(logPath, message) {
-  import_node_fs9.default.mkdirSync(import_node_path8.default.dirname(logPath), { recursive: true });
-  import_node_fs9.default.appendFileSync(logPath, `${(/* @__PURE__ */ new Date()).toISOString()} ${message}
+  import_node_fs12.default.mkdirSync(import_node_path11.default.dirname(logPath), { recursive: true });
+  import_node_fs12.default.appendFileSync(logPath, `${(/* @__PURE__ */ new Date()).toISOString()} ${message}
 `, "utf8");
 }
 function isAlive(pid) {
@@ -4299,33 +5246,33 @@ function isAlive(pid) {
   }
 }
 function acquirePidLock(pidPath) {
-  import_node_fs9.default.mkdirSync(import_node_path8.default.dirname(pidPath), { recursive: true });
-  if (import_node_fs9.default.existsSync(pidPath)) {
-    const raw = import_node_fs9.default.readFileSync(pidPath, "utf8").trim();
+  import_node_fs12.default.mkdirSync(import_node_path11.default.dirname(pidPath), { recursive: true });
+  if (import_node_fs12.default.existsSync(pidPath)) {
+    const raw = import_node_fs12.default.readFileSync(pidPath, "utf8").trim();
     const pid = Number(raw);
     if (Number.isFinite(pid) && pid > 0 && isAlive(pid)) {
       throw new DaemonAlreadyRunning(
         `another daemon is already running (pid=${pid}, pid_file=${pidPath}).`
       );
     }
-    import_node_fs9.default.unlinkSync(pidPath);
+    import_node_fs12.default.unlinkSync(pidPath);
   }
-  import_node_fs9.default.writeFileSync(pidPath, String(process.pid), "utf8");
+  import_node_fs12.default.writeFileSync(pidPath, String(process.pid), "utf8");
 }
 function releasePidLock(pidPath) {
-  if (import_node_fs9.default.existsSync(pidPath)) {
-    import_node_fs9.default.unlinkSync(pidPath);
+  if (import_node_fs12.default.existsSync(pidPath)) {
+    import_node_fs12.default.unlinkSync(pidPath);
   }
 }
 async function runDaemon(configPath) {
-  const cfg = loadConfig(configPath || import_node_path8.default.join(xdgConfigDir(), "config.toml"));
+  const cfg = loadConfig(configPath || import_node_path11.default.join(xdgConfigDir(), "config.toml"));
   const dataDir = resolveDataDir(cfg);
   const socketPath = resolveSocketPath(cfg);
   cfg.daemon.dataDir = dataDir;
   cfg.daemon.socketPath = socketPath;
-  import_node_fs9.default.mkdirSync(dataDir, { recursive: true });
-  const pidPath = import_node_path8.default.join(dataDir, "daemon.pid");
-  const logPath = import_node_path8.default.join(dataDir, "daemon.log");
+  import_node_fs12.default.mkdirSync(dataDir, { recursive: true });
+  const pidPath = import_node_path11.default.join(dataDir, "daemon.pid");
+  const logPath = import_node_path11.default.join(dataDir, "daemon.log");
   acquirePidLock(pidPath);
   appendLogLine(logPath, "daemon starting");
   let stopResolve;
@@ -4339,7 +5286,7 @@ async function runDaemon(configPath) {
   try {
     await server.start();
     if (cfg.defaults.autoResumeOnDaemonStart) {
-      for (const entry of server.registry.list()) {
+      for (const entry of server.registry.list(null, true)) {
         if (!["idle", "running", "errored", "compacting"].includes(entry.status)) {
           continue;
         }
@@ -4349,18 +5296,18 @@ async function runDaemon(configPath) {
             status: "closed",
             appServerPid: null,
             errorMessage: "ephemeral session expired when daemon stopped"
-          });
+          }, entry.workspace);
           continue;
         }
         try {
-          const session = await server.factory.resume(entry.name);
-          server.sessions.set(entry.name, session);
+          const session = await server.factory.resume(entry.name, entry.workspace);
+          server.sessions.set(`${entry.workspace}\0${entry.name}`, session);
         } catch (error) {
           server.registry.update(entry.name, {
             status: "errored",
             appServerPid: null,
             errorMessage: error.message
-          });
+          }, entry.workspace);
           appendLogLine(logPath, `failed to auto-resume ${entry.name}: ${error.message}`);
         }
       }

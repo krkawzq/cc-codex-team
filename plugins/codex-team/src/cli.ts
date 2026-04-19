@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 
 import { loadConfig, resolveDataDir, resolveSocketPath } from "./config";
 import { DaemonNotRunning, wireToError } from "./errors";
+import { resolveWorkspace, validateWorkspace } from "./workspace";
 
 export type ParsedArgs =
   | { group: "session"; action: string; args: Record<string, unknown> }
@@ -17,11 +18,26 @@ export type ParsedArgs =
   | { group: "queue"; action: string; args: Record<string, unknown> }
   | { group: "health"; action: string }
   | { group: "daemon"; action: string; args: Record<string, unknown> }
+  | { group: "workspace"; action: string; args: Record<string, unknown> }
+  | { group: "client"; action: string; args: Record<string, unknown> }
+  | { group: "watch"; action: string; subaction: string; args: Record<string, unknown> }
   | { group: "monitor"; action: "events" | "watchdog" };
 
 interface ParsedOptions {
   _: string[];
   [key: string]: string | boolean | string[] | undefined;
+}
+
+interface RequestMeta {
+  workspace: string;
+  clientId: string | null;
+  allWorkspaces: boolean;
+}
+
+interface GlobalArgs {
+  argv: string[];
+  workspaceFlag: string | null;
+  allWorkspaces: boolean;
 }
 
 function pidAlive(pid: number): boolean {
@@ -44,6 +60,49 @@ function diagnoseStalePid(dataDir: string): { stale: boolean; pid: number | null
     return { stale: true, pid: Number.isFinite(pid) ? pid : null, pidPath };
   }
   return { stale: false, pid, pidPath };
+}
+
+function defaultRequestMeta(): RequestMeta {
+  return {
+    workspace: resolveWorkspace(),
+    clientId: process.env.CODEX_TEAM_CLIENT_ID || null,
+    allWorkspaces: false,
+  };
+}
+
+function extractGlobalArgs(argv: string[]): GlobalArgs {
+  const out: string[] = [];
+  let workspaceFlag: string | null = null;
+  let allWorkspaces = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === "--all-workspaces") {
+      allWorkspaces = true;
+      continue;
+    }
+    if (token === "--workspace") {
+      index += 1;
+      workspaceFlag = argv[index] || "";
+      continue;
+    }
+    if (token.startsWith("--workspace=")) {
+      workspaceFlag = token.slice("--workspace=".length);
+      continue;
+    }
+    out.push(token);
+  }
+  if (workspaceFlag && allWorkspaces) {
+    throw new Error("--workspace and --all-workspaces are mutually exclusive");
+  }
+  return { argv: out, workspaceFlag, allWorkspaces };
+}
+
+function resolveRequestMeta(globals: GlobalArgs): RequestMeta {
+  return {
+    workspace: validateWorkspace(resolveWorkspace({ explicit: globals.workspaceFlag })),
+    clientId: process.env.CODEX_TEAM_CLIENT_ID || null,
+    allWorkspaces: globals.allWorkspaces,
+  };
 }
 
 async function socketReady(socketPath: string): Promise<boolean> {
@@ -73,6 +132,7 @@ export async function sendRequest(
   socketPath: string,
   cmd: string,
   params: Record<string, unknown>,
+  meta: RequestMeta = defaultRequestMeta(),
 ): Promise<Record<string, unknown>> {
   return await new Promise<Record<string, unknown>>((resolve, reject) => {
     const socket = net.createConnection(socketPath);
@@ -83,7 +143,7 @@ export async function sendRequest(
       reject(new DaemonNotRunning(`no daemon at ${socketPath}: ${error.message}`));
     });
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ id: cryptoId(), cmd, params })}\n`);
+      socket.write(`${JSON.stringify({ v: 2, id: cryptoId(), cmd, workspace: meta.workspace, clientId: meta.clientId, allWorkspaces: meta.allWorkspaces, params })}\n`);
     });
     void (async () => {
       try {
@@ -104,7 +164,7 @@ export async function sendRequest(
   });
 }
 
-async function streamSubscribe(socketPath: string, cmd: string): Promise<number> {
+async function streamSubscribe(socketPath: string, cmd: string, meta: RequestMeta): Promise<number> {
   return await new Promise<number>((resolve) => {
     const socket = net.createConnection(socketPath);
     socket.setEncoding("utf8");
@@ -113,7 +173,7 @@ async function streamSubscribe(socketPath: string, cmd: string): Promise<number>
       resolve(4);
     });
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ id: cryptoId(), cmd, params: {} })}\n`);
+      socket.write(`${JSON.stringify({ v: 2, id: cryptoId(), cmd, workspace: meta.workspace, clientId: meta.clientId, allWorkspaces: meta.allWorkspaces, params: {} })}\n`);
     });
     socket.on("data", (chunk) => {
       process.stdout.write(chunk);
@@ -122,7 +182,7 @@ async function streamSubscribe(socketPath: string, cmd: string): Promise<number>
   });
 }
 
-async function streamHistorySubscribe(socketPath: string, params: Record<string, unknown>): Promise<number> {
+async function streamHistorySubscribe(socketPath: string, params: Record<string, unknown>, meta: RequestMeta): Promise<number> {
   return await new Promise<number>((resolve) => {
     const socket = net.createConnection(socketPath);
     socket.setEncoding("utf8");
@@ -131,7 +191,7 @@ async function streamHistorySubscribe(socketPath: string, params: Record<string,
       resolve(4);
     });
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ id: cryptoId(), cmd: "history.subscribe", params })}\n`);
+      socket.write(`${JSON.stringify({ v: 2, id: cryptoId(), cmd: "history.subscribe", workspace: meta.workspace, clientId: meta.clientId, allWorkspaces: meta.allWorkspaces, params })}\n`);
     });
     const rl = readline.createInterface({ input: socket, crlfDelay: Infinity });
     void (async () => {
@@ -322,9 +382,34 @@ function parseCli(argv: string[]): ParsedArgs {
   }
   if (group === "daemon") {
     const opts = parseOptions(rest, {
-      boolean: ["follow"],
+      boolean: ["follow", "force"],
     });
     return { group, action, args: opts };
+  }
+  if (group === "workspace") {
+    return { group, action, args: { name: rest[0] || "", _: rest } };
+  }
+  if (group === "client") {
+    const opts = parseOptions(rest, {
+      string: ["client-id", "session-id", "hostname", "pid", "project-dir", "started-at"],
+    });
+    return { group, action, args: { ...opts, id: opts._[0] || "" } };
+  }
+  if (group === "watch" && action === "alarm") {
+    const [subaction, ...alarmRest] = rest;
+    const opts = parseOptions(alarmRest, {
+      boolean: ["emit-idle", "disabled"],
+      string: [
+        "interval",
+        "interval-seconds",
+        "task-brief",
+        "task-brief-file",
+        "task-brief-head-lines",
+        "template",
+        "template-file",
+      ],
+    });
+    return { group, action, subaction: subaction || "list", args: { ...opts, name: opts._[0] } };
   }
   if (group === "monitor" && (action === "events" || action === "watchdog")) {
     return { group, action };
@@ -460,12 +545,15 @@ export class CliClient {
   }
 
   async run(argv: string[] = process.argv.slice(2)): Promise<number> {
-    const parsed = parseCli(argv);
+    const globals = extractGlobalArgs(argv);
+    const meta = resolveRequestMeta(globals);
+    const parsed = parseCli(globals.argv);
     if (parsed.group === "monitor") {
       await this.ensureDaemon();
-      return await streamSubscribe(this.socketPath, `monitor.${parsed.action}.subscribe`);
+      return await streamSubscribe(this.socketPath, `monitor.${parsed.action}.subscribe`, meta);
     }
-    if (!(parsed.group === "daemon" && (parsed.action === "start" || parsed.action === "restart"))) {
+    const noAutostart = process.env.CODEX_TEAM_NO_AUTOSTART === "1";
+    if (!noAutostart && !(parsed.group === "daemon" && (parsed.action === "start" || parsed.action === "restart"))) {
       await this.ensureDaemon();
     }
     let response: Record<string, unknown> | number;
@@ -474,7 +562,7 @@ export class CliClient {
       response = { ok: true, data: { started: true } };
     } else if (parsed.group === "daemon" && parsed.action === "restart") {
       try {
-        await sendRequest(this.socketPath, "daemon.stop", {});
+        await sendRequest(this.socketPath, "daemon.stop", { force: true }, meta);
       } catch {
         // ignore
       }
@@ -485,7 +573,7 @@ export class CliClient {
       const cfg = loadConfig();
       return await followFile(path.join(resolveDataDir(cfg), "daemon.log"));
     } else {
-      response = await this.handle(parsed);
+      response = await this.handle(parsed, meta);
     }
     if (typeof response === "number") {
       return response;
@@ -509,7 +597,7 @@ export class CliClient {
     return error.exitCode;
   }
 
-  private async handle(parsed: ParsedArgs): Promise<Record<string, unknown> | number> {
+  private async handle(parsed: ParsedArgs, meta: RequestMeta): Promise<Record<string, unknown> | number> {
     if (parsed.group === "session") {
       const args = parsed.args;
       const cmd = `session.${parsed.action.replace(/-/g, "_")}`;
@@ -540,7 +628,7 @@ export class CliClient {
       } else if (parsed.action === "read") {
         params.includeTurns = Boolean(args.includeTurns);
       }
-      return await sendRequest(this.socketPath, cmd, params);
+      return await sendRequest(this.socketPath, cmd, params, meta);
     }
     if (parsed.group === "send") {
       const outputSchema =
@@ -558,13 +646,13 @@ export class CliClient {
         serviceTier: parsed.args.serviceTier,
         summary: parsed.args.summary,
         outputSchema,
-      });
+      }, meta);
     }
     if (parsed.group === "interrupt") {
-      return await sendRequest(this.socketPath, "interrupt", { name: parsed.name });
+      return await sendRequest(this.socketPath, "interrupt", { name: parsed.name }, meta);
     }
     if (parsed.group === "compact") {
-      return await sendRequest(this.socketPath, "compact", { name: parsed.name });
+      return await sendRequest(this.socketPath, "compact", { name: parsed.name }, meta);
     }
     if (parsed.group === "history") {
       if (parsed.args.follow) {
@@ -574,7 +662,7 @@ export class CliClient {
           since: parsed.args.since,
           sinceTurnId: parsed.args.sinceTurnId,
           format: parsed.args.format || "md",
-        });
+        }, meta);
       }
       return await sendRequest(this.socketPath, "history.get", {
         name: parsed.args.name,
@@ -582,25 +670,79 @@ export class CliClient {
         since: parsed.args.since,
         sinceTurnId: parsed.args.sinceTurnId,
         format: parsed.args.format || "md",
-      });
+      }, meta);
     }
     if (parsed.group === "tail") {
       return await sendRequest(this.socketPath, "history.tail_stderr", {
         name: parsed.args.name,
         lines: Number(parsed.args.lines || 200),
-      });
+      }, meta);
     }
     if (parsed.group === "queue") {
       return await sendRequest(this.socketPath, `queue.${parsed.action.replace(/-/g, "_")}`, {
         name: parsed.args.name,
         wait: Boolean(parsed.args.wait),
-      });
+      }, meta);
     }
     if (parsed.group === "health") {
-      return await sendRequest(this.socketPath, `health.${parsed.action}`, {});
+      return await sendRequest(this.socketPath, `health.${parsed.action}`, {}, meta);
+    }
+    if (parsed.group === "workspace") {
+      if (parsed.action === "list") {
+        return await sendRequest(this.socketPath, "workspace.list", {}, { ...meta, allWorkspaces: true });
+      }
+      return await sendRequest(this.socketPath, "workspace.show", { name: parsed.args.name }, meta);
+    }
+    if (parsed.group === "client") {
+      if (parsed.action === "list") {
+        return await sendRequest(this.socketPath, "client.list", {}, { ...meta, allWorkspaces: true });
+      }
+      if (parsed.action === "register") {
+        return await sendRequest(this.socketPath, "client.register", {
+          clientId: parsed.args.clientId,
+          sessionId: parsed.args.sessionId,
+          hostname: parsed.args.hostname,
+          pid: parsed.args.pid == null ? null : Number(parsed.args.pid),
+          claudeProjectDir: parsed.args.projectDir,
+          startedAt: parsed.args.startedAt,
+        }, meta);
+      }
+      if (parsed.action === "detach") {
+        return await sendRequest(this.socketPath, "client.detach", {
+          clientId: parsed.args.id || parsed.args.clientId,
+          sessionId: parsed.args.sessionId,
+        }, meta);
+      }
+    }
+    if (parsed.group === "watch") {
+      if (parsed.subaction === "list") {
+        return await sendRequest(this.socketPath, "watch.alarm.list", {}, meta);
+      }
+      if (parsed.subaction === "create") {
+        return await sendRequest(this.socketPath, "watch.alarm.create", {
+          name: parsed.args.name,
+          enabled: !Boolean(parsed.args.disabled),
+          intervalSeconds:
+            parsed.args.intervalSeconds == null && parsed.args.interval == null
+              ? undefined
+              : Number(parsed.args.intervalSeconds ?? parsed.args.interval),
+          taskBriefFile: parsed.args.taskBriefFile || parsed.args.taskBrief,
+          taskBriefHeadLines: parsed.args.taskBriefHeadLines == null ? undefined : Number(parsed.args.taskBriefHeadLines),
+          emitIdle: Boolean(parsed.args.emitIdle),
+          template: parsed.args.template,
+          templateFile: parsed.args.templateFile,
+        }, meta);
+      }
+      if (parsed.subaction === "delete") {
+        return await sendRequest(this.socketPath, "watch.alarm.delete", {
+          name: parsed.args.name,
+        }, meta);
+      }
     }
     if (parsed.group === "daemon") {
-      return await sendRequest(this.socketPath, `daemon.${parsed.action.replace(/-/g, "_")}`, {});
+      return await sendRequest(this.socketPath, `daemon.${parsed.action.replace(/-/g, "_")}`, {
+        force: Boolean(parsed.args.force),
+      }, meta);
     }
     throw new Error("unreachable");
   }

@@ -35,6 +35,22 @@ export function defaultRegistryPath(): string {
   return path.join(xdgDataDir(), "registry.json");
 }
 
-export function sessionDir(dataDir: string, name: string): string {
-  return path.join(dataDir, "sessions", name);
+export function sessionDir(dataDir: string, workspace: string, name: string): string {
+  return path.join(dataDir, "sessions", workspace, name);
+}
+
+export function clientsDir(dataDir: string): string {
+  return path.join(dataDir, "clients");
+}
+
+export function alarmsDir(dataDir: string): string {
+  return path.join(dataDir, "alarms");
+}
+
+export function workspaceAlarmsDir(dataDir: string, workspace: string): string {
+  return path.join(alarmsDir(dataDir), workspace);
+}
+
+export function workspaceEnvFile(projectDir: string): string {
+  return path.join(projectDir, ".codex-team", "workspace.env");
 }

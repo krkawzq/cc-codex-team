@@ -30,6 +30,21 @@ test("WatchdogTimer suppresses idle periodic ticks by default but supports force
   assert.equal(typeof event?.payload.localTime, "string");
 });
 
+test("WatchdogTimer renders workspace variable", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-watchdog-"));
+  const cfg = loadConfig(path.join(tempDir, "missing.toml"));
+  cfg.monitor.watchdogTemplate = "workspace={{workspace}}";
+  const bus = new EventBus();
+  const registry = new RegistryStore(path.join(tempDir, "registry.json"));
+  const watchdog = new WatchdogTimer(cfg, registry, bus, new Map());
+  const sub = await bus.subscribe("watchdog", 0, { workspace: "ws-x" });
+
+  await watchdog.tickOnce({ force: true, workspace: "ws-x" });
+  const event = sub.shiftNow();
+  assert.equal(event?.payload.workspace, "ws-x");
+  assert.equal(event?.payload.message, "workspace=ws-x");
+});
+
 test("WatchdogTimer renders configurable reminder template", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-watchdog-"));
   const cfg = loadConfig(path.join(tempDir, "missing.toml"));

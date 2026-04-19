@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { SessionExists, SessionNotFound } from "./errors";
+import { SessionExists, SessionNotFound, WrongWorkspace } from "./errors";
 import { RegistryEntry } from "./models";
 import { isObject } from "./protocol";
+import { DEFAULT_WORKSPACE, safeWorkspace, workspaceSessionKey } from "./workspace";
 
 interface RegistryFile {
   sessions?: Record<string, RegistryEntry>;
@@ -29,10 +30,19 @@ export class RegistryStore {
       return;
     }
     const sessions = isObject(parsed.sessions) ? parsed.sessions : {};
-    for (const [name, value] of Object.entries(sessions)) {
-      if (isObject(value)) {
-        this.entries.set(name, normalizeEntry(name, value));
+    let migrated = false;
+    for (const [key, value] of Object.entries(sessions)) {
+      if (!isObject(value)) {
+        continue;
       }
+      const entry = normalizeEntry(key, value);
+      if (value.createdByClientId === undefined) {
+        migrated = true;
+      }
+      this.entries.set(entryKey(entry.workspace, entry.name), entry);
+    }
+    if (migrated) {
+      this.save();
     }
   }
 
@@ -45,52 +55,113 @@ export class RegistryStore {
   }
 
   create(entry: RegistryEntry): void {
-    if (this.entries.has(entry.name)) {
-      throw new SessionExists(`session ${JSON.stringify(entry.name)} already exists`);
+    const normalized = normalizeEntry(entry.name, entry as unknown as Record<string, unknown>);
+    const key = entryKey(normalized.workspace, normalized.name);
+    if (this.entries.has(key)) {
+      throw new SessionExists(
+        `session ${JSON.stringify(normalized.name)} already exists in workspace ${JSON.stringify(normalized.workspace)}`,
+      );
     }
-    this.entries.set(entry.name, cloneEntry(entry));
+    this.entries.set(key, cloneEntry(normalized));
     this.save();
   }
 
-  get(name: string): RegistryEntry {
-    const entry = this.entries.get(name);
+  get(name: string, workspace = DEFAULT_WORKSPACE): RegistryEntry {
+    const entry = this.entries.get(entryKey(workspace, name));
     if (!entry) {
-      throw new SessionNotFound(`session ${JSON.stringify(name)} not found`);
+      throw new SessionNotFound(
+        `session ${JSON.stringify(name)} not found in workspace ${JSON.stringify(workspace)}`,
+      );
     }
     return cloneEntry(entry);
   }
 
-  list(): RegistryEntry[] {
-    return [...this.entries.values()].map(cloneEntry);
-  }
-
-  update(name: string, fields: Partial<RegistryEntry>): RegistryEntry {
-    const current = this.entries.get(name);
-    if (!current) {
+  find(name: string, workspace: string | null, allWorkspaces = false): RegistryEntry {
+    if (!allWorkspaces) {
+      const requested = workspace || DEFAULT_WORKSPACE;
+      try {
+        return this.get(name, requested);
+      } catch (error) {
+        if (error instanceof SessionNotFound) {
+          const other = [...this.entries.values()].find((entry) => entry.name === name);
+          if (other) {
+            throw new WrongWorkspace(
+              `session ${JSON.stringify(name)} is in workspace ${JSON.stringify(other.workspace)}, not ${JSON.stringify(requested)}`,
+            );
+          }
+        }
+        throw error;
+      }
+    }
+    const matches = [...this.entries.values()].filter((entry) => entry.name === name);
+    if (matches.length === 0) {
       throw new SessionNotFound(`session ${JSON.stringify(name)} not found`);
     }
-    const updated = { ...current, ...fields };
-    this.entries.set(name, updated);
+    if (matches.length > 1) {
+      throw new SessionNotFound(
+        `session ${JSON.stringify(name)} exists in multiple workspaces; pass --workspace`,
+      );
+    }
+    return cloneEntry(matches[0]);
+  }
+
+  list(workspace?: string | null, allWorkspaces = false): RegistryEntry[] {
+    const entries = [...this.entries.values()];
+    const filtered = allWorkspaces || !workspace
+      ? entries
+      : entries.filter((entry) => entry.workspace === workspace);
+    return filtered.map(cloneEntry);
+  }
+
+  workspaces(): string[] {
+    return [...new Set([...this.entries.values()].map((entry) => entry.workspace))].sort();
+  }
+
+  update(name: string, fields: Partial<RegistryEntry>, workspace = DEFAULT_WORKSPACE): RegistryEntry {
+    const key = entryKey(workspace, name);
+    const current = this.entries.get(key);
+    if (!current) {
+      throw new SessionNotFound(
+        `session ${JSON.stringify(name)} not found in workspace ${JSON.stringify(workspace)}`,
+      );
+    }
+    const updated = { ...current, ...fields, workspace: current.workspace, name: current.name };
+    this.entries.set(key, updated);
     this.save();
     return cloneEntry(updated);
   }
 
-  delete(name: string): void {
-    if (!this.entries.has(name)) {
-      throw new SessionNotFound(`session ${JSON.stringify(name)} not found`);
+  delete(name: string, workspace = DEFAULT_WORKSPACE): void {
+    const key = entryKey(workspace, name);
+    if (!this.entries.has(key)) {
+      throw new SessionNotFound(
+        `session ${JSON.stringify(name)} not found in workspace ${JSON.stringify(workspace)}`,
+      );
     }
-    this.entries.delete(name);
+    this.entries.delete(key);
     this.save();
   }
+}
+
+function entryKey(workspace: string, name: string): string {
+  return workspaceSessionKey(workspace, name);
 }
 
 function cloneEntry(entry: RegistryEntry): RegistryEntry {
   return JSON.parse(JSON.stringify(entry)) as RegistryEntry;
 }
 
-function normalizeEntry(name: string, raw: Record<string, unknown>): RegistryEntry {
+function normalizeEntry(key: string, raw: Record<string, unknown>): RegistryEntry {
+  const parsedKey = parseKey(key);
+  const name = String(raw.name ?? parsedKey.name);
+  if (raw.workspace == null && parsedKey.workspace == null) {
+    throw new Error(`registry entry ${JSON.stringify(key)} is missing workspace`);
+  }
+  const workspace = safeWorkspace(String(raw.workspace ?? parsedKey.workspace));
   return {
+    workspace,
     name,
+    createdByClientId: raw.createdByClientId == null ? null : String(raw.createdByClientId),
     threadId: String(raw.threadId ?? ""),
     ephemeral: raw.ephemeral == null ? false : Boolean(raw.ephemeral),
     cwd: String(raw.cwd ?? ""),
@@ -114,4 +185,12 @@ function normalizeEntry(name: string, raw: Record<string, unknown>): RegistryEnt
     modelContextWindow: raw.modelContextWindow == null ? null : Number(raw.modelContextWindow),
     errorMessage: raw.errorMessage == null ? null : String(raw.errorMessage),
   };
+}
+
+function parseKey(key: string): { workspace: string | null; name: string } {
+  const nul = key.indexOf("\u0000");
+  if (nul > 0) {
+    return { workspace: key.slice(0, nul), name: key.slice(nul + 1) };
+  }
+  return { workspace: null, name: key };
 }

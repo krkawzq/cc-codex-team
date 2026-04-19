@@ -4,6 +4,7 @@ import { Config, WatchdogAlarmConfig } from "./config";
 import { EventBus } from "./eventBus";
 import { RegistryStore } from "./registry";
 import { Session } from "./session";
+import { DEFAULT_WORKSPACE, workspaceSessionKey } from "./workspace";
 
 interface WatchdogSessionView {
   name: string;
@@ -47,11 +48,12 @@ export class WatchdogTimer {
     return alarm?.template || this.cfg.monitor.watchdogTemplate || defaultWatchdogTemplate();
   }
 
-  async tickOnce(options: { force?: boolean; alarmName?: string; alarm?: WatchdogAlarmConfig } = {}): Promise<void> {
+  async tickOnce(options: { force?: boolean; alarmName?: string; alarm?: WatchdogAlarmConfig; workspace?: string } = {}): Promise<void> {
+    const workspace = options.workspace || DEFAULT_WORKSPACE;
     const now = new Date();
     const sentAt = now.toISOString();
     const localTime = formatLocalTime(now);
-    const sessions: WatchdogSessionView[] = this.registry.list().map((entry) => {
+    const sessions: WatchdogSessionView[] = this.registry.list(workspace).map((entry) => {
       const advisories: string[] = [];
       const compactionMetric = entry.contextTokensEstimate ?? entry.tokenUsageInput;
       if (compactionMetric >= this.cfg.compaction.thresholdTokens) {
@@ -63,7 +65,7 @@ export class WatchdogTimer {
       if (entry.queueLength > 0) {
         advisories.push(`queue=${entry.queueLength}`);
       }
-      const live = this.sessions.get(entry.name);
+      const live = this.sessions.get(workspaceSessionKey(entry.workspace, entry.name));
       if (live) {
         if (!live.isTransportAlive()) {
           advisories.push("transport-down");
@@ -121,11 +123,13 @@ export class WatchdogTimer {
       sentAt,
       localTime,
       alarm: alarmName,
+      workspace,
       taskBrief,
       summary,
       sessions,
     });
     this.eventBus.publish("watchdog", {
+      workspace,
       kind: "watchdog-tick",
       at: sentAt,
       sentAt,
@@ -166,6 +170,7 @@ function renderWatchdogTemplate(
     sentAt: string;
     localTime: string;
     alarm: string;
+    workspace: string;
     taskBrief: string | null;
     summary: { total: number; running: number; errored: number; queued: number };
     sessions: WatchdogSessionView[];
@@ -185,6 +190,7 @@ function renderWatchdogTemplate(
     sentAt: input.sentAt,
     localTime: input.localTime,
     alarm: input.alarm,
+    workspace: input.workspace,
     taskBrief: input.taskBrief || "",
     sessionsText,
     "summary.total": String(input.summary.total),

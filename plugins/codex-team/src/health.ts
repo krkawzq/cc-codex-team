@@ -2,9 +2,10 @@ import { Config } from "./config";
 import { EventBus } from "./eventBus";
 import { RegistryStore } from "./registry";
 import { Session } from "./session";
+import { DEFAULT_WORKSPACE, workspaceSessionKey } from "./workspace";
 
 interface SessionFactoryLike {
-  resume(name: string): Promise<Session>;
+  resume(name: string, workspace?: string): Promise<Session>;
 }
 
 export class HealthMonitor {
@@ -24,7 +25,7 @@ export class HealthMonitor {
   }
 
   async tickOnce(): Promise<void> {
-    const entries = this.registry.list();
+    const entries = this.registry.list(null, true);
     const concurrency = Math.max(1, this.cfg.heartbeat.healthCheckConcurrency);
     let index = 0;
     const workers = Array.from({ length: Math.min(concurrency, entries.length || 1) }, async () => {
@@ -38,18 +39,19 @@ export class HealthMonitor {
   }
 
   private async checkEntry(entry: ReturnType<RegistryStore["get"]>): Promise<void> {
+    const key = sessionKey(entry.workspace, entry.name);
     if (entry.status === "closed") {
-      this.stuckTurnNotified.delete(entry.name);
+      this.stuckTurnNotified.delete(key);
       return;
     }
-    const session = this.sessions.get(entry.name);
+    const session = this.sessions.get(key) || this.sessions.get(entry.name);
     if (!session) {
-      this.stuckTurnNotified.delete(entry.name);
-      await this.onDown(entry.name);
+      this.stuckTurnNotified.delete(key);
+      await this.onDown(entry.workspace, entry.name);
       return;
     }
 
-    this.maybeEmitTurnStuck(entry.name, session);
+    this.maybeEmitTurnStuck(entry.workspace, entry.name, session);
 
     try {
       if (!session.isTransportAlive()) {
@@ -60,34 +62,36 @@ export class HealthMonitor {
       this.registry.update(entry.name, {
         status: "errored",
         errorMessage: (error as Error).message,
-      });
-      await this.onDown(entry.name, session);
+      }, entry.workspace);
+      await this.onDown(entry.workspace, entry.name, session);
     }
   }
 
-  private maybeEmitTurnStuck(name: string, session: Session): void {
+  private maybeEmitTurnStuck(workspace: string, name: string, session: Session): void {
+    const key = sessionKey(workspace, name);
     if (!session.isRunning()) {
-      this.stuckTurnNotified.delete(name);
+      this.stuckTurnNotified.delete(key);
       return;
     }
     const turnId = session.currentTurnId();
     const ageMs = session.currentTurnAgeMs();
     if (!turnId || ageMs == null) {
-      this.stuckTurnNotified.delete(name);
+      this.stuckTurnNotified.delete(key);
       return;
     }
     const thresholdMs = this.cfg.heartbeat.turnStuckSeconds * 1000;
     if (ageMs < thresholdMs) {
-      if (this.stuckTurnNotified.get(name) !== turnId) {
-        this.stuckTurnNotified.delete(name);
+      if (this.stuckTurnNotified.get(key) !== turnId) {
+        this.stuckTurnNotified.delete(key);
       }
       return;
     }
-    if (this.stuckTurnNotified.get(name) === turnId) {
+    if (this.stuckTurnNotified.get(key) === turnId) {
       return;
     }
-    this.stuckTurnNotified.set(name, turnId);
+    this.stuckTurnNotified.set(key, turnId);
     this.eventBus.publish("events", {
+      workspace,
       kind: "turn-stuck",
       session: name,
       turn_id: turnId,
@@ -96,14 +100,16 @@ export class HealthMonitor {
     });
   }
 
-  private async onDown(name: string, session?: Session): Promise<void> {
-    const entry = this.registry.get(name);
-    const lastHealedAt = this.healedAt.get(name);
+  private async onDown(workspace: string, name: string, session?: Session): Promise<void> {
+    const key = sessionKey(workspace, name);
+    const entry = this.registry.get(name, workspace);
+    const lastHealedAt = this.healedAt.get(key);
     const duringTurn = session?.isRunning() || entry.status === "running";
     const activeTurnId = session?.currentTurnId() || entry.lastTurnId || null;
     const turnAgeMs = session?.currentTurnAgeMs() ?? null;
     const migratedQueue = session ? await session.detachForRecovery("auto-heal queue migration") : [];
     if (session) {
+      this.sessions.delete(key);
       this.sessions.delete(name);
     }
     const canAttemptHeal =
@@ -112,26 +118,26 @@ export class HealthMonitor {
       (lastHealedAt == null ||
         Date.now() - lastHealedAt >= this.cfg.heartbeat.selfHealBackoffSeconds * 1000);
     if (canAttemptHeal) {
-      this.healedAt.set(name, Date.now());
+      this.healedAt.set(key, Date.now());
       try {
         const resumed = await withTimeout(
-          this.factory.resume(name),
+          this.factory.resume(name, workspace),
           this.cfg.heartbeat.resumeTimeoutSeconds * 1000,
         );
         await resumed.absorbQueue(migratedQueue);
-        this.sessions.set(name, resumed);
+        this.sessions.set(key, resumed);
         this.registry.update(name, {
           status: "idle",
           errorMessage: null,
-        });
+        }, workspace);
         this.eventBus.publish("events", {
+          workspace,
           kind: duringTurn ? "auto-heal-after-crash" : "subprocess-recycled",
           session: name,
           heal_reason: duringTurn ? "transport_down_during_turn" : "transport_down_idle",
           was_during_turn: duringTurn,
           turn_id: activeTurnId,
           turn_age_ms: turnAgeMs,
-          legacy_kind: "auto-heal",
         });
         return;
       } catch (error) {
@@ -141,7 +147,7 @@ export class HealthMonitor {
         this.registry.update(name, {
           status: "errored",
           errorMessage: (error as Error).message,
-        });
+        }, workspace);
       }
     }
     if (!canAttemptHeal) {
@@ -150,6 +156,7 @@ export class HealthMonitor {
       }
     }
     this.eventBus.publish("events", {
+      workspace,
       kind: "session-down",
       session: name,
       reason: duringTurn ? "transport_down_during_turn" : "transport_down_idle",
@@ -161,6 +168,10 @@ export class HealthMonitor {
       stderrTail: session?.stderrTail(20) || "",
     });
   }
+}
+
+function sessionKey(workspace: string | undefined, name: string): string {
+  return workspaceSessionKey(workspace || DEFAULT_WORKSPACE, name);
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

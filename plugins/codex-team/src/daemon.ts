@@ -63,7 +63,7 @@ export async function runDaemon(configPath?: string): Promise<number> {
   try {
     await server.start();
     if (cfg.defaults.autoResumeOnDaemonStart) {
-      for (const entry of server.registry.list()) {
+      for (const entry of server.registry.list(null, true)) {
         if (!["idle", "running", "errored", "compacting"].includes(entry.status)) {
           continue;
         }
@@ -73,18 +73,18 @@ export async function runDaemon(configPath?: string): Promise<number> {
             status: "closed",
             appServerPid: null,
             errorMessage: "ephemeral session expired when daemon stopped",
-          });
+          }, entry.workspace);
           continue;
         }
         try {
-          const session = await server.factory.resume(entry.name);
-          server.sessions.set(entry.name, session);
+          const session = await server.factory.resume(entry.name, entry.workspace);
+          server.sessions.set(`${entry.workspace}\u0000${entry.name}`, session);
         } catch (error) {
           server.registry.update(entry.name, {
             status: "errored",
             appServerPid: null,
             errorMessage: (error as Error).message,
-          });
+          }, entry.workspace);
           appendLogLine(logPath, `failed to auto-resume ${entry.name}: ${(error as Error).message}`);
         }
       }

@@ -1,43 +1,41 @@
 ---
-description: Arm the codex-team `watchdog` stream for long-horizon orchestration. Optionally create or update a named watchdog alarm (cadence + task-brief file + custom template). Opt-in; do not run unless the task warrants a periodic reminder.
-argument-hint: "[alarm-name] [--task-brief FILE] [--interval SECS] [--template FILE] [--emit-idle] [--disable]"
-allowed-tools: Bash, Monitor, Edit, Read
+description: Arm the codex-team `watchdog` stream for long-horizon orchestration in the current workspace. Creates or updates a named runtime watchdog alarm (cadence + task-brief file + optional custom template) scoped to this workspace. Opt-in; do not run unless the task warrants a periodic reminder + self-check.
+argument-hint: "[alarm-name] [--task-brief FILE] [--interval-seconds N] [--template-file FILE] [--emit-idle] [--disabled]"
+allowed-tools: Bash, Monitor
 ---
 
-Arm the `watchdog` stream. This is an opt-in step — only use on long-horizon work where you need a periodic reminder + self-check. See `watch-codex-team` §Watchdog for when this is appropriate.
+Arm the `watchdog` stream in your current workspace. This is an opt-in step — only use on long-horizon work where you need a periodic reminder + self-check. See `watch-codex-team` §Watchdog for when this is appropriate.
 
 Raw user request:
 $ARGUMENTS
 
 ## Procedure
 
-1. **Confirm the daemon is up.** `codex-team daemon status`. Not running → tell the user to run `codex-team daemon start` (or `/codex-team:bootstrap` first) and stop.
+1. **Confirm the daemon is up.** `codex-team daemon status`. Not running → tell the user to run `/codex-team:bootstrap` first, and stop.
 
 2. **Parse `$ARGUMENTS`.**
    - First positional token (if present) = alarm name. Default `default` if omitted.
-   - `--task-brief PATH` → absolute path to a brief file (head N lines get injected into the payload).
-   - `--interval SECS` → cadence in seconds (positive integer). Default `7200` (2h) if creating a new alarm.
-   - `--template PATH` → absolute path to a template file. If omitted, the default template is used.
-   - `--emit-idle` → set `emit_idle = true` (fire every tick regardless of signal). Default `false`.
-   - `--disable` → set `enabled = false` on the named alarm (then reload). Skip steps 3-4.
+   - `--task-brief PATH` → absolute path to a brief file. Maps to `--task-brief-file` on the CLI.
+   - `--interval-seconds N` → cadence in seconds. Default `7200` (2h) if creating a new alarm.
+   - `--template-file PATH` → absolute path to a template file. Omit for the default template.
+   - `--emit-idle` → fire every tick regardless of signal. Default `false`.
+   - `--disabled` → create/update the alarm with `enabled=false`. Skip step 5 unless another enabled alarm exists.
 
-3. **Update `config.toml`.** Locate at `$XDG_CONFIG_HOME/codex-team/config.toml` (usually `~/.config/codex-team/config.toml`).
-   - If the file doesn't exist, create it with an empty preamble (daemon falls back to defaults for unspecified sections).
-   - Upsert the `[monitor.watchdog_alarms.<alarm-name>]` block with the parsed values. Preserve any keys the user already set that weren't passed on this command.
-   - Example block written:
-     ```toml
-     [monitor.watchdog_alarms.task_brief]
-     enabled = true
-     interval_seconds = 7200
-     task_brief_file = "/abs/path/to/brief.md"
-     emit_idle = true
-     ```
+3. **Create/update the runtime alarm** — scoped to the current workspace:
+   ```bash
+   codex-team watch alarm create <alarm-name> \
+     [--interval-seconds N] \
+     [--task-brief-file PATH] \
+     [--template-file PATH] \
+     [--emit-idle] \
+     [--disabled]
+   ```
+   Runtime alarms live at `<data_dir>/alarms/<workspace>/<name>.json`, not in `config.toml`. They survive daemon restarts.
 
-4. **Reload.** `codex-team daemon reload-config`. If it fails, report the error and stop.
+4. **Verify.** `codex-team watch alarm list`. Confirm the alarm is present with the expected config.
 
-5. **Arm the Monitor stream** — only once per Claude Code session. Before arming, check the task panel for an existing Monitor whose `description` matches `codex-team watchdog: …`. If present, skip arming (one Monitor process serves all alarms).
-   
-   Otherwise:
+5. **Arm the Monitor stream** — only once per Claude Code session. Before arming, check the task panel for an existing Monitor whose `description` matches `codex-team watchdog: …`. If present, skip.
+
    ```
    Monitor({
      description: "codex-team watchdog: periodic reminder + self-check",
@@ -47,22 +45,38 @@ $ARGUMENTS
    })
    ```
 
+   The script inherits `CODEX_TEAM_WORKSPACE` from the shell; subscription is workspace-scoped.
+
 6. **Report.** Short paragraph:
-   - Alarm name.
+   - Alarm name + workspace.
    - Cadence (humanize: "every 2h").
    - `task_brief_file` path, if set.
    - `emit_idle` value.
    - Whether Monitor was armed now or already active.
-   - Reminder: `[watchdog-tick]` notifications will start arriving at the next interval.
+   - Reminder: `[watchdog-tick]` notifications arrive at the next interval.
+
+## Workspace
+
+Operates on the resolved current workspace. Alarms do not span workspaces — each workspace needing a reminder needs its own alarm.
+
+Remove or disable:
+
+```bash
+codex-team watch alarm delete <alarm-name>
+codex-team watch alarm create <alarm-name> --disabled
+```
+
+Use `/codex-team:workspaces` to see alarms across all workspaces.
 
 ## Do not
 
-- Arm the watchdog for short or interactive tasks. Default is events-only for a reason.
-- Edit the default `[monitor]` section (`watchdog_interval_seconds`, etc.) — that governs the built-in `default` alarm. Named alarms are additive.
-- Run `daemon restart` to pick up config changes. `daemon reload-config` is sufficient.
+- Arm the watchdog for short or interactive tasks. Events-only is the right default.
+- Edit `[monitor].watchdog_interval_seconds` etc. in `config.toml` for one-off alarms. Runtime alarms are additive and workspace-scoped; config alarms are for permanent setups.
+- Run `daemon restart` to pick up alarm changes. Runtime alarms restart background loops automatically; config alarms need `codex-team daemon reload-config`.
 
 ## Related
 
 - When to arm the watchdog at all: `watch-codex-team` §Watchdog
 - Alarm schema + template variables: `configure-codex-team` §Watchdog alarms
 - Normal bootstrap (no watchdog): `/codex-team:bootstrap`
+- Inspect alarms in all workspaces: `/codex-team:workspaces`

@@ -5,8 +5,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/daemon-start.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh",
             "timeout": 300
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/session-end.sh",
+            "timeout": 30
           }
         ]
       }

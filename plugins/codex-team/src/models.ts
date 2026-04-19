@@ -1,8 +1,10 @@
 export type SessionStatus = "idle" | "running" | "errored" | "closed" | "compacting";
 
 export interface RegistryEntry {
+  workspace: string;
   name: string;
   threadId: string;
+  createdByClientId: string | null;
   ephemeral?: boolean;
   cwd: string;
   model: string;
@@ -49,6 +51,7 @@ export interface DigestLine {
 export type TurnTier = "trivial" | "normal" | "attn";
 
 export interface TurnSummary {
+  workspace?: string;
   session: string;
   turnId: string;
   elapsedMs: number;

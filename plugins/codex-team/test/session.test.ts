@@ -40,8 +40,8 @@ test("Session.send --wait returns summary and writes history", async () => {
   assert.equal(registry.get("alpha").status, "idle");
   assert.equal(registry.get("alpha").tokenUsageInput, 17);
 
-  const historyPath = path.join(tempDir, "sessions", "alpha", "history.md");
-  const turnsPath = path.join(tempDir, "sessions", "alpha", "turns.jsonl");
+  const historyPath = path.join(tempDir, "sessions", "default", "alpha", "history.md");
+  const turnsPath = path.join(tempDir, "sessions", "default", "alpha", "turns.jsonl");
   assert.match(fs.readFileSync(historyPath, "utf8"), /DONE/);
   assert.match(fs.readFileSync(turnsPath, "utf8"), /"turnId":"tr_a"/);
   await session.close();

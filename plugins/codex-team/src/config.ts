@@ -78,6 +78,7 @@ export interface MonitorConfig {
   watchdogTemplate: string;
   watchdogTemplateFile: string;
   watchdogAlarms: Record<string, WatchdogAlarmConfig>;
+  watchdogWorkspaceAlarms: Record<string, Record<string, WatchdogAlarmConfig>>;
 }
 
 export interface WatchdogAlarmConfig {
@@ -171,6 +172,7 @@ const DEFAULT_CONFIG: Config = {
     watchdogTemplate: "",
     watchdogTemplateFile: "",
     watchdogAlarms: {},
+    watchdogWorkspaceAlarms: {},
   },
   heartbeat: {
     intervalSeconds: 60,
@@ -228,11 +230,7 @@ function mergeConfig(base: Config, raw: Record<string, unknown>): Config {
         ? raw.monitor.watchdogAlarms
         : null;
     if (alarmsRaw) {
-      for (const [name, value] of Object.entries(alarmsRaw)) {
-        const alarm = cloneAlarm();
-        applySection(alarm, value, watchdogAlarmFieldKinds);
-        base.monitor.watchdogAlarms[name] = alarm;
-      }
+      applyWatchdogAlarms(base.monitor, alarmsRaw);
     }
   }
   applySection(base.heartbeat, raw.heartbeat, heartbeatFieldKinds);
@@ -273,6 +271,23 @@ function cloneAlarm(): WatchdogAlarmConfig {
     template: "",
     templateFile: "",
   };
+}
+
+function applyWatchdogAlarms(monitor: MonitorConfig, raw: Record<string, unknown>): void {
+  for (const [workspace, value] of Object.entries(raw)) {
+    if (!isObject(value)) {
+      continue;
+    }
+    monitor.watchdogWorkspaceAlarms[workspace] = monitor.watchdogWorkspaceAlarms[workspace] || {};
+    for (const [alarmName, alarmValue] of Object.entries(value)) {
+      if (!isObject(alarmValue)) {
+        continue;
+      }
+      const alarm = cloneAlarm();
+      applySection(alarm, alarmValue, watchdogAlarmFieldKinds);
+      monitor.watchdogWorkspaceAlarms[workspace][alarmName] = alarm;
+    }
+  }
 }
 
 type FieldKind = "string" | "number" | "boolean" | "string[]" | "object";
@@ -349,6 +364,7 @@ const monitorFieldKinds: Record<keyof MonitorConfig, FieldKind> = {
   watchdogTemplate: "string",
   watchdogTemplateFile: "string",
   watchdogAlarms: "object",
+  watchdogWorkspaceAlarms: "object",
 };
 
 const watchdogAlarmFieldKinds: Record<keyof WatchdogAlarmConfig, FieldKind> = {
@@ -387,6 +403,9 @@ function applySection<T extends object>(
   for (const [key, value] of Object.entries(source)) {
     const normalizedKey = resolveFieldKey(key, fieldKinds);
     if (!normalizedKey) {
+      continue;
+    }
+    if (normalizedKey === "watchdogAlarms" || normalizedKey === "watchdogWorkspaceAlarms") {
       continue;
     }
     const kind = fieldKinds[normalizedKey];
@@ -506,6 +525,21 @@ function validateConfig(cfg: Config): void {
     }
     assertPositiveInt(alarm.intervalSeconds, `monitor.watchdog_alarms.${name}.interval_seconds`);
     assertPositiveInt(alarm.taskBriefHeadLines, `monitor.watchdog_alarms.${name}.task_brief_head_lines`);
+  }
+  for (const [workspace, alarms] of Object.entries(cfg.monitor.watchdogWorkspaceAlarms)) {
+    if (!workspace.trim() || workspace === "*") {
+      throw new ConfigError(`invalid watchdog workspace: ${workspace}`);
+    }
+    for (const [name, alarm] of Object.entries(alarms)) {
+      if (!name.trim()) {
+        throw new ConfigError(`watchdog alarm name cannot be empty in workspace ${workspace}`);
+      }
+      if (name === "default") {
+        throw new ConfigError(`watchdog alarm name 'default' is reserved in workspace ${workspace}`);
+      }
+      assertPositiveInt(alarm.intervalSeconds, `monitor.watchdog_alarms.${workspace}.${name}.interval_seconds`);
+      assertPositiveInt(alarm.taskBriefHeadLines, `monitor.watchdog_alarms.${workspace}.${name}.task_brief_head_lines`);
+    }
   }
   assertPositiveInt(cfg.heartbeat.intervalSeconds, "heartbeat.interval_seconds");
   assertPositiveInt(cfg.heartbeat.turnStuckSeconds, "heartbeat.turn_stuck_seconds");

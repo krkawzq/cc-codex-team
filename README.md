@@ -59,6 +59,10 @@ codex-team session create reviewer --cwd /path/to/project --profile reviewer
 codex-team session create fixer --cwd /path/to/project --profile fixer
 ```
 
+Sessions are scoped to the current workspace. By default the workspace is derived
+from `CLAUDE_PROJECT_DIR`; override with `CODEX_TEAM_WORKSPACE=<name>` or
+`--workspace <name>`. Use `--all-workspaces` only for admin inspection.
+
 Restore a saved Codex thread when the codex-team registry is missing:
 
 ```bash
@@ -103,7 +107,7 @@ codex-team history fixer --format jsonl --since-turn-id tr_123 --follow
 codex-team tail fixer --stderr --lines 200
 codex-team queue show fixer
 codex-team daemon doctor
-codex-team daemon stop
+codex-team daemon stop --force   # admin reset only; prefer /codex-team:shutdown
 ```
 
 ## Local Development
@@ -143,6 +147,8 @@ npm run build
 
 - The plugin auto-starts only the daemon on Claude Code `SessionStart`.
 - Monitor streams are explicit: arm both before dispatching async work.
+- Plugin monitors are not started automatically. Arm `events` via
+  `/codex-team:bootstrap`, and arm `watchdog` only via `/codex-team:watch`.
 - Persistent sessions can auto-resume after daemon restart.
 - `--ephemeral` sessions are intentionally not durable across daemon
   shutdown.
@@ -161,6 +167,11 @@ npm run build
   `[compaction].retry_attempts` and `retry_delay_ms` in `config.toml`.
 - `health report` includes an `issues` block so it can be used as a
   triage surface rather than a second copy of `session list`.
+- When a task is finished, run `/codex-team:shutdown` or
+  close the workspace sessions and then run `codex-team daemon stop` only after
+  confirming no non-closed sessions remain in any workspace. SessionEnd only
+  detaches the current client; it does not close work that another Claude Code
+  session may be using.
 - Watchdog emits an initial snapshot on daemon start, then suppresses
   idle periodic ticks by default. Set `monitor.watchdog_emit_idle =
   true` if you want heartbeat noise even when nothing needs attention.
@@ -168,13 +179,17 @@ npm run build
   `sent_at` (ISO) and `local_time` (terminal locale). Custom templates
   can use `{{sentAt}}` and `{{localTime}}`.
 - Watchdog supports multiple named alarms with different intervals and
-  prompts:
+  prompts. Runtime alarms are easiest for task-specific reminders:
+  ```bash
+  codex-team watch alarm create fast --interval-seconds 300 --template "Fast check {{sentAt}}\n{{sessionsText}}"
+  ```
+  Persistent config alarms are workspace-keyed:
   ```toml
-  [monitor.watchdog_alarms.fast]
+  [monitor.watchdog_alarms.proj-example.fast]
   interval_seconds = 300
   template = "Fast check {{sentAt}}\n{{sessionsText}}"
 
-  [monitor.watchdog_alarms.deep]
+  [monitor.watchdog_alarms.proj-example.deep]
   interval_seconds = 1800
   task_brief_file = "docs/team/current.md"
   template_file = "docs/team/deep-watchdog-template.md"

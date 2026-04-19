@@ -8,10 +8,23 @@ export interface BusEvent {
   payload: Record<string, unknown>;
 }
 
+export interface SubscriptionOptions {
+  workspace?: string | null;
+  clientId?: string | null;
+  allWorkspaces?: boolean;
+}
+
+interface Subscriber {
+  queue: AsyncQueue<BusEvent>;
+  workspace: string | null;
+  clientId: string | null;
+  allWorkspaces: boolean;
+}
+
 export class EventBus {
   private readonly buffers = new Map<StreamName, BusEvent[]>();
   private readonly seqs = new Map<StreamName, number>();
-  private readonly subs = new Map<StreamName, Set<AsyncQueue<BusEvent>>>();
+  private readonly subs = new Map<StreamName, Set<Subscriber>>();
 
   constructor(
     private maxBuffer = 1000,
@@ -33,16 +46,28 @@ export class EventBus {
       buffer.splice(0, buffer.length - this.maxBuffer);
     }
     this.buffers.set(stream, buffer);
-    for (const queue of this.subs.get(stream) || []) {
-      queue.push(event);
+    for (const sub of this.subs.get(stream) || []) {
+      if (eventMatchesSubscriber(event, sub)) {
+        sub.queue.push(event);
+      }
     }
     return event;
   }
 
-  async subscribe(stream: StreamName, sinceSeq = 0): Promise<AsyncQueue<BusEvent>> {
+  async subscribe(
+    stream: StreamName,
+    sinceSeq = 0,
+    options: SubscriptionOptions = {},
+  ): Promise<AsyncQueue<BusEvent>> {
     const queue = new AsyncQueue<BusEvent>(this.subscriberQueueMax);
+    const sub: Subscriber = {
+      queue,
+      workspace: options.workspace || null,
+      clientId: options.clientId || null,
+      allWorkspaces: Boolean(options.allWorkspaces),
+    };
     for (const event of this.buffers.get(stream) || []) {
-      if (event.seq > sinceSeq) {
+      if (event.seq > sinceSeq && eventMatchesSubscriber(event, sub)) {
         queue.push(event);
       }
     }
@@ -51,16 +76,46 @@ export class EventBus {
       subs = new Set();
       this.subs.set(stream, subs);
     }
-    subs.add(queue);
+    subs.add(sub);
     return queue;
   }
 
   async unsubscribe(stream: StreamName, queue: AsyncQueue<BusEvent>): Promise<void> {
-    this.subs.get(stream)?.delete(queue);
+    const subs = this.subs.get(stream);
+    if (subs) {
+      for (const sub of subs) {
+        if (sub.queue === queue) {
+          subs.delete(sub);
+          break;
+        }
+      }
+    }
     queue.close();
+  }
+
+  async detachClient(clientId: string): Promise<number> {
+    let detached = 0;
+    for (const subs of this.subs.values()) {
+      for (const sub of [...subs]) {
+        if (sub.clientId === clientId) {
+          subs.delete(sub);
+          sub.queue.close(new Error(`client ${clientId} detached`));
+          detached += 1;
+        }
+      }
+    }
+    return detached;
   }
 
   lastSeq(stream: StreamName): number {
     return this.seqs.get(stream) || 0;
   }
+}
+
+function eventMatchesSubscriber(event: BusEvent, sub: Subscriber): boolean {
+  if (sub.allWorkspaces || !sub.workspace) {
+    return true;
+  }
+  const eventWorkspace = String(event.payload.workspace ?? "default");
+  return eventWorkspace === sub.workspace;
 }

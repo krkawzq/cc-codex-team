@@ -16,13 +16,14 @@ On the `events` stream:
 ```json
 {
   "kind": "compact-suggest",
+  "workspace": "<ws>",
   "session": "<name>",
   "tokens": 523412,
   "threshold": 500000
 }
 ```
 
-The daemon emitted it because the session's current-context estimate crossed `[compaction].threshold_tokens` (default 500k). This is an **advisory**, not an automatic action.
+The daemon emitted it because the session's current-context estimate crossed `[compaction].threshold_tokens` (default 500k). This is an **advisory**, not an automatic action. Like every event, it carries a `workspace` field; the daemon has already scoped it to you, but confirm the workspace matches yours before acting.
 
 You may also trigger this ritual proactively (without `compact-suggest`) if a verbose turn is about to push you past the threshold.
 
@@ -115,6 +116,7 @@ If `lines` has no such `fileChange`, the worker forgot. **Do not proceed.** Re-i
 | Session is `running` | Wait for current turn or `codex-team interrupt` first. Sending while running just queues. |
 | Work doc directory doesn't exist | Worker's sandbox is `danger_full_access` — Step 1 creates it. If it still fails, `mkdir -p` yourself and re-issue. |
 | Reply after Step 1 looks like it ignored your prompt | Long-context prompt-apply skip? Re-send the Step 1 prompt once. → `philosophy.md` §5 |
+| `compact-suggest` arrives but event's workspace isn't yours | Shouldn't happen (daemon scopes); if it does, ignore. Don't compact someone else's session. → `recover-codex-team` §Wrong workspace |
 
 ## After `compact-done`
 
@@ -126,6 +128,8 @@ If `lines` has no such `fileChange`, the worker forgot. **Do not proceed.** Re-i
 
 You can compact multiple sessions in parallel — but **issue Step 1 for each, then Step 2 for each.** Do not interleave one session's Step 1 with another's Step 2; the Monitor stream becomes hard to follow.
 
+All parallel compactions must be in your current workspace. Compacting another workspace's session is rejected (`E_WRONG_WORKSPACE`) and should never be your intent — that's someone else's work.
+
 ## Red flags
 
 | Thought | Correction |
@@ -136,6 +140,7 @@ You can compact multiple sessions in parallel — but **issue Step 1 for each, t
 | "Usage is 2M cumulative — compact now." | Check current-context estimate (`usage_last_tokens` / `token_usage_input`), not cumulative. |
 | "Let me compact all sessions at once." | Parallel is fine — but Step 1 all, then Step 2 all. Do not interleave. |
 | "The reply doesn't match my Step 1 prompt — session is confused." | Long-context skip. Re-send Step 1 unchanged. → `philosophy.md` §5 |
+| "That `compact-suggest` was for another workspace — let me compact it to help them." | No. Stay in your workspace. The other orchestrator handles theirs. |
 
 ## Cross-references
 

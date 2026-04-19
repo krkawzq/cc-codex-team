@@ -16,6 +16,7 @@ export class CompactionMonitor {
   async observeUsage(
     name: string,
     usage: {
+      workspace?: string;
       contextTokensEstimate: number | null;
       modelContextWindow: number | null;
       cumulativeUsageTokens: number | null;
@@ -27,12 +28,14 @@ export class CompactionMonitor {
       return;
     }
     const level = Math.max(1, Math.floor(metric / threshold));
-    const previousLevel = this.suggestedLevel.get(name) || 0;
+    const key = `${usage.workspace || "default"}\u0000${name}`;
+    const previousLevel = this.suggestedLevel.get(key) || 0;
     if (level <= previousLevel) {
       return;
     }
-    this.suggestedLevel.set(name, level);
+    this.suggestedLevel.set(key, level);
     this.eventBus.publish("events", {
+      workspace: usage.workspace || "default",
       kind: "compact-suggest",
       session: name,
       tokens: metric,
@@ -45,7 +48,7 @@ export class CompactionMonitor {
     });
   }
 
-  clear(name: string): void {
-    this.suggestedLevel.delete(name);
+  clear(name: string, workspace = "default"): void {
+    this.suggestedLevel.delete(`${workspace}\u0000${name}`);
   }
 }

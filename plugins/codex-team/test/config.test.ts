@@ -83,21 +83,38 @@ test("loadConfig reads multiple watchdog alarms", () => {
   fs.writeFileSync(
     configPath,
     `
-[monitor.watchdog_alarms.fast]
+[monitor.watchdog_alarms.fast.quick]
 interval_seconds = 60
 template = "fast {{sentAt}}"
 emit_idle = true
 
-[monitor.watchdog_alarms.slow]
+[monitor.watchdog_alarms.slow.daily]
 interval_seconds = 3600
 task_brief_file = "/tmp/brief.md"
 `,
     "utf8",
   );
   const cfg = loadConfig(configPath);
-  assert.equal(cfg.monitor.watchdogAlarms.fast.intervalSeconds, 60);
-  assert.equal(cfg.monitor.watchdogAlarms.fast.emitIdle, true);
-  assert.equal(cfg.monitor.watchdogAlarms.slow.taskBriefFile, "/tmp/brief.md");
+  assert.equal(cfg.monitor.watchdogWorkspaceAlarms.fast.quick.intervalSeconds, 60);
+  assert.equal(cfg.monitor.watchdogWorkspaceAlarms.fast.quick.emitIdle, true);
+  assert.equal(cfg.monitor.watchdogWorkspaceAlarms.slow.daily.taskBriefFile, "/tmp/brief.md");
+});
+
+test("loadConfig reads workspace-keyed watchdog alarms", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-node-config-"));
+  const configPath = path.join(tempDir, "config.toml");
+  fs.writeFileSync(
+    configPath,
+    `
+[monitor.watchdog_alarms.ws_a.deep]
+interval_seconds = 600
+template = "deep"
+`,
+    "utf8",
+  );
+  const cfg = loadConfig(configPath);
+  assert.equal(cfg.monitor.watchdogWorkspaceAlarms.ws_a.deep.intervalSeconds, 600);
+  assert.equal(cfg.monitor.watchdogWorkspaceAlarms.ws_a.deep.template, "deep");
 });
 
 test("loadConfig rejects reserved watchdog alarm name", () => {
@@ -106,7 +123,7 @@ test("loadConfig rejects reserved watchdog alarm name", () => {
   fs.writeFileSync(
     configPath,
     `
-[monitor.watchdog_alarms.default]
+[monitor.watchdog_alarms.ws.default]
 interval_seconds = 60
 `,
     "utf8",

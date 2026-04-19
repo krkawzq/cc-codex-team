@@ -20,6 +20,11 @@ export class InvalidRequest extends CodexTeamError {
   exitCode = 2;
 }
 
+export class ProtocolError extends CodexTeamError {
+  code = "E_PROTOCOL";
+  exitCode = 2;
+}
+
 export class DaemonNotRunning extends CodexTeamError {
   code = "E_DAEMON_DOWN";
   exitCode = 4;
@@ -37,6 +42,11 @@ export class SessionNotFound extends CodexTeamError {
 
 export class SessionExists extends CodexTeamError {
   code = "E_EXISTS";
+  exitCode = 3;
+}
+
+export class WrongWorkspace extends CodexTeamError {
+  code = "E_WRONG_WORKSPACE";
   exitCode = 3;
 }
 
@@ -79,10 +89,12 @@ export interface WireError {
 const errorClasses: Record<string, new (message?: string, detail?: Record<string, unknown>) => CodexTeamError> = {
   E_CONFIG: ConfigError,
   E_INVALID: InvalidRequest,
+  E_PROTOCOL: ProtocolError,
   E_DAEMON_DOWN: DaemonNotRunning,
   E_DAEMON_UP: DaemonAlreadyRunning,
   E_NOT_FOUND: SessionNotFound,
   E_EXISTS: SessionExists,
+  E_WRONG_WORKSPACE: WrongWorkspace,
   E_BUSY: SessionBusy,
   E_ERRORED: SessionErrored,
   E_QUEUE_FULL: QueueFull,
