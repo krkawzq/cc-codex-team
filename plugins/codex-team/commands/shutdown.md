@@ -1,60 +1,41 @@
 ---
-description: Cleanly shut the current codex-team workspace down — close its sessions, unregister watchdog alarms, detach this Claude Code as a client. Daemon is stopped only when no workspace has active sessions, or when `--global` is passed. Threads are preserved.
-argument-hint: "[--force] [--global]  skip confirmation / stop daemon even with other active workspaces"
+description: Gracefully shut the current codex-team workspace down — close sessions, remove runtime alarms, detach this Claude Code as a client. Daemon is stopped only when no other workspace is active (or `--global`). Threads preserved.
+argument-hint: "[--force] [--global]"
 allowed-tools: Bash, AskUserQuestion
 ---
 
-Bring the current workspace's codex-team state to a graceful stop. Daemon lifecycle is handled carefully: stopping it affects every workspace, so by default we only stop when truly idle.
+Raw user request: $ARGUMENTS
 
-Raw user request:
-$ARGUMENTS
+## Decision tree
 
-## Procedure
+1. **Confirm** (skip if `--force`). One `AskUserQuestion`:
+   - "Confirm shutdown of codex-team workspace `<ws>`? Closes sessions (threads preserved); stops daemon if no other workspace is active."
+   - Options: `Yes, shut down` · `No, keep running (Recommended)`.
+   User says keep running → "Aborted." Stop.
 
-1. **Confirm** (unless `$ARGUMENTS` contains `--force`). `AskUserQuestion` once:
-   - Question: "Confirm shutdown of codex-team workspace? This closes the workspace's sessions (threads preserved) and will stop the daemon if no other workspace is active."
-   - Options:
-     - `Yes, shut down`
-     - `No, keep running (Recommended)`
-
-   User picks "keep running" → "Aborted." and stop.
-
-2. **Close sessions.** `codex-team session list` in the current workspace. For each with `status != closed`:
+2. **Close sessions.** `codex-team session list` in current workspace. For each with `status != closed`:
    ```
    codex-team session close <name>
    ```
-   A single `close` failure is not fatal — note and continue.
+   A single close failure isn't fatal — note and continue.
 
-3. **Delete workspace-scoped runtime alarms** (so old alarms don't fire when a later Claude Code session picks this workspace back up):
-   ```bash
-   codex-team watch alarm list                  # current workspace
-   codex-team watch alarm delete <name>         # for each name returned
+3. **Remove runtime alarms** (so stale alarms don't fire when the workspace is reused):
    ```
-   Skip this step if the alarm is in `config.toml` (persistent by design).
+   codex-team watch alarm list
+   codex-team watch alarm delete <name>      # for each
+   ```
+   Alarms defined in `config.toml` are persistent by design — skip.
 
-4. **Daemon lifecycle.**
-   - If `$ARGUMENTS` contains `--global`: stop the daemon unconditionally. **Warn** the user first — this terminates every other workspace's sessions running on the daemon. Only proceed if they explicitly confirmed or used `--force --global`.
-     ```bash
-     codex-team daemon stop --force
-     ```
-   - Otherwise: check `codex-team workspace list`. If any other workspace has sessions or clients → leave the daemon running; report "Daemon still active for workspaces: <list>." If no other workspace has sessions → stop the daemon:
-     ```bash
-     codex-team daemon stop
-     ```
-     (The daemon may auto-stop when all clients detach and no non-closed sessions remain. Running `daemon stop` explicitly is defense-in-depth.)
-   - If `daemon stop` returns `E_INVALID_REQUEST` with "non-closed session(s) across workspaces" — a session somewhere failed to close in step 2 (maybe yours, maybe another workspace's). Inspect: `codex-team session list --all-workspaces`. If the straggler is in your workspace, retry `session close` on it and re-run step 4. If it's in another workspace, the user has to decide: leave the daemon running (default, safe) or pass `--global` to force.
+4. **Daemon.**
+   - `--global` → warn user this affects every other workspace's sessions. Only proceed with explicit confirmation or `--force --global`. Then: `codex-team daemon stop --force`.
+   - Otherwise → `codex-team workspace list`. If other workspaces have sessions/clients, leave daemon running; report "Daemon still active for workspaces: `<list>`." Else: `codex-team daemon stop`.
+   - `E_INVALID_REQUEST` with "non-closed session(s)…" → a session somewhere didn't close. `codex-team session list --all-workspaces`. If straggler is yours, retry close; otherwise leave daemon running or `--global`.
 
-5. **Report.** Short summary:
-   - Workspace name.
-   - How many sessions were closed.
-   - How many runtime alarms were deleted.
-   - Daemon status: stopped now / still running for other workspaces.
-   - Reminder: threads are preserved. `codex-team daemon start` + `session resume` restores every session.
+5. **Report.** Short: workspace, sessions closed count, alarms deleted count, daemon status, note about thread preservation.
 
 ## Do not
 
-- Ask Codex to summarize or "wrap up" — that's the compaction ritual (`compact-codex-team`), not shutdown. If the user wants a progress-write first, they should run that **before** `/codex-team:shutdown`.
-- Run `session forget`. That's a deliberate destructive decision.
-- Use `--global` casually. It terminates other Claude Code sessions' work. Prefer the default (per-workspace).
-- Kill the daemon with `kill -9` or pkill. Use `codex-team daemon stop`.
-- Run `daemon stop` from a different workspace than the user intended — the daemon is shared and affects everyone.
+- Ask Codex to "wrap up" — that's the compaction ritual (`recover-codex-team/compaction-ritual.md`), run it **before** shutdown if needed.
+- Run `session forget` — destructive, deliberate.
+- Use `--global` casually.
+- `kill -9` or `pkill` the daemon. Use `codex-team daemon stop`.

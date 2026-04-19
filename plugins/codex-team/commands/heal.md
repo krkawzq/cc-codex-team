@@ -1,40 +1,40 @@
 ---
-description: Sweep errored codex-team sessions in the current workspace and try to bring them back via restart / kill+resume. Does NOT touch healthy sessions, sessions in other workspaces, or run destructive `forget`.
+description: Sweep errored sessions in the current workspace; try restart → kill+resume. Never touches healthy sessions, other workspaces, or runs destructive `forget`.
 argument-hint: ""
 allowed-tools: Bash
 ---
 
-Bring every errored session in the **current workspace** back, report per-session outcome. Never crosses workspace boundaries — the daemon rejects those attempts anyway (`E_WRONG_WORKSPACE`).
+Bring every errored session in the **current workspace** back. Never crosses workspace boundaries (the daemon rejects those calls anyway).
 
-## Procedure
+## Decision tree
 
-1. Run `codex-team health report` (workspace-scoped by default). Identify sessions with `status == "errored"` OR `transport_alive == false` (excluding `closed`).
+1. `codex-team health report`. Identify sessions with `status == "errored"` OR `transport_alive == false` (excluding `closed`).
 
-2. If the list is empty → "No errored sessions in workspace <ws>." and stop. Mention the workspace so the user knows this is scoped.
+2. Empty → "No errored sessions in workspace `<ws>`." Stop.
 
-3. For each errored session (in order):
+3. For each errored session, in order:
 
-   a. `codex-team session dump <name>` — capture `stderr_tail` and `last_error`. Keep for the final report; do not print mid-sweep.
+   a. `codex-team session dump <name>` — capture `stderr_tail` + `last_error`. Save for final report.
 
    b. `codex-team session restart <name>`.
-      - Success → note "restarted". Continue to next session.
+      - Success → note "restarted". Next session.
 
    c. On restart failure: `codex-team session kill <name>` then `codex-team session resume <name>`.
-      - Success → note "killed + resumed".
+      - Success → "killed + resumed".
 
-   d. On resume failure: **do NOT `forget`**. Note "needs manual forget+recreate; stderr: <tail>" and move on.
+   d. On resume failure: **do not `forget`**. Note "needs manual forget+recreate; stderr: `<tail>`". Move on.
 
 4. Final report:
    - Workspace name.
-   - Count of errored sessions before the sweep.
+   - Errored count before sweep.
    - Per-session outcome: `restarted` / `killed+resumed` / `needs-manual`.
-   - Final `codex-team health report` summary line (workspace-scoped).
+   - Final health line.
 
-5. If any session still needs manual intervention, point at `recover-codex-team` and quote the stderr tail.
+5. Any `needs-manual` → point at `recover-codex-team` and include stderr tail.
 
 ## Do not
 
-- Use `--all-workspaces`. Destructive actions on another workspace's sessions are rejected and should never be your intent from this command.
-- Touch the daemon itself. Connection refused on `health report` → stop and tell the user to run `codex-team daemon start` (see `recover-codex-team`).
-- Run `session forget`. That's a decision for the user.
-- Compact, send, or otherwise dispatch work.
+- Use `--all-workspaces`. Destructive actions against other workspaces are rejected; never your intent here.
+- Touch the daemon. Connection refused on `health report` → stop; tell the user `codex-team daemon start` (see `recover-codex-team`).
+- Run `session forget` — user's decision.
+- Compact, send, or dispatch work.

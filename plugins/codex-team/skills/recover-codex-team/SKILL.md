@@ -1,24 +1,33 @@
 ---
 name: recover-codex-team
 description: >-
-  Authoritative source for the codex-team escalation ladder (`interrupt → restart → kill → forget`), failure triage, and cross-workspace error handling. Trigger on `session-down`, `turn-err`, `turn-stuck`, `status=errored`, `E_WRONG_WORKSPACE`, daemon unreachable, or `E_NO_CODEX_BIN`. Also trigger when a Codex reply twice in a row doesn't match the sent prompt (first occurrence is the known long-context quirk — not this skill). Not for: routine session writes (`manage-codex-team`), inspection without action (`inspect-codex-team`).
+  Authoritative source for the codex-team escalation ladder (`interrupt → restart → kill → forget`), failure triage, cross-workspace error handling, and the compaction ritual. Trigger on `session-down`, `turn-err`, `turn-stuck`, `status=errored`, `E_WRONG_WORKSPACE`, daemon unreachable, `E_NO_CODEX_BIN`, a `compact-suggest` event, or when a Codex reply mismatches the prompt for the second time in a row (first mismatch is the known long-context quirk — not this skill). Not for: routine session writes (`manage-codex-team`), picking a collaboration pattern (`codex-team-playbooks`), configuration (`configure-codex-team`).
 ---
 
 # Recover codex-team
 
-Known symptom → known first move. Do not guess. Do not improvise.
+> **You are reading this because something broke, or is about to.** Close this file if you were just looking for how to respond to a normal `turn-done` — that's in `manage-codex-team/event-table.md`.
+
+**Known symptom → known first move. Do not guess. Do not improvise.**
+
+**Reference files in this skill:**
+
+- `compaction-ritual.md` — the 2-step "dump, then compact" procedure for `compact-suggest` and pre-emptive compactions.
+- `known-quirks.md` — Codex-side quirks that look like failures but aren't, chief among them the long-context prompt-apply skip.
+
+---
 
 ## First: is this actually a failure?
 
 Before climbing the ladder, rule out three false positives:
 
-1. **Long-context prompt-apply skip.** A worker reply that doesn't match the prompt you just sent is **not a recovery case** on first occurrence. Re-send the same prompt unchanged; one re-send usually resolves it. Only if two consecutive re-sends behave the same way is it a real problem. → `philosophy.md` §5, `manage-codex-team` §Known quirks.
+1. **Long-context prompt-apply skip.** A worker reply that doesn't match the prompt you just sent is **not a recovery case** on first occurrence. Re-send the same prompt unchanged; one re-send usually resolves it. Only two consecutive mismatches = real problem. → `known-quirks.md`.
 
 2. **Worker mid-turn.** Turns can legitimately take minutes. Check `session status` for `currentTurnAgeMs`; only if it exceeds `heartbeat.turn_stuck_seconds` is it a real stuck turn.
 
-3. **Wrong workspace.** If a command returns `E_WRONG_WORKSPACE`, the session exists in another workspace on the shared daemon. Not a failure — your CLI call needs `--workspace <correct-one>` or you should leave that session alone. → §Wrong workspace below.
+3. **Wrong workspace.** `E_WRONG_WORKSPACE` means the session exists in a different workspace on the shared daemon. Not a failure — see §Wrong workspace below.
 
-If none, proceed.
+If none of the above, proceed.
 
 ## Escalation ladder (authoritative)
 
@@ -34,24 +43,26 @@ Ephemeral session:
 interrupt  →  restart (only while still live)  →  kill  →  create a fresh one
 ```
 
-**Never skip rungs.** `forget` is destructive — it deletes the registry entry; the Codex-side thread persists but you've lost its handle. Start at the lowest rung and climb only on failure.
+**Never skip rungs.** `forget` is destructive — it deletes the registry entry (Codex-side thread persists but you've lost its handle). Start at the lowest rung and climb only on failure.
 
 ## Symptom → action table
 
 | Symptom | First action | If that fails |
 |---|---|---|
-| `session-down` and no `auto-heal` in ~10s | `codex-team session restart <name>` | See "Restart fails" |
+| `session-down` and no `auto-heal` in ~10s | `codex-team session restart <name>` | See §Restart fails |
 | `turn-stuck` (age exceeds threshold) | `codex-team interrupt <name>` | `codex-team session kill <name>` |
 | `turn-err` / `status=errored` | `codex-team session dump <name>` then `session restart <name>` | `session kill <name>` |
-| `E_WRONG_WORKSPACE` | See §Wrong workspace | — |
-| `E_INVALID_NAME` (create / attach) | Pick a name matching `[a-zA-Z0-9_.-]` ≤ 64 chars, alphanumeric/`_` first, avoiding Windows reserved names and trailing dots/spaces. See `manage-codex-team` §Create | — |
-| Daemon unreachable | `codex-team daemon doctor` | See "Daemon down" |
+| `E_WRONG_WORKSPACE` | §Wrong workspace | — |
+| `E_INVALID_NAME` (create / attach) | Pick a name matching `[a-zA-Z0-9_.-]` ≤ 64 chars, alphanumeric/`_` first char; avoid Windows reserved names and trailing dots/spaces. → `manage-codex-team` §Create | — |
+| Daemon unreachable | `codex-team daemon doctor` | §Daemon down |
 | Stale pid / stale socket suspected | `codex-team daemon doctor` | Remove stale files, then `daemon start` |
 | `E_NO_CODEX_BIN` | Install / repair Codex CLI | Pin `[daemon].codex_bin` in config |
 | `dist/main.js missing` | `npm install && npm run build` in plugin checkout | Reinstall from a built tree |
-| Ephemeral `session read` / `resume` fails after daemon restart | Create a fresh session | Ephemeral state is gone by design — stop retrying |
-| Reply mismatched prompt **twice** in a row | `codex-team interrupt` then dump + inspect | Restart if transport broke |
-| An alarm seems to target the wrong workspace | `codex-team watch alarm list --all-workspaces` | `codex-team watch alarm delete` + recreate in correct workspace |
+| Ephemeral `session read` / `resume` fails after daemon restart | Create a fresh session | Ephemeral state is gone by design |
+| Reply mismatches prompt **twice** in a row | `codex-team interrupt` then dump + inspect | Restart if transport broke |
+| `compact-suggest` fired | `compaction-ritual.md` | — |
+| `compact-suggest` during mid-work | Let the current turn finish, then `compaction-ritual.md` | — |
+| An alarm seems to target the wrong workspace | `codex-team watch alarm list --all-workspaces` | `watch alarm delete` + recreate in correct workspace |
 
 ## Wrong workspace
 
@@ -67,26 +78,26 @@ codex-team workspace show                  # what the CLI thinks the current wor
 
 **Three likely causes:**
 
-1. **You're in the wrong workspace.** Your `CODEX_TEAM_WORKSPACE` / derived workspace doesn't match where you created the session earlier. Fix: export the correct one, or pass `--workspace <ws>` on this call.
+1. **You're in the wrong workspace.** `CODEX_TEAM_WORKSPACE` / derived workspace doesn't match where the session was created. Export the correct one, or pass `--workspace <ws>` on this call.
 2. **Name collision across workspaces.** Sessions are per-workspace-unique, not global. Same name in two workspaces is fine, but you must disambiguate with `--workspace`.
-3. **Another Claude Code window manages this session.** A different CC is in a different workspace; the session is theirs, not yours. Leave it alone.
+3. **Another Claude Code window manages this session.** A different CC in a different workspace owns it. Leave it alone.
 
 **Never:**
 
-- Force the operation by editing `registry.json` directly.
+- Edit `registry.json` directly to force the operation.
 - `session forget` in your own workspace hoping it clears the collision (it doesn't — the other workspace's entry is separate).
-- Blindly run with `--all-workspaces` to dodge the error (that bypasses isolation and can hit someone else's work).
+- Blindly run with `--all-workspaces` to dodge the error (bypasses isolation; can hit someone else's work).
 
-## First, trust auto-heal briefly
+## Trust auto-heal briefly
 
-When `session-down` fires, the daemon attempts one automatic `thread/resume` in a fresh `codex app-server` child. Wait ~10 seconds for an `auto-heal` event before intervening.
+When `session-down` fires, the daemon attempts one automatic `thread/resume` in a fresh `codex app-server` child. **Wait ~10 seconds** for an `auto-heal` event before intervening.
 
 Exceptions:
 
-- **Ephemeral sessions are not auto-healed.**
+- Ephemeral sessions are not auto-healed.
 - A second immediate crash of the same session is rate-limited by backoff.
 
-Both events carry `was_during_turn`, `turn_id`, `turn_age_ms`, `reason` / `heal_reason`. Use these to distinguish "worker died mid-turn" from "idle child recycled".
+Both events carry `was_during_turn`, `turn_id`, `turn_age_ms`, `reason` / `heal_reason`. Use them to distinguish "worker died mid-turn — work lost" from "idle child recycled — nothing to do".
 
 ## Restart fails
 
@@ -103,7 +114,7 @@ Both events carry `was_during_turn`, `turn_id`, `turn_age_ms`, `reason` / `heal_
      → only if the thread itself is unusable
 ```
 
-Ephemeral: steps 2-4 are only valid while the live app-server is still running. After daemon shutdown, the thread is gone by design.
+Ephemeral: steps 2–4 are only valid while the live app-server is still running. After daemon shutdown, the thread is gone by design.
 
 ## Turn stuck
 
@@ -130,12 +141,12 @@ Facts first:
 codex-team daemon doctor
 ```
 
-Inspect `ipc_kind`, `ipc_ready`, `ipc_endpoint`, `socket_exists`, `pid`, `summary`, `log_path`. Quick reading guide:
+Read `ipc_kind`, `ipc_ready`, `ipc_endpoint`, `socket_exists`, `pid`, `summary`, `log_path`.
 
-- `ipc_ready: true` — daemon is listening and accepting connections. If this is `true` and your CLI still fails, suspect workspace mismatch or a routing bug.
-- `ipc_ready: false` with `ipc_kind: "uds"` + `socket_exists: true` — stale socket file from a crashed daemon; remove and `daemon start` (see stale-state block below).
-- `ipc_ready: false` with `ipc_kind: "pipe"` (Windows) — no named pipe exists; daemon isn't running. Just `daemon start`.
-- `ipc_ready: false` with `socket_exists: false` — daemon isn't running; `daemon start`.
+- `ipc_ready: true` — daemon is listening. If your CLI still fails, suspect workspace mismatch or a routing bug.
+- `ipc_ready: false` + `ipc_kind: "uds"` + `socket_exists: true` — stale socket from a crashed daemon; see stale-state block below.
+- `ipc_ready: false` + `ipc_kind: "pipe"` (Windows) — no named pipe; `daemon start`.
+- `ipc_ready: false` + `socket_exists: false` — daemon isn't running; `daemon start`.
 
 Normal recovery:
 
@@ -145,7 +156,7 @@ codex-team daemon start
 codex-team health report
 ```
 
-If startup is blocked by stale state (Unix only — Windows named pipes live in the OS namespace, not the filesystem, so there is nothing to `rm`):
+Blocked by stale state (Unix only — Windows named pipes have no filesystem counterpart):
 
 ```bash
 DATA_DIR="${CODEX_TEAM_DAEMON_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/codex-team}"
@@ -156,11 +167,11 @@ rm -f "${SOCKET_PATH}"
 codex-team daemon start
 ```
 
-On Windows, if the pid file points at a dead process and `daemon start` still fails, delete `%LOCALAPPDATA%\codex-team\daemon.pid` manually and retry.
+Windows: if the pid file points at a dead process and `daemon start` still fails, delete `%LOCALAPPDATA%\codex-team\daemon.pid` manually and retry.
 
 Then **re-arm any Monitor streams you were using**. Persistent Monitor children don't reconnect after the daemon socket disappears.
 
-**Important:** stopping the daemon affects **every workspace**, not just yours. Before `daemon stop`, check `codex-team workspace list` and confirm no other workspace is in active use. If non-closed sessions exist, the CLI refuses unless `--force` is passed; only use `--force` after explicit confirmation.
+**Important:** stopping the daemon affects **every workspace**. Before `daemon stop`, check `codex-team workspace list` and confirm no other workspace is in active use. If non-closed sessions exist elsewhere, the CLI refuses unless `--force`; only use after explicit confirmation.
 
 ## Codex binary missing
 
@@ -197,14 +208,16 @@ codex-team daemon start
 
 Queued sends matter. Inspect before destroying.
 
-- `session restart` preserves the in-memory queue only if the current process survives long enough to hand control back.
+- `session restart` preserves the in-memory queue only if the process survives long enough to hand control back.
 - `session kill` / `session close` / `queue clear` / `queue drop-oldest` reject queued waiters with an error (no silent hangs).
-- Useful commands:
-  ```bash
-  codex-team queue show <name>
-  codex-team queue retry-last <name>
-  codex-team queue clear <name>
-  ```
+
+Useful commands:
+
+```bash
+codex-team queue show <name>
+codex-team queue retry-last <name>
+codex-team queue clear <name>
+```
 
 ## Ephemeral sessions
 
@@ -234,22 +247,23 @@ Forcing detach unsubscribes their monitors and removes their runtime alarms.
 
 | Thought | Correction |
 |---|---|
-| "Worker reply doesn't match my prompt — let me restart." | First occurrence: re-send same prompt (long-context skip). Only escalate after two consecutive mismatches. |
-| "`E_WRONG_WORKSPACE` — let me bypass with `--all-workspaces`." | No. That bypasses isolation and can hit someone else's session. Verify your workspace first. |
+| "Worker reply doesn't match my prompt — let me restart." | First occurrence: re-send same prompt (long-context skip). Only escalate after two consecutive mismatches. → `known-quirks.md`. |
+| "`E_WRONG_WORKSPACE` — let me bypass with `--all-workspaces`." | No. Bypasses isolation; can hit someone else's session. Verify your workspace first. |
 | "Daemon is down; I'll keep retrying `send`." | Diagnose first: `daemon doctor`. |
 | "Ephemeral resume failed; one more retry might work." | No. Thread died with the app-server. Recreate. |
 | "Queue disappeared after `kill` — must be a bug." | Destructive recovery drops queued work by design. Inspect before killing. |
 | "Persistent Monitors will reconnect after `daemon restart`." | They won't. Re-arm. |
 | "`auto-heal` fired, so the problem is gone." | Check `was_during_turn`. If yes, the lost turn may need a re-send. |
-| "`forget` is faster than the ladder." | `forget` is rung 5. If you reach for it first, you've lost data you could have saved. |
+| "`forget` is faster than the ladder." | `forget` is rung 5. Reach for it first and you've lost data you could have saved. |
 | "Turn has been running 4 minutes — must be stuck." | Not until `turn-stuck` fires or `currentTurnAgeMs > turn_stuck_seconds`. |
 | "I'll stop the daemon to fix this session." | Daemon stop kills every workspace's sessions. Per-session recovery first; daemon stop only if all workspaces agree. |
+| "I'll just run `codex-team compact` to get tokens down." | Two-step ritual, always. → `compaction-ritual.md`. |
 
 ## Cross-references
 
 - Routine session writes: `manage-codex-team`
-- Known long-context quirk (re-send, not recovery): `philosophy.md` §5, `manage-codex-team` §Known quirks
-- Read-only inspection (first step of triage): `inspect-codex-team`
+- Known quirks (not failures): `known-quirks.md`
+- Read-only inspection (first step of triage): `manage-codex-team` §Read-only inspection
 - Config / runtime prereqs: `configure-codex-team`
 - Cross-workspace visibility: `/codex-team:workspaces`
-- Sweep-everything shortcut: `/codex-team:heal`
+- Sweep errored sessions in one shot: `/codex-team:heal`
