@@ -73,4 +73,24 @@ describe("PendingRegistry", () => {
     expect(reg.removeForUser("user-1").map((x) => x.request_id)).toEqual([b.request_id]);
     expect(reg.get(c.request_id)?.request_id).toBe(c.request_id);
   });
+
+  it("supports claim and release semantics for exactly-once responders", () => {
+    const reg = new PendingRegistry();
+    const client = {};
+    const pending = reg.add({
+      client: client as never,
+      jsonrpc_id: 99,
+      kind: "approval.command_execution",
+      user: "user-1",
+      session_name: "sess-1",
+      thread_id: "th-1",
+      turn_id: "turn-1",
+      raw: {},
+    });
+
+    expect(reg.claim(pending.request_id, "user-1")?.request_id).toBe(pending.request_id);
+    expect(reg.claim(pending.request_id, "user-1")).toBeNull();
+    expect(reg.releaseClaim(pending.request_id)?.request_id).toBe(pending.request_id);
+    expect(reg.claim(pending.request_id, "user-1")?.request_id).toBe(pending.request_id);
+  });
 });

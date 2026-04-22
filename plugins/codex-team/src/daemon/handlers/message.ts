@@ -67,19 +67,26 @@ export const messageApproval: HandlerFn = async (ctx, req) => {
   const { user, rec } = await resolveLive(ctx, req);
   const requestId = asPositional(req, 1, "request_id");
   const shortcut = asPositionalOptional(req, 2);
-  const pending = requirePending(ctx, user, requestId);
+  const pending = peekPending(ctx, user, requestId);
 
   if (!pending.kind.startsWith("approval.")) {
     throw new CodexTeamError("invalid_decision", `request '${requestId}' is not an approval (kind=${pending.kind})`);
   }
 
-  const response = await buildResponse(req, pending, shortcut);
-  pending.client.respond(pending.jsonrpc_id, response as JsonValue);
+  const claimed = claimPending(ctx, user, requestId);
+  let response: unknown;
+  try {
+    response = await buildResponse(req, claimed, shortcut);
+  } catch (e) {
+    ctx.pending.releaseClaim(requestId);
+    throw e;
+  }
+  claimed.client.respond(claimed.jsonrpc_id, response as JsonValue);
   ctx.pending.remove(requestId);
   return {
     session: rec.name,
     request_id: requestId,
-    kind: pending.kind,
+    kind: claimed.kind,
     responded: true,
     response,
   };
@@ -89,14 +96,21 @@ export const messageAnswer: HandlerFn = async (ctx, req) => {
   const { user, rec } = await resolveLive(ctx, req);
   const requestId = asPositional(req, 1, "request_id");
   const inline = asPositionalOptional(req, 2);
-  const pending = requirePending(ctx, user, requestId);
+  const pending = peekPending(ctx, user, requestId);
 
   if (pending.kind !== "user_input.request") {
     throw new CodexTeamError("invalid_decision", `request '${requestId}' is not a user_input request (kind=${pending.kind})`);
   }
 
-  const response = await buildAnswerResponse(req, pending, inline);
-  pending.client.respond(pending.jsonrpc_id, response as JsonValue);
+  const claimed = claimPending(ctx, user, requestId);
+  let response: unknown;
+  try {
+    response = await buildAnswerResponse(req, claimed, inline);
+  } catch (e) {
+    ctx.pending.releaseClaim(requestId);
+    throw e;
+  }
+  claimed.client.respond(claimed.jsonrpc_id, response as JsonValue);
   ctx.pending.remove(requestId);
   return { session: rec.name, request_id: requestId, responded: true, response };
 };
@@ -213,11 +227,17 @@ async function resolveLive(
   return { user, rec, client };
 }
 
-function requirePending(ctx: DaemonContext, user: string, requestId: string): PendingRequest {
+function peekPending(ctx: DaemonContext, user: string, requestId: string): PendingRequest {
   const p = ctx.pending.get(requestId);
   if (!p) throw new CodexTeamError("invalid_params", `no pending request '${requestId}'`);
   if (p.user !== user) throw new CodexTeamError("invalid_params", `pending request '${requestId}' belongs to another user`);
   return p;
+}
+
+function claimPending(ctx: DaemonContext, user: string, requestId: string): PendingRequest {
+  const claimed = ctx.pending.claim(requestId, user);
+  if (!claimed) throw new CodexTeamError("invalid_params", `no pending request '${requestId}'`);
+  return claimed;
 }
 
 async function readPromptInput(req: IpcRequest): Promise<string> {
