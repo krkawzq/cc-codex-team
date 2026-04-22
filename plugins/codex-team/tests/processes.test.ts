@@ -99,4 +99,21 @@ describe("daemon/processes", () => {
 
     expect(withPlatform("win32", () => mod.readProcessCommandLine(88))).toBe("codex app-server --listen stdio://");
   });
+
+  it("falls back to tasklist on Windows when richer inspection is unavailable", async () => {
+    const execFileSync = vi.fn()
+      .mockImplementationOnce(() => { throw new Error("no powershell"); })
+      .mockImplementationOnce(() => { throw new Error("no powershell"); })
+      .mockImplementationOnce(() => { throw new Error("no pwsh"); })
+      .mockImplementationOnce(() => { throw new Error("no wmic"); })
+      .mockImplementationOnce(() => "Image Name:   codex.exe\r\nPID:          99\r\n");
+    vi.doMock("node:child_process", () => ({
+      default: { execFileSync },
+      execFileSync,
+    }));
+    const mod = await import("../src/daemon/processes");
+
+    expect(withPlatform("win32", () => mod.readProcessCommandLine(99))).toBe("codex.exe");
+    expect(withPlatform("win32", () => mod.inspectCodexAppServerProcess(99))).toBe("unknown");
+  });
 });
