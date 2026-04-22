@@ -1,0 +1,1 @@
+<reasoning>{"id":"reasoning-short-1","text":"Run the formatter first, then snapshot the markdown output."}<\reasoning>

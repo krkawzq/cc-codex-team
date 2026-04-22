@@ -1,0 +1,11 @@
+{
+  "renderer": "item",
+  "options": {
+    "truncate": 88
+  },
+  "item": {
+    "id": "reasoning-long-1",
+    "type": "reasoning",
+    "text": "I need to compare the old generic item wrapper against the documented tag vocabulary, then preserve enough structure that future renderer refactors fail loudly in snapshots."
+  }
+}

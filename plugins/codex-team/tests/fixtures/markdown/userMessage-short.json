@@ -1,0 +1,13 @@
+{
+  "renderer": "item",
+  "item": {
+    "id": "user-short-1",
+    "type": "userMessage",
+    "content": [
+      {
+        "type": "text",
+        "text": "Summarize the renderer changes."
+      }
+    ]
+  }
+}
