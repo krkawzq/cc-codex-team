@@ -62,6 +62,29 @@ describe("formatShort", () => {
       },
       "audit  live  gpt-5.4  busy=y\nnotes  live  gpt-5.4-mini  busy=n",
     ],
+    [
+      "daemon:user:list",
+      {
+        users: [
+          {
+            token: "agent-a",
+            live_sessions: 2,
+            last_active_at: "2026-04-23T00:55:00.000Z",
+          },
+        ],
+      },
+      "YWdlbnQtYQ... name=agent-a live=2 last_seen=5m",
+    ],
+    [
+      "message:history",
+      {
+        turns: [
+          { id: "turn-1", status: "completed", durationMs: 1500, item_count: 3 },
+          { id: "turn-2", status: "running", startedAt: 1000, completedAt: 2200, items: [{}, {}] },
+        ],
+      },
+      "turn-1 completed 1s items=3\nturn-2 running 1s items=2",
+    ],
   ])("renders %s compactly", (method, data, expected) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-23T01:00:00.000Z"));
@@ -109,6 +132,25 @@ describe("formatShort", () => {
       ],
     })).toBe(
       "th-1  completed  openai  busy=unknown",
+    );
+
+    expect(formatShort("daemon:user:list", {
+      users: [
+        {
+          token: "agent-a",
+          created_at: "2026-04-23T00:59:55.000Z",
+        },
+      ],
+    })).toBe(
+      "YWdlbnQtYQ... name=agent-a live=unknown last_seen=5s",
+    );
+
+    expect(formatShort("message:history", {
+      turns: [
+        { id: "turn-1", status: "completed" },
+      ],
+    })).toBe(
+      "turn-1 completed unknown items=unknown",
     );
   });
 });

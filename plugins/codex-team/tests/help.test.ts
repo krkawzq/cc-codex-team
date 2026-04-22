@@ -40,8 +40,10 @@ describe("renderHelp", () => {
   it("documents --short for compact status commands", () => {
     expect(renderHelp(["status"])).toContain("--short");
     expect(renderHelp(["daemon", "status"])).toContain("--short");
+    expect(renderHelp(["daemon", "user", "list"])).toContain("--short");
     expect(renderHelp(["session", "info"])).toContain("--short");
     expect(renderHelp(["session", "list"])).toContain("--short");
+    expect(renderHelp(["message", "history"])).toContain("--short");
   });
 
   it("marks monitor events stream and interval flags as mutually exclusive", () => {

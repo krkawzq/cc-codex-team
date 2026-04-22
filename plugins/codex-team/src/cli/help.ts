@@ -146,9 +146,17 @@ const daemonUserGroup: HelpNode = {
     leaf({
       name: "list",
       summary: "List all daemon users and their activity.",
-      usage: "codex-team daemon user list",
+      usage: "codex-team daemon user list [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per user to stdout.",
+        },
+      ],
       examples: [
         "codex-team daemon user list",
       ],
@@ -785,6 +793,13 @@ const messageGroup: HelpNode = {
           default: "json",
           required: false,
           description: "Render output as json or markdown.",
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per turn to stdout.",
         },
       ],
       examples: [

@@ -6,10 +6,14 @@ export function formatShort(method: string, data: unknown): string {
       return formatStatus(data);
     case "daemon:status":
       return formatDaemonStatus(data);
+    case "daemon:user:list":
+      return formatDaemonUserList(data);
     case "session:info":
       return formatSessionInfo(data);
     case "session:list":
       return formatSessionList(data);
+    case "message:history":
+      return formatMessageHistory(data);
     default:
       throw new Error(`--short is not supported for '${method}'`);
   }
@@ -88,6 +92,43 @@ function formatSessionList(data: unknown): string {
         formatScalar(session.model ?? session.model_provider),
         `busy=${busyFlag(session.busy, turn)}`,
       ].join("  ");
+    })
+    .join("\n");
+}
+
+function formatDaemonUserList(data: unknown): string {
+  const value = asObject(data);
+  const users = Array.isArray(value.users) ? value.users : [];
+  if (users.length === 0) return "(no users)";
+
+  return users
+    .map((entry) => {
+      const user = asObject(entry);
+      const live = user.live_sessions ?? user.live_count ?? user.session_count ?? user.live;
+      return [
+        shortTokenPrefix(user.token),
+        `name=${formatScalar(user.name ?? user.token)}`,
+        `live=${formatCount(live)}`,
+        `last_seen=${formatAgeFromDateish(user.last_active_at ?? user.created_at)}`,
+      ].join(" ");
+    })
+    .join("\n");
+}
+
+function formatMessageHistory(data: unknown): string {
+  const value = asObject(data);
+  const turns = Array.isArray(value.turns) ? value.turns : [];
+  if (turns.length === 0) return "(no turns)";
+
+  return turns
+    .map((entry) => {
+      const turn = asObject(entry);
+      return [
+        formatScalar(turn.id),
+        formatScalar(turn.status),
+        formatTurnDuration(turn),
+        `items=${formatCount(turn.items && Array.isArray(turn.items) ? turn.items.length : turn.item_count ?? turn.itemCount)}`,
+      ].join(" ");
     })
     .join("\n");
 }
@@ -177,6 +218,23 @@ function itemCount(turn: Record<string, unknown> | null): string {
   return formatScalar(turn.item_count ?? turn.itemCount ?? turn.items_count);
 }
 
+function formatTurnDuration(turn: Record<string, unknown>): string {
+  const direct = turn.durationMs ?? turn.duration_ms;
+  if (typeof direct === "number" && Number.isFinite(direct)) return humanizeMs(direct);
+
+  const started = asFiniteNumber(turn.startedAt ?? turn.started_at);
+  const completed = asFiniteNumber(turn.completedAt ?? turn.completed_at);
+  if (started !== null && completed !== null && completed >= started) {
+    return humanizeMs(completed - started);
+  }
+  return "unknown";
+}
+
+function formatCount(value: unknown): string {
+  if (Array.isArray(value)) return String(value.length);
+  return formatScalar(value);
+}
+
 function parseDate(value: unknown): Date | null {
   if (typeof value !== "string" || value.length === 0) return null;
   const date = new Date(value);
@@ -204,9 +262,13 @@ function formatScalar(value: unknown): string {
 
 export function shortTokenPrefix(token: unknown): string {
   const encoded = typeof token === "string" && token.length > 0 ? encodeToken(token) : "unknown";
-  return `${encoded.slice(0, 8)}...`;
+  return `${encoded.slice(0, 10)}...`;
 }
 
 export const __private__ = {
   humanizeMs,
 };
+
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
