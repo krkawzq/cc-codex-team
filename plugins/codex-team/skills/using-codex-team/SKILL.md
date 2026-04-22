@@ -108,7 +108,7 @@ Do not violate these, even under duress:
 7. **Events are summaries.** Always. Never expect full turn content in the event stream.
 8. **Approvals block the turn.** A session waiting on `approval.*` or `user_input.request` cannot make progress until you reply.
 9. **Multiple agents can share a session via `--takeover`**, but the original holder gets a `session.seized` event and loses pending requests. Cross-user attach by name must be unique; otherwise use the `thread_id`.
-10. **Daemon auto-shuts down after 6h idle.** Live sessions count as activity. Don't rely on the daemon being there forever if you walk away.
+10. **Daemon auto-shuts down after 6h idle.** Idle is only evaluated when there are 0 live sessions; live sessions and the codex activity associated with them keep the daemon from being idled out. Don't rely on the daemon being there forever if you walk away.
 
 ## Output rendering
 

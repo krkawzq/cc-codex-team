@@ -16,7 +16,8 @@ codex-team [global-flags] <command> [args] [flags]
 | `-h, --help` | bool | No | false | Print help |
 
 Top-level convenience: `codex-team version` (no `-b`).
-Group help works too: `codex-team session --help`, `codex-team daemon --help`, etc.
+Per-command help works too: `codex-team session --help`, `codex-team session new --help`, `codex-team daemon config set --help`, etc.
+`--help` is a parse terminator: `codex-team daemon --help user create` prints help for `daemon` and ignores the trailing `user create`.
 
 ## daemon group (no `-b` required)
 
@@ -28,7 +29,7 @@ Group help works too: `codex-team session --help`, `codex-team daemon --help`, e
 | `daemon restart` | Hand off to a new daemon process (3s sock-vacate window) |
 | `daemon logs [-f] [-n <N>] [--level <lvl>]` | Stream daemon log file |
 | `daemon user create <token>` | Register a user |
-| `daemon user destroy <token>` | Remove user + their sessions, pending requests, and retained events |
+| `daemon user destroy <token> [--force]` | Remove user + their sessions, pending requests, and retained events (`--force` required if live sessions remain) |
 | `daemon user list` | All registered users |
 | `daemon config get <key>` | `{value, default, source, needs_restart}` |
 | `daemon config set <key> <value>` | Apply (hot) or queue for restart (cold) |
@@ -77,7 +78,7 @@ Notes:
 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
-| `--graceful` | bool | false | Skip `turn/interrupt`; detach returns immediately and any already-running turn finishes or fails out-of-band |
+| `--graceful` | bool | false | Skip `turn/interrupt`; wait for the current turn to go idle before detaching |
 
 ### `session fork <source> [new_name]`
 
@@ -144,6 +145,12 @@ No flags. Hard cancel.
 | `--file <path>` | path | Read JSON from file |
 | `--stdin` | bool | Read JSON from stdin |
 
+Shortcut validity depends on approval kind:
+
+- `approval.permissions` allows `accept`, `accept-session`, `decline`; `cancel` is invalid.
+- `approval.mcp_elicitation` allows `accept`, `decline`, `cancel`; `accept-session` is invalid.
+- `approval.mcp_elicitation` in `mode:"form"` requires `--json` for `accept` because `content` must be supplied.
+
 ### `message answer <session> <request_id> [answer]`
 
 | Input | |
@@ -183,7 +190,7 @@ Streaming. Emits NDJSON.
 | `--filter <type,...>` | string | — | Whitelist |
 | `--exclude <type,...>` | string | — | Blacklist |
 | `--include-delta` | bool | false | Include `*_delta` events |
-| `--since <id>` | string | — | Resume from event id. `id_rotated` error if that id is already out of the ring |
+| `--since <id>` | string | — | Resume from event id. `id_rotated` if evicted; `invalid_params` if the id never existed in the current log |
 | `--session <name\|uuid>` | string | — | Only events for this session |
 
 ### `monitor alarm <interval_s> <command>`

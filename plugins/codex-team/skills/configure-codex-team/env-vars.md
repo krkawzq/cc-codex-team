@@ -6,6 +6,8 @@ codex-team honours a small number of env vars, mostly for routing persistent sta
 
 Overrides the root for all persistent state. Default `~/.codex-team`.
 
+`~`, `~/...`, and `~\\...` are expanded before use.
+
 Use cases:
 
 - Pinning a test run: `CODEX_TEAM_DATA_DIR=/tmp/ct-test pytest tests/…`
@@ -13,6 +15,7 @@ Use cases:
 - Claude Code plugin routing (auto-set by the `bin/codex-team` launcher to `$CLAUDE_PLUGIN_DATA/data` when invoked by CC)
 
 On Unix, all daemon state files live under this dir: `daemon.sock`, `daemon.log`, `config.json`, `users/…`, etc. On Windows, the daemon IPC endpoint is a named pipe derived from this location rather than a literal `daemon.sock` file. Change it ⇒ completely separate daemon.
+On Windows, home resolution prefers `os.homedir()`, then `USERPROFILE`, then `HOMEDRIVE` + `HOMEPATH`, and finally `HOME`.
 
 ## `CODEX_TEAM_SOCK`
 
@@ -23,6 +26,7 @@ CODEX_TEAM_SOCK=/tmp/alt.sock codex-team daemon status
 ```
 
 Equivalent to the `--daemon-sock` flag on the cli, but propagates to spawn env. On Windows this value is normalized into a named-pipe endpoint, not used as a filesystem socket path verbatim.
+`~`, `~/...`, and `~\\...` are expanded here too.
 
 ## `CLAUDE_PLUGIN_DATA` + `CLAUDE_PLUGIN_ROOT`
 

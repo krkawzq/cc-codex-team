@@ -13,11 +13,21 @@ description: >-
 | Failure | Daemon response |
 |---|---|
 | `server_overloaded` / transient app-server stream/network failures | Retries with backoff (default 3× / 0.25s–2s). If budget exhausted → `response_too_many_failed_attempts` surfaces as `codex_error` |
-| app-server process crash | Pool detects EOF; fires `turn.error` for the affected live session(s); cleans up pool mapping. Next interactive command on those sessions triggers lazy re-spawn |
+| app-server process crash | Pool detects EOF; fires `turn.error` for the affected live session(s); re-acquires a client, then attempts `thread/resume` automatically. The lost in-flight turn does not recover, but the live session usually does |
 | daemon crash / sudden restart | Persistent state (users, sessions, events, config) reloads. Live sessions keep their `live` flag; no running turn survives, but the session can be used again on next interactive command (lazy re-spawn of app-server) |
-| Stale sock file | Startup: `connect()` probes; on refusal, checks pidfile; dead pid → `unlink` + rebind |
-| Orphan codex processes from previous daemon | Startup: `reapOrphans()` reads `codex-pids.json` and SIGTERMs any survivors |
+| Stale sock file / pidfile | Startup: `connect()` probes; on refusal, pid ownership is checked before aborting. A live pid only blocks startup if it still looks like a `codex-team --daemon-internal` process |
+| Orphan codex processes from previous daemon | Startup: `reapOrphans()` reads `codex-pids.json`, verifies identity via `pid + start_time + nonce`, and SIGTERMs only surviving codex app-server children |
 | `thread.closed` from codex | Auto-detach: session removed from registry, pending requests cancelled |
+
+### Daemon ownership on startup
+
+The startup guard is stricter than "pidfile exists". codex-team now checks:
+
+- is the socket already reachable?
+- does the pidfile pid still exist?
+- if it exists, does it still look like the codex-team daemon process that owns this socket path?
+
+If the pid is alive but has been reused by some unrelated process, startup treats the pidfile as stale and continues. Only a live daemon owner blocks a second daemon from starting.
 
 ## Symptom → action
 
@@ -43,10 +53,10 @@ description: >-
 ### Drain a user's state
 
 ```bash
-codex-team daemon user destroy <token>
+codex-team daemon user destroy <token> --force
 ```
 
-This now detaches live sessions, cancels pending requests, clears retained events, and removes the user in one operation.
+Without `--force`, destroy is rejected if the user still has live sessions. With `--force`, codex-team closes live sessions, cancels pending requests, clears retained events, and removes the user in one operation.
 
 ### Force-kill the daemon (rare)
 
@@ -70,7 +80,7 @@ Stops daemon, `rm -rf ~/.codex-team`, rebuilds. Loses all sessions, events, conf
 codex-team -b $TOK message interrupt <session>
 ```
 
-If interrupt is rejected (`active_turn_not_steerable`), the turn is in a review or compact phase — wait it out. If interrupt succeeds but a pending approval hangs anyway, `session detach` will force-cancel any pending requests.
+If interrupt is rejected (`active_turn_not_steerable`), the turn is in a review or compact phase — wait it out. If interrupt succeeds but a pending approval hangs anyway, `session detach` tears the session down and pending requests fail with `-32000 session detached`.
 
 ### Recover a session after `thread.closed`
 

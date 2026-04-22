@@ -77,3 +77,31 @@ Live sessions are isolated onto dedicated app-server clients by default, so chan
 ## 14. Takeover cancels pending requests
 
 When user A has a pending `approval.command_execution` and user B runs `session attach --takeover`, codex-team cancels the pending request on user A's side by responding to codex with `-32000 session seized`. User A will see their pending event vanish but NOT receive a `server_request_resolved` (they receive `session.seized` instead). Codex treats the cancelled approval as declined.
+
+## 15. Persisted state is schema-versioned and newer versions are rejected
+
+`users/*/sessions.json` and the per-user `events.log` carry `schema_version`. If a file was written by a newer codex-team build, this build refuses to load it rather than guessing.
+
+**Mitigation**: do not downgrade the daemon onto a newer data dir. If you must inspect or recover data, use the newer binary or move the old data dir aside and start with a fresh one.
+
+## 16. Daemon log follow is rotation-safe
+
+`daemon logs --follow` now tails by byte offset, debounces bursts, and keeps working across rename-based log rotation. If a log file disappears briefly during rotation, the follower resets its offset and resumes when the file reappears.
+
+**Mitigation**: if a follow stream looks quiet during rotation, wait for the next write before assuming logging stopped.
+
+## 17. Windows shutdown is cooperative first, shell wrappers are exercised
+
+On Windows, child-process shutdown now tries `stdin.end()` before `kill()` so app-server and monitor children get a chance to exit cleanly under back-pressure. The `.cmd` wrapper path is also covered and expected to chain through `call`, so nested launcher scripts should return control to the parent shell correctly.
+
+**Mitigation**: if you still see a stuck Windows child, treat it as a real process issue rather than an expected wrapper limitation.
+
+## 18. Orphan reap and pidfile ownership are identity-based, not pid-only
+
+`codex-pids.json` tracks `pid + start_time + nonce`, and daemon startup also checks whether a pidfile owner still looks like a `codex-team` daemon before refusing to start. This avoids killing or blocking on an unrelated process that inherited the same PID later.
+
+If startup still refuses with "another daemon pidfile is live", verify the pid in `daemon.pid` really belongs to codex-team before deleting anything:
+
+1. Inspect the pid from the error or pidfile.
+2. Check its command line / process details.
+3. Only remove the pidfile manually if that process is gone or is not a codex-team daemon.

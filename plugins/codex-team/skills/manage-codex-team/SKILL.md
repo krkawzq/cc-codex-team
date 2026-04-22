@@ -116,6 +116,9 @@ See `events.md` in this skill for the full type catalogue. The three you'll see 
 - `turn.completed` — a turn finished. Fetch content with `message tail` or `message history`.
 - `approval.<kind>` — codex is waiting for your answer. Respond via `message approval`.
 - `user_input.request` — codex wants an askUserQuestion answer. Respond via `message answer`.
+- `turn.queued_failed` — daemon tried to auto-drain a queued prompt after `turn.completed`, but dispatch failed. Treat it as a retry/triage point, not a completion signal.
+
+`monitor events --stream` is safe to leave open during high-rate sessions. The cli now applies stdout back-pressure so a noisy worker does not blow up the stream reader's memory.
 
 ### Fetching content on demand
 
@@ -146,6 +149,8 @@ codex-team -b $TOKEN message approval <s> <request_id> \
   --json '{"decision":"acceptWithExecpolicyAmendment","execpolicyAmendment":{...}}'
 ```
 
+Shortcut validity depends on the approval kind. In particular: `approval.permissions` rejects `cancel`; `approval.mcp_elicitation` rejects `accept-session`; form-mode `approval.mcp_elicitation` requires `--json`.
+
 askUserQuestion:
 
 ```bash
@@ -172,7 +177,7 @@ All are read-only. Safe to run in loops if you insist.
 ## Ending work
 
 ```bash
-# Graceful: do not interrupt; detach returns immediately
+# Graceful: do not interrupt; wait for the active turn to finish before detaching
 codex-team -b $TOKEN session detach <name> --graceful
 
 # Default: hard detach (interrupt current turn, drop queue)
@@ -203,6 +208,8 @@ codex-team -b $TOKEN message peer demo "stay within the existing API shape"
 ### Parallel workers
 
 Spin up two sessions in the same user, give each different work, arm one events Monitor (events carry `session` field to disambiguate).
+
+If one worker emits `turn.queued_failed`, inspect the error, fix the blocking condition (often a transient app-server/session issue), then re-send or manually resume that queued unit of work.
 
 See `codex-team-playbooks/` for canonical multi-session topologies.
 

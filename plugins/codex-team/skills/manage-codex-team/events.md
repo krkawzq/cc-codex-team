@@ -13,7 +13,7 @@ Every `monitor events` line is a JSON object with the shape:
 }
 ```
 
-`session` and `thread_id` are `null` for system-level events.
+`session` and `thread_id` are usually `null` for system-level events. Two exceptions matter operationally: session-scoped `warning` events for reply durability, and `monitor.overflow`, which may echo your `--session` filter context.
 
 ## Session events
 
@@ -74,6 +74,16 @@ Most of the time you only care about `item.completed` with `type: agent_message`
 ### Queue lifecycle
 
 - `turn.queued_started` — a previously queued `message send` has just been dispatched. Payload carries the stable `queue_id` returned by `message send` plus the real `turn_id`.
+- `turn.queued_failed` — daemon tried to auto-dispatch a queued turn after `turn.completed`, but dispatch failed. Payload:
+
+```json
+payload: {
+  "queue_id": "queue-<hex>",
+  "error": { "message": "..." }
+}
+```
+
+The failed item stays queued. Treat this as "operator attention needed", not as a terminal turn result.
 
 ## Approval / input events (needs response)
 
@@ -195,7 +205,7 @@ Your turn was routed to a fallback model due to rate limits.
 
 ## System events
 
-`session` and `thread_id` are both `null`.
+Most of these have `session = null` and `thread_id = null`.
 
 - `warning` / `error` — generic codex-side alerts
 - `config_warning` — codex config issue (invalid key, conflicting overrides)
@@ -203,6 +213,29 @@ Your turn was routed to a fallback model due to rate limits.
 - `account.updated` / `account.rate_limits_updated` / `account.login_completed` — auth/quota state
 - `mcp_server.status_updated` — MCP server startup transitions
 - `mcp_server.oauth_login_completed` — MCP OAuth flow result
+- `monitor.overflow` — interval-mode `monitor events` dropped backlog because its bounded queue overflowed. Payload:
+
+```json
+payload: {
+  "dropped_count": 123,
+  "dropped_bytes": 45678,
+  "limit_events": 512,
+  "limit_bytes": 524288
+}
+```
+
+### `warning` payload kinds you should recognize
+
+These warnings are daemon-generated, not codex-originated:
+
+| `payload.kind` | Meaning | Typical response |
+|---|---|---|
+| `approval_reply_backpressured` | approval response reached app-server slowly because stdin was backpressured | wait; the command may resolve a bit later |
+| `approval_reply_delivery_failed` | approval response could not be delivered to app-server | inspect daemon logs, then decide whether to retry from fresh state |
+| `user_input_reply_backpressured` | `message answer` hit the same stdin backpressure path | wait; the command may resolve a bit later |
+| `user_input_reply_delivery_failed` | `message answer` could not be delivered | inspect daemon logs, then retry only after re-checking pending state |
+
+All four carry at least `payload.kind`, `payload.message`, and `payload.request_id`.
 
 ## High-frequency deltas (default filtered)
 
@@ -222,7 +255,7 @@ For a typical orchestration loop, subscribe with:
 
 ```
 monitor events --stream --filter \
-  turn.completed,turn.queued_started,turn.error,approval.command_execution,approval.file_change,approval.permissions,approval.mcp_elicitation,user_input.request,thread.closed,session.seized
+  turn.completed,turn.queued_started,turn.queued_failed,turn.error,approval.command_execution,approval.file_change,approval.permissions,approval.mcp_elicitation,user_input.request,thread.closed,session.seized,warning
 ```
 
 That covers: decision points + errors + ownership changes. Skip `item.*` unless you want fine-grained progress visibility.

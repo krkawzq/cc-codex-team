@@ -19,6 +19,7 @@ codex-team -b $TOK status
 ```
 
 For full listings, inspect your events log (`monitor events --since 0`) and look for `approval.*` / `user_input.request` events whose `request_id` hasn't been followed by `server_request_resolved`.
+Also account for teardown/takeover cases: a pending request can disappear because the session was detached or seized, in which case you'll see session state change rather than `server_request_resolved`.
 
 ## Response commands
 
@@ -38,9 +39,11 @@ codex-team -b $TOK message answer   <session> <request_id> --json '<response>'
 
 `<session>` can be name or thread_id.
 
+`message approval` and `message answer` now resolve only after the daemon gets app-server stdin acknowledgement. Under heavy back-pressure that can add a small delay; if delivery slows or fails you may also see a session-scoped `warning` event keyed by the same `request_id`.
+
 ## Approval response matrix
 
-Each kind has a different wire-level response. Shortcuts expand to the right shape; use `--json` for anything non-trivial.
+Each kind has a different wire-level response. Shortcuts are validated per approval kind; a shortcut that is legal for one kind can be `invalid_decision` for another. Use `--json` for anything non-trivial.
 
 ### `approval.command_execution`
 
@@ -102,6 +105,8 @@ Two modes:
 | `decline` | `{action:"decline"}` |
 | `cancel` | `{action:"cancel"}` |
 
+`accept-session` is invalid for all MCP elicitation requests.
+
 **`mode: "form"`** — schema-constrained user input. `accept` **requires** `--json`:
 
 ```bash
@@ -112,6 +117,15 @@ codex-team -b $TOK message approval <s> <req> --json '{
 ```
 
 `content` must satisfy `payload.requested_schema`. Primitive types + single/multi-select enums + simple objects.
+
+Shortcut summary:
+
+| Kind | Allowed shortcuts | Rejected shortcuts / caveats |
+|---|---|---|
+| `approval.command_execution` | `accept`, `accept-session`, `decline`, `cancel` | use `--json` for policy amendments |
+| `approval.file_change` | `accept`, `accept-session`, `decline`, `cancel` | — |
+| `approval.permissions` | `accept`, `accept-session`, `decline` | `cancel` is rejected |
+| `approval.mcp_elicitation` | `accept`, `decline`, `cancel` | `accept-session` is rejected; form-mode `accept` requires `--json` |
 
 ## user_input response (askUserQuestion)
 

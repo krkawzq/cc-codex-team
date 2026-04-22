@@ -8,9 +8,9 @@ Complete list. Change via `codex-team daemon config set <key> <value>`. Inspect 
 |---|---|---|---|---|
 | `daemon.idle_shutdown_hours` | int | `6` | hot | Threshold for auto-shutdown after no activity (requires 0 live sessions) |
 | `daemon.log_level` | enum | `info` | hot | `error` / `warn` / `info` / `debug` / `trace` |
-| `daemon.log_path` | path | `<data_dir>/daemon.log` | restart | JSONL log destination |
-| `daemon.data_dir` | path | `~/.codex-team` | restart | Root for all persistent state |
-| `daemon.sock_path` | path | `<data_dir>/daemon.sock` (Unix) / named-pipe seed (Windows) | restart | Daemon IPC endpoint |
+| `daemon.log_path` | path | `<data_dir>/daemon.log` | restart | JSONL log destination; `~`, `~/...`, and `~\\...` are expanded |
+| `daemon.data_dir` | path | `~/.codex-team` | restart | Root for all persistent state; `~`, `~/...`, and `~\\...` are expanded |
+| `daemon.sock_path` | path | `<data_dir>/daemon.sock` (Unix) / named-pipe seed (Windows) | restart | Daemon IPC endpoint; `~`, `~/...`, and `~\\...` are expanded before pipe/socket normalization |
 | `daemon.ready_timeout_seconds` | int | `15` | hot | How long cli waits for daemon readiness after spawn |
 | `daemon.connect_timeout_seconds` | int | `5` | hot | Per-attempt cli connect timeout to the daemon |
 | `daemon.connect_retry_attempts` | int | `3` | hot | Retry count for transient cli→daemon connect/request failures |
@@ -61,3 +61,8 @@ codex-team daemon restart
 ```
 
 Most hot keys apply immediately. `daemon.idle_shutdown_hours` is checked on the next idle timer tick (up to one minute).
+
+## Path expansion notes
+
+- All config-backed daemon paths use the same user-home expansion logic as env vars: `~`, `~/...`, and `~\\...` resolve against the platform home directory.
+- On Windows, home resolution prefers `os.homedir()`, then `USERPROFILE`, then `HOMEDRIVE` + `HOMEPATH`, and finally `HOME`.
