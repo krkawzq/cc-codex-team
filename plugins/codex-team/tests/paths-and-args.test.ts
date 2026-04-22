@@ -153,4 +153,20 @@ describe("parseArgs", () => {
     expect(sessionLeaf.positionals).toEqual([]);
     expect(sessionLeaf.unknown).toBeNull();
   });
+
+  it("parses the new session health/heal and message wait commands", () => {
+    const health = parseArgs(["-b", "token-1", "session", "health", "sess-1"]);
+    expect(health.commandPath).toEqual(["session", "health"]);
+    expect(health.positionals).toEqual(["sess-1"]);
+
+    const heal = parseArgs(["-b", "token-1", "session", "heal", "sess-1", "--force"]);
+    expect(heal.commandPath).toEqual(["session", "heal"]);
+    expect(heal.flags.force).toBe(true);
+
+    const wait = parseArgs(["-b", "token-1", "message", "wait", "sess-1", "--for", "turn-1", "--timeout", "30"]);
+    expect(wait.commandPath).toEqual(["message", "wait"]);
+    expect(wait.positionals).toEqual(["sess-1"]);
+    expect(wait.flags.for).toBe("turn-1");
+    expect(wait.flags.timeout).toBe("30");
+  });
 });

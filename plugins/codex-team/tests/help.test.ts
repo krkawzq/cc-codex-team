@@ -54,4 +54,16 @@ describe("renderHelp", () => {
     expect(help).toContain("permissions: cancel is invalid.");
     expect(help).toContain("mcp_elicitation: accept-session is invalid; form mode needs --json.");
   });
+
+  it("renders session heal and message wait help entries", () => {
+    const heal = renderHelp(["session", "heal"]);
+    expect(heal).toContain("codex-team session heal");
+    expect(heal).toContain("--force");
+
+    const wait = renderHelp(["message", "wait"]);
+    expect(wait).toContain("codex-team message wait");
+    expect(wait).toContain("--for");
+    expect(wait).toContain("--timeout");
+    expect(wait).toContain("If the session is idle, waits for the next turn");
+  });
 });

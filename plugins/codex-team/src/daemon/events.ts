@@ -205,6 +205,23 @@ export class EventLog {
     return buf && buf.length > 0 ? buf[0].id : null;
   }
 
+  latestEvent(
+    user: string,
+    filter: { session?: string | null; thread_id?: string | null; types?: string[] } = {},
+  ): TeamEvent | null {
+    this.loadUser(user);
+    const buf = this.buffers.get(user) ?? [];
+    const types = filter.types ? new Set(filter.types) : null;
+    for (let i = buf.length - 1; i >= 0; i--) {
+      const event = buf[i]!;
+      if (filter.session !== undefined && event.session !== filter.session) continue;
+      if (filter.thread_id !== undefined && event.thread_id !== filter.thread_id) continue;
+      if (types && !types.has(event.type)) continue;
+      return event;
+    }
+    return null;
+  }
+
   private async ensureLoaded(user: string): Promise<void> {
     if (this.loaded.has(user)) return;
     let promise = this.loadPromises.get(user);

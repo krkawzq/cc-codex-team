@@ -325,4 +325,49 @@ describe("runCli", () => {
       expect.stringContaining("\"markdown\""),
     );
   });
+
+  it("maps message wait outcomes to CLI exit codes", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementationOnce((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            outcome: "error",
+            event_type: "turn.error",
+          },
+        });
+      }, 0);
+    }).mockImplementationOnce((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            outcome: "timeout",
+            timeout_s: 5,
+          },
+        });
+      }, 0);
+    });
+
+    const errorCode = await runCli(["-b", "token-1", "message", "wait", "sess-1"]);
+    const timeoutCode = await runCli(["-b", "token-1", "message", "wait", "sess-1", "--timeout", "5"]);
+
+    expect(errorCode).toBe(1);
+    expect(timeoutCode).toBe(124);
+  });
 });

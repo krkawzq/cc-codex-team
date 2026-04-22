@@ -186,6 +186,9 @@ describe("session handlers", () => {
           { client: pendingClient, jsonrpc_id: 42 },
         ]),
       },
+      events: {
+        append: vi.fn().mockResolvedValue(undefined),
+      },
       retryOptions: vi.fn().mockReturnValue({}),
     };
 
@@ -195,6 +198,10 @@ describe("session handlers", () => {
     expect(vi.mocked(threadUnsubscribe)).toHaveBeenCalledWith({}, "th-1", {});
     expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
     expect(pendingClient.respondError).toHaveBeenCalledWith(42, -32000, "session detached");
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "session.closed",
+      payload: expect.objectContaining({ reason: "user_detach" }),
+    }));
     expect(result).toMatchObject({ graceful: false, noop: false });
   });
 
@@ -224,6 +231,9 @@ describe("session handlers", () => {
       },
       pending: {
         removeForSession: vi.fn().mockReturnValue([]),
+      },
+      events: {
+        append: vi.fn().mockResolvedValue(undefined),
       },
       retryOptions: vi.fn().mockReturnValue({}),
     };

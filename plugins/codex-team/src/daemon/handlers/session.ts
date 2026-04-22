@@ -9,6 +9,7 @@ import {
   SessionRecord,
   generateSessionName,
   looksLikeThreadId,
+  sessionRuntimeDefaults,
   validateSessionName,
 } from "../sessions";
 import {
@@ -81,6 +82,7 @@ export const sessionNew: HandlerFn = async (ctx, req) => {
     created_at: now,
     last_active_at: now,
     turn_count: 0,
+    ...sessionRuntimeDefaults(),
   };
   ctx.sessions.add(user, record);
   ctx.users.touch(user);
@@ -139,6 +141,7 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
         created_at: now,
         last_active_at: now,
         turn_count: 0,
+        ...sessionRuntimeDefaults(),
         ...(anywhere?.record ? {
           model: anywhere.record.model,
           cwd: anywhere.record.cwd,
@@ -198,6 +201,7 @@ export const sessionDetach: HandlerFn = async (ctx, req) => {
   for (const p of ctx.pending.removeForSession(user, rec.name)) {
     try { p.client.respondError(p.jsonrpc_id, -32000, "session detached"); } catch { /* ignore */ }
   }
+  await appendSessionClosed(ctx, user, rec, "user_detach");
   return { session: rec, noop: false, graceful };
 };
 
@@ -269,6 +273,7 @@ export const sessionFork: HandlerFn = async (ctx, req) => {
     created_at: now,
     last_active_at: now,
     turn_count: 0,
+    ...sessionRuntimeDefaults(),
   };
   ctx.sessions.add(user, record);
   return { session: record, forked_from: source.name, at_turn: atTurn };
@@ -378,6 +383,92 @@ export const sessionList: HandlerFn = async (ctx, req) => {
   return response;
 };
 
+export const sessionHealth: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+
+  const sessionKey = keyFor(user, rec.name);
+  const busyTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const appServerAlive = isClientAlive(client);
+  const currentTurnStartedAt = rec.current_turn_started_at ?? null;
+  const pending = typeof ctx.pending.listForUser === "function"
+    ? ctx.pending.listForUser(user).filter((entry) => entry.session_name === rec.name)
+    : null;
+  const pendingApprovals = pending
+    ? pending.filter((entry) => entry.kind.startsWith("approval.")).length
+    : rec.pending_approvals ?? 0;
+  const pendingUserInputs = pending
+    ? pending.filter((entry) => entry.kind === "user_input.request").length
+    : rec.pending_user_inputs ?? 0;
+
+  return {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    state: rec.state,
+    busy: rec.state === "live" && appServerAlive && busyTurnId !== null,
+    current_turn_id: busyTurnId,
+    current_turn_started_at: currentTurnStartedAt,
+    current_turn_elapsed_ms: currentTurnStartedAt ? Math.max(0, Date.now() - Date.parse(currentTurnStartedAt)) : null,
+    current_item_type: rec.current_item_type ?? null,
+    items_done_in_turn: rec.items_in_turn ?? 0,
+    pending_approval_requests: pendingApprovals,
+    pending_user_input_requests: pendingUserInputs,
+    token_usage_last_turn: rec.token_usage_last_turn ?? null,
+    app_server_alive: appServerAlive,
+    last_event_id: ctx.events.latestEvent(user, { session: rec.name, thread_id: rec.thread_id })?.id ?? null,
+  };
+};
+
+export const sessionHeal: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const force = isTrue(flags["force"]);
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+
+  const sessionKey = keyFor(user, rec.name);
+  const existingClient = ctx.pool.clientForSession(sessionKey);
+  const appServerAlive = isClientAlive(existingClient);
+  if (rec.state === "live" && appServerAlive) {
+    return { ok: true, note: "already healthy", session: rec };
+  }
+
+  if (!appServerAlive || force) {
+    ctx.pool.release(sessionKey);
+  }
+  if (force) {
+    ctx.queues.dispose(sessionKey);
+    if (ctx.pending && typeof ctx.pending.abortForSession === "function") {
+      ctx.pending.abortForSession(user, rec.name, "session_crashed", {
+        reason: "session_heal_force_reset",
+        session: rec.name,
+        thread_id: rec.thread_id,
+      });
+    }
+  }
+
+  const client = await ctx.pool.acquire(
+    user,
+    sessionKey,
+    buildExperimentalToolAppServerOptions(rec.experimental_tools ?? []),
+  );
+  await threadResume(client, rec.thread_id, ctx.retryOptions());
+
+  const updated = ctx.sessions.update(user, rec.name, {
+    state: "live",
+    recovery_state: null,
+    ...sessionRuntimeDefaults(),
+  });
+  ctx.users.touch(user);
+  return { ok: true, healed: true, forced: force, session: updated };
+};
+
 // --- helpers ---
 
 function requireUser(ctx: DaemonContext, req: IpcRequest): void {
@@ -479,6 +570,13 @@ function keyFor(user: string, name: string): string {
   return `${user}::${name}`;
 }
 
+function isClientAlive(client: unknown): boolean {
+  if (!client) return false;
+  const maybe = client as { isAlive?: () => boolean };
+  if (typeof maybe.isAlive === "function") return maybe.isAlive();
+  return true;
+}
+
 function hasFlag(flags: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(flags, key);
 }
@@ -565,6 +663,25 @@ async function seizeFromOtherUser(
     session: rec.name,
     thread_id: rec.thread_id,
     payload: { seized_by: toUser },
+  });
+}
+
+async function appendSessionClosed(
+  ctx: DaemonContext,
+  user: string,
+  rec: SessionRecord,
+  reason: "user_detach" | "daemon_shutdown" | "app_server_crashed" | "idle_unload" | "user_destroyed",
+): Promise<void> {
+  await ctx.events.append(user, {
+    type: "session.closed",
+    session: rec.name,
+    thread_id: rec.thread_id,
+    payload: {
+      session: rec.name,
+      thread_id: rec.thread_id,
+      reason,
+      ts: new Date().toISOString(),
+    },
   });
 }
 

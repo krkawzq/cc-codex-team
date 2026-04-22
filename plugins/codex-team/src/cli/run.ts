@@ -134,16 +134,24 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
     const markdown = extractMarkdownResult(resp.result, parsed.flags.format);
     if (markdown !== null) {
       process.stdout.write(markdown + "\n");
-      return 0;
+      return exitCodeForResult(method, resp.result);
     }
     process.stdout.write(JSON.stringify({ ok: true, data: resp.result }) + "\n");
-    return 0;
+    return exitCodeForResult(method, resp.result);
   } catch (e) {
     process.stdout.write(
       JSON.stringify(err("internal", (e as Error).message ?? "rpc failed")) + "\n",
     );
     return 1;
   }
+}
+
+function exitCodeForResult(method: string, result: unknown): number {
+  if (method !== "message:wait" || !result || typeof result !== "object") return 0;
+  const outcome = (result as Record<string, unknown>).outcome;
+  if (outcome === "error") return 1;
+  if (outcome === "timeout") return 124;
+  return 0;
 }
 
 async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): Promise<number> {

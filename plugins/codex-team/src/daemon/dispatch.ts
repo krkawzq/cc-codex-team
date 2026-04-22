@@ -40,6 +40,8 @@ import {
   messageTail,
 } from "./handlers/message";
 import { monitorEvents, monitorAlarm } from "./handlers/monitor";
+import { sessionHealth, sessionHeal } from "./handlers/session";
+import { messageWait } from "./handlers/message";
 
 export interface StreamHandle {
   chunk(data: unknown): void;
@@ -89,6 +91,9 @@ const HANDLERS: Record<string, HandlerFn> = {
 
   "monitor:events": monitorEvents,
   "monitor:alarm": monitorAlarm,
+  "session:health": sessionHealth,
+  "session:heal": sessionHeal,
+  "message:wait": messageWait,
 };
 
 export function getHandler(method: string): HandlerFn {
