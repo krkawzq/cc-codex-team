@@ -125,7 +125,8 @@ describe("session handlers", () => {
         release: vi.fn(),
       },
       queues: {
-        getCurrentTurn: vi.fn().mockReturnValue("turn-1"),
+        beginTeardown: vi.fn().mockResolvedValue({ currentTurnId: "turn-1" }),
+        waitForIdle: vi.fn().mockResolvedValue(undefined),
         dispose: vi.fn(),
       },
       pending: {
@@ -143,6 +144,48 @@ describe("session handlers", () => {
     expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
     expect(pendingClient.respondError).toHaveBeenCalledWith(42, -32000, "session detached");
     expect(result).toMatchObject({ graceful: false, noop: false });
+  });
+
+  it("waits for the active turn to finish before graceful detach unsubscribes", async () => {
+    vi.mocked(threadUnsubscribe).mockResolvedValue(undefined as never);
+    let releaseIdle!: () => void;
+    const idlePromise = new Promise<void>((resolve) => {
+      releaseIdle = resolve;
+    });
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue({ name: "sess-1", thread_id: "th-1" }),
+        remove: vi.fn(),
+      },
+      pool: {
+        clientForSession: vi.fn().mockReturnValue({}),
+        release: vi.fn(),
+      },
+      queues: {
+        beginTeardown: vi.fn().mockResolvedValue({ currentTurnId: "turn-1" }),
+        waitForIdle: vi.fn().mockImplementation(() => idlePromise),
+        dispose: vi.fn(),
+      },
+      pending: {
+        removeForSession: vi.fn().mockReturnValue([]),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    const detachPromise = sessionDetach(ctx as never, makeReq("session:detach", ["sess-1"], { graceful: true }) as never);
+    await Promise.resolve();
+
+    expect(vi.mocked(turnInterrupt)).not.toHaveBeenCalled();
+    expect(vi.mocked(threadUnsubscribe)).not.toHaveBeenCalled();
+
+    releaseIdle();
+    await detachPromise;
+
+    expect(vi.mocked(threadUnsubscribe)).toHaveBeenCalledWith({}, "th-1", {});
   });
 
   it("rejects ambiguous cross-user session names", async () => {

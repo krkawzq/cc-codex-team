@@ -31,6 +31,8 @@ describe("wireDaemonEvents", () => {
       queues: {
         setCurrentTurn: vi.fn(),
         onTurnCompleted: vi.fn().mockResolvedValue(null),
+        isTeardown: vi.fn().mockReturnValue(false),
+        onClientClosed: vi.fn(),
         dispose: vi.fn(),
       },
       pending: {
@@ -75,6 +77,8 @@ describe("wireDaemonEvents", () => {
       queues: {
         setCurrentTurn: vi.fn(),
         onTurnCompleted: vi.fn().mockResolvedValue({ turn_id: "turn-2", queue_id: "q-1" }),
+        isTeardown: vi.fn().mockReturnValue(false),
+        onClientClosed: vi.fn(),
         dispose: vi.fn(),
       },
       pending: {
@@ -132,6 +136,8 @@ describe("wireDaemonEvents", () => {
       queues: {
         setCurrentTurn: vi.fn(),
         onTurnCompleted: vi.fn().mockResolvedValue(null),
+        isTeardown: vi.fn().mockReturnValue(false),
+        onClientClosed: vi.fn(),
         dispose: vi.fn(),
       },
       pending: {
@@ -182,6 +188,8 @@ describe("wireDaemonEvents", () => {
       queues: {
         setCurrentTurn: vi.fn(),
         onTurnCompleted: vi.fn().mockResolvedValue(null),
+        isTeardown: vi.fn().mockReturnValue(false),
+        onClientClosed: vi.fn(),
         dispose: vi.fn(),
       },
       pending: {
@@ -248,6 +256,8 @@ describe("wireDaemonEvents", () => {
       queues: {
         setCurrentTurn: vi.fn(),
         onTurnCompleted: vi.fn().mockResolvedValue(null),
+        isTeardown: vi.fn().mockReturnValue(false),
+        onClientClosed: vi.fn(),
         dispose: vi.fn(),
       },
       pending: {
@@ -284,7 +294,7 @@ describe("wireDaemonEvents", () => {
         }),
     }));
     expect(ctx.sessions.update).toHaveBeenNthCalledWith(1, "user-1", "sess-1", { recovery_state: "degraded" });
-    expect(ctx.queues.setCurrentTurn).toHaveBeenCalledWith("user-1::sess-1", null);
+    expect(ctx.queues.onClientClosed).toHaveBeenCalledWith("user-1::sess-1");
     expect(ctx.pending.removeForSession).toHaveBeenCalledWith("user-1", "sess-1");
     expect(pool.acquire).toHaveBeenCalledWith("user-1", "user-1::sess-1");
     expect(vi.mocked(threadResume)).toHaveBeenCalledWith({ client: "replacement" }, "th-1", {});

@@ -82,6 +82,10 @@ export function wireDaemonEvents(ctx: DaemonContext): void {
       e.respondError(-32000, "session detached");
       return;
     }
+    if (ctx.queues.isTeardown(keyFor(e.user, sessionName))) {
+      e.respondError(-32000, "session detached");
+      return;
+    }
     const effectiveClient = ctx.pool.clientById(e.clientId);
     if (!effectiveClient) {
       logger.warn("server_request: no client to track", { user: e.user, kind: norm.kind });
@@ -131,7 +135,7 @@ export function wireDaemonEvents(ctx: DaemonContext): void {
           },
         },
       });
-      ctx.queues.setCurrentTurn(sessionKey, null);
+      ctx.queues.onClientClosed(sessionKey);
       for (const p of ctx.pending.removeForSession(user, sessionName)) {
         // No live client to respond through; just drop silently.
         void p;

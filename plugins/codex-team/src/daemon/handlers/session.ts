@@ -153,11 +153,16 @@ export const sessionDetach: HandlerFn = async (ctx, req) => {
   }
 
   const sessionKey = keyFor(user, rec.name);
+  const teardown = await ctx.queues.beginTeardown(sessionKey);
   const client = ctx.pool.clientForSession(sessionKey);
-  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+  const turnId = teardown.currentTurnId;
 
   if (client && !graceful && turnId) {
     try { await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions()); } catch { /* ignore if no turn */ }
+  }
+
+  if (graceful) {
+    await ctx.queues.waitForIdle(sessionKey);
   }
 
   if (client) {
@@ -451,8 +456,9 @@ async function seizeFromOtherUser(
   rec: SessionRecord,
 ): Promise<void> {
   const sessionKey = keyFor(fromUser, rec.name);
+  const teardown = await ctx.queues.beginTeardown(sessionKey);
   const client = ctx.pool.clientForSession(sessionKey);
-  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+  const turnId = teardown.currentTurnId;
   if (client) {
     if (turnId) {
       try { await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions()); } catch { /* ignore */ }
