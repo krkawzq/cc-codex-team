@@ -30,15 +30,23 @@ The worker is the same session across iterations (keeps context). The critic is 
 ```bash
 TOK=claude-$(date +%s)
 codex-team daemon user create $TOK >/dev/null
+codex-team -b $TOK cursor save reflexion-tail
 
 cd /repo
 mkdir -p .codex-team
 echo "$BRIEF" > .codex-team/brief.md
 
-codex-team -b $TOK session new worker --profile fixer    --cwd "$(pwd)"
+codex-team -b $TOK session new worker --profile fixer    --cwd "$(pwd)" \
+  --auto-approve 'git*,npm test,vitest*'
 codex-team -b $TOK session new critic --profile reviewer --cwd "$(pwd)"
 
 N=3  # max iterations
+```
+
+In a separate terminal or Monitor tool:
+
+```bash
+codex-team -b $TOK monitor events --stream --summary --cursor reflexion-tail
 ```
 
 ### Main loop
@@ -51,7 +59,7 @@ for n in 1..N:
   else:
     message send worker "Read .codex-team/lesson-$((n-1)).md. Attempt again with that lesson in mind. Log this attempt in .codex-team/attempt-$n.md."
 
-  wait for turn.completed.
+  codex-team -b $TOK message wait worker --timeout 0
 
   # Run verification (tests, lint, etc.) externally
   if verification passes:
@@ -64,11 +72,13 @@ for n in 1..N:
     - One concrete lesson to apply in the next attempt.
   Write to .codex-team/lesson-$n.md."
 
-  wait for turn.completed.
+  codex-team -b $TOK message wait critic --timeout 0
 
 # Ran out of iterations
 escalate.
 ```
+
+`turn.completed` is only the completion signal now; it does not embed the attempt or lesson items. Read the files or `message tail` when you need the content.
 
 ## Why two sessions
 
@@ -78,6 +88,7 @@ A worker's own reflection tends to reinforce its errors. A dedicated critic sess
 
 - **Persistent critic**: keep the critic across tasks (it builds expertise about your project)
 - **Critic targets**: force the critic to look at one specific thing (e.g. "diagnose timing issues only")
+- For trusted fix loops, the worker can inherit a daemon default `session.auto_approve_command_patterns` instead of repeating `--auto-approve` on every run.
 
 ## Termination
 

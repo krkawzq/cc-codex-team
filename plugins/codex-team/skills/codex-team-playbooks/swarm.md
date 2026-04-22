@@ -34,6 +34,7 @@ Mix profiles based on task type. Don't mix write-capable and read-only under the
 ```bash
 TOK=claude-$(date +%s)
 codex-team daemon user create $TOK >/dev/null
+codex-team -b $TOK cursor save swarm-tail
 
 cd /repo
 mkdir -p .codex-team/claimed .codex-team/done .codex-team/skipped
@@ -52,6 +53,7 @@ N=4
 for i in $(seq 0 $((N-1))); do
   codex-team -b $TOK session new "explorer-$i" --profile explorer --cwd "$(pwd)"
 done
+codex-team -b $TOK monitor events --stream --summary --cursor swarm-tail
 ```
 
 ### Main worker loop (each session gets this brief)
@@ -117,6 +119,8 @@ Claude watches events. Key signals:
 - Worker says "no more tasks" — it's idle. Consider detaching it, or feed it a refill (append new items to backlog.md) if more work appeared
 - `approval.*` events — handle per `manage-codex-team/approvals.md`; read-only explorers shouldn't fire many of these
 
+For this topology, the summary stream matters: `monitor events --summary --cursor swarm-tail` gives one compact line per worker event and resumes cleanly after Claude restarts. `turn.completed` no longer carries embedded items, so fetch detail with `message tail` only for workers you need to inspect closely, or just read `.codex-team/done/*.md`.
+
 ## Refilling the backlog
 
 When workers drain the initial backlog, either:
@@ -141,6 +145,7 @@ codex-team -b $TOK message send digest "
     - Skipped tasks and why
     - Recommendations
 "
+codex-team -b $TOK message wait digest --timeout 0
 ```
 
 Claude reads summary.md, reports to user.
@@ -157,6 +162,7 @@ codex-team -b $TOK session detach digest
 ## Variants
 
 - **Typed swarm**: multiple prefixes (`hunter-*` read-only, `fixer-*` write-capable). Each worker picks tasks tagged for its type (add `[hunter]` / `[fixer]` tag in backlog lines).
+- **YOLO typed swarm**: for trusted write-capable `fixer-*` workers, set `--auto-approve "<patterns>"` on `session new` or configure `session.auto_approve_command_patterns` once at the daemon. Do not implement approval polling in shell.
 - **Watchdog swarm**: workers run an alarm that triggers refill from a dynamic source (monitoring a directory, grep output). Swarm persists over hours.
 - **Ephemeral swarm**: one-shot; detach each worker as soon as `no more tasks`. Useful for capped sweeps.
 

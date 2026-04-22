@@ -33,6 +33,7 @@ All three are read-only — debate is about reasoning, not code.
 ```bash
 TOK=claude-$(date +%s)
 codex-team daemon user create $TOK >/dev/null
+codex-team -b $TOK cursor save debate-tail
 
 cd /repo
 mkdir -p .codex-team
@@ -49,6 +50,9 @@ EOF
 codex-team -b $TOK session new advocate-a --profile planner  --cwd "$(pwd)"
 codex-team -b $TOK session new advocate-b --profile planner  --cwd "$(pwd)"
 codex-team -b $TOK session new judge      --profile reviewer --cwd "$(pwd)"
+
+# Optional long-running monitor for resumable orchestration
+codex-team -b $TOK monitor events --stream --summary --cursor debate-tail
 ```
 
 ### Round 1 — openings (parallel)
@@ -63,7 +67,14 @@ message send advocate-a "Read brief.md and position-a.md. Defend position A.
 message send advocate-b "<mirror for position B>"
 ```
 
-Both fire concurrently. Wait for both turn.completed.
+Both fire concurrently. Prefer the built-in blocker over hand-rolled polling:
+
+```bash
+codex-team -b $TOK message wait advocate-a
+codex-team -b $TOK message wait advocate-b
+```
+
+`turn.completed` is compact metadata only in 0.5.2, so read the actual opening via `message tail ... --format markdown` or the generated file.
 
 ### Round 2 — rebuttals (parallel, optional)
 
@@ -77,6 +88,13 @@ message send advocate-b "<mirror>"
 
 Cap at one rebuttal round. Debates that go longer repeat themselves.
 
+Use the same wait pattern here:
+
+```bash
+codex-team -b $TOK message wait advocate-a
+codex-team -b $TOK message wait advocate-b
+```
+
 ### Round 3 — verdict
 
 ```
@@ -88,7 +106,19 @@ message send judge "Read brief.md, both openings, and (if they exist) both rebut
     - If both positions have fatal flaws, say so — don't force a choice"
 ```
 
+Then:
+
+```bash
+codex-team -b $TOK message wait judge
+codex-team -b $TOK message tail judge -n 1 --format markdown
+```
+
 Claude reads verdict.md. If the judge said "both fatal," escalate (ask the user; or re-scope). Otherwise act on the verdict.
+
+## Operational notes
+
+- `monitor events --summary --cursor debate-tail` gives one compact line per event and resumes cleanly if Claude restarts mid-debate.
+- This topology is read-only end to end (`approval=never`), so no auto-approve config is needed.
 
 ## Variants
 

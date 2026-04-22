@@ -27,6 +27,7 @@ N depends on how much parallelism codex account can handle. 4–8 is usually swe
 ```bash
 TOK=claude-$(date +%s)
 codex-team daemon user create $TOK >/dev/null
+codex-team -b $TOK cursor save mapreduce-tail
 
 cd /repo
 mkdir -p .codex-team
@@ -43,9 +44,11 @@ EOF
 
 N=$(jq length .codex-team/partition.json)
 for i in $(seq 0 $((N-1))); do
-  codex-team -b $TOK session new "mapper-$i" --profile fixer --cwd "$(pwd)"
+  codex-team -b $TOK session new "mapper-$i" --profile fixer --cwd "$(pwd)" \
+    --auto-approve 'git*,npm test,vitest*'
 done
 codex-team -b $TOK session new reducer --profile reviewer --cwd "$(pwd)"
+codex-team -b $TOK monitor events --stream --summary --cursor mapreduce-tail
 ```
 
 ### Dispatch map phase
@@ -60,12 +63,21 @@ done
 
 All N mappers run concurrently. Events flow in. Claude tracks which mappers have fired `turn.completed`.
 
+In 0.5.2, use the summary stream for the fan-out and `message wait` only when you need to block on one specific mapper:
+
+```bash
+codex-team -b $TOK message wait mapper-3 --timeout 0
+```
+
+`turn.completed` is now compact metadata only, so inspect mapper output via `.codex-team/mapper-<i>.md` or `message tail`.
+
 ### Reduce phase
 
 When all N mappers are done:
 
 ```bash
 codex-team -b $TOK message send reducer "Read .codex-team/brief.md and every mapper-<i>.md file. Produce the final synthesis as stdout in your reply."
+codex-team -b $TOK message wait reducer --timeout 0
 ```
 
 Claude reads `message tail reducer -n 1 --format markdown` to get the aggregated result.
@@ -75,6 +87,8 @@ Claude reads `message tail reducer -n 1 --format markdown` to get the aggregated
 - Live mapper sessions are isolated by default, so wide fan-out mainly costs you more `codex app-server` processes and memory. `app_server.max_sessions_per_process` now mostly matters for reusable adhoc/read-only clients, not the mapper turns themselves.
 - Codex account rate limits will bite long before process limits. Watch for `server_overloaded` events; daemon auto-retries but sustained pressure means N is too high.
 - Approvals are per-session. N mappers = N independent approval streams. Surface them with `--session` filter per session if you want a dedicated panel per mapper.
+- For homogeneous trusted mapper fleets, `--auto-approve` on `session new` or the daemon default `session.auto_approve_command_patterns` is the right unattended path. Avoid external approval-polling scripts.
+- `monitor events --summary --cursor mapreduce-tail` gives resumable high-fanout visibility without dumping full payloads.
 
 ## Termination
 
