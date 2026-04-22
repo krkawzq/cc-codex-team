@@ -7,5 +7,5 @@ if "%CLAUDE_PLUGIN_ROOT%"=="" (
   set "PLUGIN_ROOT=%CLAUDE_PLUGIN_ROOT%"
 )
 
-"%PLUGIN_ROOT%\bin\codex-team.cmd" daemon start >nul
-"%PLUGIN_ROOT%\bin\codex-team.cmd" monitor events %*
+call "%PLUGIN_ROOT%\bin\codex-team.cmd" daemon start >nul
+call "%PLUGIN_ROOT%\bin\codex-team.cmd" monitor events %*

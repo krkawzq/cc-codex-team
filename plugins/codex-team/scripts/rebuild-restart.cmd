@@ -13,6 +13,6 @@ call npm run build || (popd & exit /b 1)
 popd
 
 echo [rebuild-restart] restarting daemon...
-"%PLUGIN_ROOT%\bin\codex-team.cmd" daemon restart || exit /b 1
+call "%PLUGIN_ROOT%\bin\codex-team.cmd" daemon restart || exit /b 1
 
 echo [rebuild-restart] done.
