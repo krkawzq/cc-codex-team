@@ -86,6 +86,7 @@ describe("session handlers", () => {
       personality: "bold",
       "base-instructions": basePath,
       "developer-instructions": devPath,
+      "experimental-tools": "ask-user-question",
     }) as never);
 
     const params = vi.mocked(threadStart).mock.calls[0]?.[1] as Record<string, unknown>;
@@ -100,11 +101,62 @@ describe("session handlers", () => {
       config: {
         profile: "work",
         model_reasoning_effort: "high",
+        features: {
+          default_mode_request_user_input: true,
+        },
       },
     });
     expect(params).not.toHaveProperty("sandboxMode");
     expect(params).not.toHaveProperty("effort");
     expect(params).not.toHaveProperty("profile");
+    expect(ctx.pool.acquire).toHaveBeenCalledWith("user-1", "user-1::sess-1", {
+      configOverrides: ["features.default_mode_request_user_input=true"],
+    });
+    expect(ctx.sessions.add).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      experimental_tools: ["ask-user-question"],
+    }));
+  });
+
+  it("uses daemon default experimental tools when the session flag is omitted", async () => {
+    vi.mocked(threadStart).mockResolvedValue({
+      thread: { id: "th-1" },
+    } as never);
+    vi.mocked(threadSetName).mockResolvedValue(undefined as never);
+
+    const client = {};
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+        touch: vi.fn(),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue(null),
+        add: vi.fn(),
+      },
+      pool: {
+        acquire: vi.fn().mockResolvedValue(client),
+        release: vi.fn(),
+      },
+      config: {
+        getEffective: vi.fn((key: string) => (
+          key === "experimental.default_tools" ? "ask-user-question" : null
+        )),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    await sessionNew(ctx as never, makeReq("session:new", ["sess-1"]) as never);
+
+    expect(vi.mocked(threadStart).mock.calls[0]?.[1]).toMatchObject({
+      config: {
+        features: {
+          default_mode_request_user_input: true,
+        },
+      },
+    });
+    expect(ctx.pool.acquire).toHaveBeenCalledWith("user-1", "user-1::sess-1", {
+      configOverrides: ["features.default_mode_request_user_input=true"],
+    });
   });
 
   it("interrupts and cleans pending state on detach", async () => {
@@ -265,6 +317,9 @@ describe("session handlers", () => {
       events: {
         append: vi.fn(),
       },
+      config: {
+        getEffective: vi.fn().mockReturnValue(null),
+      },
       retryOptions: vi.fn().mockReturnValue({}),
     };
 
@@ -322,6 +377,9 @@ describe("session handlers", () => {
       },
       events: {
         append: vi.fn(),
+      },
+      config: {
+        getEffective: vi.fn().mockReturnValue(null),
       },
       retryOptions: vi.fn().mockReturnValue({}),
     };

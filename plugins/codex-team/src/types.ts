@@ -14,6 +14,7 @@ export interface SessionRecord {
   approval?: string;
   effort?: string;
   profile?: string;
+  experimental_tools?: string[];
   created_at: string;
   last_active_at?: string;
   turn_count?: number;

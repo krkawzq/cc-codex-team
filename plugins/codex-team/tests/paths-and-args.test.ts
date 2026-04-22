@@ -104,6 +104,7 @@ describe("parseArgs", () => {
       "--attach", "/tmp/b.png",
       "--since", "-3",
       "--format=markdown",
+      "--experimental-tools", "ask-user-question,request-permissions",
     ]);
 
     expect(parsed.bearer).toBe("token-1");
@@ -112,6 +113,7 @@ describe("parseArgs", () => {
     expect(parsed.flags.attach).toEqual(["/tmp/a.png", "/tmp/b.png"]);
     expect(parsed.flags.since).toBe("-3");
     expect(parsed.flags.format).toBe("markdown");
+    expect(parsed.flags["experimental-tools"]).toBe("ask-user-question,request-permissions");
   });
 
   it("reports unknown commands and missing global flag values", () => {

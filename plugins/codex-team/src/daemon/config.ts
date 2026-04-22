@@ -44,6 +44,7 @@ export const CONFIG_KEYS: Record<string, ConfigSpec> = {
   "codex.default_sandbox": enumSpec(["read-only", "workspace-write", "danger-full-access"], "workspace-write", false, "default --sandbox"),
   "codex.default_approval": enumSpec(["never", "on-request", "on-failure", "untrusted"], "on-request", false, "default --approval"),
   "codex.default_effort": enumSpec(["minimal", "low", "medium", "high", "xhigh"], "medium", false, "default --effort"),
+  "experimental.default_tools": { type: "string", default: "", needsRestart: false, description: "default session experimental tools CSV" },
 };
 
 export interface ConfigSnapshot {

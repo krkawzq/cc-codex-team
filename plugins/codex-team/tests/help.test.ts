@@ -23,6 +23,7 @@ describe("renderHelp", () => {
     expect(help).toContain("--sandbox");
     expect(help).toContain("--approval");
     expect(help).toContain("--effort");
+    expect(help).toContain("--experimental-tools");
   });
 
   it("renders daemon config subgroup help with its child commands", () => {

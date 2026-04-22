@@ -3,6 +3,7 @@ import { normalizeNotification, normalizeServerRequest } from "./normalize";
 import type { PoolClientClose, PoolNotification, PoolServerRequest } from "../codex/pool";
 import { threadResume } from "../codex/rpc";
 import { logger } from "../logger";
+import { buildExperimentalToolAppServerOptions } from "./experimentalTools";
 
 export function wireDaemonEvents(ctx: DaemonContext): void {
   const recoveringSessions = new Set<string>();
@@ -217,7 +218,12 @@ async function recoverSession(
 
   const sessionKey = keyFor(user, sessionName);
   try {
-    const client = await ctx.pool.acquire(user, sessionKey);
+    const rec = ctx.sessions.get(user, sessionName);
+    const client = await ctx.pool.acquire(
+      user,
+      sessionKey,
+      buildExperimentalToolAppServerOptions(rec?.experimental_tools ?? []),
+    );
     await threadResume(client, threadId, ctx.retryOptions());
     const live = ctx.sessions.get(user, sessionName);
     if (live) {
