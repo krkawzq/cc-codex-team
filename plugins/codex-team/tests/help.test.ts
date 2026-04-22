@@ -44,6 +44,8 @@ describe("renderHelp", () => {
     expect(help).toContain("cannot be used with --stream");
     expect(help).toContain("cannot be used with --interval");
     expect(help).toContain("--summary");
+    expect(help).toContain("--cursor");
+    expect(help).toContain("cannot be used with --since");
   });
 
   it("renders message approval shortcut and JSON input flags", () => {

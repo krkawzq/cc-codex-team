@@ -54,6 +54,12 @@ export async function runCli(argv: string[]): Promise<number> {
     return 1;
   }
 
+  const cliValidationError = validateCliFlags(parsed, method);
+  if (cliValidationError) {
+    process.stdout.write(JSON.stringify(err("invalid_params", cliValidationError)) + "\n");
+    return 1;
+  }
+
   const ready = await ensureDaemon(sockPath);
   if (!ready) {
     process.stdout.write(JSON.stringify(err("daemon_unreachable", "daemon did not become ready in time")) + "\n");
@@ -409,6 +415,15 @@ function extractCursorEventId(result: unknown): string {
   if (!result || typeof result !== "object" || Array.isArray(result)) return "";
   const eventId = (result as { event_id?: unknown }).event_id;
   return typeof eventId === "string" ? eventId : "";
+}
+
+function validateCliFlags(parsed: ParsedArgs, method: string): string | null {
+  if (method !== "monitor:events") return null;
+  if (parsed.flags.cursor === true) return "--cursor requires a value";
+  if (parsed.flags.since !== undefined && parsed.flags.cursor !== undefined) {
+    return "--since and --cursor are mutually exclusive";
+  }
+  return null;
 }
 
 function isTransientConnectError(err: Error & { code?: string }): boolean {

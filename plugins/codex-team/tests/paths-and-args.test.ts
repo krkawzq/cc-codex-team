@@ -134,6 +134,19 @@ describe("parseArgs", () => {
     expect(parsed.flags["event-id"]).toBe("evt-9");
   });
 
+  it("parses monitor cursor flags alongside other monitor options", () => {
+    const parsed = parseArgs([
+      "-b", "token-1",
+      "monitor", "events",
+      "--cursor", "audit-tail",
+      "--stream",
+    ]);
+
+    expect(parsed.commandPath).toEqual(["monitor", "events"]);
+    expect(parsed.flags.cursor).toBe("audit-tail");
+    expect(parsed.flags.stream).toBe(true);
+  });
+
   it("resolves subgroup help paths and skips positional validation", () => {
     const subgroup = parseArgs(["daemon", "config", "--help"]);
     expect(subgroup.help).toBe(true);

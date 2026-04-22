@@ -39,9 +39,44 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   const filterTypes = parseTypeList(flags["filter"]);
   const excludeTypes = parseTypeList(flags["exclude"]);
   const sinceId = asString(flags["since"]);
+  const cursorName = asString(flags["cursor"]);
+  if (sinceId && cursorName) throw invalidParams("--since and --cursor are mutually exclusive");
   const sessionFilter = asString(flags["session"]);
+  let effectiveSinceId = sinceId;
+  let persistedCursorEventId: string | null = null;
+  let lastObservedEventId: string | null = null;
+  let cursorWriteChain = Promise.resolve();
+
+  if (cursorName) {
+    const cursor = await ctx.cursors.ensure(user, {
+      name: cursorName,
+      event_id: null,
+      auto_update: true,
+    });
+    effectiveSinceId = cursor.event_id;
+    persistedCursorEventId = cursor.event_id;
+    lastObservedEventId = cursor.event_id;
+  }
+
   const emit = (event: TeamEvent): void => {
     stream.chunk(summaryMode ? summarizeEvent(event) : event);
+  };
+  const scheduleCursorUpdate = (): void => {
+    if (!cursorName) return;
+    const nextEventId = lastObservedEventId;
+    if (!nextEventId || nextEventId === persistedCursorEventId) return;
+    cursorWriteChain = cursorWriteChain
+      .catch(() => undefined)
+      .then(async () => {
+        if (!nextEventId || nextEventId === persistedCursorEventId) return;
+        await ctx.cursors.save(user, {
+          name: cursorName,
+          event_id: nextEventId,
+          auto_update: true,
+        });
+        persistedCursorEventId = nextEventId;
+      })
+      .catch(() => undefined);
   };
 
   const accept = (e: TeamEvent): boolean => {
@@ -55,18 +90,21 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     return true;
   };
 
-  const backlog = await ctx.events.listSince(user, sinceId, { includeDelta: true });
+  const backlog = await ctx.events.listSince(user, effectiveSinceId, { includeDelta: true });
   if (!backlog.ok) {
     if (backlog.reason === "id_rotated") {
-      stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
+      stream.end(new CodexTeamError("id_rotated", `event '${effectiveSinceId}' has been rotated out`, {
         oldest_available_id: backlog.oldest_available_id,
       }));
     } else {
-      stream.end(invalidParams(`event '${sinceId}' not found`));
+      stream.end(invalidParams(`event '${effectiveSinceId}' not found`));
     }
     return { streaming: true };
   }
 
+  if (backlog.events.length > 0) {
+    lastObservedEventId = backlog.events[backlog.events.length - 1]?.id ?? lastObservedEventId;
+  }
   const initialEvents = backlog.events.filter(accept);
   const queue: TeamEvent[] = streamMode ? [...initialEvents] : [];
   let queueBytes = 0;
@@ -115,13 +153,18 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     for (const e of queue) emit(e);
     queue.length = 0;
     const sub = ctx.events.subscribe(user, (e) => {
+      lastObservedEventId = e.id;
       if (accept(e)) emit(e);
     });
-    stream.onClose(() => sub.dispose());
+    stream.onClose(() => {
+      scheduleCursorUpdate();
+      sub.dispose();
+    });
     return { streaming: true };
   }
 
   const sub = ctx.events.subscribe(user, (e) => {
+    lastObservedEventId = e.id;
     if (accept(e)) enqueueIntervalEvent(e);
   });
   let closed = false;
@@ -146,6 +189,9 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
       emit(event);
     }
     draining = false;
+    if (batch.length > 0 || overflowEvent || lastObservedEventId !== persistedCursorEventId) {
+      scheduleCursorUpdate();
+    }
     if (overflowDropped > 0 || queue.length > 0) scheduleDrain(1);
   };
   const timer = setInterval(() => {
@@ -156,12 +202,15 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   // Emit any initial backlog immediately (otherwise user waits up to intervalS for first response).
   if (overflowDropped > 0 || queue.length > 0) {
     scheduleDrain(0);
+  } else if (backlog.events.length > 0) {
+    scheduleCursorUpdate();
   }
 
   stream.onClose(() => {
     closed = true;
     clearInterval(timer);
     if (drainTimer) clearTimeout(drainTimer);
+    scheduleCursorUpdate();
     sub.dispose();
   });
   return { streaming: true };

@@ -62,6 +62,20 @@ describe("runCli", () => {
     expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"daemon_unreachable\""));
   });
 
+  it("rejects monitor events when --since and --cursor are combined", async () => {
+    const code = await runCli([
+      "-b", "token-1",
+      "monitor", "events",
+      "--since", "evt-1",
+      "--cursor", "audit-tail",
+    ]);
+
+    expect(code).toBe(1);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"invalid_params\""));
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("--since and --cursor are mutually exclusive"));
+    expect(sockMocks.probeSock).not.toHaveBeenCalled();
+  });
+
   it("prints group help for command groups", async () => {
     const code = await runCli(["session", "--help"]);
 

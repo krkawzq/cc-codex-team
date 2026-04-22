@@ -869,7 +869,13 @@ const monitorGroup: HelpNode = {
           long: "--since",
           type: "string",
           required: false,
-          description: "Resume from the given event ID.",
+          description: "Resume from the given event ID; cannot be used with --cursor.",
+        },
+        {
+          long: "--cursor",
+          type: "string",
+          required: false,
+          description: "Resume from a saved named cursor and auto-update it; cannot be used with --since.",
         },
         {
           long: "--session",
