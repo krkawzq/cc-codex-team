@@ -14,6 +14,7 @@ export interface SessionRecord {
   name: string;
   thread_id: string;
   state: "live";
+  recovery_state?: "degraded" | null;
   model?: string;
   cwd?: string;
   sandbox?: string;
@@ -144,6 +145,7 @@ export class SessionRegistry {
     }
     if (patch.last_active_at !== undefined) rec.last_active_at = patch.last_active_at;
     if (patch.turn_count !== undefined) rec.turn_count = patch.turn_count;
+    if (patch.recovery_state !== undefined) rec.recovery_state = patch.recovery_state ?? undefined;
     if (patch.model !== undefined) rec.model = patch.model;
     if (patch.cwd !== undefined) rec.cwd = patch.cwd;
     if (patch.sandbox !== undefined) rec.sandbox = patch.sandbox;

@@ -35,6 +35,7 @@ export interface PoolClientClose {
   clientId: string;
   sessions: string[];
   exitCode: number | null;
+  reason: "unexpected" | "user_close" | "shutdown";
 }
 
 interface PoolEvents {
@@ -53,6 +54,7 @@ interface Managed {
   user: string;
   client: AppServerClient;
   sessions: Set<string>;
+  closeReason: PoolClientClose["reason"] | null;
 }
 
 export class AppServerPool extends EventEmitter {
@@ -170,7 +172,10 @@ export class AppServerPool extends EventEmitter {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    const closes = Array.from(this.byClient.values()).map((m) => m.client.close().catch(() => undefined));
+    const closes = Array.from(this.byClient.values()).map((m) => {
+      m.closeReason = "shutdown";
+      return m.client.close().catch(() => undefined);
+    });
     await Promise.all(closes);
     this.inFlightAcquireBySession.clear();
     this.byUser.clear();
@@ -180,7 +185,10 @@ export class AppServerPool extends EventEmitter {
 
   async closeUser(user: string): Promise<void> {
     const managed = [...(this.byUser.get(user) ?? [])];
-    await Promise.all(managed.map((m) => m.client.close().catch(() => undefined)));
+    await Promise.all(managed.map((m) => {
+      m.closeReason = "user_close";
+      return m.client.close().catch(() => undefined);
+    }));
   }
 
   private findAvailableForUser(user: string, allowBoundSessions: boolean): Managed | null {
@@ -198,7 +206,7 @@ export class AppServerPool extends EventEmitter {
     const clientOptions = { ...(this.options.clientDefaults ?? {}), ...(override ?? {}) };
     const client = new AppServerClient(clientOptions);
     const id = `as-${this.nextClientId++}`;
-    const managed: Managed = { id, user, client, sessions: new Set() };
+    const managed: Managed = { id, user, client, sessions: new Set(), closeReason: null };
 
     client.on("notification", (n) => {
       this.emit("notification", { user, clientId: id, notification: n });
@@ -214,6 +222,8 @@ export class AppServerPool extends EventEmitter {
     });
     client.on("close", (code) => {
       const sessions = Array.from(managed.sessions);
+      const reason = managed.closeReason ?? (this.shuttingDown ? "shutdown" : "unexpected");
+      managed.closeReason = null;
       for (const s of sessions) this.bySession.delete(s);
       managed.sessions.clear();
       const list = this.byUser.get(user);
@@ -225,7 +235,7 @@ export class AppServerPool extends EventEmitter {
       this.byClient.delete(id);
       const pid = client.pid();
       if (pid !== null && this.options.onExit) this.options.onExit(pid);
-      this.emit("client_close", { user, clientId: id, sessions, exitCode: code });
+      this.emit("client_close", { user, clientId: id, sessions, exitCode: code, reason });
     });
     client.on("error", (err) => {
       logger.error("app-server client error", { user, clientId: id, err: err.message });
