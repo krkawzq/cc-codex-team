@@ -121,6 +121,19 @@ describe("parseArgs", () => {
     expect(parseArgs(["-b"]).unknown).toBe("flag -b requires a value");
   });
 
+  it("parses cursor commands and event-id flags", () => {
+    const parsed = parseArgs([
+      "-b", "token-1",
+      "cursor", "save", "audit-tail",
+      "--event-id", "evt-9",
+    ]);
+
+    expect(parsed.bearer).toBe("token-1");
+    expect(parsed.commandPath).toEqual(["cursor", "save"]);
+    expect(parsed.positionals).toEqual(["audit-tail"]);
+    expect(parsed.flags["event-id"]).toBe("evt-9");
+  });
+
   it("resolves subgroup help paths and skips positional validation", () => {
     const subgroup = parseArgs(["daemon", "config", "--help"]);
     expect(subgroup.help).toBe(true);
@@ -132,6 +145,12 @@ describe("parseArgs", () => {
     expect(leaf.commandPath).toEqual(["message", "approval"]);
     expect(leaf.positionals).toEqual([]);
     expect(leaf.unknown).toBeNull();
+
+    const cursor = parseArgs(["cursor", "--help"]);
+    expect(cursor.help).toBe(true);
+    expect(cursor.commandPath).toEqual(["cursor"]);
+    expect(cursor.positionals).toEqual([]);
+    expect(cursor.unknown).toBeNull();
   });
 
   it("treats --help as a command-path terminator", () => {

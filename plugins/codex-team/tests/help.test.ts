@@ -12,6 +12,7 @@ describe("renderHelp", () => {
     expect(help).toContain("session");
     expect(help).toContain("message");
     expect(help).toContain("monitor");
+    expect(help).toContain("cursor");
   });
 
   it("renders session new flags from the schema", () => {
@@ -54,5 +55,16 @@ describe("renderHelp", () => {
     expect(help).toContain("--stdin");
     expect(help).toContain("permissions: cancel is invalid.");
     expect(help).toContain("mcp_elicitation: accept-session is invalid; form mode needs --json.");
+  });
+
+  it("renders cursor subcommands and the explicit event-id flag", () => {
+    const help = renderHelp(["cursor", "save"]);
+
+    expect(renderHelp(["cursor"])).toContain("codex-team -b <token> cursor");
+    expect(renderHelp(["cursor"])).toContain("save");
+    expect(renderHelp(["cursor"])).toContain("list");
+    expect(renderHelp(["cursor"])).toContain("get");
+    expect(renderHelp(["cursor"])).toContain("delete");
+    expect(help).toContain("--event-id");
   });
 });

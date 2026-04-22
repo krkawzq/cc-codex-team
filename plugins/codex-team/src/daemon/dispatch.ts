@@ -39,6 +39,12 @@ import {
   messageHistory,
   messageTail,
 } from "./handlers/message";
+import {
+  cursorSave,
+  cursorList,
+  cursorGet,
+  cursorDelete,
+} from "./handlers/cursor";
 import { monitorEvents, monitorAlarm } from "./handlers/monitor";
 
 export interface StreamHandle {
@@ -89,6 +95,11 @@ const HANDLERS: Record<string, HandlerFn> = {
 
   "monitor:events": monitorEvents,
   "monitor:alarm": monitorAlarm,
+
+  "cursor:save": cursorSave,
+  "cursor:list": cursorList,
+  "cursor:get": cursorGet,
+  "cursor:delete": cursorDelete,
 };
 
 export function getHandler(method: string): HandlerFn {

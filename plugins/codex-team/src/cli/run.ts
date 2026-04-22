@@ -131,6 +131,10 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
       process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
       return 1;
     }
+    if (method === "cursor:get") {
+      process.stdout.write(extractCursorEventId(resp.result) + "\n");
+      return 0;
+    }
     const markdown = extractMarkdownResult(resp.result, parsed.flags.format);
     if (markdown !== null) {
       process.stdout.write(markdown + "\n");
@@ -401,6 +405,12 @@ function extractMarkdownResult(result: unknown, format: unknown): string | null 
   return typeof markdown === "string" ? markdown : null;
 }
 
+function extractCursorEventId(result: unknown): string {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return "";
+  const eventId = (result as { event_id?: unknown }).event_id;
+  return typeof eventId === "string" ? eventId : "";
+}
+
 function isTransientConnectError(err: Error & { code?: string }): boolean {
   return err.message === "connect timeout" ||
     err.code === "ECONNREFUSED" ||
@@ -420,6 +430,8 @@ function isReadOnlyMethod(method: string): boolean {
     method === "daemon:user:list" ||
     method === "daemon:config:get" ||
     method === "daemon:config:list" ||
+    method === "cursor:list" ||
+    method === "cursor:get" ||
     method === "session:info" ||
     method === "session:context" ||
     method === "session:list" ||
