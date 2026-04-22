@@ -39,6 +39,12 @@ import {
   messageHistory,
   messageTail,
 } from "./handlers/message";
+import {
+  cursorSave,
+  cursorList,
+  cursorGet,
+  cursorDelete,
+} from "./handlers/cursor";
 import { monitorEvents, monitorAlarm } from "./handlers/monitor";
 import { sessionHealth, sessionHeal } from "./handlers/session";
 import { messageWait } from "./handlers/message";
@@ -94,6 +100,11 @@ const HANDLERS: Record<string, HandlerFn> = {
   "session:health": sessionHealth,
   "session:heal": sessionHeal,
   "message:wait": messageWait,
+
+  "cursor:save": cursorSave,
+  "cursor:list": cursorList,
+  "cursor:get": cursorGet,
+  "cursor:delete": cursorDelete,
 };
 
 export function getHandler(method: string): HandlerFn {

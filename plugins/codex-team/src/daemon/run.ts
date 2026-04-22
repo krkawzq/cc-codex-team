@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { buildContext } from "./context";
+import { ConfigStore } from "./config";
+import { CursorStore } from "./cursors";
 import { startServer } from "./server";
 import { probeSock, unlinkSockIfStale } from "../ipc/sock";
 import { logger } from "../logger";
@@ -12,7 +14,11 @@ import { reapOrphans } from "./orphans";
 import { isLikelyCodexTeamDaemonProcess } from "./processes";
 
 export async function runDaemon(): Promise<number> {
-  const ctx = buildContext();
+  const config = new ConfigStore();
+  const ctx = buildContext({
+    config,
+    cursors: new CursorStore(config.resolvedDataDir()),
+  });
   const pidPath = pidFilePath(ctx.dataDir);
 
   const acquired = await acquireDaemonOwnership(ctx.sockPath, pidPath);

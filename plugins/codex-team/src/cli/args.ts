@@ -45,6 +45,10 @@ const COMMANDS: Set<string> = new Set([
   "session:health",
   "session:heal",
   "message:wait",
+  "cursor:save",
+  "cursor:list",
+  "cursor:get",
+  "cursor:delete",
 ]);
 
 const HELP_PATHS: Set<string> = new Set([
@@ -55,6 +59,7 @@ const HELP_PATHS: Set<string> = new Set([
   "session",
   "message",
   "monitor",
+  "cursor",
 ]);
 
 interface GlobalSpec {

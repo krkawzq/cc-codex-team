@@ -925,10 +925,23 @@ const monitorGroup: HelpNode = {
           description: "Include high-frequency *.delta events.",
         },
         {
+          long: "--summary",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Emit compact NDJSON lines with only id, ts, type, session, and a type-specific key.",
+        },
+        {
           long: "--since",
           type: "string",
           required: false,
-          description: "Resume from the given event ID.",
+          description: "Resume from the given event ID; cannot be used with --cursor.",
+        },
+        {
+          long: "--cursor",
+          type: "string",
+          required: false,
+          description: "Resume from a saved named cursor and auto-update it; cannot be used with --since.",
         },
         {
           long: "--session",
@@ -976,6 +989,90 @@ const monitorGroup: HelpNode = {
       ],
       examples: [
         "codex-team -b $TOKEN monitor alarm 30 \"codex-team -b $TOKEN status\"",
+      ],
+      needs_bearer: true,
+    }),
+  ],
+  needs_bearer: true,
+};
+
+const cursorGroup: HelpNode = {
+  name: "cursor",
+  summary: "Manage persisted named event cursors.",
+  usage: "codex-team -b <token> cursor <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team -b $TOKEN cursor save audit-tail",
+  ],
+  subcommands: [
+    leaf({
+      name: "save",
+      summary: "Save the current event tail or an explicit event ID under a cursor name.",
+      usage: "codex-team -b <token> cursor save <name> [flags]",
+      positionals: [
+        {
+          name: "name",
+          required: true,
+          description: "Cursor name to create or update.",
+        },
+      ],
+      flags: [
+        {
+          long: "--event-id",
+          type: "string",
+          required: false,
+          description: "Override the saved event ID instead of using the current tail.",
+        },
+      ],
+      examples: [
+        "codex-team -b $TOKEN cursor save audit-tail",
+        "codex-team -b $TOKEN cursor save audit-tail --event-id evt-42",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "list",
+      summary: "List saved named cursors for the current user.",
+      usage: "codex-team -b <token> cursor list",
+      positionals: [],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN cursor list",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "get",
+      summary: "Print only the saved event ID for a cursor name.",
+      usage: "codex-team -b <token> cursor get <name>",
+      positionals: [
+        {
+          name: "name",
+          required: true,
+          description: "Cursor name to resolve.",
+        },
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN cursor get audit-tail",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "delete",
+      summary: "Delete a saved cursor.",
+      usage: "codex-team -b <token> cursor delete <name>",
+      positionals: [
+        {
+          name: "name",
+          required: true,
+          description: "Cursor name to delete.",
+        },
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN cursor delete audit-tail",
       ],
       needs_bearer: true,
     }),
@@ -1051,6 +1148,7 @@ const HELP_TREE: HelpNode = {
     sessionGroup,
     messageGroup,
     monitorGroup,
+    cursorGroup,
   ],
   needs_bearer: false,
 };

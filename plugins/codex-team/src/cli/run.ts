@@ -54,6 +54,12 @@ export async function runCli(argv: string[]): Promise<number> {
     return 1;
   }
 
+  const cliValidationError = validateCliFlags(parsed, method);
+  if (cliValidationError) {
+    process.stdout.write(JSON.stringify(err("invalid_params", cliValidationError)) + "\n");
+    return 1;
+  }
+
   const ready = await ensureDaemon(sockPath);
   if (!ready) {
     process.stdout.write(JSON.stringify(err("daemon_unreachable", "daemon did not become ready in time")) + "\n");
@@ -130,6 +136,10 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
     if ("error" in resp && resp.error) {
       process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
       return 1;
+    }
+    if (method === "cursor:get") {
+      process.stdout.write(extractCursorEventId(resp.result) + "\n");
+      return 0;
     }
     const markdown = extractMarkdownResult(resp.result, parsed.flags.format);
     if (markdown !== null) {
@@ -409,6 +419,21 @@ function extractMarkdownResult(result: unknown, format: unknown): string | null 
   return typeof markdown === "string" ? markdown : null;
 }
 
+function extractCursorEventId(result: unknown): string {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return "";
+  const eventId = (result as { event_id?: unknown }).event_id;
+  return typeof eventId === "string" ? eventId : "";
+}
+
+function validateCliFlags(parsed: ParsedArgs, method: string): string | null {
+  if (method !== "monitor:events") return null;
+  if (parsed.flags.cursor === true) return "--cursor requires a value";
+  if (parsed.flags.since !== undefined && parsed.flags.cursor !== undefined) {
+    return "--since and --cursor are mutually exclusive";
+  }
+  return null;
+}
+
 function isTransientConnectError(err: Error & { code?: string }): boolean {
   return err.message === "connect timeout" ||
     err.code === "ECONNREFUSED" ||
@@ -428,6 +453,8 @@ function isReadOnlyMethod(method: string): boolean {
     method === "daemon:user:list" ||
     method === "daemon:config:get" ||
     method === "daemon:config:list" ||
+    method === "cursor:list" ||
+    method === "cursor:get" ||
     method === "session:info" ||
     method === "session:context" ||
     method === "session:list" ||

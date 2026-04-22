@@ -12,6 +12,7 @@ describe("renderHelp", () => {
     expect(help).toContain("session");
     expect(help).toContain("message");
     expect(help).toContain("monitor");
+    expect(help).toContain("cursor");
   });
 
   it("renders session new flags from the schema", () => {
@@ -42,6 +43,9 @@ describe("renderHelp", () => {
 
     expect(help).toContain("cannot be used with --stream");
     expect(help).toContain("cannot be used with --interval");
+    expect(help).toContain("--summary");
+    expect(help).toContain("--cursor");
+    expect(help).toContain("cannot be used with --since");
   });
 
   it("renders message approval shortcut and JSON input flags", () => {
@@ -65,5 +69,16 @@ describe("renderHelp", () => {
     expect(wait).toContain("--for");
     expect(wait).toContain("--timeout");
     expect(wait).toContain("If the session is idle, waits for the next turn");
+  });
+
+  it("renders cursor subcommands and the explicit event-id flag", () => {
+    const help = renderHelp(["cursor", "save"]);
+
+    expect(renderHelp(["cursor"])).toContain("codex-team -b <token> cursor");
+    expect(renderHelp(["cursor"])).toContain("save");
+    expect(renderHelp(["cursor"])).toContain("list");
+    expect(renderHelp(["cursor"])).toContain("get");
+    expect(renderHelp(["cursor"])).toContain("delete");
+    expect(help).toContain("--event-id");
   });
 });

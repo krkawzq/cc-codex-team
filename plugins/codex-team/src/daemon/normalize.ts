@@ -122,6 +122,19 @@ function buildNotificationPayload(type: string, params: Record<string, unknown>)
     case "turn.completed": {
       const turn = asObject(params.turn as JsonValue);
       const items = Array.isArray(turn.items) ? (turn.items as unknown[]) : [];
+      if (type === "turn.completed") {
+        // 0.5.2 event-digest change: keep turn.completed payloads lean and
+        // source detailed turn/items data via message history or message tail.
+        return {
+          turn_id: (turn.id as string) ?? null,
+          status: normalizeTurnCompletedStatus(turn.status),
+          duration_ms: deriveDurationMs(turn),
+          items_count: items.length,
+          token_usage: deriveTurnTokenUsage(turn),
+          ended_at: deriveTurnEndedAt(turn),
+          turn_items_included: false,
+        };
+      }
       return {
         turn_id: (turn.id as string) ?? null,
         status: (turn.status as string) ?? null,
@@ -252,6 +265,47 @@ function deriveDurationMs(turn: Record<string, unknown>): number | null {
     if (Number.isFinite(deltaMs)) return Math.max(0, Math.round(deltaMs));
   }
   return null;
+}
+
+function deriveTurnEndedAt(turn: Record<string, unknown>): number | null {
+  return asNumber(turn.endedAt) ?? asNumber(turn.completedAt);
+}
+
+function normalizeTurnCompletedStatus(value: unknown): "completed" | "errored" | "cancelled" | null {
+  if (typeof value !== "string") return null;
+  if (value === "completed") return "completed";
+  if (value === "cancelled" || value === "canceled") return "cancelled";
+  if (value === "errored" || value === "error" || value === "failed") return "errored";
+  return null;
+}
+
+function deriveTurnTokenUsage(turn: Record<string, unknown>): {
+  prompt: number | null;
+  completion: number | null;
+  total: number | null;
+} {
+  const usageSource = turn.tokenUsage ?? turn.token_usage ?? turn.usage;
+  const usage = asObject(usageSource);
+  const prompt =
+    asNumber(usage.prompt) ??
+    asNumber(usage.promptTokens) ??
+    asNumber(usage.prompt_tokens) ??
+    asNumber(usage.input) ??
+    asNumber(usage.inputTokens) ??
+    asNumber(usage.input_tokens);
+  const completion =
+    asNumber(usage.completion) ??
+    asNumber(usage.completionTokens) ??
+    asNumber(usage.completion_tokens) ??
+    asNumber(usage.output) ??
+    asNumber(usage.outputTokens) ??
+    asNumber(usage.output_tokens);
+  const total =
+    asNumber(usage.total) ??
+    asNumber(usage.totalTokens) ??
+    asNumber(usage.total_tokens);
+
+  return { prompt, completion, total };
 }
 
 function fallbackType(method: string): string {

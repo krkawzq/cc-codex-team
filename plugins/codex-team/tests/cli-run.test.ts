@@ -62,6 +62,20 @@ describe("runCli", () => {
     expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"daemon_unreachable\""));
   });
 
+  it("rejects monitor events when --since and --cursor are combined", async () => {
+    const code = await runCli([
+      "-b", "token-1",
+      "monitor", "events",
+      "--since", "evt-1",
+      "--cursor", "audit-tail",
+    ]);
+
+    expect(code).toBe(1);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"invalid_params\""));
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("--since and --cursor are mutually exclusive"));
+    expect(sockMocks.probeSock).not.toHaveBeenCalled();
+  });
+
   it("prints group help for command groups", async () => {
     const code = await runCli(["session", "--help"]);
 
@@ -104,6 +118,39 @@ describe("runCli", () => {
     expect(stdoutSpy).not.toHaveBeenCalledWith(
       expect.stringContaining("\"ok\":true"),
     );
+  });
+
+  it("prints only the saved event id for cursor get", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            event_id: "evt-9",
+          },
+        });
+      }, 0);
+    });
+
+    const code = await runCli(["-b", "token-1", "cursor", "get", "audit-tail"]);
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith("evt-9\n");
+    expect(stdoutSpy).not.toHaveBeenCalledWith(expect.stringContaining("\"ok\":true"));
   });
 
   it("treats abnormal stream socket close as failure", async () => {
