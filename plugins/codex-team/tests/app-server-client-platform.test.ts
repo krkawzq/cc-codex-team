@@ -33,6 +33,9 @@ function createFakeProc() {
   const stdin = {
     writable: true,
     writes: [] as string[],
+    end: vi.fn(function end() {
+      this.writable = false;
+    }),
     write(chunk: string) {
       this.writes.push(chunk);
       const msg = JSON.parse(chunk.trim()) as { id?: string; method?: string };
@@ -42,9 +45,6 @@ function createFakeProc() {
         });
       }
       return true;
-    },
-    end() {
-      this.writable = false;
     },
   };
 
@@ -63,7 +63,12 @@ function createFakeProc() {
   proc.pid = 1234;
   proc.exitCode = null;
   proc.signalCode = null;
-  proc.kill = vi.fn(() => true);
+  proc.kill = vi.fn((signal?: string) => {
+    proc.exitCode = signal === "SIGKILL" ? 137 : 0;
+    proc.signalCode = signal ?? null;
+    queueMicrotask(() => proc.emit("exit", proc.exitCode, proc.signalCode));
+    return true;
+  });
   return proc;
 }
 
@@ -147,5 +152,34 @@ describe("AppServerClient platform launch", () => {
 
     await expectation;
     expect(fakeProc.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("waits for stdin-driven shutdown before killing on Windows", async () => {
+    vi.useFakeTimers();
+    const fakeProc = createFakeProc();
+    const spawn = vi.fn().mockReturnValue(fakeProc);
+    vi.doMock("node:child_process", () => ({
+      default: {
+        spawn,
+        execFileSync: vi.fn(),
+      },
+      spawn,
+      execFileSync: vi.fn(),
+    }));
+
+    const { AppServerClient } = await import("../src/codex/appServerClient");
+
+    await withPlatform("win32", async () => {
+      const client = new AppServerClient();
+      await client.start();
+      const closing = client.close(1000);
+      expect(fakeProc.stdin.end).toHaveBeenCalledTimes(1);
+      expect(fakeProc.kill).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1000);
+      await closing;
+    });
+
+    expect(fakeProc.kill).toHaveBeenCalledWith();
   });
 });

@@ -96,7 +96,7 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
   let running = false;
   let timer: NodeJS.Timeout | null = null;
   let activeChild: ReturnType<typeof spawn> | null = null;
-  let activeKillTimer: NodeJS.Timeout | null = null;
+  let activeTimeoutTimer: NodeJS.Timeout | null = null;
   let activeKillHardTimer: NodeJS.Timeout | null = null;
 
   const runOnce = async (): Promise<void> => {
@@ -106,21 +106,18 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
     try {
       await new Promise<void>((resolve) => {
         const { file, args } = shellCommand(command);
-        const child = spawn(file, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+        const child = spawn(file, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         activeChild = child;
         let stdoutBuf = "";
         let stderrBuf = "";
         let killed = false;
         const killer = setTimeout(() => {
           killed = true;
-          activeKillHardTimer = setTimeout(() => {
-            try { child.kill("SIGKILL"); } catch { /* ignore */ }
-          }, 5000);
-          activeKillHardTimer.unref();
-          try { child.kill("SIGTERM"); } catch { /* ignore */ }
+          clearActiveTimeoutTimer();
+          requestChildShutdown(child, true);
         }, timeoutS * 1000);
         killer.unref();
-        activeKillTimer = killer;
+        activeTimeoutTimer = killer;
         child.stdout.setEncoding("utf8");
         child.stdout.on("data", (c) => { stdoutBuf += c; });
         child.stderr.setEncoding("utf8");
@@ -163,22 +160,58 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
   stream.onClose(() => {
     cancelled = true;
     if (timer) clearInterval(timer);
+    clearActiveTimeoutTimer();
     if (activeChild && activeChild.exitCode === null && activeChild.signalCode === null) {
-      try { activeChild.kill("SIGTERM"); } catch { /* ignore */ }
+      requestChildShutdown(activeChild, false);
+      return;
     }
-    clearActiveKillTimers();
+    clearActiveHardKillTimer();
   });
   return { streaming: true };
 
   function clearActiveKillTimers(): void {
-    if (activeKillTimer) {
-      clearTimeout(activeKillTimer);
-      activeKillTimer = null;
+    clearActiveTimeoutTimer();
+    clearActiveHardKillTimer();
+  }
+
+  function clearActiveTimeoutTimer(): void {
+    if (activeTimeoutTimer) {
+      clearTimeout(activeTimeoutTimer);
+      activeTimeoutTimer = null;
     }
+  }
+
+  function clearActiveHardKillTimer(): void {
     if (activeKillHardTimer) {
       clearTimeout(activeKillHardTimer);
       activeKillHardTimer = null;
     }
+  }
+
+  function requestChildShutdown(child: ReturnType<typeof spawn>, forceAfterDelay: boolean): void {
+    try { child.stdin?.end(); } catch { /* ignore */ }
+    if (process.platform === "win32") {
+      // Signal-based child termination is forceful on Windows, so prefer stdin
+      // closure first and only fall back to kill() if the shell stays alive.
+      scheduleHardKill(child, 5000);
+      return;
+    }
+    try { child.kill("SIGTERM"); } catch { /* ignore */ }
+    if (forceAfterDelay) scheduleHardKill(child, 5000);
+  }
+
+  function scheduleHardKill(child: ReturnType<typeof spawn>, delayMs: number): void {
+    clearActiveHardKillTimer();
+    activeKillHardTimer = setTimeout(() => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      try {
+        if (process.platform === "win32") child.kill();
+        else child.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+    }, delayMs);
+    activeKillHardTimer.unref();
   }
 };
 

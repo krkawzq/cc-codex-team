@@ -150,13 +150,9 @@ export class AppServerClient extends EventEmitter {
     this.proc = null;
     this.initialized = false;
 
-    try { proc.stdin.end(); } catch { /* ignore */ }
     const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
-    try { proc.kill("SIGTERM"); } catch { /* ignore */ }
-
-    const timer = setTimeout(() => {
-      try { proc.kill("SIGKILL"); } catch { /* ignore */ }
-    }, graceMs);
+    requestProcessShutdown(proc);
+    const timer = setTimeout(() => forceKillProcess(proc), graceMs);
     timer.unref();
 
     try {
@@ -348,4 +344,24 @@ function quoteWindowsArg(arg: string): string {
   if (arg.length === 0) return "\"\"";
   if (!/[ \t"&()^<>|]/.test(arg)) return arg;
   return `"${arg.replace(/(["])/g, "\\$1")}"`;
+}
+
+function requestProcessShutdown(proc: ChildProcessWithoutNullStreams): void {
+  try { proc.stdin.end(); } catch { /* ignore */ }
+  if (process.platform === "win32") {
+    // Node maps signal-based child termination to a forceful shutdown on Windows.
+    // Give the app-server a chance to exit cleanly after stdin closes before falling
+    // back to kill() on the grace timer.
+    return;
+  }
+  try { proc.kill("SIGTERM"); } catch { /* ignore */ }
+}
+
+function forceKillProcess(proc: ChildProcessWithoutNullStreams): void {
+  try {
+    if (process.platform === "win32") proc.kill();
+    else proc.kill("SIGKILL");
+  } catch {
+    // ignore
+  }
 }

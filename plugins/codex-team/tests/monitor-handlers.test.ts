@@ -30,14 +30,22 @@ function makeChild() {
   const stderr = new EventEmitter() as EventEmitter & { setEncoding: (enc: string) => void };
   stdout.setEncoding = () => {};
   stderr.setEncoding = () => {};
+  const stdin = {
+    writable: true,
+    end: vi.fn(() => {
+      stdin.writable = false;
+    }),
+  };
 
   const child = new EventEmitter() as EventEmitter & {
+    stdin: typeof stdin;
     stdout: typeof stdout;
     stderr: typeof stderr;
     kill: ReturnType<typeof vi.fn>;
     exitCode: number | null;
     signalCode: NodeJS.Signals | null;
   };
+  child.stdin = stdin;
   child.stdout = stdout;
   child.stderr = stderr;
   child.exitCode = null;
@@ -52,6 +60,11 @@ function makeChild() {
       child.exitCode = 137;
       child.signalCode = signal ?? null;
       child.emit("exit", 137, signal ?? null);
+    }
+    if (signal === undefined) {
+      child.exitCode = 1;
+      child.signalCode = null;
+      child.emit("exit", 1, null);
     }
     return true;
   });
@@ -70,16 +83,25 @@ function makeReq(positionals: string[], flags: Record<string, unknown> = {}) {
   };
 }
 
-function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
+function withPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T> | T): Promise<T> | T {
   const original = Object.getOwnPropertyDescriptor(process, "platform");
   Object.defineProperty(process, "platform", {
     configurable: true,
     value: platform,
   });
-  try {
-    return fn();
-  } finally {
+  const restore = () => {
     if (original) Object.defineProperty(process, "platform", original);
+  };
+  try {
+    const result = fn();
+    if (result && typeof (result as Promise<T>).then === "function") {
+      return (result as Promise<T>).finally(restore);
+    }
+    restore();
+    return result;
+  } catch (e) {
+    restore();
+    throw e;
   }
 }
 
@@ -159,5 +181,25 @@ describe("monitorAlarm", () => {
     });
 
     expect(monitorMocks.spawn).toHaveBeenCalledWith(expect.stringMatching(/cmd\.exe$/i), ["/d", "/s", "/c", "echo hi"], expect.any(Object));
+  });
+
+  it("prefers stdin shutdown before kill on Windows timeouts", async () => {
+    const child = makeChild();
+    monitorMocks.spawn.mockReturnValue(child);
+    const stream = new FakeStream();
+
+    await withPlatform("win32", async () => {
+      const promise = monitorAlarm({} as never, makeReq(["1", "echo hi"], { once: true, timeout: "1" }) as never, stream as never);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(child.stdin.end).toHaveBeenCalledTimes(1);
+      expect(child.kill).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5000);
+      await promise;
+    });
+
+    expect(child.kill).toHaveBeenCalledWith();
+    expect(stream.chunks).toContainEqual(expect.objectContaining({ __alarm_event: "timeout" }));
   });
 });
