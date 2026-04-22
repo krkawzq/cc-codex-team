@@ -98,6 +98,13 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
   let activeChild: ReturnType<typeof spawn> | null = null;
   let activeKillTimer: NodeJS.Timeout | null = null;
   let activeKillHardTimer: NodeJS.Timeout | null = null;
+  let activeTimedOut = false;
+
+  stream.onClose(() => {
+    cancelled = true;
+    if (timer) clearInterval(timer);
+    terminateActiveChild();
+  });
 
   const runOnce = async (): Promise<void> => {
     if (cancelled || running) return;
@@ -108,16 +115,12 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
         const { file, args } = shellCommand(command);
         const child = spawn(file, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
         activeChild = child;
+        activeTimedOut = false;
         let stdoutBuf = "";
         let stderrBuf = "";
-        let killed = false;
         const killer = setTimeout(() => {
-          killed = true;
-          activeKillHardTimer = setTimeout(() => {
-            try { child.kill("SIGKILL"); } catch { /* ignore */ }
-          }, 5000);
-          activeKillHardTimer.unref();
-          try { child.kill("SIGTERM"); } catch { /* ignore */ }
+          activeTimedOut = true;
+          terminateChild(child);
         }, timeoutS * 1000);
         killer.unref();
         activeKillTimer = killer;
@@ -128,20 +131,22 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
         child.on("error", (err) => {
           clearActiveKillTimers();
           if (activeChild === child) activeChild = null;
-          stream.chunk({ __alarm_event: "spawn_error", error: err.message });
+          if (!cancelled) stream.chunk({ __alarm_event: "spawn_error", error: err.message });
           resolve();
         });
         child.on("exit", (code, signal) => {
           clearActiveKillTimers();
           if (activeChild === child) activeChild = null;
-          if (stdoutBuf) stream.chunk({ stdout: stdoutBuf });
-          if (stderrBuf) stream.chunk({ stderr: stderrBuf });
-          stream.chunk({
-            __alarm_event: killed ? "timeout" : "exit",
-            exit_code: code,
-            signal,
-            duration_ms: Date.now() - start,
-          });
+          if (!cancelled) {
+            if (stdoutBuf) stream.chunk({ stdout: stdoutBuf });
+            if (stderrBuf) stream.chunk({ stderr: stderrBuf });
+            stream.chunk({
+              __alarm_event: activeTimedOut ? "timeout" : "exit",
+              exit_code: code,
+              signal,
+              duration_ms: Date.now() - start,
+            });
+          }
           resolve();
         });
       });
@@ -152,22 +157,13 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
 
   await runOnce();
   if (once || cancelled) {
-    stream.end();
+    if (!cancelled) stream.end();
     return { streaming: true };
   }
 
   timer = setInterval(() => {
     void runOnce();
   }, intervalS * 1000);
-
-  stream.onClose(() => {
-    cancelled = true;
-    if (timer) clearInterval(timer);
-    if (activeChild && activeChild.exitCode === null && activeChild.signalCode === null) {
-      try { activeChild.kill("SIGTERM"); } catch { /* ignore */ }
-    }
-    clearActiveKillTimers();
-  });
   return { streaming: true };
 
   function clearActiveKillTimers(): void {
@@ -179,6 +175,24 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
       clearTimeout(activeKillHardTimer);
       activeKillHardTimer = null;
     }
+  }
+
+  function terminateActiveChild(): void {
+    const child = activeChild;
+    if (!child) return;
+    terminateChild(child);
+  }
+
+  function terminateChild(child: ReturnType<typeof spawn>): void {
+    if (activeChild !== child) return;
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (!activeKillHardTimer) {
+      activeKillHardTimer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* ignore */ }
+      }, 5000);
+      activeKillHardTimer.unref();
+    }
+    try { child.kill("SIGTERM"); } catch { /* ignore */ }
   }
 };
 

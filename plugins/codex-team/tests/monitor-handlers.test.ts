@@ -128,6 +128,29 @@ describe("monitorAlarm", () => {
     expect(second.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
+  it("kills a stuck first-run child even if the stream closes before the initial run finishes", async () => {
+    const child = makeChild();
+    child.kill = vi.fn((signal?: NodeJS.Signals) => {
+      if (signal === "SIGKILL") {
+        child.exitCode = 137;
+        child.signalCode = signal ?? null;
+        child.emit("exit", 137, signal ?? null);
+      }
+      return true;
+    });
+    monitorMocks.spawn.mockReturnValue(child);
+
+    const stream = new FakeStream();
+    const handlerPromise = monitorAlarm({} as never, makeReq(["1", "sleep 999"], { once: true }) as never, stream as never);
+
+    stream.emit("close");
+    await vi.advanceTimersByTimeAsync(5000);
+
+    await handlerPromise;
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
   it("does not overlap recurring alarm runs while a previous run is still active", async () => {
     const first = makeChild();
     const second = makeChild();
