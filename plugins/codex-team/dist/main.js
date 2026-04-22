@@ -850,11 +850,19 @@ var sessionGroup = {
           type: "string",
           required: false,
           description: "Use a Codex config profile for defaults."
+        },
+        {
+          long: "--experimental-tools",
+          type: "csv",
+          default: "experimental.default_tools",
+          required: false,
+          description: "Enable experimental Codex tools such as ask-user-question."
         }
       ],
       examples: [
         "codex-team -b $TOKEN session new audit --model gpt-5.4 --cwd /repo",
-        "codex-team -b $TOKEN session new --profile fast-review"
+        "codex-team -b $TOKEN session new --profile fast-review",
+        "codex-team -b $TOKEN session new askq --experimental-tools ask-user-question"
       ],
       needs_bearer: true
     }),
@@ -872,10 +880,18 @@ var sessionGroup = {
           default: "false",
           required: false,
           description: "Seize a live session from another user."
+        },
+        {
+          long: "--experimental-tools",
+          type: "csv",
+          default: "inherit session or experimental.default_tools",
+          required: false,
+          description: "Enable experimental Codex tools when attaching or rehydrating a thread."
         }
       ],
       examples: [
-        "codex-team -b $TOKEN session attach th-abc123 --takeover"
+        "codex-team -b $TOKEN session attach th-abc123 --takeover",
+        "codex-team -b $TOKEN session attach th-abc123 --experimental-tools ask-user-question"
       ],
       needs_bearer: true
     }),
@@ -1519,7 +1535,8 @@ var CONFIG_KEYS = {
   "codex.default_model": { type: "string", default: "", needsRestart: false, description: "default --model for session new" },
   "codex.default_sandbox": enumSpec(["read-only", "workspace-write", "danger-full-access"], "workspace-write", false, "default --sandbox"),
   "codex.default_approval": enumSpec(["never", "on-request", "on-failure", "untrusted"], "on-request", false, "default --approval"),
-  "codex.default_effort": enumSpec(["minimal", "low", "medium", "high", "xhigh"], "medium", false, "default --effort")
+  "codex.default_effort": enumSpec(["minimal", "low", "medium", "high", "xhigh"], "medium", false, "default --effort"),
+  "experimental.default_tools": { type: "string", default: "", needsRestart: false, description: "default session experimental tools CSV" }
 };
 var ConfigStore = class {
   explicit = {};
@@ -2349,6 +2366,9 @@ var SessionRegistry = class {
     if (patch.approval !== void 0) rec.approval = patch.approval;
     if (patch.effort !== void 0) rec.effort = patch.effort;
     if (patch.profile !== void 0) rec.profile = patch.profile;
+    if (patch.experimental_tools !== void 0) {
+      rec.experimental_tools = patch.experimental_tools.length > 0 ? [...patch.experimental_tools] : void 0;
+    }
     if (patch.app_server_client_id !== void 0) rec.app_server_client_id = patch.app_server_client_id;
     this.schedulePersist(user, 0);
     return rec;
@@ -2862,7 +2882,7 @@ function parsePersistedEvents(lines) {
   const events = [];
   for (const line of eventLines) {
     const parsed = parseLine(line);
-    if (parsed && typeof parsed.id === "string") {
+    if (isPersistedEvent(parsed)) {
       events.push(parsed);
     }
   }
@@ -2876,7 +2896,14 @@ function parseLine(line) {
   }
 }
 function isHeader(value) {
-  return value !== null && value.kind === "event_log_header" && typeof value.schema_version === "number";
+  if (!value || typeof value !== "object") return false;
+  const rec = value;
+  return rec.kind === "event_log_header" && typeof rec.schema_version === "number";
+}
+function isPersistedEvent(value) {
+  if (!value || typeof value !== "object") return false;
+  const rec = value;
+  return typeof rec.id === "string" && typeof rec.ts === "string" && typeof rec.type === "string" && (rec.session === null || typeof rec.session === "string") && (rec.thread_id === null || typeof rec.thread_id === "string") && typeof rec.payload === "object" && rec.payload !== null && !Array.isArray(rec.payload);
 }
 function serializeHeaderLine() {
   return JSON.stringify({ schema_version: SCHEMA_VERSION3, kind: "event_log_header" }) + "\n";
@@ -4654,6 +4681,99 @@ function getPkgVersion() {
 // src/daemon/handlers/session.ts
 var import_node_fs11 = __toESM(require("fs"));
 
+// src/daemon/experimentalTools.ts
+var TOOL_SPECS = [
+  {
+    canonicalName: "ask-user-question",
+    aliases: [
+      "ask-user-question",
+      "ask_user_question",
+      "askuserquestion",
+      "request-user-input",
+      "request_user_input",
+      "requestuserinput"
+    ],
+    featureFlags: ["default_mode_request_user_input"]
+  },
+  {
+    canonicalName: "request-permissions",
+    aliases: [
+      "request-permissions",
+      "request_permissions",
+      "requestpermissions"
+    ],
+    featureFlags: ["request_permissions_tool"]
+  }
+];
+var ALIAS_TO_SPEC = /* @__PURE__ */ new Map();
+for (const spec of TOOL_SPECS) {
+  for (const alias of spec.aliases) {
+    ALIAS_TO_SPEC.set(alias, spec);
+  }
+}
+var SUPPORTED_EXPERIMENTAL_TOOLS = TOOL_SPECS.map((spec) => spec.canonicalName);
+function parseExperimentalTools(value) {
+  if (value === void 0 || value === null || value === "") return [];
+  if (value === true) {
+    throw invalidParams(
+      `--experimental-tools requires a comma-separated value (${SUPPORTED_EXPERIMENTAL_TOOLS.join(", ")})`
+    );
+  }
+  const rawParts = Array.isArray(value) ? value.flatMap((part) => splitCsv(part)) : splitCsv(value);
+  if (rawParts.length === 0) return [];
+  const deduped = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const part of rawParts) {
+    const normalized = normalizeAlias(part);
+    const spec = ALIAS_TO_SPEC.get(normalized);
+    if (!spec) {
+      throw invalidParams(
+        `unsupported experimental tool '${part}'; supported values: ${SUPPORTED_EXPERIMENTAL_TOOLS.join(", ")}`
+      );
+    }
+    if (seen.has(spec.canonicalName)) continue;
+    seen.add(spec.canonicalName);
+    deduped.push(spec.canonicalName);
+  }
+  return deduped;
+}
+function buildExperimentalToolThreadConfig(tools) {
+  const features = {};
+  for (const spec of specsForTools(tools)) {
+    for (const featureFlag of spec.featureFlags) {
+      features[featureFlag] = true;
+    }
+  }
+  return Object.keys(features).length > 0 ? { features } : null;
+}
+function buildExperimentalToolAppServerOptions(tools) {
+  const configOverrides = Array.from(new Set(
+    specsForTools(tools).flatMap((spec) => spec.featureFlags.map((flag) => `features.${flag}=true`))
+  ));
+  if (configOverrides.length === 0) return void 0;
+  return { configOverrides };
+}
+function specsForTools(tools) {
+  return tools.map((tool) => {
+    const spec = TOOL_SPECS.find((candidate) => candidate.canonicalName === tool);
+    if (!spec) {
+      throw invalidParams(
+        `unsupported experimental tool '${tool}'; supported values: ${SUPPORTED_EXPERIMENTAL_TOOLS.join(", ")}`
+      );
+    }
+    return spec;
+  });
+}
+function splitCsv(value) {
+  if (typeof value !== "string") {
+    throw invalidParams("experimental tool lists must be strings");
+  }
+  return value.split(",").map((part) => part.trim()).filter(Boolean);
+}
+function normalizeAlias(value) {
+  return value.trim().replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/[\s_]+/g, "-").toLowerCase();
+}
+
 // src/format/markdown.ts
 function renderTag(name, attrs, body) {
   const line = `<${name}> ${compactJson(attrs)}`;
@@ -4951,8 +5071,9 @@ var sessionNew = async (ctx, req) => {
   } else if (ctx.sessions.get(user, name)) {
     throw invalidParams(`session '${name}' already exists`);
   }
-  const startParams = await buildThreadStartParams(ctx, flags);
-  const client = await ctx.pool.acquire(user, keyFor(user, name));
+  const experimentalTools = resolveExperimentalToolsForCreate(ctx, flags);
+  const startParams = await buildThreadStartParams(ctx, flags, experimentalTools);
+  const client = await ctx.pool.acquire(user, keyFor(user, name), buildExperimentalToolAppServerOptions(experimentalTools));
   let result;
   try {
     result = await threadStart(client, startParams, ctx.retryOptions());
@@ -4978,6 +5099,7 @@ var sessionNew = async (ctx, req) => {
     profile: asString3(flags["profile"]) ?? void 0,
     base_instructions: asString3(flags["base-instructions"]) ?? void 0,
     developer_instructions: asString3(flags["developer-instructions"]) ?? void 0,
+    experimental_tools: experimentalTools.length > 0 ? experimentalTools : void 0,
     created_at: now,
     last_active_at: now,
     turn_count: 0
@@ -5015,8 +5137,9 @@ var sessionAttach = async (ctx, req) => {
     }
     ensureAttachOwnership(ctx, user, threadId);
     const name = anywhere?.record.name ?? deriveNameFromThreadId(threadId, ctx, user);
+    const experimentalTools = resolveExperimentalToolsForAttach(ctx, flags, anywhere?.record.experimental_tools);
     const sessionKey = keyFor(user, name);
-    const client = await ctx.pool.acquire(user, sessionKey);
+    const client = await ctx.pool.acquire(user, sessionKey, buildExperimentalToolAppServerOptions(experimentalTools));
     let added = false;
     try {
       ensureAttachOwnership(ctx, user, threadId);
@@ -5036,8 +5159,10 @@ var sessionAttach = async (ctx, req) => {
           sandbox: anywhere.record.sandbox,
           approval: anywhere.record.approval,
           effort: anywhere.record.effort,
-          profile: anywhere.record.profile
-        } : {}
+          profile: anywhere.record.profile,
+          experimental_tools: anywhere.record.experimental_tools
+        } : {},
+        ...experimentalTools.length > 0 ? { experimental_tools: experimentalTools } : {}
       };
       ctx.sessions.add(user, record);
       added = true;
@@ -5122,7 +5247,11 @@ var sessionFork = async (ctx, req) => {
   let newName = newNameRaw ?? generateSessionName();
   if (newNameRaw) validateSessionName(newNameRaw);
   while (ctx.sessions.get(user, newName)) newName = generateSessionName();
-  const client = await ctx.pool.acquire(user, keyFor(user, newName));
+  const client = await ctx.pool.acquire(
+    user,
+    keyFor(user, newName),
+    buildExperimentalToolAppServerOptions(source.experimental_tools ?? [])
+  );
   let forkResult;
   try {
     forkResult = await threadFork(client, source.thread_id, atTurn ?? void 0, ctx.retryOptions());
@@ -5146,6 +5275,7 @@ var sessionFork = async (ctx, req) => {
     approval: source.approval,
     effort: source.effort,
     profile: source.profile,
+    experimental_tools: source.experimental_tools,
     created_at: now,
     last_active_at: now,
     turn_count: 0
@@ -5283,7 +5413,7 @@ function asString3(v) {
 function isTrue2(v) {
   return v === true || v === "true" || v === "1";
 }
-async function buildThreadStartParams(ctx, flags) {
+async function buildThreadStartParams(ctx, flags, experimentalTools) {
   const p = {};
   const config = {};
   const model = asString3(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
@@ -5304,6 +5434,8 @@ async function buildThreadStartParams(ctx, flags) {
   if (devInstr) p.developerInstructions = devInstr;
   const personality = asString3(flags["personality"]);
   if (personality) p.personality = personality;
+  const experimentalConfig = buildExperimentalToolThreadConfig(experimentalTools);
+  if (experimentalConfig) Object.assign(config, experimentalConfig);
   if (Object.keys(config).length > 0) p.config = config;
   return p;
 }
@@ -5312,8 +5444,20 @@ function resolveDefault(ctx, key) {
   if (typeof v === "string" && v.length > 0) return v;
   return null;
 }
+function resolveExperimentalToolsForCreate(ctx, flags) {
+  if (hasFlag(flags, "experimental-tools")) return parseExperimentalTools(flags["experimental-tools"]);
+  return parseExperimentalTools(resolveDefault(ctx, "experimental.default_tools"));
+}
+function resolveExperimentalToolsForAttach(ctx, flags, inherited) {
+  if (hasFlag(flags, "experimental-tools")) return parseExperimentalTools(flags["experimental-tools"]);
+  if (inherited && inherited.length > 0) return [...inherited];
+  return parseExperimentalTools(resolveDefault(ctx, "experimental.default_tools"));
+}
 function keyFor(user, name) {
   return `${user}::${name}`;
+}
+function hasFlag(flags, key) {
+  return Object.prototype.hasOwnProperty.call(flags, key);
 }
 function deriveNameFromThreadId(threadId, ctx, user) {
   const existing = ctx.sessions.get(user, threadId);
@@ -5623,7 +5767,11 @@ async function resolveLive(ctx, req) {
   }
   const client = ctx.pool.clientForSession(keyFor2(user, rec.name));
   if (!client) {
-    const fresh = await ctx.pool.acquire(user, keyFor2(user, rec.name));
+    const fresh = await ctx.pool.acquire(
+      user,
+      keyFor2(user, rec.name),
+      buildExperimentalToolAppServerOptions(rec.experimental_tools ?? [])
+    );
     return { user, rec, client: fresh };
   }
   return { user, rec, client };
@@ -6796,7 +6944,12 @@ async function recoverSession(ctx, recoveringSessions, user, sessionName, thread
   recoveringSessions.add(recoveryKey);
   const sessionKey = keyFor3(user, sessionName);
   try {
-    const client = await ctx.pool.acquire(user, sessionKey);
+    const rec = ctx.sessions.get(user, sessionName);
+    const client = await ctx.pool.acquire(
+      user,
+      sessionKey,
+      buildExperimentalToolAppServerOptions(rec?.experimental_tools ?? [])
+    );
     await threadResume(client, threadId, ctx.retryOptions());
     const live = ctx.sessions.get(user, sessionName);
     if (live) {

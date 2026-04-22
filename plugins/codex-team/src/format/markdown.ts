@@ -100,6 +100,7 @@ export function renderSessionInfo(rec: SessionRecord): string {
   if (rec.approval) bodyLines.push(`- **approval_policy**: ${rec.approval}`);
   if (rec.effort) bodyLines.push(`- **effort**: ${rec.effort}`);
   if (rec.profile) bodyLines.push(`- **profile**: ${rec.profile}`);
+  if (rec.experimental_tools?.length) bodyLines.push(`- **experimental_tools**: ${rec.experimental_tools.join(", ")}`);
   bodyLines.push(`- **created**: ${rec.created_at}`);
   bodyLines.push(`- **last_active**: ${rec.last_active_at}`);
   return renderTag("session-info", attrs, bodyLines.join("\n"));

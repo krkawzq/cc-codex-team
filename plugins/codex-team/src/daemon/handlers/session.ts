@@ -22,6 +22,11 @@ import {
   threadUnsubscribe,
   turnInterrupt,
 } from "../../codex/rpc";
+import {
+  buildExperimentalToolAppServerOptions,
+  buildExperimentalToolThreadConfig,
+  parseExperimentalTools,
+} from "../experimentalTools";
 import { renderContext } from "../../format/markdown";
 import { renderTable } from "../../format/table";
 
@@ -43,9 +48,10 @@ export const sessionNew: HandlerFn = async (ctx, req) => {
     throw invalidParams(`session '${name}' already exists`);
   }
 
-  const startParams = await buildThreadStartParams(ctx, flags);
+  const experimentalTools = resolveExperimentalToolsForCreate(ctx, flags);
+  const startParams = await buildThreadStartParams(ctx, flags, experimentalTools);
 
-  const client = await ctx.pool.acquire(user, keyFor(user, name));
+  const client = await ctx.pool.acquire(user, keyFor(user, name), buildExperimentalToolAppServerOptions(experimentalTools));
   let result;
   try {
     result = await threadStart(client, startParams, ctx.retryOptions());
@@ -71,6 +77,7 @@ export const sessionNew: HandlerFn = async (ctx, req) => {
     profile: asString(flags["profile"]) ?? undefined,
     base_instructions: asString(flags["base-instructions"]) ?? undefined,
     developer_instructions: asString(flags["developer-instructions"]) ?? undefined,
+    experimental_tools: experimentalTools.length > 0 ? experimentalTools : undefined,
     created_at: now,
     last_active_at: now,
     turn_count: 0,
@@ -115,8 +122,9 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
     ensureAttachOwnership(ctx, user, threadId);
 
     const name = anywhere?.record.name ?? deriveNameFromThreadId(threadId, ctx, user);
+    const experimentalTools = resolveExperimentalToolsForAttach(ctx, flags, anywhere?.record.experimental_tools);
     const sessionKey = keyFor(user, name);
-    const client = await ctx.pool.acquire(user, sessionKey);
+    const client = await ctx.pool.acquire(user, sessionKey, buildExperimentalToolAppServerOptions(experimentalTools));
     let added = false;
     try {
       ensureAttachOwnership(ctx, user, threadId);
@@ -138,7 +146,9 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
           approval: anywhere.record.approval,
           effort: anywhere.record.effort,
           profile: anywhere.record.profile,
+          experimental_tools: anywhere.record.experimental_tools,
         } : {}),
+        ...(experimentalTools.length > 0 ? { experimental_tools: experimentalTools } : {}),
       };
       ctx.sessions.add(user, record);
       added = true;
@@ -228,7 +238,11 @@ export const sessionFork: HandlerFn = async (ctx, req) => {
   if (newNameRaw) validateSessionName(newNameRaw);
   while (ctx.sessions.get(user, newName)) newName = generateSessionName();
 
-  const client = await ctx.pool.acquire(user, keyFor(user, newName));
+  const client = await ctx.pool.acquire(
+    user,
+    keyFor(user, newName),
+    buildExperimentalToolAppServerOptions(source.experimental_tools ?? []),
+  );
   let forkResult;
   try {
     forkResult = await threadFork(client, source.thread_id, atTurn ?? undefined, ctx.retryOptions());
@@ -251,6 +265,7 @@ export const sessionFork: HandlerFn = async (ctx, req) => {
     approval: source.approval,
     effort: source.effort,
     profile: source.profile,
+    experimental_tools: source.experimental_tools,
     created_at: now,
     last_active_at: now,
     turn_count: 0,
@@ -408,7 +423,11 @@ function isTrue(v: unknown): boolean {
   return v === true || v === "true" || v === "1";
 }
 
-async function buildThreadStartParams(ctx: DaemonContext, flags: Record<string, unknown>): Promise<Record<string, JsonValue>> {
+async function buildThreadStartParams(
+  ctx: DaemonContext,
+  flags: Record<string, unknown>,
+  experimentalTools: string[],
+): Promise<Record<string, JsonValue>> {
   const p: Record<string, JsonValue> = {};
   const config: Record<string, JsonValue> = {};
   const model = asString(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
@@ -429,6 +448,8 @@ async function buildThreadStartParams(ctx: DaemonContext, flags: Record<string, 
   if (devInstr) p.developerInstructions = devInstr;
   const personality = asString(flags["personality"]);
   if (personality) p.personality = personality;
+  const experimentalConfig = buildExperimentalToolThreadConfig(experimentalTools);
+  if (experimentalConfig) Object.assign(config, experimentalConfig);
   if (Object.keys(config).length > 0) p.config = config;
   return p;
 }
@@ -439,8 +460,27 @@ function resolveDefault(ctx: DaemonContext, key: string): string | null {
   return null;
 }
 
+function resolveExperimentalToolsForCreate(ctx: DaemonContext, flags: Record<string, unknown>): string[] {
+  if (hasFlag(flags, "experimental-tools")) return parseExperimentalTools(flags["experimental-tools"]);
+  return parseExperimentalTools(resolveDefault(ctx, "experimental.default_tools"));
+}
+
+function resolveExperimentalToolsForAttach(
+  ctx: DaemonContext,
+  flags: Record<string, unknown>,
+  inherited: string[] | undefined,
+): string[] {
+  if (hasFlag(flags, "experimental-tools")) return parseExperimentalTools(flags["experimental-tools"]);
+  if (inherited && inherited.length > 0) return [...inherited];
+  return parseExperimentalTools(resolveDefault(ctx, "experimental.default_tools"));
+}
+
 function keyFor(user: string, name: string): string {
   return `${user}::${name}`;
+}
+
+function hasFlag(flags: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(flags, key);
 }
 
 function deriveNameFromThreadId(threadId: string, ctx: DaemonContext, user: string): string {

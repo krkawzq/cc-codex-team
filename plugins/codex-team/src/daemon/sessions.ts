@@ -23,6 +23,7 @@ export interface SessionRecord {
   profile?: string;
   base_instructions?: string;
   developer_instructions?: string;
+  experimental_tools?: string[];
   created_at: string;
   last_active_at: string;
   turn_count: number;
@@ -158,6 +159,9 @@ export class SessionRegistry {
     if (patch.approval !== undefined) rec.approval = patch.approval;
     if (patch.effort !== undefined) rec.effort = patch.effort;
     if (patch.profile !== undefined) rec.profile = patch.profile;
+    if (patch.experimental_tools !== undefined) {
+      rec.experimental_tools = patch.experimental_tools.length > 0 ? [...patch.experimental_tools] : undefined;
+    }
     if (patch.app_server_client_id !== undefined) rec.app_server_client_id = patch.app_server_client_id;
 
     this.schedulePersist(user, 0);

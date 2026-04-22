@@ -16,6 +16,7 @@ import {
 import { renderHistory, renderTail } from "../../format/markdown";
 import type { PendingRequest } from "../pending";
 import type { RetryOptions } from "../../codex/retry";
+import { buildExperimentalToolAppServerOptions } from "../experimentalTools";
 
 export const messageSend: HandlerFn = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
@@ -255,7 +256,11 @@ async function resolveLive(
   const client = ctx.pool.clientForSession(keyFor(user, rec.name));
   if (!client) {
     // lazy re-spawn: acquire again
-    const fresh = await ctx.pool.acquire(user, keyFor(user, rec.name));
+    const fresh = await ctx.pool.acquire(
+      user,
+      keyFor(user, rec.name),
+      buildExperimentalToolAppServerOptions(rec.experimental_tools ?? []),
+    );
     return { user, rec, client: fresh };
   }
   return { user, rec, client };

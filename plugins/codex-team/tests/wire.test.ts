@@ -20,7 +20,7 @@ function makeContext(pool: FakePool, overrides: Record<string, unknown> = {}) {
   return {
     pool,
     sessions: {
-      get: vi.fn().mockReturnValue({ name: "sess-1", thread_id: "th-1" }),
+      get: vi.fn().mockReturnValue({ name: "sess-1", thread_id: "th-1", experimental_tools: ["ask-user-question"] }),
       update: vi.fn(),
       remove: vi.fn(),
     },
@@ -322,7 +322,9 @@ describe("wireDaemonEvents", () => {
     expect(ctx.sessions.update).toHaveBeenNthCalledWith(1, "user-1", "sess-1", { recovery_state: "degraded" });
     expect(ctx.queues.onClientClosed).toHaveBeenCalledWith("user-1::sess-1");
     expect(ctx.pending.removeForSession).toHaveBeenCalledWith("user-1", "sess-1");
-    expect(pool.acquire).toHaveBeenCalledWith("user-1", "user-1::sess-1");
+    expect(pool.acquire).toHaveBeenCalledWith("user-1", "user-1::sess-1", {
+      configOverrides: ["features.default_mode_request_user_input=true"],
+    });
     expect(vi.mocked(threadResume)).toHaveBeenCalledWith(replacement, "th-1", {});
     expect(ctx.sessions.update).toHaveBeenNthCalledWith(2, "user-1", "sess-1", { recovery_state: null });
     expect(ctx.queues.dispose).not.toHaveBeenCalled();

@@ -489,25 +489,39 @@ function parsePersistedEvents(lines: string[]): { events: TeamEvent[]; totalLine
   const events: TeamEvent[] = [];
   for (const line of eventLines) {
     const parsed = parseLine(line);
-    if (parsed && typeof parsed.id === "string") {
-      events.push(parsed as TeamEvent);
+    if (isPersistedEvent(parsed)) {
+      events.push(parsed);
     }
   }
   return { events, totalLines };
 }
 
-function parseLine(line: string): Record<string, unknown> | null {
+function parseLine(line: string): unknown | null {
   try {
-    return JSON.parse(line) as Record<string, unknown>;
+    return JSON.parse(line) as unknown;
   } catch (e) {
     throw new Error(`failed to parse event log line: ${(e as Error).message}`);
   }
 }
 
-function isHeader(value: Record<string, unknown> | null): value is EventLogHeader {
-  return value !== null &&
-    value.kind === "event_log_header" &&
-    typeof value.schema_version === "number";
+function isHeader(value: unknown): value is EventLogHeader {
+  if (!value || typeof value !== "object") return false;
+  const rec = value as Record<string, unknown>;
+  return rec.kind === "event_log_header" &&
+    typeof rec.schema_version === "number";
+}
+
+function isPersistedEvent(value: unknown): value is TeamEvent {
+  if (!value || typeof value !== "object") return false;
+  const rec = value as Record<string, unknown>;
+  return typeof rec.id === "string" &&
+    typeof rec.ts === "string" &&
+    typeof rec.type === "string" &&
+    (rec.session === null || typeof rec.session === "string") &&
+    (rec.thread_id === null || typeof rec.thread_id === "string") &&
+    typeof rec.payload === "object" &&
+    rec.payload !== null &&
+    !Array.isArray(rec.payload);
 }
 
 function serializeHeaderLine(): string {
