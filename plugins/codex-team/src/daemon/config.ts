@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { configFilePath, defaultDataDir, defaultLogPath, defaultSockPath, expandUserPath, normalizeSockPath } from "../paths";
+import { validateAutoApprovePatterns } from "./auto-approve";
 
 export type ConfigValue = string | number | boolean;
 export type HotCold = "hot" | "restart";
@@ -12,6 +13,7 @@ export interface ConfigSpec {
   needsRestart: boolean;
   enumValues?: string[];
   description: string;
+  validate?: (value: ConfigValue) => string | null;
 }
 
 function enumSpec(values: string[], def: string, needsRestart: boolean, desc: string): ConfigSpec {
@@ -31,6 +33,13 @@ export const CONFIG_KEYS: Record<string, ConfigSpec> = {
 
   "monitor.default_interval_seconds": { type: "int", default: 30, needsRestart: false, description: "default --interval for `monitor events`" },
   "monitor.event_log_retention": { type: "int", default: 10000, needsRestart: false, description: "per-user ring-buffer event retention" },
+  "session.auto_approve_command_patterns": {
+    type: "string",
+    default: "",
+    needsRestart: false,
+    description: "default session auto-approve command patterns CSV",
+    validate: (value) => typeof value === "string" ? validateAutoApprovePatterns(value) : "expected string",
+  },
 
   "app_server.max_sessions_per_process": { type: "int", default: 16, needsRestart: false, description: "max session bindings per reusable app-server process (primarily adhoc clients)" },
   "app_server.idle_unload_minutes": { type: "int", default: 60, needsRestart: false, description: "idle duration before unloading live session from app-server" },
@@ -162,36 +171,48 @@ export class ConfigStore {
 }
 
 function parseValue(raw: string, spec: ConfigSpec): { ok: true; value: ConfigValue } | { ok: false; error: string } {
+  let parsed: { ok: true; value: ConfigValue } | { ok: false; error: string };
   switch (spec.type) {
     case "int": {
       const n = Number(raw);
-      if (!Number.isFinite(n) || !Number.isInteger(n)) return { ok: false, error: `expected integer, got: ${raw}` };
-      return { ok: true, value: n };
+      parsed = !Number.isFinite(n) || !Number.isInteger(n)
+        ? { ok: false, error: `expected integer, got: ${raw}` }
+        : { ok: true, value: n };
+      break;
     }
     case "float": {
       const n = Number(raw);
-      if (!Number.isFinite(n)) return { ok: false, error: `expected number, got: ${raw}` };
-      return { ok: true, value: n };
+      parsed = !Number.isFinite(n)
+        ? { ok: false, error: `expected number, got: ${raw}` }
+        : { ok: true, value: n };
+      break;
     }
     case "bool": {
-      if (raw === "true" || raw === "1") return { ok: true, value: true };
-      if (raw === "false" || raw === "0") return { ok: true, value: false };
-      return { ok: false, error: `expected true/false, got: ${raw}` };
+      if (raw === "true" || raw === "1") parsed = { ok: true, value: true };
+      else if (raw === "false" || raw === "0") parsed = { ok: true, value: false };
+      else parsed = { ok: false, error: `expected true/false, got: ${raw}` };
+      break;
     }
     case "enum": {
-      if (!spec.enumValues || !spec.enumValues.includes(raw)) {
-        return { ok: false, error: `expected one of: ${spec.enumValues?.join(" / ") ?? ""}` };
-      }
-      return { ok: true, value: raw };
+      parsed = !spec.enumValues || !spec.enumValues.includes(raw)
+        ? { ok: false, error: `expected one of: ${spec.enumValues?.join(" / ") ?? ""}` }
+        : { ok: true, value: raw };
+      break;
     }
     case "path":
     case "string":
     default:
-      return { ok: true, value: raw };
+      parsed = { ok: true, value: raw };
+      break;
   }
+  if (!parsed.ok) return parsed;
+  if (!spec.validate) return parsed;
+  const error = spec.validate(parsed.value);
+  return error ? { ok: false, error } : parsed;
 }
 
 function isValidPersistedValue(value: unknown, spec: ConfigSpec): value is ConfigValue {
+  const typeValid = (() => {
   switch (spec.type) {
     case "int":
       return typeof value === "number" && Number.isInteger(value) && Number.isFinite(value);
@@ -206,4 +227,7 @@ function isValidPersistedValue(value: unknown, spec: ConfigSpec): value is Confi
     default:
       return typeof value === "string";
   }
+  })();
+  if (!typeValid) return false;
+  return !spec.validate || spec.validate(value as ConfigValue) === null;
 }

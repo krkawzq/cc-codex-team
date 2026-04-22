@@ -27,6 +27,7 @@ import {
   buildExperimentalToolThreadConfig,
   parseExperimentalTools,
 } from "../experimentalTools";
+import { parseAutoApprovePatterns, parseConfiguredAutoApprovePatterns } from "../auto-approve";
 import { renderContext } from "../../format/markdown";
 import { renderTable } from "../../format/table";
 
@@ -49,7 +50,7 @@ export const sessionNew: HandlerFn = async (ctx, req) => {
   }
 
   const experimentalTools = resolveExperimentalToolsForCreate(ctx, flags);
-  const autoApprovePatterns = resolveAutoApprovePatternsForCreate(flags);
+  const autoApprovePatterns = resolveAutoApprovePatternsForCreate(ctx, flags);
   const startParams = await buildThreadStartParams(ctx, flags, experimentalTools);
 
   const client = await ctx.pool.acquire(user, keyFor(user, name), buildExperimentalToolAppServerOptions(experimentalTools));
@@ -469,8 +470,10 @@ function resolveExperimentalToolsForCreate(ctx: DaemonContext, flags: Record<str
   return parseExperimentalTools(resolveDefault(ctx, "experimental.default_tools"));
 }
 
-function resolveAutoApprovePatternsForCreate(flags: Record<string, unknown>): string[] {
-  if (!hasFlag(flags, "auto-approve")) return [];
+function resolveAutoApprovePatternsForCreate(ctx: DaemonContext, flags: Record<string, unknown>): string[] {
+  if (!hasFlag(flags, "auto-approve")) {
+    return parseConfiguredAutoApprovePatterns(ctx.config.getEffective("session.auto_approve_command_patterns"));
+  }
   const raw = asString(flags["auto-approve"]);
   if (raw === null) throw invalidParams("--auto-approve requires a comma-separated value");
   return parseAutoApprovePatterns(raw);
@@ -494,13 +497,6 @@ function hasFlag(flags: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(flags, key);
 }
 
-function parseAutoApprovePatterns(raw: string): string[] {
-  if (raw.length === 0) return [];
-  return raw
-    .split(",")
-    .map((pattern) => pattern.trim())
-    .filter((pattern) => pattern.length > 0);
-}
 
 function deriveNameFromThreadId(threadId: string, ctx: DaemonContext, user: string): string {
   const existing = ctx.sessions.get(user, threadId);
