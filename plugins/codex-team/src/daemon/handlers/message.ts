@@ -354,17 +354,33 @@ async function buildResponse(req: IpcRequest, pending: PendingRequest, shortcut:
     return explicit;
   }
   if (!shortcut) throw invalidParams("supply a shortcut (accept|accept-session|decline|cancel) or --json/--file/--stdin");
+  return buildApprovalShortcutResponse(pending.kind, pending.raw, shortcut);
+}
 
-  switch (pending.kind) {
+export function buildApprovalShortcutResponse(kind: string, raw: Record<string, unknown>, shortcut: string): unknown {
+  switch (kind) {
     case "approval.command_execution":
     case "approval.file_change":
-      return { decision: commandOrFileShortcut(shortcut, pending.kind) };
+      return { decision: commandOrFileShortcut(shortcut, kind) };
     case "approval.permissions":
-      return permissionsShortcut(shortcut, pending.raw);
+      return permissionsShortcut(shortcut, raw);
     case "approval.mcp_elicitation":
-      return mcpElicitationShortcut(shortcut, pending.raw);
+      return mcpElicitationShortcut(shortcut, raw);
     default:
-      throw new CodexTeamError("invalid_decision", `unknown approval kind '${pending.kind}'`);
+      throw new CodexTeamError("invalid_decision", `unknown approval kind '${kind}'`);
+  }
+}
+
+export function preferredAutoApprovalShortcut(kind: string): "accept" | "accept-session" | null {
+  switch (kind) {
+    case "approval.command_execution":
+    case "approval.file_change":
+    case "approval.permissions":
+      return "accept-session";
+    case "approval.mcp_elicitation":
+      return "accept";
+    default:
+      return null;
   }
 }
 
