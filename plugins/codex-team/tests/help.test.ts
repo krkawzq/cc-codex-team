@@ -36,6 +36,13 @@ describe("renderHelp", () => {
     expect(help).toContain("reset");
   });
 
+  it("marks monitor events stream and interval flags as mutually exclusive", () => {
+    const help = renderHelp(["monitor", "events"]);
+
+    expect(help).toContain("cannot be used with --stream");
+    expect(help).toContain("cannot be used with --interval");
+  });
+
   it("renders message approval shortcut and JSON input flags", () => {
     const help = renderHelp(["message", "approval"]);
 

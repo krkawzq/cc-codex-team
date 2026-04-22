@@ -814,14 +814,14 @@ const monitorGroup: HelpNode = {
           type: "int",
           default: "monitor.default_interval_seconds",
           required: false,
-          description: "Poll in batches every N seconds.",
+          description: "Poll in batches every N seconds; cannot be used with --stream.",
         },
         {
           long: "--stream",
           type: "bool",
           default: "false",
           required: false,
-          description: "Emit events immediately instead of polling.",
+          description: "Emit events immediately; cannot be used with --interval.",
         },
         {
           long: "--filter",
