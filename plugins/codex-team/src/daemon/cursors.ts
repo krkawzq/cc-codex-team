@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -10,6 +11,7 @@ const CURSOR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SCHEMA_VERSION = 1;
 const LOCK_RETRY_MS = 10;
 const LOCK_TIMEOUT_MS = 2000;
+const LOCK_STALE_MS = 5 * 60 * 1000;
 
 export interface CursorRecord {
   name: string;
@@ -21,6 +23,12 @@ export interface CursorRecord {
 interface CursorEnvelope {
   schema_version?: number;
   cursors?: CursorRecord[];
+}
+
+interface CursorLockRecord {
+  pid: number;
+  started_at: string;
+  host: string;
 }
 
 type PersistOp =
@@ -188,13 +196,22 @@ async function acquireCursorLock(filePath: string): Promise<() => Promise<void>>
   while (true) {
     try {
       const handle = await fs.promises.open(lockPath, "wx");
-      return async () => {
+      try {
+        await handle.writeFile(JSON.stringify(makeCursorLockRecord()));
+      } finally {
         await handle.close();
+      }
+      return async () => {
         await fs.promises.unlink(lockPath).catch(() => undefined);
       };
     } catch (error) {
       const err = error as NodeJS.ErrnoException;
       if (err.code !== "EEXIST") throw error;
+      if (await reclaimStaleCursorLock(lockPath)) {
+        return async () => {
+          await fs.promises.unlink(lockPath).catch(() => undefined);
+        };
+      }
       if (Date.now() >= deadline) {
         throw new Error(`timed out waiting for cursor lock '${lockPath}'`);
       }
@@ -203,8 +220,38 @@ async function acquireCursorLock(filePath: string): Promise<() => Promise<void>>
   }
 }
 
+async function reclaimStaleCursorLock(lockPath: string): Promise<boolean> {
+  const lock = await readCursorLock(lockPath);
+  if (!lock || !isStaleCursorLock(lock)) return false;
+
+  const tmpPath = `${lockPath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  await fs.promises.writeFile(tmpPath, JSON.stringify(makeCursorLockRecord()));
+  try {
+    await fs.promises.rename(tmpPath, lockPath);
+    return true;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === "EEXIST" || err.code === "EPERM") {
+      await fs.promises.unlink(lockPath).catch(() => undefined);
+      await fs.promises.rename(tmpPath, lockPath);
+      return true;
+    }
+    return false;
+  } finally {
+    await fs.promises.unlink(tmpPath).catch(() => undefined);
+  }
+}
+
 function makeTempPath(filePath: string): string {
   return `${filePath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+}
+
+function makeCursorLockRecord(): CursorLockRecord {
+  return {
+    pid: process.pid,
+    started_at: new Date().toISOString(),
+    host: os.hostname(),
+  };
 }
 
 async function loadEnvelopeFromFile(filePath: string): Promise<Map<string, CursorRecord>> {
@@ -230,6 +277,44 @@ function loadEnvelopeFromText(raw: string): { cursors: Map<string, CursorRecord>
     bucket.set(cursor.name, cloneCursor(cursor)!);
   }
   return { cursors: bucket };
+}
+
+async function readCursorLock(lockPath: string): Promise<CursorLockRecord | null> {
+  try {
+    const raw = await fs.promises.readFile(lockPath, "utf8");
+    const parsed = JSON.parse(raw) as Partial<CursorLockRecord>;
+    if (
+      typeof parsed.pid !== "number" ||
+      !Number.isFinite(parsed.pid) ||
+      typeof parsed.started_at !== "string" ||
+      typeof parsed.host !== "string"
+    ) {
+      return null;
+    }
+    return {
+      pid: parsed.pid,
+      started_at: parsed.started_at,
+      host: parsed.host,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isStaleCursorLock(lock: CursorLockRecord): boolean {
+  if (!isPidAlive(lock.pid)) return true;
+  if (lock.pid === process.pid) return false;
+  const startedAt = Date.parse(lock.started_at);
+  return Number.isFinite(startedAt) && (Date.now() - startedAt) > LOCK_STALE_MS;
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 function applyPersistOp(bucket: Map<string, CursorRecord>, op: PersistOp): void {

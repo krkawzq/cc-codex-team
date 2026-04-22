@@ -127,6 +127,36 @@ describe("CursorStore and cursor handlers", () => {
     expect(() => JSON.parse(raw)).not.toThrow();
   });
 
+  it("reclaims a stale lock file left by a dead process", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-cursors-"));
+    dirs.push(dir);
+    const store = new CursorStore(dir);
+    const userPath = path.join(dir, "users", "dXNlci0x");
+    const lockPath = path.join(userPath, "cursors.json.lock");
+
+    fs.mkdirSync(userPath, { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999999,
+      started_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      host: "stale-host",
+    }));
+
+    await expect(store.save("user-1", {
+      name: "audit-tail",
+      event_id: "evt-9",
+      auto_update: true,
+    })).resolves.toMatchObject({
+      name: "audit-tail",
+      event_id: "evt-9",
+    });
+
+    expect(store.get("user-1", "audit-tail")).toEqual(expect.objectContaining({
+      name: "audit-tail",
+      event_id: "evt-9",
+    }));
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
   it("rejects save when the final rename fails", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-cursors-"));
     dirs.push(dir);
