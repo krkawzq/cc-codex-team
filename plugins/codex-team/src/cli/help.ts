@@ -212,6 +212,7 @@ const daemonConfigGroup: HelpNode = {
       flags: [],
       examples: [
         "codex-team daemon config set monitor.default_interval_seconds 10",
+        "codex-team daemon config set session.auto_approve_command_patterns 'git*,node *'",
       ],
       needs_bearer: false,
     }),
@@ -655,7 +656,7 @@ const sessionGroup: HelpNode = {
           type: "bool",
           default: "false",
           required: false,
-          description: "Print one compact line per session to stdout.",
+          description: "Print one compact line per session to stdout; cannot be used with --format table.",
         },
       ],
       examples: [
@@ -673,6 +674,9 @@ const sessionGroup: HelpNode = {
       flags: [],
       examples: [
         "codex-team -b $TOKEN session health audit",
+      ],
+      notes: [
+        "If the session is crashed or the app-server is dead, run 'codex-team -b <token> session heal <name|thread_id>'.",
       ],
       needs_bearer: true,
     }),
@@ -695,6 +699,10 @@ const sessionGroup: HelpNode = {
       examples: [
         "codex-team -b $TOKEN session heal audit",
         "codex-team -b $TOKEN session heal audit --force",
+      ],
+      notes: [
+        "Use 'codex-team -b <token> session health <name|thread_id>' first to inspect crash state and pending work.",
+        "Healthy live sessions return { ok: true, note: \"already healthy\" }.",
       ],
       needs_bearer: true,
     }),
@@ -858,7 +866,7 @@ const messageGroup: HelpNode = {
           type: "bool",
           default: "false",
           required: false,
-          description: "Print one compact line per turn to stdout.",
+          description: "Print one compact line per turn to stdout; cannot be used with --format markdown.",
         },
       ],
       examples: [

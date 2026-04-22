@@ -87,6 +87,13 @@ describe("CursorStore and cursor handlers", () => {
     expect(gotten).toEqual({ event_id: "evt-2" });
 
     const reloaded = new CursorStore(dir);
+    expect(reloaded.list("user-1")).toEqual([
+      expect.objectContaining({
+        name: "audit-tail",
+        event_id: "evt-2",
+        auto_update: true,
+      }),
+    ]);
     expect(reloaded.get("user-1", "audit-tail")).toEqual(expect.objectContaining({
       name: "audit-tail",
       event_id: "evt-2",

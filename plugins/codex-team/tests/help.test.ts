@@ -37,6 +37,7 @@ describe("renderHelp", () => {
     expect(help).toContain("unset");
     expect(help).toContain("list");
     expect(help).toContain("reset");
+    expect(renderHelp(["daemon", "config", "set"])).toContain("session.auto_approve_command_patterns");
   });
 
   it("documents --short for compact status commands", () => {
@@ -44,8 +45,8 @@ describe("renderHelp", () => {
     expect(renderHelp(["daemon", "status"])).toContain("--short");
     expect(renderHelp(["daemon", "user", "list"])).toContain("--short");
     expect(renderHelp(["session", "info"])).toContain("--short");
-    expect(renderHelp(["session", "list"])).toContain("--short");
-    expect(renderHelp(["message", "history"])).toContain("--short");
+    expect(renderHelp(["session", "list"])).toContain("cannot be used with --format table");
+    expect(renderHelp(["message", "history"])).toContain("cannot be used with --format markdown");
   });
 
   it("marks monitor events stream and interval flags as mutually exclusive", () => {
@@ -71,9 +72,14 @@ describe("renderHelp", () => {
   });
 
   it("renders session heal and message wait help entries", () => {
+    const health = renderHelp(["session", "health"]);
+    expect(health).toContain("codex-team session health");
+    expect(health).toContain("session heal");
+
     const heal = renderHelp(["session", "heal"]);
     expect(heal).toContain("codex-team session heal");
     expect(heal).toContain("--force");
+    expect(heal).toContain("session health");
 
     const wait = renderHelp(["message", "wait"]);
     expect(wait).toContain("codex-team message wait");

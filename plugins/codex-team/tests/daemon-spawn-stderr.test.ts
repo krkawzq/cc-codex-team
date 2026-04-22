@@ -59,6 +59,17 @@ describe("daemon spawn stderr retry", () => {
     expect(code).toBe(1);
     expect(processMocks.spawn).toHaveBeenCalledTimes(2);
 
+    const firstCall = processMocks.spawn.mock.calls[0];
+    expect(firstCall?.[1]).toEqual([
+      process.argv[1],
+      "--daemon-internal",
+    ]);
+    expect(firstCall?.[2]).toMatchObject({
+      detached: true,
+      windowsHide: true,
+      stdio: "ignore",
+    });
+
     const secondCall = processMocks.spawn.mock.calls[1];
     expect(secondCall?.[1]).toEqual([
       process.argv[1],
