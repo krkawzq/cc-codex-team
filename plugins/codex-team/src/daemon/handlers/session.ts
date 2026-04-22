@@ -437,6 +437,9 @@ export const sessionHeal: HandlerFn = async (ctx, req) => {
   const force = isTrue(flags["force"]);
   const rec = ctx.sessions.get(user, identifier);
   if (!rec) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+  if (rec.state !== "live" && rec.state !== "crashed") {
+    throw invalidParams(`session '${rec.name}' is in unexpected state '${String(rec.state)}'`);
+  }
 
   const sessionKey = keyFor(user, rec.name);
   const existingClient = ctx.pool.clientForSession(sessionKey);

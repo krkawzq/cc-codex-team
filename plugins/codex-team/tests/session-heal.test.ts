@@ -111,4 +111,124 @@ describe("sessionHeal", () => {
       },
     });
   });
+
+  it("returns already healthy when the live session still has an app-server", async () => {
+    const rec = {
+      name: "sess-1",
+      thread_id: "th-1",
+      state: "live",
+      created_at: "2025-01-01T00:00:00.000Z",
+      last_active_at: "2025-01-01T00:00:00.000Z",
+      turn_count: 2,
+      ...sessionRuntimeDefaults(),
+    };
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+        touch: vi.fn(),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue(rec),
+      },
+      pool: {
+        clientForSession: vi.fn().mockReturnValue({
+          isAlive: () => true,
+        }),
+        release: vi.fn(),
+        acquire: vi.fn(),
+      },
+      queues: {
+        dispose: vi.fn(),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    await expect(sessionHeal(ctx as never, makeReq() as never)).resolves.toEqual({
+      ok: true,
+      note: "already healthy",
+      session: rec,
+    });
+    expect(ctx.pool.acquire).not.toHaveBeenCalled();
+    expect(vi.mocked(threadResume)).not.toHaveBeenCalled();
+  });
+
+  it("force-resets queue and pending state before resuming a crashed session", async () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const sessions = new SessionRegistry(dir);
+    sessions.add("user-1", {
+      name: "sess-1",
+      thread_id: "th-1",
+      state: "crashed",
+      created_at: "2025-01-01T00:00:00.000Z",
+      last_active_at: "2025-01-01T00:00:00.000Z",
+      turn_count: 2,
+      crash_reason: "app-server process exited unexpectedly",
+      ...sessionRuntimeDefaults(),
+    });
+    await sessions.flush();
+
+    const client = { tag: "replacement" };
+    vi.mocked(threadResume).mockResolvedValue(undefined as never);
+    const abortForSession = vi.fn();
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+        touch: vi.fn(),
+      },
+      sessions,
+      pool: {
+        clientForSession: vi.fn().mockReturnValue({
+          isAlive: () => false,
+        }),
+        release: vi.fn(),
+        acquire: vi.fn().mockResolvedValue(client),
+      },
+      queues: {
+        dispose: vi.fn(),
+      },
+      pending: {
+        abortForSession,
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    await expect(sessionHeal(ctx as never, makeReq({ force: true }) as never)).resolves.toMatchObject({
+      ok: true,
+      healed: true,
+      forced: true,
+      session: {
+        name: "sess-1",
+        state: "live",
+      },
+    });
+    expect(ctx.pool.release).toHaveBeenCalledWith("user-1::sess-1");
+    expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
+    expect(abortForSession).toHaveBeenCalledWith("user-1", "sess-1", "session_crashed", {
+      reason: "session_heal_force_reset",
+      session: "sess-1",
+      thread_id: "th-1",
+    });
+  });
+
+  it("rejects unexpected persisted session states", async () => {
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue({
+          name: "sess-1",
+          thread_id: "th-1",
+          state: "orphaned",
+        }),
+      },
+    };
+
+    await expect(sessionHeal(ctx as never, makeReq() as never)).rejects.toMatchObject({
+      code: "invalid_params",
+    });
+  });
 });
