@@ -2,7 +2,11 @@ import crypto from "node:crypto";
 
 import type { DaemonContext } from "./context";
 import { normalizeNotification, normalizeServerRequest } from "./normalize";
-import { AUTO_APPROVED_EVENT_TYPE } from "./events";
+import {
+  AUTO_APPROVED_EVENT_TYPE,
+  SESSION_CLOSED_EVENT_TYPE,
+  SESSION_CRASHED_EVENT_TYPE,
+} from "./events";
 import type { PoolClientClose, PoolNotification, PoolServerRequest } from "../codex/pool";
 import type { JsonValue } from "../codex/errors";
 import { threadResume, threadUnsubscribe } from "../codex/rpc";
@@ -338,6 +342,7 @@ async function maybeAutoApproveRequest(
       kind: norm.kind,
       matched_pattern: match.matchedPattern,
       command_preview: match.commandPreview,
+      decision: shortcut,
     },
   }).catch(() => undefined);
 
@@ -442,7 +447,7 @@ async function appendSessionClosed(
   reason: "user_detach" | "daemon_shutdown" | "app_server_crashed" | "idle_unload" | "user_destroyed",
 ): Promise<void> {
   await ctx.events.append(user, {
-    type: "session.closed",
+    type: SESSION_CLOSED_EVENT_TYPE,
     session,
     thread_id: threadId,
     payload: {
@@ -463,7 +468,7 @@ async function appendSessionCrashed(
   lastTurnId: string | null,
 ): Promise<void> {
   await ctx.events.append(user, {
-    type: "session.crashed",
+    type: SESSION_CRASHED_EVENT_TYPE,
     session,
     thread_id: threadId,
     payload: {

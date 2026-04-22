@@ -29,6 +29,7 @@ import {
   parseExperimentalTools,
 } from "../experimentalTools";
 import { parseAutoApprovePatterns, parseConfiguredAutoApprovePatterns } from "../auto-approve";
+import { SESSION_CLOSED_EVENT_TYPE } from "../events";
 import { renderContext } from "../../format/markdown";
 import { renderTable } from "../../format/table";
 
@@ -688,7 +689,7 @@ async function appendSessionClosed(
   reason: "user_detach" | "daemon_shutdown" | "app_server_crashed" | "idle_unload" | "user_destroyed",
 ): Promise<void> {
   await ctx.events.append(user, {
-    type: "session.closed",
+    type: SESSION_CLOSED_EVENT_TYPE,
     session: rec.name,
     thread_id: rec.thread_id,
     payload: {

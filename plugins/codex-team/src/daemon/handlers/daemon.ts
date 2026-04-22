@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { CONFIG_KEYS } from "../config";
 import { CodexTeamError, invalidParams } from "../../errors";
 import type { HandlerFn } from "../dispatch";
+import { SESSION_CLOSED_EVENT_TYPE } from "../events";
 import { shutdownDaemon } from "../shutdown";
 import { logger } from "../../logger";
 import { PACKAGE_ROOT, VERSION } from "../../version";
@@ -78,7 +79,7 @@ export const daemonUserDestroy: HandlerFn = async (ctx, req) => {
   const sessions = await ctx.sessions.clearUser(token);
   for (const rec of sessions) {
     await ctx.events.append(token, {
-      type: "session.closed",
+      type: SESSION_CLOSED_EVENT_TYPE,
       session: rec.name,
       thread_id: rec.thread_id ?? null,
       payload: {

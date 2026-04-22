@@ -182,6 +182,7 @@ describe("daemon auto-approve flow", () => {
         kind: "approval.permissions",
         matched_pattern: "git*",
         command_preview: "git status",
+        decision: "accept-session",
       }),
     }));
   });

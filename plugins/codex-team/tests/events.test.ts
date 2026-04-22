@@ -4,7 +4,13 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { EventLog, isDeltaType } from "../src/daemon/events";
+import {
+  AUTO_APPROVED_EVENT_TYPE,
+  EventLog,
+  SESSION_CLOSED_EVENT_TYPE,
+  SESSION_CRASHED_EVENT_TYPE,
+  isDeltaType,
+} from "../src/daemon/events";
 import { encodeToken } from "../src/paths";
 
 function mkTmpDir() {
@@ -222,5 +228,13 @@ describe("isDeltaType", () => {
   it("recognizes *_delta event types", () => {
     expect(isDeltaType("item.agent_message_delta")).toBe(true);
     expect(isDeltaType("turn.completed")).toBe(false);
+  });
+});
+
+describe("event type constants", () => {
+  it("exports integration event names centrally", () => {
+    expect(AUTO_APPROVED_EVENT_TYPE).toBe("auto_approved");
+    expect(SESSION_CLOSED_EVENT_TYPE).toBe("session.closed");
+    expect(SESSION_CRASHED_EVENT_TYPE).toBe("session.crashed");
   });
 });

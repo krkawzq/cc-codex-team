@@ -5,6 +5,7 @@ import type { DaemonContext } from "../context";
 import type { IpcRequest } from "../../ipc/protocol";
 import type { JsonValue } from "../../codex/errors";
 import { CodexTeamError, invalidParams } from "../../errors";
+import { SESSION_CLOSED_EVENT_TYPE, SESSION_CRASHED_EVENT_TYPE } from "../events";
 import {
   threadRead,
   threadTurnsList,
@@ -247,7 +248,7 @@ export const messageWait: HandlerFn = async (ctx, req) => {
       thread_id: rec.thread_id,
       turn_id: rec.current_turn_id ?? rec.last_turn_id ?? null,
       outcome: "error",
-      event_type: "session.crashed",
+      event_type: SESSION_CRASHED_EVENT_TYPE,
       error: {
         reason: rec.crash_reason ?? "session_crashed",
       },
@@ -292,7 +293,7 @@ export const messageWait: HandlerFn = async (ctx, req) => {
           const turnId = eventTurnId(event);
           if (!turnId) return;
           targetTurnId = turnId;
-        } else if (event.type === "session.crashed" || event.type === "session.closed") {
+        } else if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
           settle({
             session: rec.name,
             thread_id: rec.thread_id,
@@ -314,7 +315,7 @@ export const messageWait: HandlerFn = async (ctx, req) => {
         settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
         return;
       }
-      if (event.type === "session.crashed" && eventCrashTurnId(event) === targetTurnId) {
+      if (event.type === SESSION_CRASHED_EVENT_TYPE && eventCrashTurnId(event) === targetTurnId) {
         settle({
           session: rec.name,
           thread_id: rec.thread_id,
@@ -326,7 +327,7 @@ export const messageWait: HandlerFn = async (ctx, req) => {
         });
         return;
       }
-      if (event.type === "session.closed") {
+      if (event.type === SESSION_CLOSED_EVENT_TYPE) {
         settle({
           session: rec.name,
           thread_id: rec.thread_id,

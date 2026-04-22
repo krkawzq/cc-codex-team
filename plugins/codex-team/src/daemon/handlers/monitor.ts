@@ -3,7 +3,12 @@ import { spawn } from "node:child_process";
 import type { HandlerFn } from "../dispatch";
 import { CodexTeamError, invalidParams } from "../../errors";
 import type { TeamEvent } from "../../types";
-import { isDeltaType } from "../events";
+import {
+  AUTO_APPROVED_EVENT_TYPE,
+  SESSION_CLOSED_EVENT_TYPE,
+  SESSION_CRASHED_EVENT_TYPE,
+  isDeltaType,
+} from "../events";
 
 const MAX_INTERVAL_QUEUE_EVENTS = 512;
 const MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
@@ -424,6 +429,13 @@ function summarizeEventKey(event: TeamEvent): string | null {
   const payload = event.payload;
 
   if (event.type.startsWith("turn.")) return asPayloadString(payload.turn_id);
+  if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
+    return labeledSummaryValue("reason", payload.reason ?? payload.crash_reason ?? payload.why);
+  }
+  if (event.type === AUTO_APPROVED_EVENT_TYPE) {
+    return labeledSummaryValue("matched_pattern", payload.matched_pattern ?? payload.matchedPattern)
+      ?? asPayloadString(payload.request_id);
+  }
   if (event.type.startsWith("approval.") || event.type === "user_input.request" || event.type === "server_request_resolved") {
     return asPayloadString(payload.request_id);
   }
@@ -450,4 +462,9 @@ function asPayloadString(value: unknown): string | null {
   if (typeof value === "string") return value;
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return null;
+}
+
+function labeledSummaryValue(label: string, value: unknown): string | null {
+  const rendered = asPayloadString(value);
+  return rendered ? `${label}=${rendered}` : null;
 }

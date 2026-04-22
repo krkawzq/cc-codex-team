@@ -126,4 +126,77 @@ describe("monitor events --summary", () => {
     stream.close();
     expect(dispose).toHaveBeenCalledTimes(1);
   });
+
+  it("labels lifecycle and auto-approval events with meaningful keys", async () => {
+    const stream = new FakeStream();
+    const dispose = vi.fn();
+
+    await monitorEvents({
+      users: { has: () => true },
+      config: { getEffective: () => 30 },
+      events: {
+        listSince: vi.fn().mockReturnValue({
+          ok: true,
+          events: [
+            {
+              id: "evt-10",
+              ts: "2025-01-01T00:00:10.000Z",
+              type: "session.crashed",
+              session: "sess-1",
+              thread_id: "th-1",
+              payload: {
+                reason: "app-server process exited unexpectedly",
+              },
+            },
+            {
+              id: "evt-11",
+              ts: "2025-01-01T00:00:11.000Z",
+              type: "session.closed",
+              session: "sess-1",
+              thread_id: "th-1",
+              payload: {
+                reason: "idle_unload",
+              },
+            },
+            {
+              id: "evt-12",
+              ts: "2025-01-01T00:00:12.000Z",
+              type: "auto_approved",
+              session: "sess-1",
+              thread_id: "th-1",
+              payload: {
+                request_id: "req-8",
+                matched_pattern: "git*",
+              },
+            },
+          ],
+        }),
+        subscribe: () => ({ dispose }),
+      },
+    } as never, makeReq({ stream: true, summary: true }) as never, stream as never);
+
+    expect(stream.chunks).toEqual([
+      {
+        id: "evt-10",
+        ts: "2025-01-01T00:00:10.000Z",
+        type: "session.crashed",
+        session: "sess-1",
+        key: "reason=app-server process exited unexpectedly",
+      },
+      {
+        id: "evt-11",
+        ts: "2025-01-01T00:00:11.000Z",
+        type: "session.closed",
+        session: "sess-1",
+        key: "reason=idle_unload",
+      },
+      {
+        id: "evt-12",
+        ts: "2025-01-01T00:00:12.000Z",
+        type: "auto_approved",
+        session: "sess-1",
+        key: "matched_pattern=git*",
+      },
+    ]);
+  });
 });
