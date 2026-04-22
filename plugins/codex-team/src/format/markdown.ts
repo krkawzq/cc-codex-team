@@ -74,7 +74,7 @@ export function renderContext(input: {
   }
 
   const turns = Array.isArray((t as { turns?: unknown[] } | null)?.turns)
-    ? ((t as { turns: unknown[] }).turns)
+    ? (((t as unknown as { turns: unknown[] })).turns)
         .filter((turn): turn is TurnListItem => !!turn && typeof turn === "object")
         .map(renderTurn)
         .filter(Boolean)
@@ -144,9 +144,14 @@ export function renderItem(item: TurnItem, indent = ""): string {
       case "fileChange":
       case "file-patch":
         return renderFileChange(item);
+      case "mcpToolCall":
+        return renderMcpToolCall(item);
+      case "autoApprovalReview":
+        return renderAutoApprovalReview(item);
       case "reasoning":
         return renderReasoning(item);
       default:
+        if (type.startsWith("hook.")) return renderHook(item, type);
         return renderInline("item", sanitizeInlineAttrs(item));
     }
   })();
@@ -154,62 +159,137 @@ export function renderItem(item: TurnItem, indent = ""): string {
   return indent ? indentBlock(rendered, indent) : rendered;
 }
 
-function compactJson(obj: Record<string, unknown>): string {
-  return JSON.stringify(obj);
+function compactJson(value: unknown): string {
+  return JSON.stringify(value ?? {});
+}
+
+function renderInlineValue(name: string, value: unknown): string {
+  return `<${name}>${compactJson(value)}<\\${name}>`;
 }
 
 function renderUserMessage(item: TurnItem): string {
-  const attrs = baseItemAttrs(item);
+  const attrs = baseItemAttrs(item, { includeType: false });
   const text = extractMessageText(item);
   if (text) attrs.text = text;
-  return renderInline("item", attrs);
+  return renderInline("user-input", attrs);
 }
 
 function renderAgentMessage(item: TurnItem): string {
-  const attrs = baseItemAttrs(item);
+  const attrs = baseItemAttrs(item, { includeType: false });
   const body = extractMessageText(item);
-  if (!body) return renderInline("item", attrs);
-  return renderTag("item", attrs, body);
+  if (!body) return renderInline("agent-message", attrs);
+  return renderTag("agent-message", attrs, body);
 }
 
 function renderCommandExecution(item: TurnItem): string {
-  const attrs = baseItemAttrs(item);
-  delete attrs.status;
-  const shellAttrs: Record<string, unknown> = {};
+  const attrs = baseItemAttrs(item, { includeType: false });
   const cmd = extractCommand(item);
-  if (cmd) shellAttrs.cmd = cmd;
+  if (cmd) attrs.cmd = cmd;
   const cwd = asString(item.cwd);
-  if (cwd) shellAttrs.cwd = cwd;
+  if (cwd) attrs.cwd = cwd;
   const exit = item.exit ?? item.exitCode;
-  if (exit !== undefined) shellAttrs.exit = exit;
+  if (exit !== undefined) attrs.exit = exit;
   const durationMs = item.duration_ms ?? item.durationMs;
-  if (durationMs !== undefined) shellAttrs.duration_ms = durationMs;
+  if (durationMs !== undefined) attrs.duration_ms = durationMs;
   const shellBody = extractCommandOutput(item) ?? "";
-  return renderTag("item", attrs, renderTag("shell", shellAttrs, shellBody));
+  return renderTag("shell", attrs, shellBody);
 }
 
 function renderFileChange(item: TurnItem): string {
-  const attrs = baseItemAttrs(item);
-  delete attrs.status;
-  const patchAttrs: Record<string, unknown> = {};
+  const attrs = baseItemAttrs(item, { includeType: false });
   const path = asString(item.path);
-  if (path) patchAttrs.path = path;
-  if (item.status !== undefined) patchAttrs.status = item.status;
+  if (path) attrs.path = path;
+  if (item.status !== undefined) attrs.status = item.status;
   const diffBody = extractDiff(item) ?? "";
-  return renderTag("item", attrs, renderTag("file-patch", patchAttrs, diffBody));
+  return renderTag("file-patch", attrs, diffBody);
+}
+
+function renderMcpToolCall(item: TurnItem): string {
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const server = asString(item.server) ?? asString(item.serverName);
+  if (server) attrs.server = server;
+  const tool = extractToolName(item);
+  attrs.tool = tool;
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== undefined) attrs.duration_ms = durationMs;
+
+  const bodyParts: string[] = [];
+  const args = extractMcpArgs(item);
+  if (args !== undefined) bodyParts.push(renderInlineValue("mcp-args", args));
+
+  const result = extractMcpResult(item);
+  if (result) bodyParts.push(renderTag("mcp-result", {}, result));
+
+  return renderTag(`tool.${toTagSegment(tool)}`, attrs, bodyParts.join("\n\n"));
+}
+
+function renderHook(item: TurnItem, type: string): string {
+  const run = asObject(item.run);
+  const attrs = baseItemAttrs(item, { includeType: false });
+
+  const hookId = asString(item.hook_id) ?? asString(item.hookId) ?? asString(run.id);
+  if (hookId) attrs.hook_id = hookId;
+  const status = asString(item.status) ?? asString(run.status);
+  if (status) attrs.status = status;
+  const command = extractCommand(item) ?? extractCommand(run);
+  if (command) attrs.command = command;
+  const cwd = asString(item.cwd) ?? asString(run.cwd);
+  if (cwd) attrs.cwd = cwd;
+  const exit = item.exit ?? item.exitCode ?? run.exit ?? run.exitCode;
+  if (exit !== undefined) attrs.exit = exit;
+  const durationMs = item.duration_ms ?? item.durationMs ?? run.duration_ms ?? run.durationMs;
+  if (durationMs !== undefined) attrs.duration_ms = durationMs;
+
+  const output = extractHookOutput(item, run);
+  const tagName = typeToTagName(type);
+  if (!output) return renderInline(tagName, attrs);
+  return renderTag(tagName, attrs, renderTag("hook-output", {}, output));
+}
+
+function renderAutoApprovalReview(item: TurnItem): string {
+  const review = asObject(item.review);
+  const attrs = baseItemAttrs(item, { includeType: false });
+
+  const kind = asString(item.kind)
+    ?? asString(review.kind)
+    ?? asString(review.request_kind)
+    ?? asString(review.requestKind)
+    ?? asString(review.approval_kind)
+    ?? asString(review.approvalKind);
+  if (kind) attrs.kind = kind;
+
+  const matchedPattern = asString(item.matched_pattern)
+    ?? asString(item.matchedPattern)
+    ?? asString(review.matched_pattern)
+    ?? asString(review.matchedPattern)
+    ?? asString(review.pattern);
+  if (matchedPattern) attrs.matched_pattern = matchedPattern;
+
+  const commandPreview = extractCommandPreview(item, review);
+  if (commandPreview) attrs.command_preview = commandPreview;
+
+  const decision = asString(item.decision)
+    ?? asString(item.action)
+    ?? asString(item.decision_source)
+    ?? asString(item.decisionSource)
+    ?? asString(review.decision)
+    ?? asString(review.action);
+  if (decision) attrs.decision = decision;
+
+  return renderInline("auto-approval-review", attrs);
 }
 
 function renderReasoning(item: TurnItem): string {
-  const attrs = baseItemAttrs(item);
+  const attrs = baseItemAttrs(item, { includeType: false });
   const text = extractReasoningText(item);
   if (text) attrs.text = text;
-  return renderInline("item", attrs);
+  return renderInline("reasoning", attrs);
 }
 
-function baseItemAttrs(item: TurnItem): Record<string, unknown> {
+function baseItemAttrs(item: TurnItem, options: { includeType?: boolean } = {}): Record<string, unknown> {
   const attrs: Record<string, unknown> = {};
   if (typeof item.id === "string") attrs.id = item.id;
-  attrs.type = normalizeItemType(item.type);
+  if (options.includeType !== false) attrs.type = normalizeItemType(item.type);
   if (item.phase !== undefined) attrs.phase = item.phase;
   if (item.status !== undefined) attrs.status = item.status;
   if (item.kind !== undefined) attrs.kind = item.kind;
@@ -232,6 +312,20 @@ function sanitizeInlineAttrs(item: TurnItem): Record<string, unknown> {
 function normalizeItemType(raw: unknown): string {
   const type = typeof raw === "string" && raw ? raw : "unknown";
   return ITEM_TYPE_ALIASES[type] ?? type;
+}
+
+function typeToTagName(type: string): string {
+  return type.split(".").map(toTagSegment).join(".");
+}
+
+function toTagSegment(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/_/g, "-")
+    .replace(/[^a-zA-Z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
 }
 
 function extractMessageText(item: TurnItem): string | null {
@@ -280,6 +374,67 @@ function extractDiff(item: TurnItem): string | null {
   return asString(item.diff) ?? asString(item.patch) ?? asString(item.changes);
 }
 
+function extractToolName(item: TurnItem): string {
+  return asString(item.tool)
+    ?? asString(item.toolName)
+    ?? asString(item.name)
+    ?? "unknown";
+}
+
+function extractMcpArgs(item: TurnItem): unknown {
+  const args = item.args ?? item.arguments ?? item.input ?? item.parameters;
+  return args === undefined ? undefined : args;
+}
+
+function extractMcpResult(item: TurnItem): string | null {
+  return extractRichBody(
+    item.result,
+    item.output,
+    item.content,
+    item.text,
+  );
+}
+
+function extractHookOutput(item: TurnItem, run: TurnItem): string | null {
+  return extractCommandOutput(item)
+    ?? extractCommandOutput(run)
+    ?? extractRichBody(item.result, run.result);
+}
+
+function extractCommandPreview(...values: TurnItem[]): string | null {
+  for (const value of values) {
+    const preview = asString(value.command_preview)
+      ?? asString(value.commandPreview)
+      ?? extractCommand(value);
+    if (preview) return preview;
+  }
+  return null;
+}
+
+function extractRichBody(...values: unknown[]): string | null {
+  for (const value of values) {
+    const text = extractText(value);
+    if (text) return text;
+
+    if (Array.isArray(value)) {
+      const serialized = compactJson(value);
+      if (serialized !== "[]") return serialized;
+      continue;
+    }
+
+    if (value && typeof value === "object") {
+      const serialized = JSON.stringify(value, null, 2);
+      if (serialized && serialized !== "{}") return serialized;
+      continue;
+    }
+
+    if (typeof value === "number" || typeof value === "boolean") {
+      return String(value);
+    }
+  }
+  return null;
+}
+
 function firstText(...values: unknown[]): string | null {
   for (const value of values) {
     const text = extractText(value);
@@ -326,10 +481,19 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function asObject(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
 const ITEM_TYPE_ALIASES: Record<string, string> = {
   agent_message: "agentMessage",
+  auto_approval_review: "autoApprovalReview",
   command_execution: "commandExecution",
   file_change: "fileChange",
+  mcp_tool_call: "mcpToolCall",
   user_message: "userMessage",
 };
 
@@ -341,4 +505,7 @@ const OMIT_INLINE_KEYS = new Set([
   "diff",
   "patch",
   "changes",
+  "result",
+  "review",
+  "run",
 ]);
