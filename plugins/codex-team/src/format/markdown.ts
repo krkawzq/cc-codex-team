@@ -1,12 +1,15 @@
 import type { SessionRecord } from "../daemon/sessions";
 import type { Thread, TurnListItem } from "../codex/rpc";
 
+export type TurnItem = Record<string, unknown>;
+
 export function renderTag(name: string, attrs: Record<string, unknown>, body: string): string {
   const line = `<${name}> ${compactJson(attrs)}`;
-  if (!body || body.trim().length === 0) {
+  const normalizedBody = stripOuterNewlines(body);
+  if (!normalizedBody) {
     return `${line}\n\n<\\${name}>`;
   }
-  return `${line}\n\n${body.trim()}\n\n<\\${name}>`;
+  return `${line}\n\n${normalizedBody}\n\n<\\${name}>`;
 }
 
 export function renderInline(name: string, attrs: Record<string, unknown>): string {
@@ -70,9 +73,16 @@ export function renderContext(input: {
     if (typeof t.updated_at === "number") attrs.updated_at = t.updated_at;
   }
 
-  return renderTag("context", attrs, [
-    "<!-- thread/read only returns thread metadata; for turn-level content use 'message history' -->",
-  ].join("\n"));
+  const turns = Array.isArray((t as { turns?: unknown[] } | null)?.turns)
+    ? ((t as { turns: unknown[] }).turns)
+        .filter((turn): turn is TurnListItem => !!turn && typeof turn === "object")
+        .map(renderTurn)
+        .filter(Boolean)
+    : [];
+
+  return renderTag("context", attrs, turns.length > 0
+    ? turns.join("\n\n")
+    : "<!-- thread/read only returns thread metadata; for turn-level content use 'message history' -->");
 }
 
 export function renderSessionInfo(rec: SessionRecord): string {
@@ -112,56 +122,222 @@ function renderTurn(turn: TurnListItem): string {
   if (items.length === 0) {
     return renderInline("turn", attrs);
   }
-  const body = items.map(renderItem).filter(Boolean).join("\n\n");
+  const body = items
+    .filter((item): item is TurnItem => !!item && typeof item === "object")
+    .map((item) => renderItem(item))
+    .filter(Boolean)
+    .join("\n\n");
   return renderTag("turn", attrs, body);
 }
 
-function renderItem(raw: unknown): string {
-  if (!raw || typeof raw !== "object") return "";
-  const item = raw as Record<string, unknown>;
-  const type = typeof item.type === "string" ? item.type : "unknown";
-  const id = typeof item.id === "string" ? item.id : undefined;
-  const attrs: Record<string, unknown> = {};
-  if (id) attrs.id = id;
+export function renderItem(item: TurnItem, indent = ""): string {
+  const type = normalizeItemType(item.type);
+  const rendered = (() => {
+    switch (type) {
+      case "userMessage":
+        return renderUserMessage(item);
+      case "agentMessage":
+        return renderAgentMessage(item);
+      case "commandExecution":
+        return renderCommandExecution(item);
+      case "fileChange":
+      case "file-patch":
+        return renderFileChange(item);
+      case "reasoning":
+        return renderReasoning(item);
+      default:
+        return renderInline("item", sanitizeInlineAttrs(item));
+    }
+  })();
 
-  switch (type) {
-    case "agent_message": {
-      const text = typeof item.text === "string" ? item.text : stringifyMaybe(item.content);
-      return renderTag("agent-message", attrs, text ?? "");
-    }
-    case "reasoning": {
-      const text = typeof item.text === "string" ? item.text : stringifyMaybe(item.summary);
-      return renderTag("reasoning", attrs, text ?? "");
-    }
-    case "command_execution": {
-      if (item.command !== undefined) attrs.cmd = item.command;
-      if (item.exit !== undefined) attrs.exit = item.exit;
-      if (item.durationMs !== undefined) attrs.duration_ms = item.durationMs;
-      if (item.stderr !== undefined) attrs.stderr = item.stderr;
-      const body = typeof item.stdout === "string" ? item.stdout : stringifyMaybe(item.output) ?? "";
-      return renderTag("shell", attrs, body);
-    }
-    case "file_change": {
-      if (item.path !== undefined) attrs.path = item.path;
-      if (item.status !== undefined) attrs.status = item.status;
-      const body = typeof item.diff === "string" ? item.diff : stringifyMaybe(item.changes) ?? "";
-      return renderTag("file-patch", attrs, body);
-    }
-    default: {
-      attrs.type = type;
-      const body = stringifyMaybe(item) ?? "";
-      return renderTag("item", attrs, body);
-    }
-  }
-}
-
-function stringifyMaybe(v: unknown): string | null {
-  if (v === undefined || v === null) return null;
-  if (typeof v === "string") return v;
-  try { return JSON.stringify(v, null, 2); }
-  catch { return String(v); }
+  return indent ? indentBlock(rendered, indent) : rendered;
 }
 
 function compactJson(obj: Record<string, unknown>): string {
   return JSON.stringify(obj);
 }
+
+function renderUserMessage(item: TurnItem): string {
+  const attrs = baseItemAttrs(item);
+  const text = extractMessageText(item);
+  if (text) attrs.text = text;
+  return renderInline("item", attrs);
+}
+
+function renderAgentMessage(item: TurnItem): string {
+  const attrs = baseItemAttrs(item);
+  const body = extractMessageText(item);
+  if (!body) return renderInline("item", attrs);
+  return renderTag("item", attrs, body);
+}
+
+function renderCommandExecution(item: TurnItem): string {
+  const attrs = baseItemAttrs(item);
+  delete attrs.status;
+  const shellAttrs: Record<string, unknown> = {};
+  const cmd = extractCommand(item);
+  if (cmd) shellAttrs.cmd = cmd;
+  const cwd = asString(item.cwd);
+  if (cwd) shellAttrs.cwd = cwd;
+  const exit = item.exit ?? item.exitCode;
+  if (exit !== undefined) shellAttrs.exit = exit;
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== undefined) shellAttrs.duration_ms = durationMs;
+  const shellBody = extractCommandOutput(item) ?? "";
+  return renderTag("item", attrs, renderTag("shell", shellAttrs, shellBody));
+}
+
+function renderFileChange(item: TurnItem): string {
+  const attrs = baseItemAttrs(item);
+  delete attrs.status;
+  const patchAttrs: Record<string, unknown> = {};
+  const path = asString(item.path);
+  if (path) patchAttrs.path = path;
+  if (item.status !== undefined) patchAttrs.status = item.status;
+  const diffBody = extractDiff(item) ?? "";
+  return renderTag("item", attrs, renderTag("file-patch", patchAttrs, diffBody));
+}
+
+function renderReasoning(item: TurnItem): string {
+  const attrs = baseItemAttrs(item);
+  const text = extractReasoningText(item);
+  if (text) attrs.text = text;
+  return renderInline("item", attrs);
+}
+
+function baseItemAttrs(item: TurnItem): Record<string, unknown> {
+  const attrs: Record<string, unknown> = {};
+  if (typeof item.id === "string") attrs.id = item.id;
+  attrs.type = normalizeItemType(item.type);
+  if (item.phase !== undefined) attrs.phase = item.phase;
+  if (item.status !== undefined) attrs.status = item.status;
+  if (item.kind !== undefined) attrs.kind = item.kind;
+  if (item.role !== undefined) attrs.role = item.role;
+  if (item.source !== undefined) attrs.source = item.source;
+  return attrs;
+}
+
+function sanitizeInlineAttrs(item: TurnItem): Record<string, unknown> {
+  const attrs: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(item)) {
+    if (value === undefined || OMIT_INLINE_KEYS.has(key)) continue;
+    attrs[key] = value;
+  }
+  if (!("id" in attrs) && typeof item.id === "string") attrs.id = item.id;
+  if (!("type" in attrs)) attrs.type = normalizeItemType(item.type);
+  return attrs;
+}
+
+function normalizeItemType(raw: unknown): string {
+  const type = typeof raw === "string" && raw ? raw : "unknown";
+  return ITEM_TYPE_ALIASES[type] ?? type;
+}
+
+function extractMessageText(item: TurnItem): string | null {
+  return firstText(item.text, item.content);
+}
+
+function extractReasoningText(item: TurnItem): string | null {
+  return firstText(item.text, item.summaryText, item.summary, item.content);
+}
+
+function extractCommand(item: TurnItem): string | null {
+  const direct = asString(item.command) ?? asString(item.cmd);
+  if (direct) return direct;
+
+  const command = item.command;
+  if (Array.isArray(command)) {
+    const parts = command
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (typeof part === "number" || typeof part === "boolean") return String(part);
+        return null;
+      })
+      .filter((part): part is string => !!part);
+    if (parts.length > 0) return parts.join(" ");
+  }
+
+  return null;
+}
+
+function extractCommandOutput(item: TurnItem): string | null {
+  const direct = asString(item.output);
+  if (direct) return direct;
+
+  const output = item.output;
+  if (output && typeof output === "object" && !Array.isArray(output)) {
+    const stdout = asString((output as Record<string, unknown>).stdout);
+    const stderr = asString((output as Record<string, unknown>).stderr);
+    const merged = joinText([stdout, stderr], "\n");
+    if (merged) return merged;
+  }
+
+  return joinText([asString(item.stdout), asString(item.stderr)], "\n");
+}
+
+function extractDiff(item: TurnItem): string | null {
+  return asString(item.diff) ?? asString(item.patch) ?? asString(item.changes);
+}
+
+function firstText(...values: unknown[]): string | null {
+  for (const value of values) {
+    const text = extractText(value);
+    if (text) return text;
+  }
+  return null;
+}
+
+function extractText(value: unknown): string | null {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (!Array.isArray(value)) return null;
+
+  const parts = value
+    .map((entry) => extractTextEntry(entry))
+    .filter((entry): entry is string => !!entry);
+
+  return parts.length > 0 ? parts.join("\n\n") : null;
+}
+
+function extractTextEntry(entry: unknown): string | null {
+  if (typeof entry === "string" && entry.length > 0) return entry;
+  if (!entry || typeof entry !== "object") return null;
+
+  const obj = entry as Record<string, unknown>;
+  if (typeof obj.text === "string" && obj.text.length > 0) return obj.text;
+  if (Array.isArray(obj.content)) return extractText(obj.content);
+  return null;
+}
+
+function joinText(values: Array<string | null>, separator: string): string | null {
+  const present = values.filter((value): value is string => !!value);
+  return present.length > 0 ? present.join(separator) : null;
+}
+
+function stripOuterNewlines(value: string): string {
+  return value.replace(/^\n+/, "").replace(/\n+$/, "");
+}
+
+function indentBlock(text: string, indent: string): string {
+  return text.split("\n").map((line) => (line ? `${indent}${line}` : line)).join("\n");
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+const ITEM_TYPE_ALIASES: Record<string, string> = {
+  agent_message: "agentMessage",
+  command_execution: "commandExecution",
+  file_change: "fileChange",
+  user_message: "userMessage",
+};
+
+const OMIT_INLINE_KEYS = new Set([
+  "content",
+  "stdout",
+  "stderr",
+  "output",
+  "diff",
+  "patch",
+  "changes",
+]);

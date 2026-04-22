@@ -1763,6 +1763,11 @@ async function dispatchCommand(sockPath, parsed, method) {
       process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
       return 1;
     }
+    const markdown = extractMarkdownResult(resp.result, parsed.flags.format);
+    if (markdown !== null) {
+      process.stdout.write(markdown + "\n");
+      return 0;
+    }
     process.stdout.write(JSON.stringify({ ok: true, data: resp.result }) + "\n");
     return 0;
   } catch (e) {
@@ -1848,7 +1853,12 @@ async function runStream(sock, parsed, method) {
     };
     onMessages(sock, (msg) => {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
-        writeStdout(JSON.stringify(msg.data) + "\n");
+        const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
+        if (markdown !== null) {
+          writeStdout(markdown + "\n");
+        } else {
+          writeStdout(JSON.stringify(msg.data) + "\n");
+        }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
           writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
@@ -1984,6 +1994,13 @@ function randomId() {
 }
 function truthy(v) {
   return v === true || v === "true" || v === "1";
+}
+function extractMarkdownResult(result, format) {
+  if (format !== "markdown" || !result || typeof result !== "object" || Array.isArray(result)) {
+    return null;
+  }
+  const markdown = result.markdown;
+  return typeof markdown === "string" ? markdown : null;
 }
 function isTransientConnectError(err2) {
   return err2.message === "connect timeout" || err2.code === "ECONNREFUSED" || err2.code === "ENOENT" || err2.code === "EPIPE" || err2.code === "ECONNRESET";
@@ -4640,14 +4657,15 @@ var import_node_fs11 = __toESM(require("fs"));
 // src/format/markdown.ts
 function renderTag(name, attrs, body) {
   const line = `<${name}> ${compactJson(attrs)}`;
-  if (!body || body.trim().length === 0) {
+  const normalizedBody = stripOuterNewlines(body);
+  if (!normalizedBody) {
     return `${line}
 
 <\\${name}>`;
   }
   return `${line}
 
-${body.trim()}
+${normalizedBody}
 
 <\\${name}>`;
 }
@@ -4692,9 +4710,8 @@ function renderContext(input) {
     if (typeof t.created_at === "number") attrs.created_at = t.created_at;
     if (typeof t.updated_at === "number") attrs.updated_at = t.updated_at;
   }
-  return renderTag("context", attrs, [
-    "<!-- thread/read only returns thread metadata; for turn-level content use 'message history' -->"
-  ].join("\n"));
+  const turns = Array.isArray(t?.turns) ? t.turns.filter((turn) => !!turn && typeof turn === "object").map(renderTurn).filter(Boolean) : [];
+  return renderTag("context", attrs, turns.length > 0 ? turns.join("\n\n") : "<!-- thread/read only returns thread metadata; for turn-level content use 'message history' -->");
 }
 function renderTurn(turn) {
   const attrs = {
@@ -4710,58 +4727,185 @@ function renderTurn(turn) {
   if (items.length === 0) {
     return renderInline("turn", attrs);
   }
-  const body = items.map(renderItem).filter(Boolean).join("\n\n");
+  const body = items.filter((item) => !!item && typeof item === "object").map((item) => renderItem(item)).filter(Boolean).join("\n\n");
   return renderTag("turn", attrs, body);
 }
-function renderItem(raw) {
-  if (!raw || typeof raw !== "object") return "";
-  const item = raw;
-  const type = typeof item.type === "string" ? item.type : "unknown";
-  const id = typeof item.id === "string" ? item.id : void 0;
-  const attrs = {};
-  if (id) attrs.id = id;
-  switch (type) {
-    case "agent_message": {
-      const text = typeof item.text === "string" ? item.text : stringifyMaybe(item.content);
-      return renderTag("agent-message", attrs, text ?? "");
+function renderItem(item, indent = "") {
+  const type = normalizeItemType(item.type);
+  const rendered = (() => {
+    switch (type) {
+      case "userMessage":
+        return renderUserMessage(item);
+      case "agentMessage":
+        return renderAgentMessage(item);
+      case "commandExecution":
+        return renderCommandExecution(item);
+      case "fileChange":
+      case "file-patch":
+        return renderFileChange(item);
+      case "reasoning":
+        return renderReasoning(item);
+      default:
+        return renderInline("item", sanitizeInlineAttrs(item));
     }
-    case "reasoning": {
-      const text = typeof item.text === "string" ? item.text : stringifyMaybe(item.summary);
-      return renderTag("reasoning", attrs, text ?? "");
-    }
-    case "command_execution": {
-      if (item.command !== void 0) attrs.cmd = item.command;
-      if (item.exit !== void 0) attrs.exit = item.exit;
-      if (item.durationMs !== void 0) attrs.duration_ms = item.durationMs;
-      if (item.stderr !== void 0) attrs.stderr = item.stderr;
-      const body = typeof item.stdout === "string" ? item.stdout : stringifyMaybe(item.output) ?? "";
-      return renderTag("shell", attrs, body);
-    }
-    case "file_change": {
-      if (item.path !== void 0) attrs.path = item.path;
-      if (item.status !== void 0) attrs.status = item.status;
-      const body = typeof item.diff === "string" ? item.diff : stringifyMaybe(item.changes) ?? "";
-      return renderTag("file-patch", attrs, body);
-    }
-    default: {
-      attrs.type = type;
-      const body = stringifyMaybe(item) ?? "";
-      return renderTag("item", attrs, body);
-    }
-  }
-}
-function stringifyMaybe(v) {
-  if (v === void 0 || v === null) return null;
-  if (typeof v === "string") return v;
-  try {
-    return JSON.stringify(v, null, 2);
-  } catch {
-    return String(v);
-  }
+  })();
+  return indent ? indentBlock(rendered, indent) : rendered;
 }
 function compactJson(obj) {
   return JSON.stringify(obj);
 }
+function renderUserMessage(item) {
+  const attrs = baseItemAttrs(item);
+  const text = extractMessageText(item);
+  if (text) attrs.text = text;
+  return renderInline("item", attrs);
+}
+function renderAgentMessage(item) {
+  const attrs = baseItemAttrs(item);
+  const body = extractMessageText(item);
+  if (!body) return renderInline("item", attrs);
+  return renderTag("item", attrs, body);
+}
+function renderCommandExecution(item) {
+  const attrs = baseItemAttrs(item);
+  delete attrs.status;
+  const shellAttrs = {};
+  const cmd = extractCommand(item);
+  if (cmd) shellAttrs.cmd = cmd;
+  const cwd = asString2(item.cwd);
+  if (cwd) shellAttrs.cwd = cwd;
+  const exit = item.exit ?? item.exitCode;
+  if (exit !== void 0) shellAttrs.exit = exit;
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== void 0) shellAttrs.duration_ms = durationMs;
+  const shellBody = extractCommandOutput(item) ?? "";
+  return renderTag("item", attrs, renderTag("shell", shellAttrs, shellBody));
+}
+function renderFileChange(item) {
+  const attrs = baseItemAttrs(item);
+  delete attrs.status;
+  const patchAttrs = {};
+  const path12 = asString2(item.path);
+  if (path12) patchAttrs.path = path12;
+  if (item.status !== void 0) patchAttrs.status = item.status;
+  const diffBody = extractDiff(item) ?? "";
+  return renderTag("item", attrs, renderTag("file-patch", patchAttrs, diffBody));
+}
+function renderReasoning(item) {
+  const attrs = baseItemAttrs(item);
+  const text = extractReasoningText(item);
+  if (text) attrs.text = text;
+  return renderInline("item", attrs);
+}
+function baseItemAttrs(item) {
+  const attrs = {};
+  if (typeof item.id === "string") attrs.id = item.id;
+  attrs.type = normalizeItemType(item.type);
+  if (item.phase !== void 0) attrs.phase = item.phase;
+  if (item.status !== void 0) attrs.status = item.status;
+  if (item.kind !== void 0) attrs.kind = item.kind;
+  if (item.role !== void 0) attrs.role = item.role;
+  if (item.source !== void 0) attrs.source = item.source;
+  return attrs;
+}
+function sanitizeInlineAttrs(item) {
+  const attrs = {};
+  for (const [key, value] of Object.entries(item)) {
+    if (value === void 0 || OMIT_INLINE_KEYS.has(key)) continue;
+    attrs[key] = value;
+  }
+  if (!("id" in attrs) && typeof item.id === "string") attrs.id = item.id;
+  if (!("type" in attrs)) attrs.type = normalizeItemType(item.type);
+  return attrs;
+}
+function normalizeItemType(raw) {
+  const type = typeof raw === "string" && raw ? raw : "unknown";
+  return ITEM_TYPE_ALIASES[type] ?? type;
+}
+function extractMessageText(item) {
+  return firstText(item.text, item.content);
+}
+function extractReasoningText(item) {
+  return firstText(item.text, item.summaryText, item.summary, item.content);
+}
+function extractCommand(item) {
+  const direct = asString2(item.command) ?? asString2(item.cmd);
+  if (direct) return direct;
+  const command = item.command;
+  if (Array.isArray(command)) {
+    const parts = command.map((part) => {
+      if (typeof part === "string") return part;
+      if (typeof part === "number" || typeof part === "boolean") return String(part);
+      return null;
+    }).filter((part) => !!part);
+    if (parts.length > 0) return parts.join(" ");
+  }
+  return null;
+}
+function extractCommandOutput(item) {
+  const direct = asString2(item.output);
+  if (direct) return direct;
+  const output = item.output;
+  if (output && typeof output === "object" && !Array.isArray(output)) {
+    const stdout = asString2(output.stdout);
+    const stderr = asString2(output.stderr);
+    const merged = joinText([stdout, stderr], "\n");
+    if (merged) return merged;
+  }
+  return joinText([asString2(item.stdout), asString2(item.stderr)], "\n");
+}
+function extractDiff(item) {
+  return asString2(item.diff) ?? asString2(item.patch) ?? asString2(item.changes);
+}
+function firstText(...values) {
+  for (const value of values) {
+    const text = extractText(value);
+    if (text) return text;
+  }
+  return null;
+}
+function extractText(value) {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (!Array.isArray(value)) return null;
+  const parts = value.map((entry) => extractTextEntry(entry)).filter((entry) => !!entry);
+  return parts.length > 0 ? parts.join("\n\n") : null;
+}
+function extractTextEntry(entry) {
+  if (typeof entry === "string" && entry.length > 0) return entry;
+  if (!entry || typeof entry !== "object") return null;
+  const obj = entry;
+  if (typeof obj.text === "string" && obj.text.length > 0) return obj.text;
+  if (Array.isArray(obj.content)) return extractText(obj.content);
+  return null;
+}
+function joinText(values, separator) {
+  const present = values.filter((value) => !!value);
+  return present.length > 0 ? present.join(separator) : null;
+}
+function stripOuterNewlines(value) {
+  return value.replace(/^\n+/, "").replace(/\n+$/, "");
+}
+function indentBlock(text, indent) {
+  return text.split("\n").map((line) => line ? `${indent}${line}` : line).join("\n");
+}
+function asString2(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+var ITEM_TYPE_ALIASES = {
+  agent_message: "agentMessage",
+  command_execution: "commandExecution",
+  file_change: "fileChange",
+  user_message: "userMessage"
+};
+var OMIT_INLINE_KEYS = /* @__PURE__ */ new Set([
+  "content",
+  "stdout",
+  "stderr",
+  "output",
+  "diff",
+  "patch",
+  "changes"
+]);
 
 // src/format/table.ts
 function renderTable2(rows, columns) {
@@ -4826,14 +4970,14 @@ var sessionNew = async (ctx, req) => {
     name,
     thread_id: threadId,
     state: "live",
-    model: asString2(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
-    cwd: asString2(flags["cwd"]) ?? process.cwd(),
-    sandbox: asString2(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
-    approval: asString2(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
-    effort: asString2(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
-    profile: asString2(flags["profile"]) ?? void 0,
-    base_instructions: asString2(flags["base-instructions"]) ?? void 0,
-    developer_instructions: asString2(flags["developer-instructions"]) ?? void 0,
+    model: asString3(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
+    cwd: asString3(flags["cwd"]) ?? process.cwd(),
+    sandbox: asString3(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
+    approval: asString3(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
+    effort: asString3(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
+    profile: asString3(flags["profile"]) ?? void 0,
+    base_instructions: asString3(flags["base-instructions"]) ?? void 0,
+    developer_instructions: asString3(flags["developer-instructions"]) ?? void 0,
     created_at: now,
     last_active_at: now,
     turn_count: 0
@@ -4972,7 +5116,7 @@ var sessionFork = async (ctx, req) => {
   const identifier = asPositional(req, 0, "session");
   const newNameRaw = asPositionalOptional(req, 1);
   const flags = asFlags(req);
-  const atTurn = asString2(flags["at-turn"]);
+  const atTurn = asString3(flags["at-turn"]);
   const source = ctx.sessions.get(user, identifier);
   if (!source) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
   let newName = newNameRaw ?? generateSessionName();
@@ -5030,7 +5174,7 @@ var sessionContext = async (ctx, req) => {
   const user = req.bearer;
   const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
-  const format = asString2(flags["format"]) ?? "json";
+  const format = asString3(flags["format"]) ?? "json";
   if (format !== "json" && format !== "markdown") {
     throw invalidParams(`--format must be 'json' or 'markdown'`);
   }
@@ -5069,8 +5213,8 @@ var sessionList = async (ctx, req) => {
   const user = req.bearer;
   const flags = asFlags(req);
   const all = isTrue2(flags["all"]);
-  const sortField = asString2(flags["sort"]) ?? "last_active";
-  const format = asString2(flags["format"]) ?? "json";
+  const sortField = asString3(flags["sort"]) ?? "last_active";
+  const format = asString3(flags["format"]) ?? "json";
   if (format !== "json" && format !== "table") {
     throw invalidParams(`--format must be 'json' or 'table'`);
   }
@@ -5132,7 +5276,7 @@ function asPositionalOptional(req, idx) {
   const v = positionals[idx];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
-function asString2(v) {
+function asString3(v) {
   if (Array.isArray(v)) return v[v.length - 1] ?? null;
   return typeof v === "string" ? v : null;
 }
@@ -5142,23 +5286,23 @@ function isTrue2(v) {
 async function buildThreadStartParams(ctx, flags) {
   const p = {};
   const config = {};
-  const model = asString2(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
+  const model = asString3(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
   if (model) p.model = model;
-  const cwd = asString2(flags["cwd"]) ?? process.cwd();
+  const cwd = asString3(flags["cwd"]) ?? process.cwd();
   if (cwd) p.cwd = cwd;
-  const sandbox = asString2(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
+  const sandbox = asString3(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
   if (sandbox) p.sandbox = sandbox;
-  const approval = asString2(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
+  const approval = asString3(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
   if (approval) p.approvalPolicy = approval;
-  const effort = asString2(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
+  const effort = asString3(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
   if (effort) config.model_reasoning_effort = effort;
-  const profile = asString2(flags["profile"]);
+  const profile = asString3(flags["profile"]);
   if (profile) config.profile = profile;
   const baseInstr = await readInstructionFile(flags["base-instructions"], "--base-instructions");
   if (baseInstr) p.baseInstructions = baseInstr;
   const devInstr = await readInstructionFile(flags["developer-instructions"], "--developer-instructions");
   if (devInstr) p.developerInstructions = devInstr;
-  const personality = asString2(flags["personality"]);
+  const personality = asString3(flags["personality"]);
   if (personality) p.personality = personality;
   if (Object.keys(config).length > 0) p.config = config;
   return p;
@@ -5210,7 +5354,7 @@ async function withAttachLock(threadId, fn) {
   }
 }
 async function readInstructionFile(value, flag) {
-  const filePath = asString2(value);
+  const filePath = asString3(value);
   if (!filePath) return null;
   try {
     return await import_node_fs11.default.promises.readFile(filePath, "utf8");
@@ -5393,8 +5537,8 @@ var messageHistory = async (ctx, req) => {
   const { rec, client } = await resolveLive(ctx, req);
   const limitRaw = getFlag2(req, "limit");
   const limit = typeof limitRaw === "string" ? parseInt(limitRaw, 10) : typeof limitRaw === "number" ? limitRaw : 50;
-  const sinceRaw = asString3(getFlag2(req, "since"));
-  const format = asString3(getFlag2(req, "format")) ?? "json";
+  const sinceRaw = asString4(getFlag2(req, "since"));
+  const format = asString4(getFlag2(req, "format")) ?? "json";
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
   const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 50;
   const relativeSince = sinceRaw && /^-\d+$/.test(sinceRaw) ? Math.max(1, Math.floor(Math.abs(Number(sinceRaw)))) : null;
@@ -5426,7 +5570,7 @@ var messageTail = async (ctx, req, stream) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const nRaw = getFlag2(req, "n");
   const n = typeof nRaw === "string" ? parseInt(nRaw, 10) : typeof nRaw === "number" ? nRaw : 3;
-  const format = asString3(getFlag2(req, "format")) ?? "json";
+  const format = asString4(getFlag2(req, "format")) ?? "json";
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
   const follow = isTrue3(getFlag2(req, "follow")) || isTrue3(getFlag2(req, "f"));
   const snapshot = async () => {
@@ -5505,7 +5649,7 @@ function emitPendingWarning(ctx, user, session, threadId, payload) {
 }
 async function readPromptInput(req) {
   const positional = asPositionalOptional2(req, 1);
-  const fromFile = asString3(getFlag2(req, "file"));
+  const fromFile = asString4(getFlag2(req, "file"));
   const fromStdin = isTrue3(getFlag2(req, "stdin"));
   const sources = [positional, fromFile, fromStdin].filter((v) => v !== null && v !== false).length;
   if (sources === 0) {
@@ -5522,13 +5666,13 @@ async function readPromptInput(req) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
   }
-  const stdinContent = asString3(req.params.stdin_content);
+  const stdinContent = asString4(req.params.stdin_content);
   if (stdinContent === null) throw invalidParams("--stdin requested but no content forwarded from cli");
   return stdinContent;
 }
 async function readJsonInput(req) {
-  const jsonRaw = asString3(getFlag2(req, "json"));
-  const fromFile = asString3(getFlag2(req, "file"));
+  const jsonRaw = asString4(getFlag2(req, "json"));
+  const fromFile = asString4(getFlag2(req, "file"));
   const fromStdin = isTrue3(getFlag2(req, "stdin"));
   const sources = [jsonRaw, fromFile, fromStdin].filter((v) => v !== null && v !== false).length;
   if (sources === 0) return null;
@@ -5542,7 +5686,7 @@ async function readJsonInput(req) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
   } else {
-    const stdinContent = asString3(req.params.stdin_content);
+    const stdinContent = asString4(req.params.stdin_content);
     if (stdinContent === null) throw invalidParams("--stdin requested but no content forwarded from cli");
     raw = stdinContent;
   }
@@ -5641,7 +5785,7 @@ function asPositionalOptional2(req, idx) {
   const v = list[idx];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
-function asString3(v) {
+function asString4(v) {
   if (Array.isArray(v)) {
     const last = v[v.length - 1];
     return typeof last === "string" ? last : null;
@@ -5731,8 +5875,8 @@ var monitorEvents = async (ctx, req, stream) => {
   const includeDelta = isTrue4(flags["include-delta"]);
   const filterTypes = parseTypeList(flags["filter"]);
   const excludeTypes = parseTypeList(flags["exclude"]);
-  const sinceId = asString4(flags["since"]);
-  const sessionFilter = asString4(flags["session"]);
+  const sinceId = asString5(flags["since"]);
+  const sessionFilter = asString5(flags["session"]);
   const accept = (e) => {
     if (!includeDelta && isDeltaType(e.type)) return false;
     if (filterTypes && filterTypes.length > 0 && !filterTypes.includes(e.type)) return false;
@@ -6000,7 +6144,7 @@ function asPositionals2(req) {
 function isTrue4(v) {
   return v === true || v === "true" || v === "1";
 }
-function asString4(v) {
+function asString5(v) {
   if (Array.isArray(v)) {
     const last = v[v.length - 1];
     return typeof last === "string" ? last : null;
@@ -6016,7 +6160,7 @@ function toInt4(v, fallback) {
   return fallback;
 }
 function parseTypeList(v) {
-  const s = asString4(v);
+  const s = asString5(v);
   if (!s) return null;
   return s.split(",").map((x) => x.trim()).filter(Boolean);
 }

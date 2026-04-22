@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { CodexTeamError, invalidParams, methodNotFound, notImplemented } from "../src/errors";
 import { err, ok } from "../src/result";
-import { renderContext, renderHistory, renderInline, renderSessionInfo, renderTag } from "../src/format/markdown";
+import { renderContext, renderHistory, renderInline, renderItem, renderSessionInfo, renderTag } from "../src/format/markdown";
 import { renderTable } from "../src/format/table";
 import { status } from "../src/daemon/handlers/status";
 
@@ -94,6 +94,63 @@ describe("format helpers", () => {
     const table = renderTable([{ a: 1, b: "x" }, { a: 20, b: "yy" }], ["a", "b"]);
     expect(table).toContain("a   b");
     expect(table).toContain("20  yy");
+  });
+
+  it("renders userMessage items inline with text attrs", () => {
+    const rendered = renderItem({
+      id: "item-1",
+      type: "userMessage",
+      content: [{ type: "text", text: "Fix the markdown renderer." }],
+    });
+
+    expect(rendered).toBe(
+      "<item>{\"id\":\"item-1\",\"type\":\"userMessage\",\"text\":\"Fix the markdown renderer.\"}<\\item>",
+    );
+  });
+
+  it("renders agentMessage items as blocks with markdown bodies", () => {
+    const rendered = renderItem({
+      id: "item-2",
+      type: "agentMessage",
+      phase: "final_answer",
+      content: [{ type: "text", text: "Here is the result:\n\n- fixed A\n- fixed B" }],
+    });
+
+    expect(rendered).toContain("<item> {\"id\":\"item-2\",\"type\":\"agentMessage\",\"phase\":\"final_answer\"}");
+    expect(rendered).toContain("Here is the result:\n\n- fixed A\n- fixed B");
+    expect(rendered).not.toContain("\"content\":");
+  });
+
+  it("renders commandExecution items with nested shell tags", () => {
+    const rendered = renderItem({
+      id: "item-3",
+      type: "commandExecution",
+      command: "ls -la",
+      cwd: "/repo",
+      exit: 0,
+      durationMs: 32,
+      stdout: "total 24",
+      stderr: "drwxr-xr-x 5 user staff 160",
+    });
+
+    expect(rendered).toContain("<item> {\"id\":\"item-3\",\"type\":\"commandExecution\"}");
+    expect(rendered).toContain("<shell> {\"cmd\":\"ls -la\",\"cwd\":\"/repo\",\"exit\":0,\"duration_ms\":32}");
+    expect(rendered).toContain("total 24\ndrwxr-xr-x 5 user staff 160");
+    expect(rendered).not.toContain("\"stdout\":");
+  });
+
+  it("renders fallback items inline without dumping JSON bodies", () => {
+    const rendered = renderItem({
+      id: "item-4",
+      type: "mcpToolCall",
+      server: "docs",
+      args: { q: "markdown" },
+      output: "ignored body",
+    });
+
+    expect(rendered).toBe(
+      "<item>{\"id\":\"item-4\",\"type\":\"mcpToolCall\",\"server\":\"docs\",\"args\":{\"q\":\"markdown\"}}<\\item>",
+    );
   });
 });
 
