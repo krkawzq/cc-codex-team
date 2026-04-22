@@ -286,12 +286,14 @@ function emitPendingWarning(
   threadId: string | null,
   payload: Record<string, unknown>,
 ): void {
-  void ctx.events.append(user, {
-    type: "warning",
-    session,
-    thread_id: threadId,
-    payload,
-  }).catch(() => undefined);
+  setImmediate(() => {
+    void ctx.events.append(user, {
+      type: "warning",
+      session,
+      thread_id: threadId,
+      payload,
+    }).catch(() => undefined);
+  });
 }
 
 async function readPromptInput(req: IpcRequest): Promise<string> {

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -76,6 +77,12 @@ function deferred<T>() {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+function waitForImmediate(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
 }
 
 describe("message handlers", () => {
@@ -238,6 +245,7 @@ describe("message handlers", () => {
     });
 
     await messageApproval(ctx as never, makeReq(["sess-1", "req-a", "accept"]) as never);
+    await waitForImmediate();
 
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
       type: "warning",
@@ -276,6 +284,39 @@ describe("message handlers", () => {
     ack.resolve({ backpressured: false });
     await expect(first).resolves.toMatchObject({ request_id: claimed.request_id, responded: true });
     expect(responder.respondAck).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps approval responses fast when warning persistence is delayed", async () => {
+    const pendingClient = { respondAck: vi.fn().mockResolvedValue({ backpressured: true }) };
+    const ctx = makeLiveContext({
+      pending: {
+        get: vi.fn().mockReturnValue({ kind: "approval.command_execution", user: "user-1" }),
+        claim: vi.fn().mockReturnValue({
+          request_id: "req-latency",
+          kind: "approval.command_execution",
+          client: pendingClient,
+          jsonrpc_id: 21,
+          user: "user-1",
+          raw: {},
+        }),
+        releaseClaim: vi.fn(),
+        markResponded: vi.fn(),
+        remove: vi.fn(),
+      },
+      events: {
+        append: vi.fn().mockImplementation(() => new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 500);
+          timer.unref();
+        })),
+      },
+    });
+
+    const start = performance.now();
+    const result = await messageApproval(ctx as never, makeReq(["sess-1", "req-latency", "accept"]) as never);
+    const elapsedMs = performance.now() - start;
+
+    expect(result).toMatchObject({ request_id: "req-latency", responded: true });
+    expect(elapsedMs).toBeLessThan(50);
   });
 
   it("supports relative --since -N history windows", async () => {
