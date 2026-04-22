@@ -30,7 +30,7 @@ var require_package = __commonJS({
   "package.json"(exports2, module2) {
     module2.exports = {
       name: "codex-team",
-      version: "0.5.0",
+      version: "0.5.1",
       private: true,
       description: "CLI + daemon orchestrating long-lived Codex app-server sessions for agents",
       license: "MIT",
@@ -3833,7 +3833,7 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     this.proc.stderr.setEncoding("utf8");
     this.proc.stderr.on("data", (chunk) => this.onStderr(chunk));
     const init = await this.request("initialize", {
-      clientInfo: this.options.clientInfo ?? { name: "codex-team", title: "codex-team", version: "0.5.0" },
+      clientInfo: this.options.clientInfo ?? { name: "codex-team", title: "codex-team", version: "0.5.1" },
       capabilities: { experimentalApi: this.options.experimentalApi }
     });
     this.notify("initialized", {});

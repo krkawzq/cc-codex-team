@@ -136,7 +136,7 @@ export class AppServerClient extends EventEmitter {
     this.proc.stderr.on("data", (chunk: string) => this.onStderr(chunk));
 
     const init = await this.request("initialize", {
-      clientInfo: this.options.clientInfo ?? { name: "codex-team", title: "codex-team", version: "0.5.0" },
+      clientInfo: this.options.clientInfo ?? { name: "codex-team", title: "codex-team", version: "0.5.1" },
       capabilities: { experimentalApi: this.options.experimentalApi },
     });
     this.notify("initialized", {});
