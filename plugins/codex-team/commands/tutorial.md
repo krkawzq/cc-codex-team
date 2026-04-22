@@ -20,7 +20,7 @@ Raw user request: $ARGUMENTS
 
 If `$ARGUMENTS` names a branch (`what`, `quickstart`, `cli`, `events`, `approvals`, `playbooks`, `recovery`, `config`), jump straight there. Otherwise intro:
 
-> codex-team runs a team of long-lived Codex worker sessions. You (Claude) are the orchestrator; workers do the coding. Each session is a thread coordinated by a single daemon and backed by `codex app-server`; live sessions are isolated by default, while read-only adhoc work may reuse clients. You pick a bearer token (any string), create a user once, then drive sessions with `codex-team -b <token> ...`. Events stream out via `monitor events`; details come from `message tail` / `message history`.
+> codex-team runs a team of long-lived Codex worker sessions. You (Claude) are the orchestrator; workers do the coding. Each session is a thread coordinated by a single daemon and backed by `codex app-server`; live sessions are isolated by default, while read-only adhoc work may reuse clients. You pick a bearer token (any string), create a user once, then drive sessions with `codex-team -b <token> ...`. Events stream out via `monitor events`; use `--summary --cursor <name>` for orchestration fleets and `message wait` when you're blocked on one turn. Details come from `message tail` / `message history`.
 
 Then `AskUserQuestion` with:
 
@@ -28,7 +28,7 @@ Then `AskUserQuestion` with:
 - `Walk me through the first run` → **B**
 - `Show me the CLI surface` → **C**
 - `How does the event stream work?` → **D**
-- `How do I answer approval / askUserQuestion?` → **E**
+- `How do I answer approval / ask-user-question user input?` → **E**
 - `Multi-agent patterns (worker+reviewer, map-reduce, …)` → **F**
 - `What to do when something breaks` → **G**
 - `Daemon config & codex profiles` → **H**

@@ -1,7 +1,7 @@
 ---
 name: manage-codex-team
 description: >-
-  Authoritative source for driving codex-team sessions day-to-day — creating / sending / interrupting / detaching sessions, arming the event stream, and responding to events (`turn.completed`, `turn.error`, `approval.*`, `user_input.request`). Trigger when you are about to dispatch work, read session state, or respond to an event the Monitor just delivered. Not for: one-shot CLI reference (`configure-codex-team`), failure recovery (`recover-codex-team`), picking a collaboration pattern (`codex-team-playbooks`).
+  Authoritative source for driving codex-team sessions day-to-day — creating / sending / interrupting / detaching sessions, arming the event stream, and responding to events (`turn.completed`, `turn.error`, `approval.*`, `user_input.request`, `session.crashed`, `session.closed`). Trigger when you are about to dispatch work, read session state, or respond to an event the Monitor just delivered. Not for: one-shot CLI reference (`configure-codex-team`), failure recovery (`recover-codex-team`), picking a collaboration pattern (`codex-team-playbooks`).
 ---
 
 # Manage codex-team
@@ -21,6 +21,9 @@ description: >-
     │  approval.* / user_input ───►│  (needs response)
     │              │               │
     │              ▼               │
+    │  session.crashed / closed ──►│  (inspect / recover)
+    │              │               │
+    │              ▼               │
     │       turn.completed         │  (fetch via message tail)
     │              │               │
     │              ▼               │
@@ -36,7 +39,8 @@ description: >-
 codex-team -b $TOKEN session new <name> \
   --cwd <abs-path> \
   [--model <m>] [--sandbox <mode>] [--approval <policy>] [--effort <level>] \
-  [--personality <preset>] [--profile <cfg-name>] \
+  [--personality <preset>] [--profile <cfg-name>] [--experimental-tools <csv>] \
+  [--auto-approve <csv-or-/regex/flags>] \
   [--base-instructions <file>] [--developer-instructions <file>]
 ```
 
@@ -44,10 +48,12 @@ Returns a record with the UUID `thread_id`. Session is **live** immediately.
 
 Name rules: `^[A-Za-z0-9_\-]{1,128}$`, not a UUID, not starting with `th-`. Leave `[name]` empty to auto-generate `s-<hex>`.
 
+`--auto-approve` replaces any daemon default for that session; `--auto-approve ""` opts out explicitly.
+
 ### `session attach` — resume an existing thread
 
 ```bash
-codex-team -b $TOKEN session attach <name|thread_id> [--takeover]
+codex-team -b $TOKEN session attach <name|thread_id> [--takeover] [--experimental-tools <csv>]
 ```
 
 - By name: if the name is in your user's registry, idempotent noop. If another user has that name live, it must be unique across users or attach errors.
@@ -99,8 +105,14 @@ Note: during a review or compact turn, codex rejects interrupt/steer with `codex
 
 Arm once:
 
+```bash
+codex-team -b $TOKEN cursor save ops-tail
 ```
-/codex-team:events -b $TOKEN --stream
+
+Then either:
+
+```text
+/codex-team:events -b $TOKEN --stream --summary --cursor ops-tail
 ```
 
 Or raw Monitor invocation (see quickstart).
@@ -111,26 +123,41 @@ Or raw Monitor invocation (see quickstart).
 
 ### What you'll see
 
-See `events.md` in this skill for the full type catalogue. The three you'll see most:
+See `events.md` in this skill for the full type catalogue. The common ones are:
 
 - `turn.completed` — a turn finished. Fetch content with `message tail` or `message history`.
+- `session.crashed` — the live session lost its app-server. Run `session health`, then `session heal`.
+- `session.closed` — the live binding was torn down (detach, shutdown, idle unload, destroy, etc.).
 - `approval.<kind>` — codex is waiting for your answer. Respond via `message approval`.
-- `user_input.request` — codex wants an askUserQuestion answer. Respond via `message answer`.
+- `user_input.request` — codex wants an ask-user-question / user-input answer. Respond via `message answer`.
+- `approval.request_cancelled` / `user_input.request_cancelled` — the pending request was dropped during teardown or crash handling.
 - `turn.queued_failed` — daemon tried to auto-drain a queued prompt after `turn.completed`, but dispatch failed. Treat it as a retry/triage point, not a completion signal.
 
 `monitor events --stream` is safe to leave open during high-rate sessions. The cli now applies stdout back-pressure so a noisy worker does not blow up the stream reader's memory.
 
+Use `--summary` for high-fanout orchestration and `--cursor <name>` when the stream needs to resume cleanly across Claude restarts. In 0.5.2, `turn.completed` is compact metadata only; it no longer embeds turn items.
+
+### Blocking on one turn
+
+```bash
+codex-team -b $TOKEN message wait <session> [--for <turn_id>] [--timeout <s>]
+```
+
+- Exit `0` on a completed turn
+- Exit `1` on errored/cancelled/crashed paths
+- Exit `124` on timeout
+
 ### Fetching content on demand
 
 ```bash
-# Latest N turns (summary only; items field empty per protocol)
-codex-team -b $TOKEN message tail <session> -n 3 --format markdown
+# Latest N turns rendered as markdown
+codex-team -b $TOKEN message tail <session> -n 3 --format markdown --truncate 2048
 
 # Follow mode — streams new snapshots as turns complete
-codex-team -b $TOKEN message tail <session> --follow
+codex-team -b $TOKEN message tail <session> --follow --truncate 2048
 
 # Longer history with pagination or relative offsets
-codex-team -b $TOKEN message history <session> --limit 20 --since <cursor-or--3>
+codex-team -b $TOKEN message history <session> --limit 20 --since <turn-or--3> --truncate 2048
 ```
 
 ## Responding to approvals
@@ -170,9 +197,11 @@ codex-team -b $TOKEN message answer <s> <request_id> --json \
 | `codex-team -b <TOK> session list` | Live sessions in your registry |
 | `codex-team -b <TOK> session list --all` | Every thread on disk (including other users) |
 | `codex-team -b <TOK> session info <s>` | Session metadata (model, cwd, created_at, …) |
+| `codex-team -b <TOK> session health <s>` | Live runtime snapshot: busy flag, current turn, pending approvals, app-server liveness |
+| `codex-team -b <TOK> session heal <s> [--force]` | Re-attach a crashed/dead live session to a fresh app-server |
 | `codex-team -b <TOK> session context <s> --format markdown` | Latest compact-context snapshot from codex |
 
-All are read-only. Safe to run in loops if you insist.
+All are read-only. `session health` is the first check when you receive `session.crashed`.
 
 ## Ending work
 
@@ -215,7 +244,7 @@ See `codex-team-playbooks/` for canonical multi-session topologies.
 
 ## Anti-patterns
 
-- Polling `session info` / `message history` as a substitute for the event stream (wastes RPCs; doesn't see turn.started in time).
+- Polling `session info` / `message history` as a substitute for the event stream or `message wait` (wastes RPCs; doesn't see turn.started in time).
 - Holding multiple pending approvals across sessions without tracking which `request_id` belongs to which. Record them as you receive events.
 - Using `interrupt` as a way to queue: it destroys the in-flight turn's work. Use `send` (queues automatically) or `peer` (soft interject).
 - Passing raw JSON to `message approval` when a shortcut would do — more verbose, more error-prone.
