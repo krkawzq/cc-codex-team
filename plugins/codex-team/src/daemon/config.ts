@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { defaultDataDir, configFilePath, defaultLogPath, defaultSockPath, normalizeSockPath } from "../paths";
+import { configFilePath, defaultDataDir, defaultLogPath, defaultSockPath, expandUserPath, normalizeSockPath } from "../paths";
 
 export type ConfigValue = string | number | boolean;
 export type HotCold = "hot" | "restart";
@@ -143,19 +143,19 @@ export class ConfigStore {
 
   resolvedLogPath(): string {
     const explicit = this.explicit["daemon.log_path"];
-    if (typeof explicit === "string" && explicit.trim().length > 0) return explicit;
+    if (typeof explicit === "string" && explicit.trim().length > 0) return expandUserPath(explicit);
     return defaultLogPath(this.resolvedDataDir());
   }
 
   resolvedSockPath(): string {
     const explicit = this.explicit["daemon.sock_path"];
-    if (typeof explicit === "string" && explicit.trim().length > 0) return normalizeSockPath(explicit);
+    if (typeof explicit === "string" && explicit.trim().length > 0) return normalizeSockPath(expandUserPath(explicit));
     return defaultSockPath(this.resolvedDataDir());
   }
 
   resolvedDataDir(): string {
     const explicit = this.explicit["daemon.data_dir"];
-    if (typeof explicit === "string" && explicit.trim().length > 0) return explicit;
+    if (typeof explicit === "string" && explicit.trim().length > 0) return expandUserPath(explicit);
     return defaultDataDir();
   }
 }

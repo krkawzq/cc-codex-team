@@ -1,9 +1,10 @@
 import os from "node:os";
+import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { parseArgs } from "../src/cli/args";
-import { decodeToken, defaultSockPath, encodeToken, homeDir, isFilesystemSockPath, isNamedPipePath, normalizeSockPath } from "../src/paths";
+import { decodeToken, defaultDataDir, defaultSockPath, encodeToken, expandUserPath, homeDir, isFilesystemSockPath, isNamedPipePath, normalizeSockPath } from "../src/paths";
 
 function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
   const original = Object.getOwnPropertyDescriptor(process, "platform");
@@ -62,6 +63,28 @@ describe("paths", () => {
       const resolved = withPlatform("win32", () => homeDir());
       expect(resolved).toBe("C:\\Users\\native");
     } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  });
+
+  it("expands leading ~ for both POSIX and Windows paths", () => {
+    expect(expandUserPath("~/logs/daemon.log", "darwin", "/Users/tester")).toBe("/Users/tester/logs/daemon.log");
+    expect(expandUserPath("~\\logs\\daemon.log", "win32", "C:\\Users\\tester")).toBe("C:\\Users\\tester\\logs\\daemon.log");
+  });
+
+  it("expands CODEX_TEAM_DATA_DIR before deriving default paths", () => {
+    const originalDataDir = process.env.CODEX_TEAM_DATA_DIR;
+    const originalHome = process.env.HOME;
+    process.env.CODEX_TEAM_DATA_DIR = "~/.codex-team-alt";
+    process.env.HOME = "/home/tester";
+
+    try {
+      expect(defaultDataDir()).toBe("/home/tester/.codex-team-alt");
+      expect(defaultSockPath()).toBe(path.join("/home/tester/.codex-team-alt", "daemon.sock"));
+    } finally {
+      if (originalDataDir === undefined) delete process.env.CODEX_TEAM_DATA_DIR;
+      else process.env.CODEX_TEAM_DATA_DIR = originalDataDir;
       if (originalHome === undefined) delete process.env.HOME;
       else process.env.HOME = originalHome;
     }

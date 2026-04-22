@@ -69,4 +69,29 @@ describe("ConfigStore", () => {
     store.reset();
     expect(store.snapshot().explicit).toEqual({});
   });
+
+  it("expands leading ~ in resolved configured paths", () => {
+    const dir = mkTmpDir();
+    const home = mkTmpDir();
+    dirs.push(dir, home);
+    fs.mkdirSync(path.dirname(configFilePath(dir)), { recursive: true });
+    fs.writeFileSync(configFilePath(dir), JSON.stringify({
+      "daemon.data_dir": "~/.codex-team-data",
+      "daemon.log_path": "~/logs/daemon.log",
+      "daemon.sock_path": "~/.codex-team.sock",
+    }));
+
+    const originalHome = process.env.HOME;
+    process.env.HOME = home;
+
+    try {
+      const store = new ConfigStore(dir);
+      expect(store.resolvedDataDir()).toBe(path.join(home, ".codex-team-data"));
+      expect(store.resolvedLogPath()).toBe(path.join(home, "logs/daemon.log"));
+      expect(store.resolvedSockPath()).toBe(path.join(home, ".codex-team.sock"));
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  });
 });

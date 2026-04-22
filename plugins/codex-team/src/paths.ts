@@ -12,32 +12,35 @@ export function homeDir(): string {
 }
 
 export function defaultDataDir(): string {
-  return process.env.CODEX_TEAM_DATA_DIR || path.join(homeDir(), `.${APP}`);
+  const configured = process.env.CODEX_TEAM_DATA_DIR;
+  if (configured) return expandUserPath(configured);
+  return path.join(homeDir(), `.${APP}`);
 }
 
 export function defaultSockPath(dataDir = defaultDataDir(), platform = process.platform): string {
   const configured = process.env.CODEX_TEAM_SOCK;
-  if (configured) return normalizeSockPath(configured, platform);
-  if (platform === "win32") return namedPipePath(dataDir);
-  const candidate = path.join(dataDir, "daemon.sock");
+  if (configured) return normalizeSockPath(expandUserPath(configured, platform), platform);
+  const resolvedDataDir = expandUserPath(dataDir, platform);
+  if (platform === "win32") return namedPipePath(resolvedDataDir);
+  const candidate = path.join(resolvedDataDir, "daemon.sock");
   if (Buffer.byteLength(candidate, "utf8") <= UNIX_SOCKET_MAX_BYTES) return candidate;
-  return path.join(os.tmpdir(), `${APP}-${pathHash(dataDir)}.sock`);
+  return path.join(os.tmpdir(), `${APP}-${pathHash(resolvedDataDir)}.sock`);
 }
 
 export function defaultLogPath(dataDir = defaultDataDir()): string {
-  return path.join(dataDir, "daemon.log");
+  return path.join(expandUserPath(dataDir), "daemon.log");
 }
 
 export function configFilePath(dataDir = defaultDataDir()): string {
-  return path.join(dataDir, "config.json");
+  return path.join(expandUserPath(dataDir), "config.json");
 }
 
 export function pidFilePath(dataDir = defaultDataDir()): string {
-  return path.join(dataDir, "daemon.pid");
+  return path.join(expandUserPath(dataDir), "daemon.pid");
 }
 
 export function usersDir(dataDir = defaultDataDir()): string {
-  return path.join(dataDir, "users");
+  return path.join(expandUserPath(dataDir), "users");
 }
 
 export function userDir(token: string, dataDir = defaultDataDir()): string {
@@ -68,6 +71,13 @@ export function isNamedPipePath(sockPath: string): boolean {
 
 export function isFilesystemSockPath(sockPath: string, platform = process.platform): boolean {
   return !isNamedPipePath(normalizeSockPath(sockPath, platform));
+}
+
+export function expandUserPath(input: string, platform = process.platform, home = homeDir()): string {
+  if (input !== "~" && !input.startsWith("~/") && !input.startsWith("~\\")) return input;
+  const pathModule = platform === "win32" ? path.win32 : path.posix;
+  const suffix = input === "~" ? "" : input.slice(1).replace(/^[\\/]+/, "");
+  return suffix.length > 0 ? pathModule.join(home, suffix) : home;
 }
 
 export function encodeToken(token: string): string {
