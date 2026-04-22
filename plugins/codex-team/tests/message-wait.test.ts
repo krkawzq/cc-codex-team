@@ -105,7 +105,11 @@ describe("messageWait", () => {
     });
   });
 
-  it("returns the compact terminal payload for a historical completed turn", async () => {
+  it.each([
+    { status: "completed", outcome: "completed" },
+    { status: "errored", outcome: "error" },
+    { status: "cancelled", outcome: "error" },
+  ])("returns status-aware terminal payloads for historical turn.completed events ($status)", async ({ status, outcome }) => {
     const dir = mkTmpDir();
     dirs.push(dir);
     const sessions = new SessionRegistry(dir);
@@ -128,7 +132,7 @@ describe("messageWait", () => {
       thread_id: "th-1",
       payload: {
         turn_id: "turn-9",
-        status: "completed",
+        status,
         duration_ms: 1337,
         items_count: 4,
         token_usage: { prompt: 21, completion: 13, total: 34 },
@@ -152,9 +156,9 @@ describe("messageWait", () => {
       session: "sess-1",
       thread_id: "th-1",
       turn_id: "turn-9",
-      outcome: "completed",
+      outcome,
       event_type: "turn.completed",
-      status: "completed",
+      status,
       duration_ms: 1337,
       items_count: 4,
       token_usage: { prompt: 21, completion: 13, total: 34 },

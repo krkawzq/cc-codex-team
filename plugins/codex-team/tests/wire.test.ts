@@ -210,6 +210,50 @@ describe("wireDaemonEvents", () => {
     expect(ctx.pending.remove).not.toHaveBeenCalled();
   });
 
+  it("does not clear unrelated pending requests when serverRequest/resolved arrives after client eviction", async () => {
+    const pool = new FakePool();
+    pool.clientById.mockReturnValue(null);
+    const ctx = makeContext(pool, {
+      pending: {
+        removeForSession: vi.fn().mockReturnValue([]),
+        removeByJsonrpcId: vi.fn(),
+        abortForSession: vi.fn().mockReturnValue([]),
+        listForUser: vi.fn().mockReturnValue([
+          {
+            request_id: "req-2",
+            jsonrpc_id: 7,
+            user: "user-1",
+            session_name: "sess-2",
+            kind: "approval.permissions",
+          },
+        ]),
+        remove: vi.fn(),
+        add: vi.fn(),
+      },
+    });
+
+    wireDaemonEvents(ctx as never);
+
+    pool.emit("notification", {
+      user: "user-1",
+      clientId: "client-gone",
+      notification: {
+        method: "serverRequest/resolved",
+        params: {
+          threadId: "th-1",
+          requestId: 7,
+        },
+      },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ctx.pending.removeByJsonrpcId).not.toHaveBeenCalled();
+    expect(ctx.pending.remove).not.toHaveBeenCalled();
+    expect(ctx.sessions.update).not.toHaveBeenCalledWith("user-1", "sess-2", expect.anything());
+  });
+
   it("tracks server requests with the emitting client and logs them as events", async () => {
     const pool = new FakePool();
     const client = {};
