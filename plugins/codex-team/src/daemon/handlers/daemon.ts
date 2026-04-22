@@ -74,6 +74,19 @@ export const daemonUserDestroy: HandlerFn = async (ctx, req) => {
   await ctx.pool.closeUser(token);
   const sessions = await ctx.sessions.clearUser(token);
   for (const rec of sessions) {
+    await ctx.events.append(token, {
+      type: "session.closed",
+      session: rec.name,
+      thread_id: rec.thread_id ?? null,
+      payload: {
+        session: rec.name,
+        thread_id: rec.thread_id ?? null,
+        reason: "user_destroyed",
+        ts: new Date().toISOString(),
+      },
+    });
+  }
+  for (const rec of sessions) {
     ctx.queues.dispose(`${token}::${rec.name}`);
   }
   await ctx.events.clearUser(token);

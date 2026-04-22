@@ -237,6 +237,125 @@ export const messageTail: HandlerFn = async (ctx, req, stream) => {
   return { streaming: true };
 };
 
+export const messageWait: HandlerFn = async (ctx, req) => {
+  const { user, rec } = await resolveSessionRecord(ctx, req);
+  if (rec.state !== "live") {
+    return {
+      session: rec.name,
+      thread_id: rec.thread_id,
+      turn_id: rec.current_turn_id ?? rec.last_turn_id ?? null,
+      outcome: "error",
+      event_type: "session.crashed",
+      error: {
+        reason: rec.crash_reason ?? "session_crashed",
+      },
+    };
+  }
+  const requestedTurnId = asString(getFlag(req, "for"));
+  const timeoutSeconds = parseTimeoutSeconds(getFlag(req, "timeout"));
+  const sessionKey = keyFor(user, rec.name);
+  const initialTurnId = requestedTurnId ?? rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+
+  if (requestedTurnId) {
+    const historical = await findTerminalEvent(ctx, user, rec.name, requestedTurnId);
+    if (historical) return terminalWaitResult(rec.name, rec.thread_id, requestedTurnId, historical);
+  } else if (initialTurnId) {
+    const historical = await findTerminalEvent(ctx, user, rec.name, initialTurnId);
+    if (historical) return terminalWaitResult(rec.name, rec.thread_id, initialTurnId, historical);
+  }
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    let targetTurnId = requestedTurnId;
+    let timer: NodeJS.Timeout | null = null;
+
+    const settle = (result: Record<string, unknown>) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      sub.dispose();
+      resolve(result);
+    };
+
+    const sub = ctx.events.subscribe(user, (event) => {
+      if (event.session !== rec.name) return;
+      if (event.thread_id !== rec.thread_id) return;
+
+      if (!targetTurnId) {
+        targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+      }
+
+      if (!targetTurnId) {
+        if (event.type === "turn.started") {
+          const turnId = eventTurnId(event);
+          if (!turnId) return;
+          targetTurnId = turnId;
+        } else if (event.type === "session.crashed" || event.type === "session.closed") {
+          settle({
+            session: rec.name,
+            thread_id: rec.thread_id,
+            turn_id: null,
+            outcome: "error",
+            event_type: event.type,
+            event_id: event.id,
+            error: event.payload,
+          });
+        }
+        return;
+      }
+
+      if (event.type === "turn.completed" && eventTurnId(event) === targetTurnId) {
+        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
+        return;
+      }
+      if (event.type === "turn.error" && eventTurnId(event) === targetTurnId) {
+        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
+        return;
+      }
+      if (event.type === "session.crashed" && eventCrashTurnId(event) === targetTurnId) {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId,
+          outcome: "error",
+          event_type: event.type,
+          event_id: event.id,
+          error: event.payload,
+        });
+        return;
+      }
+      if (event.type === "session.closed") {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId,
+          outcome: "error",
+          event_type: event.type,
+          event_id: event.id,
+          error: event.payload,
+        });
+      }
+    });
+
+    if (!targetTurnId && !requestedTurnId) {
+      targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+    }
+
+    if (timeoutSeconds > 0) {
+      timer = setTimeout(() => {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId ?? null,
+          outcome: "timeout",
+          timeout_s: timeoutSeconds,
+        });
+      }, timeoutSeconds * 1000);
+      timer.unref();
+    }
+  });
+};
+
 // ----- helpers -----
 
 async function resolveLive(
@@ -253,17 +372,31 @@ async function resolveLive(
   if (!rec) {
     throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
   }
+  if (rec.state === "crashed") {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is crashed; run 'codex-team -b ${user} session heal ${rec.name}'`);
+  }
   const client = ctx.pool.clientForSession(keyFor(user, rec.name));
-  if (!client) {
-    // lazy re-spawn: acquire again
-    const fresh = await ctx.pool.acquire(
-      user,
-      keyFor(user, rec.name),
-      buildExperimentalToolAppServerOptions(rec.experimental_tools ?? []),
-    );
-    return { user, rec, client: fresh };
+  if (!isClientAlive(client)) {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
   }
   return { user, rec, client };
+}
+
+async function resolveSessionRecord(
+  ctx: DaemonContext,
+  req: IpcRequest,
+): Promise<{ user: string; rec: import("../sessions").SessionRecord }> {
+  const user = req.bearer;
+  if (!user) throw invalidParams("bearer token required");
+  if (!ctx.users.has(user)) {
+    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
+  }
+  const identifier = asPositional(req, 0, "session");
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
+  }
+  return { user, rec };
 }
 
 function requirePending(ctx: DaemonContext, user: string, requestId: string): PendingRequest {
@@ -455,8 +588,67 @@ function asStringArray(v: unknown): string[] {
   return [];
 }
 
+function isClientAlive(client: unknown): client is import("../../codex/appServerClient").AppServerClient {
+  if (!client) return false;
+  const maybe = client as { isAlive?: () => boolean };
+  if (typeof maybe.isAlive === "function") return maybe.isAlive();
+  return true;
+}
+
+function parseTimeoutSeconds(value: unknown): number {
+  if (value === undefined) return 600;
+  const raw = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(raw) || raw < 0) throw invalidParams("--timeout must be a non-negative number of seconds");
+  return Math.floor(raw);
+}
+
 function isTrue(v: unknown): boolean {
   return v === true || v === "true" || v === "1";
+}
+
+function eventTurnId(event: { payload: Record<string, unknown> }): string | null {
+  const turnId = event.payload.turn_id;
+  return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
+}
+
+function eventCrashTurnId(event: { payload: Record<string, unknown> }): string | null {
+  const turnId = event.payload.last_turn_id;
+  return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
+}
+
+function terminalWaitResult(
+  session: string,
+  threadId: string,
+  turnId: string,
+  event: { id: string; type: string; payload: Record<string, unknown> },
+): Record<string, unknown> {
+  return {
+    session,
+    thread_id: threadId,
+    turn_id: turnId,
+    outcome: event.type === "turn.completed" ? "completed" : "error",
+    event_type: event.type,
+    event_id: event.id,
+    ...(event.type === "turn.error" ? { error: event.payload.error ?? event.payload } : {}),
+  };
+}
+
+async function findTerminalEvent(
+  ctx: DaemonContext,
+  user: string,
+  session: string,
+  turnId: string,
+): Promise<import("../../types").TeamEvent | null> {
+  const listed = await ctx.events.listSince(user, null, { includeDelta: true });
+  if (!listed.ok) return null;
+  for (let i = listed.events.length - 1; i >= 0; i--) {
+    const event = listed.events[i]!;
+    if (event.session !== session) continue;
+    if (event.type !== "turn.completed" && event.type !== "turn.error") continue;
+    if (eventTurnId(event) !== turnId) continue;
+    return event;
+  }
+  return null;
 }
 
 async function assertAttachable(filePath: string): Promise<void> {

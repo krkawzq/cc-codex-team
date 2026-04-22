@@ -42,6 +42,9 @@ const COMMANDS: Set<string> = new Set([
   "message:tail",
   "monitor:events",
   "monitor:alarm",
+  "session:health",
+  "session:heal",
+  "message:wait",
 ]);
 
 const HELP_PATHS: Set<string> = new Set([

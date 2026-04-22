@@ -625,6 +625,41 @@ const sessionGroup: HelpNode = {
       ],
       needs_bearer: true,
     }),
+    leaf({
+      name: "health",
+      summary: "Show a compact live health snapshot for one session.",
+      usage: "codex-team -b <token> session health <name|thread_id>",
+      positionals: [
+        { ...SESSION_TARGET },
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN session health audit",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "heal",
+      summary: "Re-attach a crashed or dead live session to a fresh app-server.",
+      usage: "codex-team -b <token> session heal <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET },
+      ],
+      flags: [
+        {
+          long: "--force",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Drop half-baked in-memory queue state before retrying the resume.",
+        },
+      ],
+      examples: [
+        "codex-team -b $TOKEN session heal audit",
+        "codex-team -b $TOKEN session heal audit --force",
+      ],
+      needs_bearer: true,
+    }),
   ],
   needs_bearer: true,
 };
@@ -802,6 +837,37 @@ const messageGroup: HelpNode = {
       ],
       examples: [
         "codex-team -b $TOKEN message tail audit -n 5 --follow",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "wait",
+      summary: "Block until a turn completes, errors, or times out.",
+      usage: "codex-team -b <token> message wait <name|thread_id> [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGET, description: "Session to watch." },
+      ],
+      flags: [
+        {
+          long: "--for",
+          type: "string",
+          required: false,
+          description: "Wait for a specific turn ID instead of inferring the current or next turn.",
+        },
+        {
+          long: "--timeout",
+          type: "int",
+          default: "600",
+          required: false,
+          description: "Seconds to wait before returning timeout; use 0 to disable the timeout.",
+        },
+      ],
+      notes: [
+        "Without --for, waits for the current in-flight turn. If the session is idle, waits for the next turn that starts after this call.",
+      ],
+      examples: [
+        "codex-team -b $TOKEN message wait audit",
+        "codex-team -b $TOKEN message wait audit --for turn-42 --timeout 30",
       ],
       needs_bearer: true,
     }),

@@ -42,6 +42,7 @@ describe("daemon:user:destroy", () => {
         dispose: vi.fn(),
       },
       events: {
+        append: vi.fn().mockResolvedValue(undefined),
         clearUser: vi.fn().mockResolvedValue(undefined),
       },
     };
@@ -52,6 +53,16 @@ describe("daemon:user:destroy", () => {
     expect(ctx.pending.removeForUser).toHaveBeenCalledWith("user-1");
     expect(ctx.pool.closeUser).toHaveBeenCalledWith("user-1");
     expect(ctx.sessions.clearUser).toHaveBeenCalledWith("user-1");
+    expect(ctx.events.append).toHaveBeenNthCalledWith(1, "user-1", expect.objectContaining({
+      type: "session.closed",
+      session: "sess-1",
+      payload: expect.objectContaining({ reason: "user_destroyed" }),
+    }));
+    expect(ctx.events.append).toHaveBeenNthCalledWith(2, "user-1", expect.objectContaining({
+      type: "session.closed",
+      session: "sess-2",
+      payload: expect.objectContaining({ reason: "user_destroyed" }),
+    }));
     expect(ctx.queues.dispose).toHaveBeenNthCalledWith(1, "user-1::sess-1");
     expect(ctx.queues.dispose).toHaveBeenNthCalledWith(2, "user-1::sess-2");
     expect(ctx.events.clearUser).toHaveBeenCalledWith("user-1");
@@ -85,6 +96,7 @@ describe("daemon:user:destroy", () => {
         dispose: vi.fn(),
       },
       events: {
+        append: vi.fn(),
         clearUser: vi.fn(),
       },
     };
@@ -118,6 +130,7 @@ describe("daemon:user:destroy", () => {
         dispose: vi.fn(),
       },
       events: {
+        append: vi.fn().mockResolvedValue(undefined),
         clearUser: vi.fn().mockResolvedValue(undefined),
       },
     };
@@ -126,6 +139,11 @@ describe("daemon:user:destroy", () => {
 
     expect(ctx.pool.closeUser).toHaveBeenCalledWith("user-1");
     expect(ctx.sessions.clearUser).toHaveBeenCalledWith("user-1");
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "session.closed",
+      session: "sess-1",
+      payload: expect.objectContaining({ reason: "user_destroyed" }),
+    }));
     expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
     expect(ctx.users.destroy).toHaveBeenCalledWith("user-1");
     expect(result).toEqual({

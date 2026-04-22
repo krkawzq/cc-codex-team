@@ -13,6 +13,26 @@ export async function shutdownDaemon(ctx: DaemonContext, reason: string, exitCod
   logger.info("shutdown initiated", { reason });
 
   try {
+    for (const user of ctx.users.list()) {
+      for (const rec of ctx.sessions.listLive(user.token)) {
+        await ctx.events.append(user.token, {
+          type: "session.closed",
+          session: rec.name,
+          thread_id: rec.thread_id,
+          payload: {
+            session: rec.name,
+            thread_id: rec.thread_id,
+            reason: "daemon_shutdown",
+            ts: new Date().toISOString(),
+          },
+        });
+      }
+    }
+  } catch (e) {
+    logger.error("session closed event flush error", { err: (e as Error).message });
+  }
+
+  try {
     await ctx.pool.shutdown();
   } catch (e) {
     logger.error("pool shutdown error", { err: (e as Error).message });
