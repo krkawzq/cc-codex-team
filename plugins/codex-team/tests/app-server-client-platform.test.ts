@@ -1,0 +1,151 @@
+import { EventEmitter } from "node:events";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+function withPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T> | T): Promise<T> | T {
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", {
+    configurable: true,
+    value: platform,
+  });
+  const finish = () => {
+    if (original) Object.defineProperty(process, "platform", original);
+  };
+  try {
+    const result = fn();
+    if (result && typeof (result as Promise<T>).then === "function") {
+      return (result as Promise<T>).finally(finish);
+    }
+    finish();
+    return result;
+  } catch (e) {
+    finish();
+    throw e;
+  }
+}
+
+function createFakeProc() {
+  const stdout = new EventEmitter() as EventEmitter & { setEncoding(enc: string): void };
+  const stderr = new EventEmitter() as EventEmitter & { setEncoding(enc: string): void };
+  stdout.setEncoding = () => {};
+  stderr.setEncoding = () => {};
+
+  const stdin = {
+    writable: true,
+    writes: [] as string[],
+    write(chunk: string) {
+      this.writes.push(chunk);
+      const msg = JSON.parse(chunk.trim()) as { id?: string; method?: string };
+      if (msg.method === "initialize" && msg.id) {
+        queueMicrotask(() => {
+          stdout.emit("data", JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { ready: true } }) + "\n");
+        });
+      }
+      return true;
+    },
+    end() {
+      this.writable = false;
+    },
+  };
+
+  const proc = new EventEmitter() as EventEmitter & {
+    stdout: typeof stdout;
+    stderr: typeof stderr;
+    stdin: typeof stdin;
+    pid: number;
+    exitCode: number | null;
+    signalCode: string | null;
+    kill(signal?: string): boolean;
+  };
+  proc.stdout = stdout;
+  proc.stderr = stderr;
+  proc.stdin = stdin;
+  proc.pid = 1234;
+  proc.exitCode = null;
+  proc.signalCode = null;
+  proc.kill = vi.fn(() => true);
+  return proc;
+}
+
+describe("AppServerClient platform launch", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it("wraps JS entrypoints with the current Node executable", async () => {
+    const fakeProc = createFakeProc();
+    const spawn = vi.fn().mockReturnValue(fakeProc);
+    vi.doMock("node:child_process", () => ({
+      default: {
+        spawn,
+        execFileSync: vi.fn(),
+      },
+      spawn,
+      execFileSync: vi.fn(),
+    }));
+
+    const { AppServerClient } = await import("../src/codex/appServerClient");
+    const client = new AppServerClient({
+      bin: "/tmp/codex.js",
+    });
+
+    await client.start();
+
+    expect(spawn).toHaveBeenCalledWith(process.execPath, ["/tmp/codex.js", "app-server", "--listen", "stdio://"], expect.any(Object));
+  });
+
+  it("wraps Windows .cmd shims with the command processor", async () => {
+    const fakeProc = createFakeProc();
+    const spawn = vi.fn().mockReturnValue(fakeProc);
+    const execFileSync = vi.fn().mockReturnValue("C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd\r\n");
+    vi.doMock("node:child_process", () => ({
+      default: {
+        spawn,
+        execFileSync,
+      },
+      spawn,
+      execFileSync,
+    }));
+
+    const { AppServerClient } = await import("../src/codex/appServerClient");
+    await withPlatform("win32", async () => {
+      const client = new AppServerClient({
+        bin: "codex",
+      });
+      await client.start();
+    });
+
+    expect(execFileSync).toHaveBeenCalledWith("where", ["codex"], expect.any(Object));
+    expect(spawn).toHaveBeenCalledWith(expect.stringMatching(/cmd\.exe$/i), ["/d", "/s", "/c", expect.stringContaining("codex.cmd")], expect.any(Object));
+  });
+
+  it("times out unanswered app-server requests using the configured timeout", async () => {
+    vi.useFakeTimers();
+    const fakeProc = createFakeProc();
+    const spawn = vi.fn().mockReturnValue(fakeProc);
+    vi.doMock("node:child_process", () => ({
+      default: {
+        spawn,
+        execFileSync: vi.fn(),
+      },
+      spawn,
+      execFileSync: vi.fn(),
+    }));
+
+    const { AppServerClient } = await import("../src/codex/appServerClient");
+    const { RequestTimeoutError } = await import("../src/codex/errors");
+    const client = new AppServerClient({
+      requestTimeoutMs: 1000,
+    });
+
+    await client.start();
+    const pending = client.request("thread/read", { threadId: "th-1" });
+    const expectation = expect(pending).rejects.toBeInstanceOf(RequestTimeoutError);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await expectation;
+    expect(fakeProc.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+});

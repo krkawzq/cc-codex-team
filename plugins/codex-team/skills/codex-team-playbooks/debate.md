@@ -1,198 +1,113 @@
-# Playbook: Debate / Panel
-
-**Team size:** 2-3 · **Pattern:** Multiple workers each propose a position; Claude adjudicates.
+# Debate
 
 ## Adoption signal
 
-- Design / architecture / strategy decision with multiple defensible options.
-- You (Claude) want independent takes before committing, not one opinion you'll then second-guess.
-- The question has no obviously right answer — it's a trade-off.
+- Question has two (or more) defensible viewpoints and the wrong choice is costly
+- Typical use: architecture decisions, library selection, API shape, algorithm choice
+- Decomposes poorly — it's genuinely contested, not a matter of execution
 
-Examples:
+Use debate when a **reviewer + worker** can't decide for you (they'd each just say "seems ok") and you need adversarial pressure.
 
-- Which refactoring approach to pick for a tangled module.
-- Whether to introduce a new dependency or work around with existing code.
-- Which of three library APIs best fits a use case.
-- How to structure a cross-cutting abstraction.
+## Team
 
-Not this playbook when:
-
-- Question has a clear correct answer (just send to one worker → `solo-worker.md`).
-- You already know the answer and want execution → `plan-execute-verify.md`.
-- The task is "find the right design", i.e. no options are on the table yet → send a single worker to research options first, then debate if needed.
-
-## Team composition
+Three sessions:
 
 | Session | Role | Profile |
 |---|---|---|
-| `advocate-A` | Argues for option A. Does not consider other options. | `worker` high effort, concise |
-| `advocate-B` | Argues for option B. Does not consider other options. | `worker` high effort, concise |
-| `advocate-C` (optional) | Argues for option C. | `worker` high effort, concise |
-| — | **Claude is the judge.** Reads all advocates' arguments and decides. | — |
+| `advocate-a` | Argues for position A | `planner` (read-only, xhigh) |
+| `advocate-b` | Argues for position B | `planner` (read-only, xhigh) |
+| `judge` | Synthesises + picks | `reviewer` (read-only, xhigh) |
 
-Each advocate is deliberately biased toward their position. That's the playbook's design. Claude provides the neutrality.
+All three are read-only — debate is about reasoning, not code.
 
 ## Shared artefacts
 
-- **Debate brief**: `/<repo>/docs/briefs/<task>-debate.md` — describes the decision, the options on the table, the evaluation criteria.
-- **Per-advocate work doc**: `/<repo>/docs/debate/<task>-advocate-<X>.md`. Each advocate writes their case here (proposal + rationale + counter-objection handling).
-- **Judgment doc** (Claude writes): `/<repo>/docs/debate/<task>-decision.md` — records the decision + reasoning + which arguments were decisive.
+- `.codex-team/brief.md` — the question + any context
+- `.codex-team/position-a.md` / `.codex-team/position-b.md` — initial stances (Claude writes)
+- `.codex-team/a-opening.md` / `.codex-team/b-opening.md` — round 1
+- `.codex-team/a-rebuttal.md` / `.codex-team/b-rebuttal.md` — round 2 (optional)
+- `.codex-team/verdict.md` — judge's decision + rationale
 
-## Debate brief shape
+## Orchestration
 
-```markdown
-# Debate: <decision>
+```bash
+TOK=claude-$(date +%s)
+codex-team daemon user create $TOK >/dev/null
 
-## Context
-<what has to be decided, and why this matters>
+cd /repo
+mkdir -p .codex-team
+cat > .codex-team/brief.md <<'EOF'
+<question + relevant context>
+EOF
+cat > .codex-team/position-a.md <<'EOF'
+<one-paragraph summary of position A>
+EOF
+cat > .codex-team/position-b.md <<'EOF'
+<one-paragraph summary of position B>
+EOF
 
-## Options
-- **A:** <option A, one paragraph>
-- **B:** <option B, one paragraph>
-- **C:** <option C, one paragraph>
-
-## Evaluation criteria (weighted)
-1. <criterion 1> — weight: high/med/low
-2. <criterion 2> — ...
-3. <criterion 3> — ...
-
-## Constraints (hard)
-- <must-have 1>
-- <must-have 2>
-
-## Reference
-- <files, prior PRs, related docs>
+codex-team -b $TOK session new advocate-a --profile planner  --cwd "$(pwd)"
+codex-team -b $TOK session new advocate-b --profile planner  --cwd "$(pwd)"
+codex-team -b $TOK session new judge      --profile reviewer --cwd "$(pwd)"
 ```
 
-## Advocate work doc shape
-
-```markdown
-# Advocate for option <X>
-
-## Proposal
-<concrete shape of option X in this codebase>
-
-## Strengths (vs criteria)
-- <criterion 1>: <why option X is strong>
-- ...
-
-## Concessions / weaknesses (be honest)
-- <weakness>: <mitigation>
-
-## Answers to anticipated objections
-- "But what about <objection>?" → <answer>
-
-## Concrete next steps if adopted
-- <step 1>
-- ...
-```
-
-## Judgment doc shape
-
-```markdown
-# Decision: <decision>
-
-## Chosen option
-<A | B | C>
-
-## Decisive arguments
-- From advocate-<X>: <argument>
-- From advocate-<Y>: <argument — yes, you can borrow from rejected options>
-
-## Rejected arguments (and why)
-- Advocate-<Y>'s "<claim>" — reason rejected
-
-## Implementation plan
-- <high-level plan; or a handoff to plan-execute-verify>
-```
-
-## Communication flow
+### Round 1 — openings (parallel)
 
 ```
-          debate brief (shared, read-only)
-                  │
-      ┌───────────┼───────────┐
-      ▼           ▼           ▼
-  [advocate-A] [advocate-B] [advocate-C]
-      │           │           │
-   A.md         B.md         C.md
-      │           │           │
-      └───────────┴───────────┘
-                  │
-                  ▼
-           Claude — judgment.md
+message send advocate-a "Read brief.md and position-a.md. Defend position A.
+  Produce .codex-team/a-opening.md:
+    - Three strongest arguments for A
+    - The single strongest objection you can anticipate, with your response
+  Ground every claim in the repo — cite files where relevant."
+
+message send advocate-b "<mirror for position B>"
 ```
 
-**Advocates do not read each other's work docs.** That's the playbook's isolation: each case is independent. If they read each other's they'd converge, defeating the point.
+Both fire concurrently. Wait for both turn.completed.
 
-## Iteration loop
-
-```
-Phase 1 (Open):
-  1. Write debate brief. Iterate with user until the options and criteria are honest.
-  2. Create N advocate sessions. Dispatch all in parallel.
-  3. Wait for all advocates' turn-done.
-
-Phase 2 (Read):
-  4. Read each advocate's work doc end to end. Look for:
-     - How each handles the weakest criterion for their option.
-     - Whether their "concessions" are real or perfunctory.
-     - What concrete steps they propose.
-
-Phase 3 (Optional cross-examination):
-  5. If Claude has a specific follow-up for advocate-X, dispatch one targeted send.
-  6. Wait for turn-done, re-read.
-
-Phase 4 (Judge):
-  7. Write the judgment doc. State the decision + which arguments were decisive.
-  8. Share with user (brief paragraph in-chat); point them at the judgment doc.
-  9. Close advocate sessions.
-
-Handoff:
-  10. If implementation follows, open a new playbook (often `plan-execute-verify.md`).
-```
-
-## Send templates
-
-**Advocate — first send:**
+### Round 2 — rebuttals (parallel, optional)
 
 ```
-codex-team send advocate-<X> "advocate for option <X> from <debate-brief-path>. Do not consider options A/B/C/… other than your own. Write your case to <advocate-work-path-X> using the template (Proposal / Strengths / Concessions / Answers to anticipated objections / Concrete next steps). Reply 'case presented' with a one-line summary of your strongest argument."
+message send advocate-a "Read .codex-team/b-opening.md. Produce .codex-team/a-rebuttal.md:
+  - Address B's strongest argument head-on
+  - Do not introduce new arguments for A"
+
+message send advocate-b "<mirror>"
 ```
 
-**Advocate — cross-examination:**
+Cap at one rebuttal round. Debates that go longer repeat themselves.
+
+### Round 3 — verdict
 
 ```
-codex-team send advocate-<X> "cross-examination: specifically, how does option <X> handle <specific scenario>? Update your answer in <advocate-work-path-X>'s 'Answers to anticipated objections' section; reply 'updated'"
+message send judge "Read brief.md, both openings, and (if they exist) both rebuttals.
+  Produce .codex-team/verdict.md:
+    - Which position wins?
+    - Top 1–2 reasons (cite the advocates' arguments by name)
+    - Any caveats / conditions under which the other position would win instead
+    - If both positions have fatal flaws, say so — don't force a choice"
 ```
 
-(Claude does not tell advocate-X what advocate-Y said — that would let advocate-X refute positions they're not supposed to engage with. Paraphrase the scenario neutrally.)
-
-## Exit criteria
-
-- Every advocate has presented their case.
-- Claude has written the judgment doc.
-- User (if present) has reviewed the decision.
-
-## Failure modes
-
-| Smell | Fix |
-|---|---|
-| Advocates produce similar cases | Brief's options weren't actually different. Re-scope. Usually means one option is a strict dominator and there's no debate to have. |
-| Advocates mention each other's options | You didn't instruct them not to. First send template must forbid it explicitly. |
-| Each advocate only lists strengths | Template requires "Concessions / weaknesses" — enforce via reasoning_effort=high and explicit re-send if absent. |
-| Claude can't decide | Often means the brief's criteria aren't weighted. Edit brief, ask user to confirm weights, re-read advocates' cases. |
-| You ran 5+ advocates | Beyond 3 the judge-load becomes impractical. If you need 5 options, shortlist first (single worker), then debate the top 3. |
-| Advocate A hedges into agreeing with B | Over-corrected concessions. Re-send with "your job is to make the strongest honest case *for* <X>, not to neutralise". |
-| The judgment doc doesn't cite specific arguments | You didn't really read the cases. Re-read; cite. |
+Claude reads verdict.md. If the judge said "both fatal," escalate (ask the user; or re-scope). Otherwise act on the verdict.
 
 ## Variants
 
-- **Devil's advocate** (1 advocate + Claude as proposer): Claude proposes, the single advocate attacks. Useful when there's one strong hypothesis you want to stress-test.
-- **Iterative debate**: After round 1, advocates are allowed to see the judge's critique (not each other's cases). Round 2 addresses the critique. Use for high-stakes decisions where round 1 left gaps.
+- **Three-way debate**: positions A / B / C with three advocates. Judge has more to weigh. Diminishing returns beyond 3.
+- **Silent judge**: advocates never see the judge's criteria. Useful when you worry the judge's rubric leaks into the arguments.
+- **Iterated debate**: judge produces preliminary verdict → advocates get one more rebuttal targeting the judge's reasoning. Use sparingly — adds a round, easy to spiral.
 
-## Related
+## Termination
 
-- If debate converges on a plan → switch to `plan-execute-verify.md` to build it.
-- If the "debate" is really "pick the right answer from a known set" and advocates aren't needed → single worker with the options listed.
-- For recurrent refinement of a single artefact → `reflexion.md`, not debate.
+```bash
+for s in advocate-a advocate-b judge; do
+  codex-team -b $TOK session detach "$s"
+done
+```
+
+## Anti-patterns
+
+- **Advocates given write access.** They'll implement "their" position and create facts on the ground. Keep read-only.
+- **Advocates seeing each other's writing before writing their own opening.** Contaminates the position. Openings first, rebuttals second.
+- **Debating a question that's actually empirical.** If a quick prototype or benchmark answers it, run that instead — debate is for genuine value / tradeoff calls, not for measurable facts.
+- **More than 2 rebuttal rounds.** If openings + one rebuttal each didn't make the answer clear, the question is under-specified. Fix the brief, not the protocol.
+- **Running debate for every decision.** It's expensive — 3 sessions, 4–6 turns. Reserve for genuinely contested, hard-to-reverse calls.

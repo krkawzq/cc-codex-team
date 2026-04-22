@@ -1,444 +1,351 @@
-import readline from "node:readline";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
 
-import { AsyncQueue } from "../asyncQueue";
-import { Config, resolveCodexBin } from "../config";
-import { TransportError } from "../errors";
-import { ManagedChild, spawnManaged } from "../platform";
-import { isObject } from "../protocol";
+import { logger } from "../logger";
+import {
+  JsonValue,
+  JsonRpcError,
+  RequestTimeoutError,
+  TransportClosedError,
+  mapJsonRpcError,
+} from "./errors";
 
-export interface RpcNotification {
+const STDERR_TAIL_LINES = 400;
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+
+export interface AppServerOptions {
+  bin?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  configOverrides?: string[];
+  clientInfo?: { name: string; title?: string; version: string };
+  experimentalApi?: boolean;
+  stderrTailLines?: number;
+  requestTimeoutMs?: number;
+}
+
+export interface ServerNotification {
   method: string;
-  params: Record<string, unknown>;
+  params: JsonValue;
 }
 
-export interface AppServerClientLike {
-  readonly pid: number | null;
-  start(): Promise<void>;
-  isAlive(): boolean;
-  stderrSnapshot(): string[];
-  stderrTail(limit?: number): string;
-  nextNotification(timeoutMs?: number, timeoutMessage?: string): Promise<RpcNotification>;
-  threadStart(params: Record<string, unknown>): Promise<Record<string, unknown>>;
-  threadResume(threadId: string, params: Record<string, unknown>): Promise<Record<string, unknown>>;
-  threadRead(threadId: string, includeTurns?: boolean): Promise<Record<string, unknown>>;
-  threadArchive(threadId: string): Promise<Record<string, unknown>>;
-  threadCompactStart(threadId: string): Promise<Record<string, unknown>>;
-  turnStart(params: Record<string, unknown>): Promise<Record<string, unknown>>;
-  turnInterrupt(threadId: string, turnId: string): Promise<Record<string, unknown>>;
-  kill(): void;
-  close(): Promise<void>;
+export interface ServerRequest {
+  id: string | number;
+  method: string;
+  params: JsonValue;
 }
+
+export interface InitializeResponse extends Record<string, unknown> {}
 
 interface PendingRequest {
-  resolve: (value: Record<string, unknown>) => void;
-  reject: (error: Error) => void;
-  method: string;
+  resolve(value: JsonValue): void;
+  reject(err: Error): void;
+  timer: NodeJS.Timeout;
 }
 
-const BUFFERED_NOTIFICATION_METHODS = new Set([
-  "item/started",
-  "item/completed",
-  "turn/started",
-  "turn/completed",
-  "thread/tokenUsageUpdated",
-  "thread/tokenUsage/updated",
-]);
-
-const OPT_OUT_NOTIFICATION_METHODS = [
-  "item/agentMessage/delta",
-  "item/reasoning/delta",
-  "item/reasoning/summaryTextDelta",
-  "item/commandExecution/outputDelta",
-  "item/fileChange/outputDelta",
-  "item/mcpToolCall/progress",
-  "turn/diff/updated",
-  "turn/plan/updated",
-];
-
-function responseErrorMessage(error: unknown): string {
-  if (isObject(error)) {
-    const code = error.code == null ? "" : `code=${String(error.code)} `;
-    return `${code}${String(error.message ?? "unknown error")}`.trim();
-  }
-  return String(error);
+export interface AppServerEvents {
+  notification: (n: ServerNotification) => void;
+  server_request: (r: ServerRequest) => void;
+  close: (code: number | null) => void;
+  error: (err: Error) => void;
 }
 
-export class AppServerClient implements AppServerClientLike {
-  private proc: ManagedChild | null = null;
-  private readonly notifications = new AsyncQueue<RpcNotification>(1000);
-  private readonly pending = new Map<string, PendingRequest>();
-  private readonly stderrLines: string[] = [];
-  private nextRequestId = 0;
-  private readLoopStarted = false;
-  private closeError: Error | null = null;
+export declare interface AppServerClient {
+  on<E extends keyof AppServerEvents>(event: E, listener: AppServerEvents[E]): this;
+  once<E extends keyof AppServerEvents>(event: E, listener: AppServerEvents[E]): this;
+  off<E extends keyof AppServerEvents>(event: E, listener: AppServerEvents[E]): this;
+  emit<E extends keyof AppServerEvents>(event: E, ...args: Parameters<AppServerEvents[E]>): boolean;
+}
+
+export class AppServerClient extends EventEmitter {
+  private proc: ChildProcessWithoutNullStreams | null = null;
+  private buf = "";
+  private pending = new Map<string, PendingRequest>();
+  private stderrTail: string[] = [];
+  private lastPid: number | null = null;
+  private readonly options: Required<Omit<AppServerOptions, "env" | "cwd" | "clientInfo">> &
+    Pick<AppServerOptions, "env" | "cwd" | "clientInfo">;
   private initialized = false;
 
-  constructor(private readonly cfg: Config) {}
-
-  get pid(): number | null {
-    return this.proc?.pid ?? null;
+  constructor(options: AppServerOptions = {}) {
+    super();
+    this.options = {
+      bin: options.bin ?? "codex",
+      args: options.args ?? [],
+      cwd: options.cwd,
+      env: options.env,
+      configOverrides: options.configOverrides ?? [],
+      clientInfo: options.clientInfo,
+      experimentalApi: options.experimentalApi ?? true,
+      stderrTailLines: options.stderrTailLines ?? STDERR_TAIL_LINES,
+      requestTimeoutMs: Math.max(1, options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS),
+    };
   }
 
   isAlive(): boolean {
-    return !!this.proc && this.proc.exitCode == null && !this.proc.killed;
+    return this.proc !== null && this.proc.exitCode === null && this.proc.signalCode === null;
   }
 
-  stderrSnapshot(): string[] {
-    return [...this.stderrLines];
+  pid(): number | null {
+    return this.proc?.pid ?? this.lastPid;
   }
 
-  stderrTail(limit = 40): string {
-    return this.stderrLines.slice(Math.max(0, this.stderrLines.length - limit)).join("\n");
+  stderrTailText(): string {
+    return this.stderrTail.join("\n");
   }
 
-  async start(): Promise<void> {
-    if (this.proc) {
-      return;
-    }
-    const args = this.buildArgs();
-    const env = { ...process.env };
-    if (this.cfg.daemon.codexHome) {
-      env.CODEX_HOME = this.cfg.daemon.codexHome;
-    }
-    this.proc = spawnManaged({
-      command: resolveCodexBin(this.cfg),
-      args,
-      stdio: ["pipe", "pipe", "pipe"],
-      cwd: undefined,
-      env,
-      detached: true,
-    });
-    this.proc.stderr.setEncoding("utf8");
-    this.proc.stderr.on("data", (chunk: string) => {
-      for (const line of chunk.split(/\r?\n/)) {
-        if (!line) {
-          continue;
-        }
-        this.stderrLines.push(line);
-        if (this.stderrLines.length > 400) {
-          this.stderrLines.splice(0, this.stderrLines.length - 400);
-        }
-      }
-    });
-    this.proc.once("error", (error) => {
-      this.failAll(new TransportError(`failed to start app-server: ${error.message}`));
-    });
-    this.proc.once("exit", (code, signal) => {
-      this.failAll(
-        new TransportError(
-          `app-server exited${signal ? ` via ${signal}` : ` with code ${String(code ?? 1)}`}: ${this.stderrTail(20)}`,
-        ),
-      );
-    });
-    this.startReadLoop();
-    await this.initialize();
-  }
+  async start(): Promise<InitializeResponse> {
+    if (this.proc) throw new Error("app-server already started");
 
-  private buildArgs(): string[] {
-    if (this.cfg.daemon.launchArgsOverride.length > 0) {
-      return [...this.cfg.daemon.launchArgsOverride];
-    }
-    const args: string[] = [];
-    for (const override of this.cfg.daemon.configOverrides) {
-      args.push("--config", override);
-    }
+    const args = [...this.options.args];
+    for (const kv of this.options.configOverrides) args.push("--config", kv);
     args.push("app-server", "--listen", "stdio://");
-    return args;
-  }
+    const launch = resolveLaunch(this.options.bin, args);
 
-  private startReadLoop(): void {
-    if (this.readLoopStarted || !this.proc) {
-      return;
-    }
-    this.readLoopStarted = true;
+    const env = { ...process.env, ...(this.options.env ?? {}) } as NodeJS.ProcessEnv;
+
+    logger.debug("spawning app-server", { bin: launch.command, args: launch.args });
+    this.proc = spawn(launch.command, launch.args, {
+      cwd: this.options.cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    this.lastPid = this.proc.pid ?? null;
+
+    this.proc.on("error", (err) => {
+      logger.error("app-server spawn error", { err: err.message });
+      this.failAllPending(new TransportClosedError(`spawn error: ${err.message}`));
+      this.emit("error", err);
+    });
+    this.proc.on("exit", (code, signal) => {
+      logger.info("app-server exited", { code, signal });
+      this.failAllPending(new TransportClosedError(`app-server exited (code=${code}, signal=${signal})`));
+      this.emit("close", code);
+      this.proc = null;
+      this.initialized = false;
+    });
+
     this.proc.stdout.setEncoding("utf8");
-    const rl = readline.createInterface({
-      input: this.proc.stdout,
-      crlfDelay: Infinity,
+    this.proc.stdout.on("data", (chunk: string) => this.onStdout(chunk));
+
+    this.proc.stderr.setEncoding("utf8");
+    this.proc.stderr.on("data", (chunk: string) => this.onStderr(chunk));
+
+    const init = await this.request("initialize", {
+      clientInfo: this.options.clientInfo ?? { name: "codex-team", title: "codex-team", version: "0.5.0" },
+      capabilities: { experimentalApi: this.options.experimentalApi },
     });
-    void (async () => {
-      try {
-        for await (const line of rl) {
-          if (!line) {
-            continue;
-          }
-          this.handleLine(line);
-        }
-        this.failAll(new TransportError(`app-server closed stdout: ${this.stderrTail(20)}`));
-      } catch (error) {
-        this.failAll(new TransportError(`failed to read app-server stream: ${(error as Error).message}`));
-      } finally {
-        rl.close();
-      }
-    })();
-  }
-
-  private handleLine(line: string): void {
-    let message: unknown;
-    try {
-      message = JSON.parse(line);
-    } catch (error) {
-      this.failAll(new TransportError(`invalid JSON-RPC line: ${(error as Error).message}`));
-      return;
-    }
-    if (!isObject(message)) {
-      return;
-    }
-    const id = message.id;
-    const method = message.method;
-    if (typeof method === "string" && id !== undefined) {
-      void this.handleServerRequest(String(id), method, isObject(message.params) ? message.params : {}).catch((error) => {
-        this.failAll(new TransportError(`failed to handle server request ${method}: ${(error as Error).message}`));
-      });
-      return;
-    }
-    if (typeof method === "string") {
-      if (!BUFFERED_NOTIFICATION_METHODS.has(method)) {
-        return;
-      }
-      this.notifications.push({
-        method,
-        params: isObject(message.params) ? message.params : {},
-      });
-      return;
-    }
-    if (id === undefined) {
-      return;
-    }
-    const pending = this.pending.get(String(id));
-    if (!pending) {
-      return;
-    }
-    this.pending.delete(String(id));
-    if (message.error !== undefined) {
-      pending.reject(new TransportError(`${pending.method}: ${responseErrorMessage(message.error)}`));
-      return;
-    }
-    pending.resolve(isObject(message.result) ? message.result : {});
-  }
-
-  private async handleServerRequest(
-    id: string,
-    method: string,
-    params: Record<string, unknown>,
-  ): Promise<void> {
-    let result: Record<string, unknown> = {};
-    if (
-      method === "item/commandExecution/requestApproval" ||
-      method === "item/fileChange/requestApproval" ||
-      method === "item/permissions/requestApproval"
-    ) {
-      result = { decision: "accept" };
-    } else if (method === "item/tool/call") {
-      result = { success: false, content: [], structuredContent: null };
-    } else if (method === "item/commandExecution/requestCallback") {
-      result = { decision: "accept" };
-    } else {
-      void params;
-      result = {};
-    }
-    this.write({ id, result });
-  }
-
-  private async initialize(): Promise<void> {
-    if (this.initialized) {
-      return;
-    }
-    const payload = await this.request("initialize", {
-      clientInfo: {
-        name: "codex-team",
-        title: "Codex Team",
-        version: "0.3.0",
-      },
-      capabilities: {
-        experimentalApi: true,
-        optOutNotificationMethods: OPT_OUT_NOTIFICATION_METHODS,
-      },
-    });
-    validateInitializeResponse(payload);
     this.notify("initialized", {});
     this.initialized = true;
+    return init as InitializeResponse;
   }
 
-  request(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    if (!this.proc || this.closeError) {
-      throw this.closeError ?? new TransportError("app-server is not running");
-    }
-    const id = `rpc-${++this.nextRequestId}`;
-    return awaitResponse<Record<string, unknown>>(
-      () =>
-        new Promise<Record<string, unknown>>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            this.pending.delete(id);
-            reject(new TransportError(`${method}: timed out after ${this.cfg.daemon.rpcTimeoutSeconds}s`));
-          }, this.cfg.daemon.rpcTimeoutSeconds * 1000);
-          this.pending.set(id, {
-            method,
-            resolve: (value) => {
-              clearTimeout(timeout);
-              resolve(value);
-            },
-            reject: (error) => {
-              clearTimeout(timeout);
-              reject(error);
-            },
-          });
-          try {
-            this.write({ id, method, params });
-          } catch (error) {
-            this.pending.delete(id);
-            clearTimeout(timeout);
-            reject(error as Error);
-          }
-        }),
-    );
-  }
-
-  notify(method: string, params: Record<string, unknown>): void {
-    if (!this.proc || this.closeError) {
-      return;
-    }
-    this.write({ method, params });
-  }
-
-  async nextNotification(timeoutMs = 0, timeoutMessage = "timed out waiting for notification"): Promise<RpcNotification> {
-    return await this.notifications.shift(timeoutMs, timeoutMessage);
-  }
-
-  async threadStart(params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const response = await this.request("thread/start", params);
-    requireThreadId(response, "thread/start");
-    return response;
-  }
-
-  async threadResume(threadId: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const response = await this.request("thread/resume", { threadId, ...params });
-    requireThreadId(response, "thread/resume");
-    return response;
-  }
-
-  async threadRead(threadId: string, includeTurns = false): Promise<Record<string, unknown>> {
-    const response = await this.request("thread/read", { threadId, includeTurns });
-    requireThreadId(response, "thread/read");
-    return response;
-  }
-
-  async threadArchive(threadId: string): Promise<Record<string, unknown>> {
-    return await this.request("thread/archive", { threadId });
-  }
-
-  async threadCompactStart(threadId: string): Promise<Record<string, unknown>> {
-    return await this.request("thread/compact/start", { threadId });
-  }
-
-  async turnStart(params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const response = await this.request("turn/start", params);
-    const turn = isObject(response.turn) ? response.turn : null;
-    if (!turn || typeof turn.id !== "string" || !turn.id) {
-      throw new TransportError("turn/start response missing turn.id");
-    }
-    return response;
-  }
-
-  async turnInterrupt(threadId: string, turnId: string): Promise<Record<string, unknown>> {
-    return await this.request("turn/interrupt", { threadId, turnId });
-  }
-
-  kill(): void {
+  async close(graceMs = 2000): Promise<void> {
     const proc = this.proc;
-    if (proc?.pid != null) {
-      void proc.killTree(0);
-    }
-  }
-
-  async close(): Promise<void> {
-    const proc = this.proc;
+    if (!proc) return;
     this.proc = null;
     this.initialized = false;
-    this.failAll(new TransportError("app-server client closed"));
-    if (!proc) {
+
+    try { proc.stdin.end(); } catch { /* ignore */ }
+    const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+    try { proc.kill("SIGTERM"); } catch { /* ignore */ }
+
+    const timer = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+    }, graceMs);
+    timer.unref();
+
+    try {
+      await exited;
+    } finally {
+      clearTimeout(timer);
+    }
+    this.failAllPending(new TransportClosedError("app-server closed"));
+  }
+
+  request(method: string, params: JsonValue = {}): Promise<JsonValue> {
+    if (!this.proc) return Promise.reject(new TransportClosedError("app-server is not running"));
+    if (this.proc.exitCode !== null) return Promise.reject(new TransportClosedError("app-server already exited"));
+
+    const id = randomUUID();
+    return new Promise<JsonValue>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
+        void this.close().catch(() => undefined);
+        pending.reject(new RequestTimeoutError(`${method} timed out after ${this.options.requestTimeoutMs}ms`));
+      }, this.options.requestTimeoutMs);
+      timer.unref();
+      this.pending.set(id, {
+        resolve,
+        reject,
+        timer,
+      });
+      try {
+        this.writeMessage({ jsonrpc: "2.0", id, method, params });
+      } catch (e) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(e as Error);
+      }
+    });
+  }
+
+  notify(method: string, params: JsonValue = {}): void {
+    if (!this.proc) throw new TransportClosedError("app-server is not running");
+    this.writeMessage({ jsonrpc: "2.0", method, params });
+  }
+
+  respond(id: string | number, result: JsonValue): void {
+    if (!this.proc) return;
+    this.writeMessage({ jsonrpc: "2.0", id, result });
+  }
+
+  respondError(id: string | number, code: number, message: string, data?: JsonValue): void {
+    if (!this.proc) return;
+    const error: { code: number; message: string; data?: JsonValue } = { code, message };
+    if (data !== undefined) error.data = data;
+    this.writeMessage({ jsonrpc: "2.0", id, error });
+  }
+
+  isInitialized(): boolean {
+    return this.initialized;
+  }
+
+  private writeMessage(msg: Record<string, unknown>): void {
+    const proc = this.proc;
+    if (!proc || !proc.stdin.writable) {
+      throw new TransportClosedError("app-server stdin closed");
+    }
+    const line = JSON.stringify(msg) + "\n";
+    proc.stdin.write(line);
+  }
+
+  private onStdout(chunk: string): void {
+    this.buf += chunk;
+    let idx: number;
+    while ((idx = this.buf.indexOf("\n")) >= 0) {
+      const line = this.buf.slice(0, idx);
+      this.buf = this.buf.slice(idx + 1);
+      if (!line.trim()) continue;
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        logger.warn("malformed line from app-server", { snippet: line.slice(0, 200) });
+        continue;
+      }
+      this.dispatchIncoming(parsed);
+    }
+  }
+
+  private onStderr(chunk: string): void {
+    const lines = chunk.split("\n");
+    for (const line of lines) {
+      if (!line) continue;
+      this.stderrTail.push(line);
+      if (this.stderrTail.length > this.options.stderrTailLines) this.stderrTail.shift();
+    }
+  }
+
+  private dispatchIncoming(msg: Record<string, unknown>): void {
+    const hasId = "id" in msg;
+    const hasMethod = typeof msg.method === "string";
+    const method = typeof msg.method === "string" ? msg.method : null;
+
+    if (hasMethod && hasId) {
+      this.emit("server_request", {
+        id: msg.id as string | number,
+        method: method!,
+        params: (msg.params as JsonValue) ?? null,
+      });
       return;
     }
-    const exitPromise = new Promise<void>((resolve) => {
-      if (proc.exitCode != null || proc.killed) {
-        resolve();
+
+    if (hasMethod && !hasId) {
+      this.emit("notification", { method: method!, params: (msg.params as JsonValue) ?? null });
+      return;
+    }
+
+    if (hasId) {
+      const id = String(msg.id);
+      const pending = this.pending.get(id);
+      if (!pending) {
+        logger.debug("unmatched response id", { id });
         return;
       }
-      proc.once("exit", () => resolve());
-    });
-    if (proc.stdin.writable) {
-      proc.stdin.end();
-    }
-    const timeout = new Promise<void>((resolve) => {
-      setTimeout(resolve, 500);
-    });
-    await Promise.race([exitPromise, timeout]);
-    if (proc.exitCode == null && !proc.killed) {
-      await proc.killTree(1500);
-      await exitPromise.catch(() => undefined);
+      this.pending.delete(id);
+      clearTimeout(pending.timer);
+      if ("error" in msg && msg.error && typeof msg.error === "object") {
+        const errObj = msg.error as { code?: number; message?: string; data?: JsonValue };
+        const code = typeof errObj.code === "number" ? errObj.code : -32000;
+        const message = typeof errObj.message === "string" ? errObj.message : "unknown";
+        pending.reject(mapJsonRpcError(code, message, errObj.data));
+      } else {
+        pending.resolve((msg.result as JsonValue) ?? null);
+      }
     }
   }
 
-  private write(payload: Record<string, unknown>): void {
-    if (!this.proc || !this.proc.stdin.writable) {
-      throw new TransportError("app-server stdin is not writable");
-    }
-    this.proc.stdin.write(`${JSON.stringify(payload)}\n`);
-  }
-
-  private failAll(error: Error): void {
-    if (this.closeError) {
-      return;
-    }
-    this.closeError = error;
-    for (const pending of this.pending.values()) {
-      pending.reject(error);
+  private failAllPending(err: Error): void {
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(err);
     }
     this.pending.clear();
-    this.notifications.close(error);
   }
 }
 
-async function awaitResponse<T>(factory: () => Promise<T>): Promise<T> {
-  return await factory();
+export function isJsonRpcError(e: unknown): e is JsonRpcError {
+  return e instanceof JsonRpcError;
 }
 
-function requireThreadId(response: Record<string, unknown>, method: string): void {
-  const thread = isObject(response.thread) ? response.thread : null;
-  if (!thread || typeof thread.id !== "string" || !thread.id) {
-    throw new TransportError(`${method} response missing thread.id`);
+function resolveLaunch(bin: string, args: string[]): { command: string; args: string[] } {
+  if (isNodeScript(bin)) {
+    return { command: process.execPath, args: [bin, ...args] };
+  }
+  if (process.platform !== "win32") {
+    return { command: bin, args };
+  }
+
+  const resolved = resolveWindowsCommand(bin) ?? bin;
+  if (/\.(cmd|bat)$/i.test(resolved)) {
+    return {
+      command: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", quoteWindowsCommand(resolved, args)],
+    };
+  }
+  return { command: resolved, args };
+}
+
+function resolveWindowsCommand(bin: string): string | null {
+  if (bin.includes("\\") || bin.includes("/") || path.extname(bin).length > 0) return bin;
+  try {
+    const raw = execFileSync("where", [bin], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+    });
+    return raw.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
+  } catch {
+    return null;
   }
 }
 
-function validateInitializeResponse(response: Record<string, unknown>): void {
-  const userAgent = typeof response.userAgent === "string" ? response.userAgent.trim() : "";
-  const server = isObject(response.serverInfo) ? response.serverInfo : null;
-  let serverName = server && typeof server.name === "string" ? server.name.trim() : "";
-  let serverVersion = server && typeof server.version === "string" ? server.version.trim() : "";
-  if ((!serverName || !serverVersion) && userAgent) {
-    const parsed = splitUserAgent(userAgent);
-    serverName ||= parsed.name || "";
-    serverVersion ||= parsed.version || "";
-  }
-  if (!userAgent || !serverName || !serverVersion) {
-    throw new TransportError(
-      `initialize response missing required metadata (userAgent=${JSON.stringify(userAgent)}, serverName=${JSON.stringify(serverName)}, serverVersion=${JSON.stringify(serverVersion)})`,
-    );
-  }
+function isNodeScript(bin: string): boolean {
+  return /\.(cjs|mjs|js)$/i.test(bin);
 }
 
-function splitUserAgent(userAgent: string): { name: string | null; version: string | null } {
-  const raw = userAgent.trim();
-  if (!raw) {
-    return { name: null, version: null };
-  }
-  if (raw.includes("/")) {
-    const [name, ...rest] = raw.split("/");
-    return { name: name || null, version: rest.join("/") || null };
-  }
-  const parts = raw.split(/\s+/, 2);
-  if (parts.length === 2) {
-    return { name: parts[0] || null, version: parts[1] || null };
-  }
-  return { name: raw, version: null };
+function quoteWindowsCommand(bin: string, args: string[]): string {
+  return [bin, ...args].map(quoteWindowsArg).join(" ");
+}
+
+function quoteWindowsArg(arg: string): string {
+  if (arg.length === 0) return "\"\"";
+  if (!/[ \t"&()^<>|]/.test(arg)) return arg;
+  return `"${arg.replace(/(["])/g, "\\$1")}"`;
 }

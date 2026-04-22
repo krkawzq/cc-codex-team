@@ -1,142 +1,115 @@
 ---
 name: using-codex-team
 description: >-
-  Entry router and skill map for the codex-team plugin — a multi-worker, multi-workspace Codex orchestration layer. Trigger whenever the user (a) mentions `codex-team`, a codex-team session, or Codex workers; (b) asks for high concurrency, parallel refactor, bulk review, mass debug, batch porting, or many mechanically-independent subtasks; (c) is about to spawn multiple long-lived code agents; (d) shows you a `[turn-done]` / `[turn-attn]` / `[compact-suggest]` / `[session-down]` / `[watchdog-tick]` event in-chat; (e) asks whether codex-team is right for some work. Not for: one-shot codex invocations (use the `codex:codex-rescue` subagent).
+  Entry router and mental model for codex-team — a multi-session Codex orchestration layer. Trigger when (a) the user mentions codex-team, Codex workers, or long-lived Codex sessions; (b) the task needs parallel coding, bulk refactor, multi-agent review, or any work that decomposes into multiple mechanically independent Codex runs; (c) you see a `turn.completed` / `turn.error` / `approval.*` / `user_input.request` event in the task panel and need to know what to do; (d) you're picking whether codex-team is the right tool. Not for: one-shot codex invocations — use the `codex:codex-rescue` subagent.
 ---
 
 # Using codex-team
 
-> **You are reading this because a skill auto-loader matched one of the triggers in the `description` above.** Skills in this plugin are loaded on demand, not all at once — `using-codex-team` is the entry router, not a container for every detail. If the task below is not what you are actually doing, close this file and return to your work.
+> **You are reading this because a skill auto-loader matched a trigger in the description.** If the task below isn't what you're actually doing, close this and return to your work.
 
-`codex-team` runs a **team of long-lived Codex worker sessions**. You — Claude — are the orchestrator. Workers do the coding; you schedule, decide, merge.
-
-## Before anything else
-
-If you have not read `philosophy.md` (in this same folder) during this conversation, read it now. Every other skill in this plugin assumes its 8 principles are internalized. It is the **single source of truth** for them.
-
-`philosophy.md` is the only place you will find:
-
-- §1 asymmetric division of labour
-- §2 convergent vs divergent capability split
-- §3 respect the worker; don't replace their thinking
-- §4 workers are peers, not tools
-- §5 the long-context prompt-apply skip (re-send, not recovery)
-- §6 concrete direction beats open-ended tasking
-- §7 work-doc discipline
-- §8 long instructions go in Markdown files
-
-Other skills link to these section numbers. Do not restate them.
-
-## When to propose this plugin
-
-Suggest `codex-team` when any of the following. If the user hasn't asked, **propose but don't push** — offer it as an option.
-
-| Signal | Why it fits |
-|---|---|
-| User asks for high concurrency or "many codex at once" | That's literally what this is. |
-| User names the plugin, a slash command, or a specific session | Obvious trigger. |
-| Task decomposes into ≥3 mechanically-independent subtasks | Each becomes one session; real parallelism. |
-| Bulk review across many files / PRs / modules | → `codex-team-playbooks/map-reduce.md` or `worker-reviewer.md`. |
-| Mass debug — same class of bug across repositories | One session per repo, same brief. |
-| Long-horizon refactor with identifiable chunks | Each chunk = one session with its own work doc. |
-| Porting a library across languages / frameworks | Per-component session; shared design brief. |
-| User wants to keep working while code is being written | Async loop; your context stays free. |
-
-**Don't propose** when:
-
-| Signal | Why it doesn't fit |
-|---|---|
-| Single file, single problem, one-shot | Use direct tools or `codex:codex-rescue`. |
-| Highly creative / architectural / exploratory | Codex is weak at divergent work (`philosophy.md` §2). |
-| Need tight cross-session shared state | Workers have isolated threads; coordination overhead kills the benefit. |
-| User is pair-programming synchronously | No async loop to exploit. |
-| ≤2 subtasks | You running them directly is faster than spinning up sessions. |
-
-How to propose (one sentence):
-
-> *"I could set this up as a codex-team with N parallel sessions (one per <chunk-dimension>). Each would own its own work doc and I'd coordinate. Want me to?"*
+`codex-team` runs a **team of long-lived Codex worker sessions** behind one daemon. You (Claude) are the orchestrator — schedule, decide, merge. Workers do the coding.
 
 ## Mental model
 
 ```
-      Claude (orchestrator)
-           │
-    codex-team CLI           ▲ Monitor notifications
-           │                 │
-           ▼                 │
-      codex-team daemon (local IPC, multi-tenant)
-        │   │   │   │
-       N × codex app-server subprocesses  (one per named session)
+┌────────────────────────────────────────────────────────────────┐
+│  agent (Claude)  ──┐                                           │
+│                    │ codex-team -b <token> ...  (stateless cli)│
+│                    ▼                                           │
+│               codex-team-daemon (singleton per OS user)        │
+│                    │  JSON-RPC 2.0 over stdio                  │
+│                    ▼                                           │
+│               codex app-server process(es)                     │
+│                    │  isolated live sessions + reusable adhoc  │
+│                    ▼                                           │
+│               sessions (threads inside app-server)             │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-- **You → Codex** is pull. `codex-team send <name> "..."`. Default is non-blocking.
-- **Codex → You** is push. The daemon distils each turn into one event on the `events` stream; the `Monitor` tool delivers it as an in-chat notification.
-- **You do not poll.** You sleep until Monitor wakes you. If you're about to loop `codex-team session status` or `history`, stop — either the Monitor isn't armed, or you forgot it is.
+Five concepts:
 
-## Workspaces (the tenancy unit)
-
-One daemon, many workspaces. Every session, subscription, and watchdog alarm belongs to exactly one workspace. **You see only your current workspace by default.**
-
-Resolution order (first non-empty wins):
-
-1. `--workspace <name>` flag on the CLI call
-2. `CODEX_TEAM_WORKSPACE` environment variable
-3. `${CLAUDE_PROJECT_DIR}/.codex-team/workspace.env` (pin file)
-4. Derived from `CLAUDE_PROJECT_DIR` as `proj-<sha1(abs-path)[:8]>`
-5. Literal `default`
-
-The plugin's `SessionStart` hook computes the workspace, registers this Claude Code instance as a client, and exports the resolved workspace into env. **You almost never need to set it yourself.** To inspect: `/codex-team:workspaces` or `codex-team workspace show`.
-
-## Bootstrap order (once per Claude Code session)
-
-1. **Daemon.** `SessionStart` hook starts it. Verify with `codex-team daemon status`.
-2. **Arm the `events` stream** — always required when dispatching work. → `manage-codex-team/event-table.md`.
-3. **(Optional) Arm a `watchdog` alarm** — only for long-horizon work. → `manage-codex-team` §Watchdog or `/codex-team:watch`.
-4. **Create or resume sessions.** → `manage-codex-team` §Session lifecycle, or `/codex-team:bootstrap`.
-5. **Send the first prompts, then sleep.** Work is event-driven from here.
-
-`/codex-team:bootstrap` wraps steps 1-2+4.
-
-## Skill router
-
-Load the skill whose trigger matches what you are about to do:
-
-| You are about to… | Use skill |
+| Concept | Meaning |
 |---|---|
-| Pick a multi-agent collaboration pattern (worker+reviewer, map-reduce, debate, pipeline, …) | `codex-team-playbooks` |
-| Create / send / interrupt / close a session, arm events, inspect status | `manage-codex-team` |
-| Respond to a `turn-done` / `turn-attn` / `session-down` event | `manage-codex-team` §Decision on every Monitor wake |
-| Escalate a failure, a stuck turn, `E_WRONG_WORKSPACE`, or daemon issue | `recover-codex-team` |
-| Run the compaction ritual after a `compact-suggest` advisory | `recover-codex-team/compaction-ritual.md` |
-| Edit `config.toml`, build a profile, or consult a codex tricks/tuning question | `configure-codex-team` |
+| **bearer token** | Your identity — any string you pick. Isolates your sessions from other agents sharing the daemon. |
+| **user** | Namespace keyed by token. Create once with `daemon user create`. |
+| **session** | A codex thread (UUID on the wire). You give it a human name. Persistent on disk by codex. |
+| **live session** | A session currently attached to an app-server process. Only live sessions accept `send` / `peer` / `interrupt`. |
+| **event** | A NDJSON summary line pushed by the daemon when something happens on a session you own. |
 
-## Slash commands (thin, mostly idempotent)
+## When to use codex-team
 
-| Command | Purpose |
+- Task decomposes into ≥2 mechanically independent coding subtasks → parallel workers
+- Long-running refactor / bulk migration / large multi-file change → long-lived session
+- Review-then-fix / plan-then-execute / debate patterns → multi-session with shared artefacts
+- You want to fire off work AND keep your own context free while it runs
+
+## When NOT to use codex-team
+
+- One-shot code fixes where `codex` cli or `codex:codex-rescue` subagent is enough
+- Interactive line-by-line editing — codex-team is for autonomous turns
+- Anything where you'd micromanage every step; codex-team presumes worker autonomy within a session
+
+## First run (canonical flow)
+
+```bash
+# Pick a bearer token — any string you'll reuse for this agent conversation
+TOKEN=claude-$(date +%s)
+
+# 1. Register the user (one-time; idempotent for re-register → user_already_exists)
+codex-team daemon user create $TOKEN
+
+# 2. Start a session in the repo you're working in
+codex-team -b $TOKEN session new refactor --cwd /path/to/repo \
+  --model gpt-5.4 --sandbox workspace-write --approval on-request
+
+# 3. Arm the events Monitor (convenience slash command)
+#    /codex-team:events -b <TOKEN>
+#    — OR equivalent raw Monitor({ command: "... monitor events --stream" })
+
+# 4. Send work. Non-blocking — the turn runs async in the worker.
+codex-team -b $TOKEN message send refactor "Refactor the auth module..."
+
+# 5. When an event says turn.completed, fetch the full turn
+codex-team -b $TOKEN message tail refactor -n 1 --format markdown
+```
+
+The daemon auto-spawned on step 1. No explicit bootstrap. No workspaces. No hooks.
+
+## Core loop
+
+1. **Send or peer** — push a prompt to a live session
+2. **Watch events** — `monitor events` tells you when turns finish, errors fire, approvals are needed
+3. **Fetch detail on demand** — events are summaries only; use `message tail` for content
+4. **Respond to asks** — `approval.*` and `user_input.request` events need your reply via `message approval` / `message answer`
+5. **Detach when done** — `session detach` releases app-server resources; the thread persists in codex for later resume
+
+## Skill map
+
+| You need to … | Read |
 |---|---|
-| `/codex-team:bootstrap [NAME:CWD ...]` | Daemon healthcheck + events armed + sessions created/resumed. |
-| `/codex-team:watch [alarm-name] [...]` | Register a runtime watchdog alarm in current workspace. |
-| `/codex-team:brief` | One-screen snapshot of sessions + health. |
-| `/codex-team:heal` | Restart every errored session in current workspace. |
-| `/codex-team:workspaces` | List all workspaces on the daemon. |
-| `/codex-team:shutdown` | Close sessions + conditionally stop daemon. |
-| `/codex-team:tutorial` | Branching walkthrough for new users. |
+| Understand the architecture more deeply | `mental-model.md` (this skill) |
+| See a full first-run walkthrough | `quickstart.md` (this skill) |
+| Look up any CLI command / flag / config key | `skills/configure-codex-team/` |
+| Drive sessions day-to-day: send patterns, events, approvals | `skills/manage-codex-team/` |
+| Pick a multi-agent topology | `skills/codex-team-playbooks/` |
+| Handle errors / crashes / protocol quirks | `skills/recover-codex-team/` |
 
-Add `--all-workspaces` to inspection commands for audit; destructive commands reject it.
+## Ten invariants
 
-## Invariants (never violate)
+Do not violate these, even under duress:
 
-1. **One send, then sleep.** After dispatching, return control or `ScheduleWakeup`. Do not poll.
-2. **Git belongs to you.** Workers must never run `git commit|merge|push|branch|tag`. You do all version control.
-3. **Each session owns one work doc.** → `philosophy.md` §7.
-4. **Compaction is a 2-step ritual.** Work doc first, then `compact`. Never call `codex-team compact` alone. → `recover-codex-team/compaction-ritual.md`.
-5. **Escalate in order.** `interrupt → restart → kill → forget`. Never skip rungs. → `recover-codex-team`.
-6. **YOLO is intentional.** Sandbox `danger_full_access`, approval `never`. Workers complete turns autonomously. Do not narrow unless the user asks via a profile.
-7. **Daemon bounces are last-resort.** Try per-session recovery first; bouncing disrupts other workspaces.
-8. **`watchdog` is opt-in.** Only for long-horizon work.
-9. **Workspace isolation is the default; crossing it is deliberate.** Destructive commands cannot cross workspaces; read-only audit can via `--all-workspaces`.
-10. **End the task cleanly.** When orchestration is truly done, run `/codex-team:shutdown`. `SessionEnd` only detaches your client.
+1. **One bearer token per agent conversation.** Don't rotate mid-session.
+2. **Every `-b` call implicitly spawns the daemon.** You never `daemon start` manually.
+3. **Sessions are not deletable** by codex-team. `detach` removes from the live set; codex keeps the thread file.
+4. **`send` is non-blocking.** It starts a turn and returns. Don't poll for completion — listen on events.
+5. **`peer` needs an active turn.** Without one, use `send`.
+6. **`interrupt` is hard.** It kills in-flight tool calls. Prefer `peer` if you want to redirect without destroying state.
+7. **Events are summaries.** Always. Never expect full turn content in the event stream.
+8. **Approvals block the turn.** A session waiting on `approval.*` or `user_input.request` cannot make progress until you reply.
+9. **Multiple agents can share a session via `--takeover`**, but the original holder gets a `session.seized` event and loses pending requests. Cross-user attach by name must be unique; otherwise use the `thread_id`.
+10. **Daemon auto-shuts down after 6h idle.** Live sessions count as activity. Don't rely on the daemon being there forever if you walk away.
 
-## Reporting to the user
+## Output rendering
 
-When Monitor wakes you, tell the user in 1-2 sentences what happened and what you decided. Do not dump the full turn summary — it's in the session's history and work doc.
+`session context` / `message history` / `message tail` all accept `--format markdown` and return a tag-structured markdown blob (`<turn>`, `<shell>`, `<file-patch>`, …). Tag names + attributes follow `plugins/codex-team/docs/html-md-format.md`.

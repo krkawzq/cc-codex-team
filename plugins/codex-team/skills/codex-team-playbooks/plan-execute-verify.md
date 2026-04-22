@@ -1,184 +1,100 @@
-# Playbook: Plan-Execute-Verify
-
-**Team size:** 3 · **Pattern:** Planner proposes, Executor implements, Verifier audits — each its own session.
+# Plan – execute – verify
 
 ## Adoption signal
 
-- One concrete deliverable (a feature, a migration, a non-trivial bug fix).
-- Correctness is high-stakes; you want each phase scrutinised by a different session.
-- Brief already specifies *what* but not *how* — the planner fills in the *how*.
+- Task is complex enough to benefit from an explicit upfront plan
+- Execution is non-trivial (multi-step, multi-file)
+- A verification step has clear, checkable criteria (tests pass, lints clean, diff reviewed)
 
-This is a stricter cousin of `pipeline.md`. Pipeline has 2-4 arbitrary stages; plan-execute-verify is always exactly three and carries a specific semantics: planning → execution → verification against the plan.
+Not the same as a pipeline — here the three stages have named roles with strict separation of concerns.
 
-Not this playbook when:
-
-- The *what* and *how* are both already fixed in the brief → `solo-worker.md`.
-- Stages are design/implement/test/docs (4-stage SDLC) → `pipeline.md`.
-- Iteration dominates (many rounds of critique → `reflexion.md`).
-
-## Team composition
+## Team
 
 | Session | Role | Profile |
 |---|---|---|
-| `planner` | Reads brief + repo; produces an explicit plan (steps + expected outcomes + tests to run). Does not execute. | `worker` with high effort |
-| `executor` | Reads plan; executes it step by step; updates work doc. Does not plan or verify. | `worker` |
-| `verifier` | Reads plan + what executor actually did; checks each step for conformance; writes a pass/fail verdict per step. | `reviewer` |
+| `planner` | Produces the plan | `planner` (read-only, xhigh) |
+| `executor` | Executes the plan step-by-step | `fixer` (workspace-write, on-request) |
+| `verifier` | Runs checks, produces pass/fail | `reviewer` (read-only, xhigh) |
 
 ## Shared artefacts
 
-- **Brief**: `/<repo>/docs/briefs/<task>-brief.md` — shared, Claude-owned. Specifies *what* to accomplish and success criteria.
-- **Plan doc**: `/<repo>/docs/pev/<task>-plan.md` — the planner's output. Read-only for executor and verifier.
-- **Execution log**: `/<repo>/docs/pev/<task>-exec.md` — the executor's step-by-step record. Read by verifier.
-- **Verification report**: `/<repo>/docs/pev/<task>-verify.md` — the verifier's pass/fail matrix. Read by Claude.
-- **Per-session work doc**: `/<repo>/docs/worker/<session-name>-work.md`. Internal progress log per session.
+- `<cwd>/.codex-team/brief.md` — Claude writes
+- `<cwd>/.codex-team/plan.md` — planner writes (ordered list of steps, each with acceptance criterion)
+- `<cwd>/.codex-team/execution.md` — executor writes (log of what was done per step)
+- `<cwd>/.codex-team/verification.md` — verifier writes (step-by-step verdict + overall)
 
-## Plan doc shape
+## Orchestration
 
-```markdown
-# Plan for <task>
+```bash
+TOK=claude-$(date +%s)
+codex-team daemon user create $TOK >/dev/null
 
-## Objective
-<restatement from brief>
+cd /repo
+mkdir -p .codex-team
+echo "$BRIEF" > .codex-team/brief.md
 
-## Approach
-<the design call the planner made>
-
-## Steps
-1. <step> — expected outcome: <outcome>; verification: <how to check>
-2. <step> — …
-N. <step> — …
-
-## Risks / uncertainty
-- <risk 1> — mitigation: <mitigation>
-- ...
-
-## Success criteria (from brief)
-- <criterion 1> — verified by: <step N in this plan>
+codex-team -b $TOK session new planner  --profile planner  --cwd "$(pwd)"
+codex-team -b $TOK session new executor --profile fixer    --cwd "$(pwd)"
+codex-team -b $TOK session new verifier --profile reviewer --cwd "$(pwd)"
 ```
 
-The **verification column** is what makes this playbook stricter than a pipeline. Every step has a named way to confirm it worked.
-
-## Execution log shape
-
-```markdown
-# Execution of <task>
-
-## Step 1
-- Action taken: <exact commands / files changed>
-- Result: <what actually happened>
-- Deviation from plan: <yes/no; details if yes>
-
-## Step 2
-...
-```
-
-## Verification report shape
-
-```markdown
-# Verification of <task>
-
-## Per-step
-
-| # | Plan step | Expected | Actual | Verdict |
-|---|---|---|---|---|
-| 1 | <step> | <expected> | <actual> | pass / fail / partial |
-| 2 | ... | ... | ... | ... |
-
-## Overall
-- Brief success criteria 1: pass/fail
-- Brief success criteria 2: pass/fail
-
-## Blockers to merge
-- <issue 1> — severity: low/med/high
-```
-
-## Iteration loop
+### Phase 1 — Plan
 
 ```
-Phase 1 (Plan):
-  1. Send planner: produce plan doc.
-  2. Wait for turn-done.
-  3. Claude reviews the plan. If weak/wrong: re-dispatch planner with specifics. If okay: proceed.
+message send planner "Read .codex-team/brief.md. Produce .codex-team/plan.md:
+  - Ordered list of steps (no more than 10)
+  - Each step: what to do, what files it touches, acceptance criterion
+  - End with overall acceptance criterion
 
-Phase 2 (Execute):
-  4. Create executor session. Dispatch with plan doc as input.
-  5. Executor works through steps; updates execution log + own work doc.
-  6. Wait for turn-done. If executor asks questions (via turn-attn), answer.
-  7. When executor reports done, proceed.
-
-Phase 3 (Verify):
-  8. Create verifier session. Dispatch with plan + execution log as inputs.
-  9. Wait for turn-done. Verifier produces verification report.
-  10. Claude reads the report.
-      - All pass → merge (Claude-owned), close sessions.
-      - Any fail → either (a) re-dispatch executor to fix that step, and re-verify;
-                   or (b) re-dispatch planner if the step was under-specified.
+Do not execute. Do not modify any files outside .codex-team/."
 ```
 
-Phase 3 may loop back into Phase 2 (or Phase 1) if the verdict is fail.
+Wait for turn.completed. Claude reads plan.md. If obviously wrong, message send planner with targeted feedback. Otherwise proceed.
 
-## Send templates
-
-**Planner — first send:**
+### Phase 2 — Execute
 
 ```
-codex-team send planner "plan-only: read <brief-path>; read the relevant files listed in the brief's Reference section; produce a plan doc at <plan-path> using the template with Objective / Approach / Steps (each with expected outcome + verification) / Risks / Success criteria mapping. Do not modify code. Create the work doc at <planner-work-path>. Reply 'plan done' with a one-line summary of your approach."
+message send executor "Read .codex-team/brief.md and .codex-team/plan.md.
+Execute every step. Log each step's outcome in .codex-team/execution.md with headings.
+Stop at the first step you can't complete; explain why."
 ```
 
-**Planner — rework:**
+Executor may fire `approval.command_execution` / `approval.file_change` events. Claude responds per `manage-codex-team/approvals.md`, using brief.md as the reference for what's in scope.
+
+If executor stops mid-plan: Claude reads execution.md, decides whether to adjust plan (message planner again) or retry the failing step.
+
+### Phase 3 — Verify
 
 ```
-codex-team send planner "rework plan: the current plan at <plan-path> is insufficient because <specific reason>. Update it; keep the same template. Reply 'plan done' when the gap is closed."
+message send verifier "Read .codex-team/plan.md and .codex-team/execution.md.
+For each step in the plan:
+  - Did it get done? (check execution.md)
+  - Does the acceptance criterion hold? (check the actual files / run tests)
+Write .codex-team/verification.md: per-step verdict + overall accept / reject.
+If reject, list concrete follow-ups."
 ```
 
-**Executor — first send:**
+Claude reads verification.md. If accept: detach all; done. If reject: decide — do we message executor to address the gaps, or restart planning?
 
-```
-codex-team send executor "execute: read <brief-path> for context, read <plan-path> for the plan; execute each step in order; record actual results + any deviations in <exec-path> using the template; create the work doc at <executor-work-path>; do not run git commit|merge|push; reply 'execution done' with a one-line summary"
-```
+## When to short-circuit
 
-**Executor — fix a failed step:**
+- Trivial task: skip planner; solo-worker is fine.
+- Plan obviously incomplete: send planner again with feedback — don't execute a half-plan.
+- Verification keeps rejecting: the plan is probably wrong. Go back to planner, not executor.
 
-```
-codex-team send executor "step <N> failed verification because <reason>. Read verifier's note in <verify-path> under the row for step <N>; re-execute that step with the correction; update <exec-path>'s step <N> section; reply 'step <N> reworked'"
-```
+## Parallel variants
 
-**Verifier — first send:**
+- **Parallel planning**: two planners with different approaches, then pick. Expensive but useful for novel problems.
+- **Parallel execution**: if plan steps are independent, spawn N `executor-<i>` sessions, each assigned a subset. Reduce to single verifier.
 
-```
-codex-team send verifier "verify: read <brief-path> for success criteria, read <plan-path>, read <exec-path>; produce <verify-path> using the template — per-step pass/fail with actual-vs-expected + brief success criteria pass/fail; do not modify code; create the work doc at <verifier-work-path>; reply 'verification done' with overall verdict"
-```
+## Termination
 
-**Verifier — re-verify a single step:**
-
-```
-codex-team send verifier "re-verify step <N>: the executor reworked it. Read <exec-path>'s step <N> again; update only step <N>'s row in <verify-path>; reply 're-verified' with the new verdict"
+```bash
+for s in planner executor verifier; do codex-team -b $TOK session detach "$s"; done
 ```
 
-## Exit criteria
+## Anti-patterns
 
-- Verification report shows all plan steps `pass` and all brief success criteria `pass`.
-- No `fail` / `partial` verdicts in the report (or Claude has explicitly accepted them as out-of-scope).
-
-## Failure modes
-
-| Smell | Fix |
-|---|---|
-| Planner produces a plan that looks like the brief restated | Plan needs *concrete steps with verification method* per step. Re-dispatch with "each step must name the file touched and how to verify". |
-| Executor deviates from plan without flagging it | Executor's prompt must require explicit deviation notes per step. See template. |
-| Verifier rubber-stamps everything | Verifier prompt must demand actual-vs-expected comparison per step with evidence. Raise reasoning_effort if needed. |
-| Verifier modifies code to "fix" issues it found | Forbidden. Verifier writes findings; re-dispatch executor to fix. Enforce in verifier profile's `developer_instructions`. |
-| Plan gets obsolete after partial execution | Re-dispatch planner with updated context — treat it as a plan revision. Don't let executor improvise in a changed world. |
-| Session management: you keep all three sessions open the whole time | Fine if resources allow; otherwise close planner after Phase 1, close executor after Phase 2. Threads preserved, can be resumed if rework needed. |
-
-## Variants
-
-- **Plan-Execute only** (2 sessions, no verifier). Drop if correctness risk is low. Effectively a `pipeline.md` with 2 stages.
-- **Plan-Execute-Verify-Refine** (add Refiner session for polish). Rare — if refinement is needed, it usually means verification found failures; use the normal rework loop.
-- **Nested plan**: Executor's step N internally spawns a sub-session using `solo-worker.md`. Outer playbook doesn't care; executor is responsible for the sub-session.
-
-## Related
-
-- For continuous design → implement → test → doc pipeline without strict verify phase → `pipeline.md`.
-- For iterative critique on a single deliverable → `reflexion.md`.
-- For adversarial design review with multiple plan proposals → `debate.md` first to pick the plan, then `plan-execute-verify.md` to execute it.
+- Letting planner write code. Planner describes; executor does.
+- Letting executor skip the plan. If executor decides "I'll just do it my way," abort — it's not following the protocol, and verifier has nothing to verify against.
+- Verifier in workspace-write mode. Must be read-only so it doesn't paper over problems.

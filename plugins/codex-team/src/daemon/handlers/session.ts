@@ -1,0 +1,494 @@
+import fs from "node:fs";
+
+import type { HandlerFn } from "../dispatch";
+import type { DaemonContext } from "../context";
+import type { IpcRequest } from "../../ipc/protocol";
+import type { JsonValue } from "../../codex/errors";
+import { CodexTeamError, invalidParams } from "../../errors";
+import {
+  SessionRecord,
+  generateSessionName,
+  looksLikeThreadId,
+  validateSessionName,
+} from "../sessions";
+import {
+  threadFork,
+  threadIdOf,
+  threadList,
+  threadRead,
+  threadResume,
+  threadSetName,
+  threadStart,
+  threadUnsubscribe,
+  turnInterrupt,
+} from "../../codex/rpc";
+import { renderContext } from "../../format/markdown";
+import { renderTable } from "../../format/table";
+
+export const sessionNew: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const positionals = asPositionals(req);
+  const flags = asFlags(req);
+
+  const provided = positionals[0];
+  if (provided) validateSessionName(provided);
+  let name = provided ?? generateSessionName();
+  // avoid collision if auto-generated
+  if (!provided) {
+    while (ctx.sessions.get(user, name)) name = generateSessionName();
+  } else if (ctx.sessions.get(user, name)) {
+    throw invalidParams(`session '${name}' already exists`);
+  }
+
+  const startParams = await buildThreadStartParams(ctx, flags);
+
+  const client = await ctx.pool.acquire(user, keyFor(user, name));
+  let result;
+  try {
+    result = await threadStart(client, startParams, ctx.retryOptions());
+  } catch (e) {
+    ctx.pool.release(keyFor(user, name));
+    throw e;
+  }
+  const threadId = threadIdOf(result);
+
+  // Tell codex the name (best effort, non-fatal)
+  try { await threadSetName(client, threadId, name, ctx.retryOptions()); } catch { /* ignore */ }
+
+  const now = new Date().toISOString();
+  const record: SessionRecord = {
+    name,
+    thread_id: threadId,
+    state: "live",
+    model: asString(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? undefined,
+    cwd: asString(flags["cwd"]) ?? process.cwd(),
+    sandbox: asString(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? undefined,
+    approval: asString(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? undefined,
+    effort: asString(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? undefined,
+    profile: asString(flags["profile"]) ?? undefined,
+    base_instructions: asString(flags["base-instructions"]) ?? undefined,
+    developer_instructions: asString(flags["developer-instructions"]) ?? undefined,
+    created_at: now,
+    last_active_at: now,
+    turn_count: 0,
+  };
+  ctx.sessions.add(user, record);
+  ctx.users.touch(user);
+  return { session: record };
+};
+
+export const sessionAttach: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const takeover = isTrue(flags["takeover"]);
+
+  const existing = ctx.sessions.get(user, identifier);
+  if (existing) {
+    ctx.sessions.touch(user, existing.name);
+    return { session: existing, noop: true };
+  }
+
+  const anywhere = looksLikeThreadId(identifier)
+    ? ctx.sessions.findLiveAnywhere(identifier)
+    : ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
+  if (anywhere === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
+  }
+  if (anywhere && anywhere.user !== user) {
+    if (!takeover) {
+      throw new CodexTeamError("session_busy", `session is live under user '${anywhere.user}'. Pass --takeover to seize.`);
+    }
+    await seizeFromOtherUser(ctx, anywhere.user, user, anywhere.record);
+  }
+
+  const threadId = looksLikeThreadId(identifier) ? identifier : (anywhere?.record.thread_id ?? null);
+  if (!threadId) {
+    throw new CodexTeamError("session_not_found", `no session matches '${identifier}' in this user`);
+  }
+
+  const name = anywhere?.record.name ?? deriveNameFromThreadId(threadId, ctx, user);
+  const client = await ctx.pool.acquire(user, keyFor(user, name));
+  try {
+    await threadResume(client, threadId, ctx.retryOptions());
+  } catch (e) {
+    ctx.pool.release(keyFor(user, name));
+    throw e;
+  }
+
+  const now = new Date().toISOString();
+  const record: SessionRecord = {
+    name,
+    thread_id: threadId,
+    state: "live",
+    created_at: now,
+    last_active_at: now,
+    turn_count: 0,
+    ...(anywhere?.record ? {
+      model: anywhere.record.model,
+      cwd: anywhere.record.cwd,
+      sandbox: anywhere.record.sandbox,
+      approval: anywhere.record.approval,
+      effort: anywhere.record.effort,
+      profile: anywhere.record.profile,
+    } : {}),
+  };
+  ctx.sessions.add(user, record);
+  ctx.users.touch(user);
+  return { session: record };
+};
+
+export const sessionDetach: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const graceful = isTrue(flags["graceful"]);
+
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) {
+    return { session: null, noop: true };
+  }
+
+  const sessionKey = keyFor(user, rec.name);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+
+  if (client && !graceful && turnId) {
+    try { await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions()); } catch { /* ignore if no turn */ }
+  }
+
+  if (client) {
+    try { await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions()); } catch { /* ignore */ }
+  }
+
+  ctx.pool.release(sessionKey);
+  ctx.queues.dispose(sessionKey);
+  ctx.sessions.remove(user, rec.name);
+  for (const p of ctx.pending.removeForSession(user, rec.name)) {
+    try { p.client.respondError(p.jsonrpc_id, -32000, "session detached"); } catch { /* ignore */ }
+  }
+  return { session: rec, noop: false, graceful };
+};
+
+export const sessionRename: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const newName = asPositional(req, 1, "new_name");
+  validateSessionName(newName);
+
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+
+  const oldName = rec.name;
+  const client = ctx.pool.clientForSession(keyFor(user, oldName));
+  if (client) {
+    try { await threadSetName(client, rec.thread_id, newName, ctx.retryOptions()); } catch { /* best effort */ }
+  }
+
+  // Update registry; also need to rekey in the pool
+  const updated = ctx.sessions.update(user, oldName, { name: newName });
+  ctx.pool.rekeySession(keyFor(user, oldName), keyFor(user, newName));
+  return { session: updated };
+};
+
+export const sessionFork: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const newNameRaw = asPositionalOptional(req, 1);
+  const flags = asFlags(req);
+  const atTurn = asString(flags["at-turn"]);
+
+  const source = ctx.sessions.get(user, identifier);
+  if (!source) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+
+  let newName = newNameRaw ?? generateSessionName();
+  if (newNameRaw) validateSessionName(newNameRaw);
+  while (ctx.sessions.get(user, newName)) newName = generateSessionName();
+
+  const client = await ctx.pool.acquire(user, keyFor(user, newName));
+  let forkResult;
+  try {
+    forkResult = await threadFork(client, source.thread_id, atTurn ?? undefined, ctx.retryOptions());
+  } catch (e) {
+    ctx.pool.release(keyFor(user, newName));
+    throw e;
+  }
+  const newThreadId = threadIdOf(forkResult);
+
+  try { await threadSetName(client, newThreadId, newName, ctx.retryOptions()); } catch { /* ignore */ }
+
+  const now = new Date().toISOString();
+  const record: SessionRecord = {
+    name: newName,
+    thread_id: newThreadId,
+    state: "live",
+    model: source.model,
+    cwd: source.cwd,
+    sandbox: source.sandbox,
+    approval: source.approval,
+    effort: source.effort,
+    profile: source.profile,
+    created_at: now,
+    last_active_at: now,
+    turn_count: 0,
+  };
+  ctx.sessions.add(user, record);
+  return { session: record, forked_from: source.name, at_turn: atTurn };
+};
+
+export const sessionInfo: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+
+  const rec = ctx.sessions.get(user, identifier);
+  if (rec) {
+    return { session: rec };
+  }
+
+  // Not live here: try codex-side thread/read for metadata-only view
+  try {
+    const client = await ctx.pool.acquireForAdhoc(user);
+    const result = await threadRead(client, identifier, ctx.retryOptions());
+    return { session: null, thread: result.thread, live: false };
+  } catch (e) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not found: ${(e as Error).message}`);
+  }
+};
+
+export const sessionContext: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const format = asString(flags["format"]) ?? "json";
+  if (format !== "json" && format !== "markdown") {
+    throw invalidParams(`--format must be 'json' or 'markdown'`);
+  }
+
+  const rec = ctx.sessions.get(user, identifier);
+  let threadId: string;
+  let client;
+  if (rec) {
+    threadId = rec.thread_id;
+    client = ctx.pool.clientForSession(keyFor(user, rec.name));
+    if (!client) client = await ctx.pool.acquireForAdhoc(user);
+  } else {
+    if (!looksLikeThreadId(identifier)) {
+      throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+    }
+    threadId = identifier;
+    client = await ctx.pool.acquireForAdhoc(user);
+  }
+
+  const result = await threadRead(client, threadId, ctx.retryOptions());
+  if (format === "json") {
+    return { thread_id: threadId, thread: result.thread };
+  }
+  const markdown = renderContext({
+    session: rec?.name ?? null,
+    thread_id: threadId,
+    thread: result.thread,
+  });
+  return {
+    thread_id: threadId,
+    format: "markdown",
+    markdown,
+    thread: result.thread,
+  };
+};
+
+export const sessionList: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const flags = asFlags(req);
+  const all = isTrue(flags["all"]);
+  const sortField = asString(flags["sort"]) ?? "last_active";
+  const format = asString(flags["format"]) ?? "json";
+  if (format !== "json" && format !== "table") {
+    throw invalidParams(`--format must be 'json' or 'table'`);
+  }
+
+  if (!all) {
+    const live = ctx.sessions.listLive(user);
+    const sorted = sortSessions(live, sortField);
+    const response: Record<string, unknown> = { sessions: sorted, all: false, sort: sortField, format };
+    if (format === "table") {
+      response.table = renderTable(
+        sorted as unknown as Array<Record<string, unknown>>,
+        ["name", "thread_id", "state", "model", "turn_count", "last_active_at"],
+      );
+    }
+    return response;
+  }
+
+  const client = await ctx.pool.acquireForAdhoc(user);
+  const result = await threadList(client, {}, ctx.retryOptions());
+  const response: Record<string, unknown> = {
+    sessions: result.data,
+    next_cursor: result.nextCursor,
+    all: true,
+    sort: sortField,
+    format,
+  };
+  if (format === "table") {
+    response.table = renderTable(
+      result.data as unknown as Array<Record<string, unknown>>,
+      ["id", "status", "preview", "cwd", "updated_at"],
+    );
+  }
+  return response;
+};
+
+// --- helpers ---
+
+function requireUser(ctx: DaemonContext, req: IpcRequest): void {
+  const bearer = req.bearer;
+  if (!bearer) throw invalidParams("bearer token required");
+  if (!ctx.users.has(bearer)) {
+    throw new CodexTeamError("user_not_found", `user '${bearer}' not found — run 'codex-team daemon user create ${bearer}'`);
+  }
+}
+
+function asFlags(req: IpcRequest): Record<string, unknown> {
+  const flags = (req.params as Record<string, unknown>).flags;
+  if (flags && typeof flags === "object") return flags as Record<string, unknown>;
+  return {};
+}
+
+function asPositionals(req: IpcRequest): string[] {
+  const p = (req.params as Record<string, unknown>).positionals;
+  return Array.isArray(p) ? p.filter((x): x is string => typeof x === "string") : [];
+}
+
+function asPositional(req: IpcRequest, idx: number, name: string): string {
+  const positionals = asPositionals(req);
+  const v = positionals[idx];
+  if (typeof v !== "string" || v.length === 0) {
+    throw invalidParams(`missing positional '${name}'`);
+  }
+  return v;
+}
+
+function asPositionalOptional(req: IpcRequest, idx: number): string | null {
+  const positionals = asPositionals(req);
+  const v = positionals[idx];
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+function asString(v: unknown): string | null {
+  if (Array.isArray(v)) return v[v.length - 1] ?? null;
+  return typeof v === "string" ? v : null;
+}
+
+function isTrue(v: unknown): boolean {
+  return v === true || v === "true" || v === "1";
+}
+
+async function buildThreadStartParams(ctx: DaemonContext, flags: Record<string, unknown>): Promise<Record<string, JsonValue>> {
+  const p: Record<string, JsonValue> = {};
+  const config: Record<string, JsonValue> = {};
+  const model = asString(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
+  if (model) p.model = model;
+  const cwd = asString(flags["cwd"]) ?? process.cwd();
+  if (cwd) p.cwd = cwd;
+  const sandbox = asString(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
+  if (sandbox) p.sandbox = sandbox;
+  const approval = asString(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
+  if (approval) p.approvalPolicy = approval;
+  const effort = asString(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
+  if (effort) config.model_reasoning_effort = effort;
+  const profile = asString(flags["profile"]);
+  if (profile) config.profile = profile;
+  const baseInstr = await readInstructionFile(flags["base-instructions"], "--base-instructions");
+  if (baseInstr) p.baseInstructions = baseInstr;
+  const devInstr = await readInstructionFile(flags["developer-instructions"], "--developer-instructions");
+  if (devInstr) p.developerInstructions = devInstr;
+  const personality = asString(flags["personality"]);
+  if (personality) p.personality = personality;
+  if (Object.keys(config).length > 0) p.config = config;
+  return p;
+}
+
+function resolveDefault(ctx: DaemonContext, key: string): string | null {
+  const v = ctx.config.getEffective(key);
+  if (typeof v === "string" && v.length > 0) return v;
+  return null;
+}
+
+function keyFor(user: string, name: string): string {
+  return `${user}::${name}`;
+}
+
+function deriveNameFromThreadId(threadId: string, ctx: DaemonContext, user: string): string {
+  const existing = ctx.sessions.get(user, threadId);
+  if (existing) return existing.name;
+  const tail = threadId.replace(/^th-/, "").replace(/-/g, "").slice(0, 8) || "x";
+  let candidate = `s-${tail}`;
+  while (ctx.sessions.get(user, candidate)) candidate = generateSessionName();
+  return candidate;
+}
+
+async function readInstructionFile(value: unknown, flag: string): Promise<string | null> {
+  const filePath = asString(value);
+  if (!filePath) return null;
+  try {
+    return await fs.promises.readFile(filePath, "utf8");
+  } catch (e) {
+    throw invalidParams(`${flag} not readable: ${(e as Error).message}`);
+  }
+}
+
+async function seizeFromOtherUser(
+  ctx: DaemonContext,
+  fromUser: string,
+  toUser: string,
+  rec: SessionRecord,
+): Promise<void> {
+  const sessionKey = keyFor(fromUser, rec.name);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+  if (client) {
+    if (turnId) {
+      try { await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions()); } catch { /* ignore */ }
+    }
+    try { await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions()); } catch { /* ignore */ }
+  }
+  ctx.pool.release(sessionKey);
+  ctx.queues.dispose(sessionKey);
+  ctx.sessions.remove(fromUser, rec.name);
+
+  // Cancel any pending approval/user_input for the session (best-effort).
+  for (const p of ctx.pending.removeForSession(fromUser, rec.name)) {
+    try { p.client.respondError(p.jsonrpc_id, -32000, "session seized by another user"); } catch { /* ignore */ }
+  }
+
+  ctx.events.append(fromUser, {
+    type: "session.seized",
+    session: rec.name,
+    thread_id: rec.thread_id,
+    payload: { seized_by: toUser },
+  });
+}
+
+function sortSessions(rows: SessionRecord[], field: string): SessionRecord[] {
+  const f = new Set(["name", "last_active", "turn_count", "created_at"]).has(field) ? field : "last_active";
+  const copy = [...rows];
+  copy.sort((a, b) => {
+    const av = (a as unknown as Record<string, unknown>)[
+      f === "last_active" ? "last_active_at" : f === "created_at" ? "created_at" : f
+    ];
+    const bv = (b as unknown as Record<string, unknown>)[
+      f === "last_active" ? "last_active_at" : f === "created_at" ? "created_at" : f
+    ];
+    if (typeof av === "string" && typeof bv === "string") return bv.localeCompare(av);
+    if (typeof av === "number" && typeof bv === "number") return bv - av;
+    return 0;
+  });
+  return copy;
+}

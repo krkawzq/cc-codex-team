@@ -5,6 +5,9 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __commonJS = (cb, mod) => function __require() {
+  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+};
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
     for (let key of __getOwnPropNames(from))
@@ -22,234 +25,73 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// src/cli.ts
-var import_node_fs6 = __toESM(require("fs"));
-var import_node_path8 = __toESM(require("path"));
-var import_node_readline = __toESM(require("readline"));
+// package.json
+var require_package = __commonJS({
+  "package.json"(exports2, module2) {
+    module2.exports = {
+      name: "codex-team",
+      version: "0.5.0",
+      private: true,
+      description: "CLI + daemon orchestrating long-lived Codex app-server sessions for agents",
+      license: "MIT",
+      engines: {
+        node: ">=18"
+      },
+      scripts: {
+        build: "tsup src/main.ts --format cjs --platform node --target node18 --out-dir dist --clean",
+        dev: "tsup src/main.ts --format cjs --platform node --target node18 --out-dir dist --watch",
+        typecheck: "tsc --noEmit",
+        clean: "rm -rf dist"
+      },
+      dependencies: {},
+      devDependencies: {
+        "@types/node": "^24.0.0",
+        tsup: "^8.5.0",
+        typescript: "^5.9.2"
+      }
+    };
+  }
+});
 
-// src/config.ts
-var import_node_fs4 = __toESM(require("fs"));
-var import_node_path6 = __toESM(require("path"));
-var import_smol_toml = require("smol-toml");
+// src/cli/run.ts
+var import_node_child_process = require("child_process");
+var import_promises = require("timers/promises");
 
-// src/errors.ts
-var CodexTeamError = class extends Error {
-  code = "E_INTERNAL";
-  exitCode = 1;
-  detail;
-  constructor(message = "", detail = {}) {
-    super(message);
-    this.name = this.constructor.name;
-    this.detail = detail;
-  }
-};
-var ConfigError = class extends CodexTeamError {
-  code = "E_CONFIG";
-  exitCode = 2;
-};
-var InvalidRequest = class extends CodexTeamError {
-  code = "E_INVALID";
-  exitCode = 2;
-};
-var InvalidName = class extends CodexTeamError {
-  code = "E_INVALID_NAME";
-  exitCode = 2;
-};
-var ProtocolError = class extends CodexTeamError {
-  code = "E_PROTOCOL";
-  exitCode = 2;
-};
-var DaemonNotRunning = class extends CodexTeamError {
-  code = "E_DAEMON_DOWN";
-  exitCode = 4;
-};
-var DaemonAlreadyRunning = class extends CodexTeamError {
-  code = "E_DAEMON_UP";
-  exitCode = 4;
-};
-var SessionNotFound = class extends CodexTeamError {
-  code = "E_NOT_FOUND";
-  exitCode = 3;
-};
-var SessionExists = class extends CodexTeamError {
-  code = "E_EXISTS";
-  exitCode = 3;
-};
-var WrongWorkspace = class extends CodexTeamError {
-  code = "E_WRONG_WORKSPACE";
-  exitCode = 3;
-};
-var SessionBusy = class extends CodexTeamError {
-  code = "E_BUSY";
-  exitCode = 3;
-};
-var SessionErrored = class extends CodexTeamError {
-  code = "E_ERRORED";
-  exitCode = 3;
-};
-var QueueFull = class extends CodexTeamError {
-  code = "E_QUEUE_FULL";
-  exitCode = 3;
-};
-var TransportError = class extends CodexTeamError {
-  code = "E_TRANSPORT";
-  exitCode = 5;
-};
-var TurnTimeout = class extends CodexTeamError {
-  code = "E_TIMEOUT";
-  exitCode = 5;
-};
-var CodexCliMissing = class extends CodexTeamError {
-  code = "E_NO_CODEX_BIN";
-  exitCode = 4;
-};
-var errorClasses = {
-  E_CONFIG: ConfigError,
-  E_INVALID: InvalidRequest,
-  E_INVALID_NAME: InvalidName,
-  E_PROTOCOL: ProtocolError,
-  E_DAEMON_DOWN: DaemonNotRunning,
-  E_DAEMON_UP: DaemonAlreadyRunning,
-  E_NOT_FOUND: SessionNotFound,
-  E_EXISTS: SessionExists,
-  E_WRONG_WORKSPACE: WrongWorkspace,
-  E_BUSY: SessionBusy,
-  E_ERRORED: SessionErrored,
-  E_QUEUE_FULL: QueueFull,
-  E_TRANSPORT: TransportError,
-  E_TIMEOUT: TurnTimeout,
-  E_NO_CODEX_BIN: CodexCliMissing
-};
-function errorToWire(error) {
-  return {
-    code: error.code,
-    msg: error.message,
-    detail: { ...error.detail }
-  };
-}
-function wireToError(wire) {
-  const ErrorClass = errorClasses[String(wire?.code ?? "")] ?? CodexTeamError;
-  return new ErrorClass(String(wire?.msg ?? ""), { ...wire?.detail ?? {} });
-}
-function asCodexTeamError(error) {
-  if (error instanceof CodexTeamError) {
-    return error;
-  }
-  if (error instanceof Error) {
-    return new CodexTeamError(error.message);
-  }
-  return new CodexTeamError(String(error));
-}
-
-// src/platform/os.ts
-var isWindows = process.platform === "win32";
-var isMacOS = process.platform === "darwin";
-var isLinux = process.platform === "linux";
-
-// src/platform/paths.ts
-var import_node_os = __toESM(require("os"));
-var import_node_path = __toESM(require("path"));
-var APP = "codex-team";
-function homeDir() {
-  return process.env.HOME || import_node_os.default.homedir() || (isWindows ? process.env.USERPROFILE || "C:\\" : "/");
-}
-function resolveConfigDir() {
-  if (process.env.CODEX_TEAM_CONFIG_DIR) {
-    return import_node_path.default.resolve(process.env.CODEX_TEAM_CONFIG_DIR);
-  }
-  if (isWindows) {
-    return import_node_path.default.join(process.env.APPDATA || import_node_path.default.join(homeDir(), "AppData", "Roaming"), APP);
-  }
-  return import_node_path.default.join(process.env.XDG_CONFIG_HOME || import_node_path.default.join(homeDir(), ".config"), APP);
-}
-function resolveDataDir(configured = "") {
-  if (configured) {
-    return import_node_path.default.resolve(configured);
-  }
-  if (process.env.CODEX_TEAM_DAEMON_DATA_DIR) {
-    return import_node_path.default.resolve(process.env.CODEX_TEAM_DAEMON_DATA_DIR);
-  }
-  if (process.env.CLAUDE_PLUGIN_DATA && (process.env.CLAUDE_PLUGIN_ROOT || process.env.CLAUDE_PLUGIN_DATA.includes(APP))) {
-    return import_node_path.default.join(import_node_path.default.resolve(process.env.CLAUDE_PLUGIN_DATA), "data");
-  }
-  if (isWindows) {
-    return import_node_path.default.join(process.env.LOCALAPPDATA || import_node_path.default.join(homeDir(), "AppData", "Local"), APP);
-  }
-  return import_node_path.default.join(process.env.XDG_DATA_HOME || import_node_path.default.join(homeDir(), ".local", "share"), APP);
-}
-function resolveRuntimeDir(configuredDataDir = "") {
-  if (isWindows) {
-    return null;
-  }
-  if (process.env.CODEX_TEAM_DAEMON_RUNTIME_DIR) {
-    return import_node_path.default.resolve(process.env.CODEX_TEAM_DAEMON_RUNTIME_DIR);
-  }
-  if (process.env.CLAUDE_PLUGIN_DATA) {
-    return import_node_path.default.join(import_node_path.default.resolve(process.env.CLAUDE_PLUGIN_DATA), "runtime");
-  }
-  void configuredDataDir;
-  return import_node_path.default.join(process.env.XDG_RUNTIME_DIR || process.env.TMPDIR || import_node_os.default.tmpdir(), APP);
-}
-function resolvePidPath(dataDir, configured = "") {
-  return import_node_path.default.resolve(configured || process.env.CODEX_TEAM_DAEMON_PID_PATH || import_node_path.default.join(dataDir, "daemon.pid"));
-}
-function resolveLogPath(dataDir) {
-  return import_node_path.default.join(dataDir, "daemon.log");
-}
-function sessionDir(dataDir, workspace, name) {
-  return import_node_path.default.join(dataDir, "sessions", workspace, name);
-}
-function clientsDir(dataDir) {
-  return import_node_path.default.join(dataDir, "clients");
-}
-function alarmsDir(dataDir) {
-  return import_node_path.default.join(dataDir, "alarms");
-}
-function workspaceAlarmsDir(dataDir, workspace) {
-  return import_node_path.default.join(alarmsDir(dataDir), workspace);
-}
-function workspaceEnvFile(projectDir) {
-  return import_node_path.default.join(projectDir, ".codex-team", "workspace.env");
-}
-function clientEnvFile(projectDir) {
-  return import_node_path.default.join(projectDir, ".codex-team", "client.env");
-}
-
-// src/platform/ipc.ts
-var import_node_crypto = __toESM(require("crypto"));
+// src/ipc/sock.ts
 var import_node_fs = __toESM(require("fs"));
 var import_node_net = __toESM(require("net"));
-var import_node_path2 = __toESM(require("path"));
-function ipcAddressForConfig(cfg) {
-  const configured = cfg.daemon.socketPath.trim();
-  if (configured) {
-    return ipcAddressFromPath(configured);
-  }
-  const dataDir = resolveDataDir(cfg.daemon.dataDir);
-  if (isWindows) {
-    const digest = import_node_crypto.default.createHash("sha1").update(import_node_path2.default.resolve(dataDir)).digest("hex").slice(0, 12);
-    return ipcAddressFromPath(`\\\\.\\pipe\\codex-team-${digest}`);
-  }
-  const runtimeDir = resolveRuntimeDir(dataDir);
-  return ipcAddressFromPath(import_node_path2.default.join(runtimeDir || dataDir, "daemon.sock"));
+var import_node_path = __toESM(require("path"));
+function writeMessage(socket, msg) {
+  socket.write(JSON.stringify(msg) + "\n");
 }
-function ipcAddressFromPath(socketPath) {
-  const pipe = isWindows || socketPath.startsWith("\\\\.\\pipe\\");
-  return {
-    kind: pipe ? "pipe" : "uds",
-    address: socketPath,
-    display: socketPath
-  };
-}
-async function ipcListen(address, onConnection) {
-  if (address.kind === "uds") {
-    import_node_fs.default.mkdirSync(import_node_path2.default.dirname(address.address), { recursive: true });
+function onMessages(socket, handler, onClose) {
+  let buf = "";
+  socket.on("data", (chunk) => {
+    buf += chunk.toString("utf8");
+    let idx;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx);
+      buf = buf.slice(idx + 1);
+      if (!line.trim()) continue;
+      try {
+        const msg = JSON.parse(line);
+        handler(msg);
+      } catch {
+      }
+    }
+  });
+  if (onClose) {
+    socket.on("close", onClose);
+    socket.on("end", onClose);
   }
-  const server = import_node_net.default.createServer(onConnection);
+}
+async function listenSock(sockPath) {
+  import_node_fs.default.mkdirSync(import_node_path.default.dirname(sockPath), { recursive: true });
+  const server = import_node_net.default.createServer();
   await new Promise((resolve, reject) => {
-    const onError = (error) => {
+    const onError = (e) => {
       server.off("listening", onListening);
-      reject(error);
+      reject(e);
     };
     const onListening = () => {
       server.off("error", onError);
@@ -257,5619 +99,4187 @@ async function ipcListen(address, onConnection) {
     };
     server.once("error", onError);
     server.once("listening", onListening);
-    server.listen(address.address);
+    server.listen(sockPath);
   });
   return server;
 }
-function ipcConnect(address) {
-  return import_node_net.default.createConnection(address.address);
+function connectSock(sockPath, timeoutMs = 2e3) {
+  return new Promise((resolve, reject) => {
+    const sock = import_node_net.default.createConnection(sockPath);
+    const timer = setTimeout(() => {
+      sock.destroy();
+      reject(new Error("connect timeout"));
+    }, timeoutMs);
+    sock.once("connect", () => {
+      clearTimeout(timer);
+      resolve(sock);
+    });
+    sock.once("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+  });
 }
-async function ipcReady(address, timeoutMs = 100) {
-  return await new Promise((resolve) => {
-    const socket = ipcConnect(address);
-    const timeout = setTimeout(() => {
-      socket.destroy();
+function probeSock(sockPath, timeoutMs = 200) {
+  return new Promise((resolve) => {
+    if (!import_node_fs.default.existsSync(sockPath)) {
+      resolve(false);
+      return;
+    }
+    const sock = import_node_net.default.createConnection(sockPath);
+    const timer = setTimeout(() => {
+      sock.destroy();
       resolve(false);
     }, timeoutMs);
-    socket.once("connect", () => {
-      clearTimeout(timeout);
-      socket.destroy();
+    sock.once("connect", () => {
+      clearTimeout(timer);
+      sock.destroy();
       resolve(true);
     });
-    socket.once("error", () => {
-      clearTimeout(timeout);
-      socket.destroy();
+    sock.once("error", () => {
+      clearTimeout(timer);
       resolve(false);
     });
   });
 }
-async function removeStaleIpcArtifact(address) {
-  if (address.kind !== "uds") {
-    return;
+function unlinkSockIfStale(sockPath) {
+  try {
+    import_node_fs.default.unlinkSync(sockPath);
+  } catch {
   }
-  if (import_node_fs.default.existsSync(address.address)) {
-    import_node_fs.default.unlinkSync(address.address);
-  }
-}
-function ipcArtifactExists(address) {
-  return address.kind === "uds" && import_node_fs.default.existsSync(address.address);
 }
 
-// src/platform/process.ts
-var import_node_child_process = require("child_process");
-var import_node_path3 = __toESM(require("path"));
-function spawnManaged(opts) {
-  const stdio = opts.stdio || ["pipe", "pipe", "pipe"];
-  const spawnOptions = {
-    cwd: opts.cwd,
-    env: opts.env,
-    detached: opts.detached,
-    stdio,
-    windowsHide: true
-  };
-  const commandExt = import_node_path3.default.extname(opts.command).toLowerCase();
-  const isCmdShim = isWindows && (commandExt === ".cmd" || commandExt === ".bat");
-  const child = isCmdShim ? (0, import_node_child_process.spawn)(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", quoteCmdLine([opts.command, ...opts.args])], spawnOptions) : (0, import_node_child_process.spawn)(opts.command, opts.args, spawnOptions);
-  const managed = child;
-  managed.killTree = async (graceMs = 1500) => {
-    if (managed.pid != null) {
-      await killProcessTree(managed.pid, graceMs);
-    }
-  };
-  return managed;
+// src/paths.ts
+var import_node_os = __toESM(require("os"));
+var import_node_path2 = __toESM(require("path"));
+var APP = "codex-team";
+function homeDir() {
+  return process.env.HOME || import_node_os.default.homedir() || "/";
 }
-async function killProcessTree(pid, graceMs = 1500) {
-  if (!Number.isFinite(pid) || pid <= 0) {
+function defaultDataDir() {
+  return process.env.CODEX_TEAM_DATA_DIR || import_node_path2.default.join(homeDir(), `.${APP}`);
+}
+function defaultSockPath(dataDir = defaultDataDir()) {
+  return process.env.CODEX_TEAM_SOCK || import_node_path2.default.join(dataDir, "daemon.sock");
+}
+function defaultLogPath(dataDir = defaultDataDir()) {
+  return import_node_path2.default.join(dataDir, "daemon.log");
+}
+function configFilePath(dataDir = defaultDataDir()) {
+  return import_node_path2.default.join(dataDir, "config.json");
+}
+function pidFilePath(dataDir = defaultDataDir()) {
+  return import_node_path2.default.join(dataDir, "daemon.pid");
+}
+function usersDir(dataDir = defaultDataDir()) {
+  return import_node_path2.default.join(dataDir, "users");
+}
+function userDir(token, dataDir = defaultDataDir()) {
+  return import_node_path2.default.join(usersDir(dataDir), encodeToken(token));
+}
+function userMetadataPath(token, dataDir = defaultDataDir()) {
+  return import_node_path2.default.join(userDir(token, dataDir), "metadata.json");
+}
+function userEventLogPath(token, dataDir = defaultDataDir()) {
+  return import_node_path2.default.join(userDir(token, dataDir), "events.log");
+}
+function userSessionsPath(token, dataDir = defaultDataDir()) {
+  return import_node_path2.default.join(userDir(token, dataDir), "sessions.json");
+}
+function encodeToken(token) {
+  return Buffer.from(token, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function decodeToken(encoded) {
+  const pad = encoded.length % 4 === 0 ? "" : "=".repeat(4 - encoded.length % 4);
+  const b64 = encoded.replace(/-/g, "+").replace(/_/g, "/") + pad;
+  return Buffer.from(b64, "base64").toString("utf8");
+}
+
+// src/cli/args.ts
+var COMMANDS = /* @__PURE__ */ new Set([
+  "version",
+  "status",
+  "daemon:status",
+  "daemon:start",
+  "daemon:stop",
+  "daemon:restart",
+  "daemon:logs",
+  "daemon:user:create",
+  "daemon:user:destroy",
+  "daemon:user:list",
+  "daemon:config:get",
+  "daemon:config:set",
+  "daemon:config:unset",
+  "daemon:config:list",
+  "daemon:config:reset",
+  "session:new",
+  "session:attach",
+  "session:detach",
+  "session:fork",
+  "session:rename",
+  "session:info",
+  "session:context",
+  "session:list",
+  "message:send",
+  "message:peer",
+  "message:interrupt",
+  "message:approval",
+  "message:answer",
+  "message:history",
+  "message:tail",
+  "monitor:events",
+  "monitor:alarm"
+]);
+var GLOBAL_FLAGS = {
+  "-b": { name: "bearer", takesValue: true },
+  "--bearer": { name: "bearer", takesValue: true },
+  "-v": { name: "verbose", takesValue: false },
+  "--verbose": { name: "verbose", takesValue: false },
+  "-h": { name: "help", takesValue: false },
+  "--help": { name: "help", takesValue: false },
+  "--daemon-sock": { name: "daemonSock", takesValue: true }
+};
+function parseArgs(argv) {
+  const result = {
+    commandPath: [],
+    positionals: [],
+    flags: {},
+    bearer: null,
+    verbose: false,
+    daemonSock: null,
+    help: false,
+    unknown: null
+  };
+  const nonGlobal = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const spec = GLOBAL_FLAGS[a];
+    if (!spec) {
+      nonGlobal.push(a);
+      continue;
+    }
+    if (spec.takesValue) {
+      const v = argv[++i];
+      if (v === void 0) {
+        result.unknown = `flag ${a} requires a value`;
+        return result;
+      }
+      if (spec.name === "bearer") result.bearer = v;
+      else if (spec.name === "daemonSock") result.daemonSock = v;
+    } else {
+      if (spec.name === "verbose") result.verbose = true;
+      else if (spec.name === "help") result.help = true;
+    }
+  }
+  const matched = matchCommand(nonGlobal);
+  if (!matched) {
+    if (nonGlobal.length === 0) {
+      result.help = true;
+      return result;
+    }
+    result.unknown = `unknown command: ${nonGlobal.join(" ")}`;
+    return result;
+  }
+  result.commandPath = matched.path;
+  const tail = matched.remaining;
+  for (let i = 0; i < tail.length; i++) {
+    const a = tail[i];
+    if (a.startsWith("--")) {
+      const eqIdx = a.indexOf("=");
+      let key;
+      let value;
+      if (eqIdx >= 0) {
+        key = a.slice(2, eqIdx);
+        value = a.slice(eqIdx + 1);
+      } else {
+        key = a.slice(2);
+        const next = tail[i + 1];
+        if (next !== void 0 && !isFlagLike(next)) {
+          value = next;
+          i++;
+        } else {
+          value = null;
+        }
+      }
+      setFlag(result.flags, key, value);
+    } else if (a.length > 1 && a.startsWith("-") && !isNegativeNumber(a)) {
+      const key = a.slice(1);
+      const next = tail[i + 1];
+      if (next !== void 0 && !isFlagLike(next)) {
+        setFlag(result.flags, key, next);
+        i++;
+      } else {
+        setFlag(result.flags, key, null);
+      }
+    } else {
+      result.positionals.push(a);
+    }
+  }
+  return result;
+}
+function isFlagLike(s) {
+  if (!s.startsWith("-")) return false;
+  if (s === "-") return false;
+  if (isNegativeNumber(s)) return false;
+  return true;
+}
+function isNegativeNumber(s) {
+  return /^-\d+(\.\d+)?$/.test(s);
+}
+function setFlag(flags, key, value) {
+  if (value === null) {
+    flags[key] = true;
     return;
   }
-  if (isWindows) {
-    await runTaskkill(pid);
-    return;
+  const existing = flags[key];
+  if (existing === void 0) {
+    flags[key] = value;
+  } else if (Array.isArray(existing)) {
+    existing.push(value);
+  } else if (typeof existing === "string") {
+    flags[key] = [existing, value];
+  } else {
+    flags[key] = value;
+  }
+}
+function matchCommand(tokens) {
+  const maxDepth = Math.min(tokens.length, 3);
+  for (let len = maxDepth; len >= 1; len--) {
+    const key = tokens.slice(0, len).join(":");
+    if (COMMANDS.has(key)) {
+      return { path: tokens.slice(0, len), remaining: tokens.slice(len) };
+    }
+  }
+  return null;
+}
+function commandKey(path10) {
+  return path10.join(":");
+}
+
+// src/cli/help.ts
+var HELP_TEXT = `codex-team \u2014 cli + daemon for orchestrating codex app-server sessions
+
+USAGE
+  codex-team -b <token> <command> [args] [flags]
+
+GLOBAL FLAGS
+  -b, --bearer <token>     user identity (required, except for 'daemon' subcommands)
+  -v, --verbose            cli debug logs to stderr
+  --daemon-sock <path>     override daemon sock path (for debug/test isolation)
+  -h, --help               show this help
+
+TOP-LEVEL
+  version                  print cli + daemon version
+  status                   summary of current user (requires -b)
+
+COMMAND GROUPS
+  daemon   <subcmd>        daemon-level management (no -b needed)
+  session  <subcmd>        session management
+  message  <subcmd>        message / turn operations on a live session
+  monitor  <subcmd>        event subscription & alarms
+
+Run 'codex-team <group> --help' for details on each group.
+Full specification: plugins/codex-team/docs/\u8BBE\u8BA1\u6587\u6863.md
+`;
+
+// src/result.ts
+function ok(data) {
+  return { ok: true, data };
+}
+function err(code, message, data) {
+  const error = { code, message };
+  if (data !== void 0) {
+    error.data = data;
+  }
+  return { ok: false, error };
+}
+
+// src/cli/run.ts
+var DAEMON_READY_TIMEOUT_MS = 5e3;
+var DAEMON_POLL_INTERVAL_MS = 100;
+async function readStdinAll() {
+  return await new Promise((resolve, reject) => {
+    let buf = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      buf += chunk;
+    });
+    process.stdin.once("end", () => resolve(buf));
+    process.stdin.once("error", reject);
+  });
+}
+async function runCli(argv) {
+  const parsed = parseArgs(argv);
+  if (parsed.unknown) {
+    process.stdout.write(JSON.stringify(err("invalid_params", parsed.unknown)) + "\n");
+    return 1;
+  }
+  if (parsed.help || parsed.commandPath.length === 0) {
+    process.stdout.write(HELP_TEXT);
+    return 0;
+  }
+  const method = commandKey(parsed.commandPath);
+  const sockPath = parsed.daemonSock || defaultSockPath();
+  if (method === "version") {
+    return await runVersion(sockPath);
+  }
+  const needsBearer = !isDaemonLevel(method);
+  if (needsBearer && !parsed.bearer) {
+    process.stdout.write(
+      JSON.stringify(err("invalid_params", `bearer token required for '${method}'; pass -b <token>`)) + "\n"
+    );
+    return 1;
+  }
+  const ready = await ensureDaemon(sockPath);
+  if (!ready) {
+    process.stdout.write(JSON.stringify(err("daemon_unreachable", "daemon did not become ready in time")) + "\n");
+    return 1;
+  }
+  return await dispatchCommand(sockPath, parsed, method);
+}
+function isDaemonLevel(method) {
+  return method === "version" || method === "daemon:status" || method.startsWith("daemon:");
+}
+async function runVersion(sockPath) {
+  const cliVersion = getCliVersion();
+  const alive = await probeSock(sockPath, 200);
+  let daemonVersion = null;
+  if (alive) {
+    try {
+      const sock = await connectSock(sockPath, 500);
+      const resp = await requestOnce(sock, { method: "version", bearer: null, params: {} });
+      sock.end();
+      if ("result" in resp && resp.result && typeof resp.result === "object") {
+        const d = resp.result;
+        daemonVersion = d.daemon_version || null;
+      }
+    } catch {
+    }
+  }
+  process.stdout.write(
+    JSON.stringify(ok({ cli_version: cliVersion, daemon_version: daemonVersion })) + "\n"
+  );
+  return 0;
+}
+async function dispatchCommand(sockPath, parsed, method) {
+  const needsStreaming = method === "monitor:events" || method === "monitor:alarm" || method === "daemon:logs" || method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]);
+  if (truthy(parsed.flags["stdin"]) && !("stdin_content" in parsed.flags)) {
+    try {
+      const content = await readStdinAll();
+      parsed.flags["stdin_content"] = content;
+    } catch (e) {
+      process.stdout.write(
+        JSON.stringify(err("invalid_params", `failed to read stdin: ${e.message}`)) + "\n"
+      );
+      return 1;
+    }
+  }
+  const sock = await connectSock(sockPath, 2e3);
+  if (needsStreaming) {
+    return await runStream(sock, parsed, method);
   }
   try {
-    process.kill(-pid, "SIGTERM");
+    const params = {
+      positionals: parsed.positionals,
+      flags: parsed.flags
+    };
+    const stdinContent = parsed.flags["stdin_content"];
+    if (typeof stdinContent === "string") params.stdin_content = stdinContent;
+    const resp = await requestOnce(sock, {
+      method,
+      bearer: parsed.bearer,
+      params
+    });
+    sock.end();
+    if ("error" in resp && resp.error) {
+      process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
+      return 1;
+    }
+    process.stdout.write(JSON.stringify({ ok: true, data: resp.result }) + "\n");
+    return 0;
+  } catch (e) {
+    sock.destroy();
+    process.stdout.write(
+      JSON.stringify(err("internal", e.message ?? "rpc failed")) + "\n"
+    );
+    return 1;
+  }
+}
+async function runStream(sock, parsed, method) {
+  return await new Promise((resolve) => {
+    let finished = false;
+    const finish = (code) => {
+      if (finished) return;
+      finished = true;
+      process.off("SIGINT", onInterrupt);
+      process.off("SIGTERM", onInterrupt);
+      resolve(code);
+    };
+    const reqId = randomId();
+    const params = {
+      positionals: parsed.positionals,
+      flags: parsed.flags,
+      streaming: true
+    };
+    const stdinContent = parsed.flags["stdin_content"];
+    if (typeof stdinContent === "string") params.stdin_content = stdinContent;
+    const req = {
+      kind: "request",
+      id: reqId,
+      method,
+      bearer: parsed.bearer ?? void 0,
+      params
+    };
+    onMessages(sock, (msg) => {
+      if (msg.kind === "stream_chunk" && msg.id === reqId) {
+        process.stdout.write(JSON.stringify(msg.data) + "\n");
+      } else if (msg.kind === "stream_end" && msg.id === reqId) {
+        if (msg.error) {
+          process.stdout.write(JSON.stringify({ ok: false, error: msg.error }) + "\n");
+          finish(1);
+        } else {
+          finish(0);
+        }
+        sock.end();
+      } else if (msg.kind === "response" && msg.id === reqId) {
+        if (msg.error) {
+          process.stdout.write(JSON.stringify({ ok: false, error: msg.error }) + "\n");
+          finish(1);
+        } else {
+          finish(0);
+        }
+        sock.end();
+      }
+    }, () => {
+      finish(finished ? 0 : 1);
+    });
+    const onInterrupt = () => {
+      sock.end();
+      finish(130);
+    };
+    process.once("SIGINT", onInterrupt);
+    process.once("SIGTERM", onInterrupt);
+    writeMessage(sock, req);
+  });
+}
+function requestOnce(sock, opts) {
+  return new Promise((resolve, reject) => {
+    const id = randomId();
+    const req = {
+      kind: "request",
+      id,
+      method: opts.method,
+      bearer: opts.bearer ?? void 0,
+      params: opts.params
+    };
+    let resolved = false;
+    onMessages(sock, (msg) => {
+      if (resolved) return;
+      if (msg.kind === "response" && msg.id === id) {
+        resolved = true;
+        resolve({ id: msg.id, result: msg.result, error: msg.error });
+      }
+    }, () => {
+      if (!resolved) reject(new Error("daemon closed connection"));
+    });
+    sock.once("error", (e) => {
+      if (!resolved) reject(e);
+    });
+    writeMessage(sock, req);
+  });
+}
+async function ensureDaemon(sockPath) {
+  if (await probeSock(sockPath, 200)) return true;
+  spawnDaemon();
+  const deadline = Date.now() + DAEMON_READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await (0, import_promises.setTimeout)(DAEMON_POLL_INTERVAL_MS);
+    if (await probeSock(sockPath, 200)) return true;
+  }
+  return false;
+}
+function spawnDaemon() {
+  const child = (0, import_node_child_process.spawn)(process.execPath, [process.argv[1], "--daemon-internal"], {
+    detached: true,
+    stdio: "ignore",
+    env: process.env
+  });
+  child.unref();
+}
+function getCliVersion() {
+  try {
+    const pkg = require_package();
+    return pkg.version ?? "unknown";
   } catch {
+    return "unknown";
+  }
+}
+function randomId() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+function truthy(v) {
+  return v === true || v === "true" || v === "1";
+}
+
+// src/daemon/run.ts
+var import_node_fs12 = __toESM(require("fs"));
+var import_node_path9 = __toESM(require("path"));
+
+// src/daemon/config.ts
+var import_node_fs2 = __toESM(require("fs"));
+var import_node_path3 = __toESM(require("path"));
+function enumSpec(values, def, needsRestart, desc) {
+  return { type: "enum", enumValues: values, default: def, needsRestart, description: desc };
+}
+var CONFIG_KEYS = {
+  "daemon.idle_shutdown_hours": { type: "int", default: 6, needsRestart: false, description: "idle auto-shutdown threshold (hours)" },
+  "daemon.log_level": enumSpec(["error", "warn", "info", "debug", "trace"], "info", false, "log verbosity"),
+  "daemon.log_path": { type: "path", default: "", needsRestart: true, description: "log file path (empty = default)" },
+  "daemon.data_dir": { type: "path", default: "", needsRestart: true, description: "persistent state root (empty = default)" },
+  "daemon.sock_path": { type: "path", default: "", needsRestart: true, description: "sock path (empty = default)" },
+  "monitor.default_interval_seconds": { type: "int", default: 30, needsRestart: false, description: "default --interval for `monitor events`" },
+  "monitor.event_log_retention": { type: "int", default: 1e4, needsRestart: false, description: "per-user ring-buffer event retention" },
+  "app_server.max_sessions_per_process": { type: "int", default: 16, needsRestart: false, description: "max sessions multiplexed per app-server process (new processes only)" },
+  "app_server.idle_unload_minutes": { type: "int", default: 60, needsRestart: false, description: "idle duration before unloading live session from app-server" },
+  "retry.max_attempts": { type: "int", default: 3, needsRestart: false, description: "server_overloaded retry count" },
+  "retry.initial_delay_seconds": { type: "float", default: 0.25, needsRestart: false, description: "initial backoff" },
+  "retry.max_delay_seconds": { type: "float", default: 2, needsRestart: false, description: "max backoff" },
+  "codex.default_model": { type: "string", default: "", needsRestart: false, description: "default --model for session new" },
+  "codex.default_sandbox": enumSpec(["read-only", "workspace-write", "danger-full-access"], "workspace-write", false, "default --sandbox"),
+  "codex.default_approval": enumSpec(["never", "on-request", "on-failure", "untrusted"], "on-request", false, "default --approval"),
+  "codex.default_effort": enumSpec(["minimal", "low", "medium", "high", "xhigh"], "medium", false, "default --effort")
+};
+var ConfigStore = class {
+  explicit = {};
+  filePath;
+  constructor(dataDir = defaultDataDir()) {
+    this.filePath = configFilePath(dataDir);
+    this.load();
+  }
+  load() {
+    try {
+      const raw = import_node_fs2.default.readFileSync(this.filePath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        for (const [k, v] of Object.entries(parsed)) {
+          if (k in CONFIG_KEYS) this.explicit[k] = v;
+        }
+      }
+    } catch {
+    }
+  }
+  persist() {
+    import_node_fs2.default.mkdirSync(import_node_path3.default.dirname(this.filePath), { recursive: true });
+    const tmp = this.filePath + ".tmp";
+    import_node_fs2.default.writeFileSync(tmp, JSON.stringify(this.explicit, null, 2));
+    import_node_fs2.default.renameSync(tmp, this.filePath);
+  }
+  listKeys() {
+    return Object.keys(CONFIG_KEYS);
+  }
+  spec(key) {
+    return CONFIG_KEYS[key] ?? null;
+  }
+  get(key) {
+    const spec = CONFIG_KEYS[key];
+    if (!spec) return null;
+    if (key in this.explicit) {
+      return { value: this.explicit[key], source: "explicit", spec };
+    }
+    return { value: spec.default, source: "default", spec };
+  }
+  getEffective(key) {
+    const e = this.get(key);
+    return e ? e.value : null;
+  }
+  set(key, rawValue) {
+    const spec = CONFIG_KEYS[key];
+    if (!spec) return { ok: false, error: `unknown key: ${key}` };
+    const parsed = parseValue(rawValue, spec);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    this.explicit[key] = parsed.value;
+    this.persist();
+    return { ok: true, value: parsed.value, needs_restart: spec.needsRestart };
+  }
+  unset(key) {
+    const spec = CONFIG_KEYS[key];
+    if (!spec) return { ok: false, error: `unknown key: ${key}` };
+    if (key in this.explicit) {
+      delete this.explicit[key];
+      this.persist();
+    }
+    return { ok: true, needs_restart: spec.needsRestart };
+  }
+  reset() {
+    this.explicit = {};
+    this.persist();
+  }
+  snapshot() {
+    const explicit = { ...this.explicit };
+    const effective = {};
+    for (const key of Object.keys(CONFIG_KEYS)) {
+      const e = this.get(key);
+      if (e) effective[key] = e.value;
+    }
+    return { explicit, effective };
+  }
+  resolvedLogPath() {
+    const explicit = this.explicit["daemon.log_path"];
+    if (typeof explicit === "string" && explicit.trim().length > 0) return explicit;
+    return defaultLogPath(this.resolvedDataDir());
+  }
+  resolvedSockPath() {
+    const explicit = this.explicit["daemon.sock_path"];
+    if (typeof explicit === "string" && explicit.trim().length > 0) return explicit;
+    return defaultSockPath(this.resolvedDataDir());
+  }
+  resolvedDataDir() {
+    const explicit = this.explicit["daemon.data_dir"];
+    if (typeof explicit === "string" && explicit.trim().length > 0) return explicit;
+    return defaultDataDir();
+  }
+};
+function parseValue(raw, spec) {
+  switch (spec.type) {
+    case "int": {
+      const n = Number(raw);
+      if (!Number.isFinite(n) || !Number.isInteger(n)) return { ok: false, error: `expected integer, got: ${raw}` };
+      return { ok: true, value: n };
+    }
+    case "float": {
+      const n = Number(raw);
+      if (!Number.isFinite(n)) return { ok: false, error: `expected number, got: ${raw}` };
+      return { ok: true, value: n };
+    }
+    case "bool": {
+      if (raw === "true" || raw === "1") return { ok: true, value: true };
+      if (raw === "false" || raw === "0") return { ok: true, value: false };
+      return { ok: false, error: `expected true/false, got: ${raw}` };
+    }
+    case "enum": {
+      if (!spec.enumValues || !spec.enumValues.includes(raw)) {
+        return { ok: false, error: `expected one of: ${spec.enumValues?.join(" / ") ?? ""}` };
+      }
+      return { ok: true, value: raw };
+    }
+    case "path":
+    case "string":
+    default:
+      return { ok: true, value: raw };
+  }
+}
+
+// src/daemon/users.ts
+var import_node_fs3 = __toESM(require("fs"));
+var import_node_path4 = __toESM(require("path"));
+
+// src/errors.ts
+var CodexTeamError = class extends Error {
+  code;
+  data;
+  constructor(code, message, data) {
+    super(message);
+    this.code = code;
+    this.data = data;
+    this.name = "CodexTeamError";
+  }
+};
+function invalidParams(message, data) {
+  return new CodexTeamError("invalid_params", message, data);
+}
+function methodNotFound(method) {
+  return new CodexTeamError("method_not_found", `unknown method '${method}'`);
+}
+
+// src/daemon/users.ts
+var UserRegistry = class {
+  users = /* @__PURE__ */ new Map();
+  dataDir;
+  constructor(dataDir) {
+    this.dataDir = dataDir;
+    this.loadFromDisk();
+  }
+  loadFromDisk() {
+    const root = usersDir(this.dataDir);
+    if (!import_node_fs3.default.existsSync(root)) return;
+    for (const dirname of import_node_fs3.default.readdirSync(root)) {
+      const metaPath = import_node_path4.default.join(root, dirname, "metadata.json");
+      try {
+        const raw = import_node_fs3.default.readFileSync(metaPath, "utf8");
+        const user = JSON.parse(raw);
+        if (user && typeof user.token === "string") {
+          this.users.set(user.token, user);
+        }
+      } catch {
+        try {
+          const token = decodeToken(dirname);
+          this.users.set(token, { token, created_at: (/* @__PURE__ */ new Date()).toISOString() });
+        } catch {
+        }
+      }
+    }
+  }
+  has(token) {
+    return this.users.has(token);
+  }
+  get(token) {
+    return this.users.get(token) ?? null;
+  }
+  list() {
+    return Array.from(this.users.values());
+  }
+  create(token) {
+    validateToken(token);
+    if (this.users.has(token)) {
+      throw new CodexTeamError("user_already_exists", `user '${token}' already exists`);
+    }
+    const user = {
+      token,
+      created_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    this.users.set(token, user);
+    this.persist(user);
+    return user;
+  }
+  destroy(token) {
+    if (!this.users.has(token)) {
+      throw new CodexTeamError("user_not_found", `user '${token}' not found`);
+    }
+    this.users.delete(token);
+    const dir = userDir(token, this.dataDir);
+    try {
+      import_node_fs3.default.rmSync(dir, { recursive: true, force: true });
+    } catch {
+    }
+  }
+  touch(token) {
+    const user = this.users.get(token);
+    if (!user) return;
+    user.last_active_at = (/* @__PURE__ */ new Date()).toISOString();
+    this.persist(user);
+  }
+  persist(user) {
+    const dir = userDir(user.token, this.dataDir);
+    import_node_fs3.default.mkdirSync(dir, { recursive: true });
+    const metaPath = userMetadataPath(user.token, this.dataDir);
+    const tmp = metaPath + ".tmp";
+    import_node_fs3.default.writeFileSync(tmp, JSON.stringify(user, null, 2));
+    import_node_fs3.default.renameSync(tmp, metaPath);
+  }
+};
+function validateToken(token) {
+  if (!token) {
+    throw new CodexTeamError("invalid_params", "token must be non-empty");
+  }
+  if (token.length > 256) {
+    throw new CodexTeamError("invalid_params", "token too long (max 256)");
+  }
+}
+
+// src/daemon/sessions.ts
+var import_node_crypto = __toESM(require("crypto"));
+var import_node_fs5 = __toESM(require("fs"));
+var import_node_path6 = __toESM(require("path"));
+
+// src/logger.ts
+var import_node_fs4 = __toESM(require("fs"));
+var import_node_path5 = __toESM(require("path"));
+var LEVELS = {
+  error: 0,
+  warn: 1,
+  info: 2,
+  debug: 3,
+  trace: 4
+};
+var Logger = class {
+  level = "info";
+  stream = null;
+  logPath = null;
+  configure(opts) {
+    if (opts.level) this.level = opts.level;
+    if (opts.logPath && opts.logPath !== this.logPath) {
+      if (this.stream) this.stream.end();
+      import_node_fs4.default.mkdirSync(import_node_path5.default.dirname(opts.logPath), { recursive: true });
+      this.stream = import_node_fs4.default.createWriteStream(opts.logPath, { flags: "a" });
+      this.logPath = opts.logPath;
+    }
+  }
+  setLevel(level) {
+    this.level = level;
+  }
+  emit(level, msg, meta) {
+    if (LEVELS[level] > LEVELS[this.level]) return;
+    const line = JSON.stringify({
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      level,
+      msg,
+      ...meta ?? {}
+    });
+    if (this.stream) {
+      this.stream.write(line + "\n");
+    } else {
+      process.stderr.write(line + "\n");
+    }
+  }
+  error(msg, meta) {
+    this.emit("error", msg, meta);
+  }
+  warn(msg, meta) {
+    this.emit("warn", msg, meta);
+  }
+  info(msg, meta) {
+    this.emit("info", msg, meta);
+  }
+  debug(msg, meta) {
+    this.emit("debug", msg, meta);
+  }
+  trace(msg, meta) {
+    this.emit("trace", msg, meta);
+  }
+};
+var logger = new Logger();
+
+// src/daemon/sessions.ts
+var NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
+var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var SCHEMA_VERSION = 1;
+var SessionRegistry = class {
+  dataDir;
+  users = /* @__PURE__ */ new Map();
+  globalByThreadId = /* @__PURE__ */ new Map();
+  constructor(dataDir) {
+    this.dataDir = dataDir;
+  }
+  loadForUser(user) {
+    if (this.users.has(user)) return;
+    const bucket = this.emptyBucket();
+    this.users.set(user, bucket);
+    const p = userSessionsPath(user, this.dataDir);
+    if (!import_node_fs5.default.existsSync(p)) return;
+    try {
+      const raw = import_node_fs5.default.readFileSync(p, "utf8");
+      const parsed = JSON.parse(raw);
+      for (const rec of parsed.sessions ?? []) {
+        if (!rec || typeof rec.name !== "string") continue;
+        bucket.byName.set(rec.name, rec);
+        bucket.byThreadId.set(rec.thread_id, rec);
+        this.globalByThreadId.set(rec.thread_id, user);
+      }
+    } catch (e) {
+      logger.warn("failed to load sessions.json", { user, err: e.message });
+    }
+  }
+  loadAllUsers(userTokens) {
+    for (const u of userTokens) this.loadForUser(u);
+  }
+  listLive(user) {
+    this.loadForUser(user);
+    return Array.from(this.users.get(user).byName.values());
+  }
+  get(user, identifier) {
+    this.loadForUser(user);
+    const b = this.users.get(user);
+    const byName = b.byName.get(identifier);
+    if (byName) return byName;
+    const byId = b.byThreadId.get(identifier);
+    if (byId) return byId;
+    return null;
+  }
+  findLiveAnywhere(identifier) {
+    const ownerByThread = this.globalByThreadId.get(identifier);
+    if (ownerByThread) {
+      const rec = this.users.get(ownerByThread)?.byThreadId.get(identifier);
+      if (rec) return { user: ownerByThread, record: rec };
+    }
+    for (const [user, bucket] of this.users) {
+      const rec = bucket.byName.get(identifier);
+      if (rec) return { user, record: rec };
+    }
+    return null;
+  }
+  add(user, record) {
+    validateRecord(record);
+    this.loadForUser(user);
+    const b = this.users.get(user);
+    if (b.byName.has(record.name)) {
+      throw new CodexTeamError("invalid_params", `session '${record.name}' already exists`);
+    }
+    if (b.byThreadId.has(record.thread_id)) {
+      throw new CodexTeamError("invalid_params", `thread_id '${record.thread_id}' already registered`);
+    }
+    const existingGlobal = this.globalByThreadId.get(record.thread_id);
+    if (existingGlobal && existingGlobal !== user) {
+      throw new CodexTeamError("session_busy", `thread '${record.thread_id}' is live under another user`);
+    }
+    b.byName.set(record.name, record);
+    b.byThreadId.set(record.thread_id, record);
+    this.globalByThreadId.set(record.thread_id, user);
+    this.persist(user);
+  }
+  update(user, name, patch) {
+    this.loadForUser(user);
+    const b = this.users.get(user);
+    const rec = b.byName.get(name);
+    if (!rec) throw new CodexTeamError("session_not_found", `session '${name}' not found`);
+    if (patch.name && patch.name !== rec.name) {
+      if (!NAME_RE.test(patch.name)) throw invalidParams(`invalid session name: ${patch.name}`);
+      if (patch.name.startsWith("th-")) throw invalidParams("session name cannot start with 'th-'");
+      if (b.byName.has(patch.name)) throw invalidParams(`session '${patch.name}' already exists`);
+      b.byName.delete(rec.name);
+      rec.name = patch.name;
+      b.byName.set(rec.name, rec);
+    }
+    if (patch.last_active_at !== void 0) rec.last_active_at = patch.last_active_at;
+    if (patch.turn_count !== void 0) rec.turn_count = patch.turn_count;
+    if (patch.model !== void 0) rec.model = patch.model;
+    if (patch.cwd !== void 0) rec.cwd = patch.cwd;
+    if (patch.sandbox !== void 0) rec.sandbox = patch.sandbox;
+    if (patch.approval !== void 0) rec.approval = patch.approval;
+    if (patch.effort !== void 0) rec.effort = patch.effort;
+    if (patch.profile !== void 0) rec.profile = patch.profile;
+    if (patch.app_server_client_id !== void 0) rec.app_server_client_id = patch.app_server_client_id;
+    this.persist(user);
+    return rec;
+  }
+  remove(user, name) {
+    this.loadForUser(user);
+    const b = this.users.get(user);
+    const rec = b.byName.get(name);
+    if (!rec) return null;
+    b.byName.delete(rec.name);
+    b.byThreadId.delete(rec.thread_id);
+    this.globalByThreadId.delete(rec.thread_id);
+    this.persist(user);
+    return rec;
+  }
+  removeAllForUser(user) {
+    this.loadForUser(user);
+    const bucket = this.users.get(user);
+    if (!bucket) return [];
+    const removed = Array.from(bucket.byName.values());
+    for (const rec of removed) {
+      this.globalByThreadId.delete(rec.thread_id);
+    }
+    this.users.delete(user);
+    return removed;
+  }
+  touch(user, name) {
+    this.loadForUser(user);
+    const b = this.users.get(user);
+    const rec = b.byName.get(name);
+    if (!rec) return;
+    rec.last_active_at = (/* @__PURE__ */ new Date()).toISOString();
+    this.persist(user);
+  }
+  persist(user) {
+    const dir = userDir(user, this.dataDir);
+    import_node_fs5.default.mkdirSync(dir, { recursive: true });
+    const p = userSessionsPath(user, this.dataDir);
+    const bucket = this.users.get(user);
+    const payload = {
+      schema_version: SCHEMA_VERSION,
+      sessions: bucket ? Array.from(bucket.byName.values()) : []
+    };
+    const tmp = p + ".tmp";
+    import_node_fs5.default.writeFileSync(tmp, JSON.stringify(payload, null, 2));
+    import_node_fs5.default.renameSync(tmp, p);
+  }
+  emptyBucket() {
+    return { byName: /* @__PURE__ */ new Map(), byThreadId: /* @__PURE__ */ new Map() };
+  }
+};
+function validateSessionName(name) {
+  if (!NAME_RE.test(name)) throw invalidParams(`invalid session name: ${name}`);
+  if (UUID_RE.test(name)) throw invalidParams("session name must not be a UUID (reserved for thread_id)");
+  if (name.startsWith("th-")) throw invalidParams("session name cannot start with 'th-' (reserved)");
+}
+function validateRecord(record) {
+  validateSessionName(record.name);
+  if (!record.thread_id) throw invalidParams("thread_id is required");
+}
+function generateSessionName() {
+  return "s-" + import_node_crypto.default.randomBytes(4).toString("hex");
+}
+function looksLikeThreadId(s) {
+  return UUID_RE.test(s) || s.startsWith("th-");
+}
+
+// src/daemon/events.ts
+var import_node_fs6 = __toESM(require("fs"));
+var import_node_path7 = __toESM(require("path"));
+var DELTA_SUFFIX = "_delta";
+var EventLog = class {
+  retention;
+  dataDir;
+  counters = /* @__PURE__ */ new Map();
+  buffers = /* @__PURE__ */ new Map();
+  subscribers = /* @__PURE__ */ new Map();
+  streams = /* @__PURE__ */ new Map();
+  loaded = /* @__PURE__ */ new Set();
+  rotatedSinceCompact = /* @__PURE__ */ new Map();
+  constructor(retention = 1e4, dataDir = null) {
+    this.retention = Math.max(100, retention);
+    this.dataDir = dataDir;
+  }
+  /** Load user's persisted events from disk (idempotent). */
+  loadUser(user) {
+    if (this.loaded.has(user)) return;
+    this.loaded.add(user);
+    if (!this.dataDir) return;
+    const filePath = userEventLogPath(user, this.dataDir);
+    if (!import_node_fs6.default.existsSync(filePath)) return;
+    try {
+      const raw = import_node_fs6.default.readFileSync(filePath, "utf8");
+      const lines = raw.split("\n").filter(Boolean);
+      const tail = lines.slice(Math.max(0, lines.length - this.retention));
+      const buf = [];
+      let maxSeq = 0;
+      for (const line of tail) {
+        try {
+          const ev = JSON.parse(line);
+          if (ev && typeof ev.id === "string") {
+            buf.push(ev);
+            const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
+            if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
+          }
+        } catch {
+        }
+      }
+      this.buffers.set(user, buf);
+      this.counters.set(user, maxSeq);
+      if (lines.length > this.retention * 1.5) this.compactFile(user, buf);
+    } catch (e) {
+      logger.warn("failed to load event log", { user, err: e.message });
+    }
+  }
+  setRetention(n) {
+    this.retention = Math.max(100, n);
+    for (const [user, buf] of this.buffers) {
+      let rotated = false;
+      while (buf.length > this.retention) buf.shift();
+      if (buf.length > this.retention) rotated = true;
+      if (rotated) this.bumpCompactionDebt(user);
+    }
+  }
+  retainedCount(user) {
+    return this.buffers.get(user)?.length ?? 0;
+  }
+  append(user, input) {
+    this.loadUser(user);
+    const seq = (this.counters.get(user) ?? 0) + 1;
+    this.counters.set(user, seq);
+    const event = {
+      id: `evt-${seq}`,
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      ...input
+    };
+    const buf = this.buffers.get(user) ?? [];
+    buf.push(event);
+    let rotated = false;
+    while (buf.length > this.retention) {
+      buf.shift();
+      rotated = true;
+    }
+    this.buffers.set(user, buf);
+    this.appendToFile(user, event);
+    if (rotated) this.bumpCompactionDebt(user);
+    for (const cb of this.subscribers.get(user) ?? []) {
+      try {
+        cb(event);
+      } catch {
+      }
+    }
+    return event;
+  }
+  async flush() {
+    const promises = [];
+    for (const [, stream] of this.streams) {
+      promises.push(new Promise((resolve) => stream.end(() => resolve())));
+    }
+    this.streams.clear();
+    await Promise.all(promises);
+  }
+  async clearUser(user) {
+    const stream = this.streams.get(user);
+    this.streams.delete(user);
+    if (stream) {
+      await new Promise((resolve) => stream.end(() => resolve()));
+    }
+    this.rotatedSinceCompact.delete(user);
+    this.counters.delete(user);
+    this.buffers.delete(user);
+    this.subscribers.delete(user);
+    this.loaded.delete(user);
+  }
+  appendToFile(user, event) {
+    if (!this.dataDir) return;
+    let stream = this.streams.get(user);
+    if (!stream) {
+      const filePath = userEventLogPath(user, this.dataDir);
+      try {
+        import_node_fs6.default.mkdirSync(import_node_path7.default.dirname(filePath), { recursive: true });
+        import_node_fs6.default.mkdirSync(userDir(user, this.dataDir), { recursive: true });
+      } catch {
+      }
+      stream = import_node_fs6.default.createWriteStream(filePath, { flags: "a" });
+      this.streams.set(user, stream);
+    }
+    stream.write(JSON.stringify(event) + "\n");
+  }
+  compactFile(user, buf) {
+    if (!this.dataDir) return;
+    const filePath = userEventLogPath(user, this.dataDir);
+    try {
+      const tmp = filePath + ".tmp";
+      import_node_fs6.default.writeFileSync(tmp, buf.map((e) => JSON.stringify(e)).join("\n") + (buf.length ? "\n" : ""));
+      const prev = this.streams.get(user);
+      if (prev) {
+        prev.end();
+        this.streams.delete(user);
+      }
+      import_node_fs6.default.renameSync(tmp, filePath);
+      this.rotatedSinceCompact.set(user, 0);
+    } catch (e) {
+      logger.warn("event log compaction failed", { user, err: e.message });
+    }
+  }
+  subscribe(user, cb) {
+    let set = this.subscribers.get(user);
+    if (!set) {
+      set = /* @__PURE__ */ new Set();
+      this.subscribers.set(user, set);
+    }
+    set.add(cb);
+    return {
+      dispose: () => {
+        const s = this.subscribers.get(user);
+        if (!s) return;
+        s.delete(cb);
+        if (s.size === 0) this.subscribers.delete(user);
+      }
+    };
+  }
+  pendingCount(user) {
+    return this.buffers.get(user)?.length ?? 0;
+  }
+  listSince(user, sinceId, opts = { includeDelta: false }) {
+    this.loadUser(user);
+    const buf = this.buffers.get(user) ?? [];
+    let slice;
+    if (!sinceId) {
+      slice = buf.slice();
+    } else {
+      const idx = buf.findIndex((e) => e.id === sinceId);
+      if (idx < 0) {
+        if (buf.length > 0 && compareSeq(sinceId, buf[0].id) < 0) {
+          return { ok: false, reason: "id_rotated", oldest_available_id: buf[0].id };
+        }
+        slice = [];
+      } else {
+        slice = buf.slice(idx + 1);
+      }
+    }
+    if (!opts.includeDelta) slice = slice.filter((e) => !e.type.endsWith(DELTA_SUFFIX));
+    return { ok: true, events: slice };
+  }
+  oldestId(user) {
+    const buf = this.buffers.get(user);
+    return buf && buf.length > 0 ? buf[0].id : null;
+  }
+  bumpCompactionDebt(user) {
+    const debt = (this.rotatedSinceCompact.get(user) ?? 0) + 1;
+    this.rotatedSinceCompact.set(user, debt);
+    if (debt >= Math.max(100, Math.floor(this.retention / 2))) {
+      this.compactFile(user, this.buffers.get(user) ?? []);
+    }
+  }
+};
+function compareSeq(a, b) {
+  const na = parseInt(a.replace(/^evt-/, ""), 10);
+  const nb = parseInt(b.replace(/^evt-/, ""), 10);
+  if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+  return a.localeCompare(b);
+}
+function isDeltaType(type) {
+  return type.endsWith(DELTA_SUFFIX);
+}
+
+// src/daemon/pending.ts
+var import_node_crypto2 = __toESM(require("crypto"));
+var PendingRegistry = class {
+  byRequestId = /* @__PURE__ */ new Map();
+  byJsonrpcKey = /* @__PURE__ */ new Map();
+  add(entry) {
+    const request_id = `req-${import_node_crypto2.default.randomBytes(4).toString("hex")}`;
+    const rec = {
+      ...entry,
+      request_id,
+      created_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    this.byRequestId.set(request_id, rec);
+    this.byJsonrpcKey.set(this.jsonrpcKey(entry.client, entry.jsonrpc_id), request_id);
+    return rec;
+  }
+  get(requestId) {
+    return this.byRequestId.get(requestId) ?? null;
+  }
+  remove(requestId) {
+    const rec = this.byRequestId.get(requestId);
+    if (!rec) return null;
+    this.byRequestId.delete(requestId);
+    this.byJsonrpcKey.delete(this.jsonrpcKey(rec.client, rec.jsonrpc_id));
+    return rec;
+  }
+  removeByJsonrpcId(client, jsonrpcId) {
+    const reqId = this.byJsonrpcKey.get(this.jsonrpcKey(client, jsonrpcId));
+    if (!reqId) return null;
+    return this.remove(reqId);
+  }
+  listForUser(user) {
+    return Array.from(this.byRequestId.values()).filter((r) => r.user === user);
+  }
+  removeForSession(user, sessionName) {
+    const removed = [];
+    for (const rec of Array.from(this.byRequestId.values())) {
+      if (rec.user === user && rec.session_name === sessionName) {
+        this.remove(rec.request_id);
+        removed.push(rec);
+      }
+    }
+    return removed;
+  }
+  removeForUser(user) {
+    const removed = [];
+    for (const rec of Array.from(this.byRequestId.values())) {
+      if (rec.user === user) {
+        this.remove(rec.request_id);
+        removed.push(rec);
+      }
+    }
+    return removed;
+  }
+  jsonrpcKey(client, id) {
+    const tag = client.__ct_tag;
+    const ref = tag ?? assignTag(client);
+    return `${ref}::${id}`;
+  }
+};
+function assignTag(client) {
+  const tag = import_node_crypto2.default.randomBytes(4).toString("hex");
+  client.__ct_tag = tag;
+  return tag;
+}
+
+// src/codex/retry.ts
+var import_promises2 = require("timers/promises");
+
+// src/codex/errors.ts
+var AppServerError = class extends Error {
+  kind;
+  constructor(message, kind = "app_server_error") {
+    super(message);
+    this.name = this.constructor.name;
+    this.kind = kind;
+  }
+};
+var JsonRpcError = class extends AppServerError {
+  code;
+  rpcMessage;
+  data;
+  codexErrorInfo;
+  additionalDetails;
+  constructor(code, message, data) {
+    super(`JSON-RPC error ${code}: ${message}`, "json_rpc_error");
+    this.code = code;
+    this.rpcMessage = message;
+    this.data = data;
+    this.codexErrorInfo = extractCodexErrorInfo(data);
+    this.additionalDetails = extractAdditionalDetails(data);
+  }
+};
+var TransportClosedError = class extends AppServerError {
+  constructor(message) {
+    super(message, "transport_closed");
+  }
+};
+var ParseError = class extends JsonRpcError {
+};
+var InvalidRequestError = class extends JsonRpcError {
+};
+var MethodNotFoundError = class extends JsonRpcError {
+};
+var InvalidParamsError = class extends JsonRpcError {
+};
+var InternalRpcError = class extends JsonRpcError {
+};
+var ServerBusyError = class extends JsonRpcError {
+};
+var RetryLimitExceededError = class extends ServerBusyError {
+};
+function mapJsonRpcError(code, message, data) {
+  if (code === -32700) return new ParseError(code, message, data);
+  if (code === -32600) return new InvalidRequestError(code, message, data);
+  if (code === -32601) return new MethodNotFoundError(code, message, data);
+  if (code === -32602) return new InvalidParamsError(code, message, data);
+  if (code === -32603) return new InternalRpcError(code, message, data);
+  if (code >= -32099 && code <= -32e3) {
+    const overloaded = isServerOverloaded(data);
+    const retryExhausted = containsRetryLimitText(message);
+    if (overloaded && retryExhausted) return new RetryLimitExceededError(code, message, data);
+    if (overloaded) return new ServerBusyError(code, message, data);
+    if (retryExhausted) return new RetryLimitExceededError(code, message, data);
+  }
+  return new JsonRpcError(code, message, data);
+}
+function isRetryable(err2) {
+  if (err2 instanceof RetryLimitExceededError) return false;
+  if (err2 instanceof ServerBusyError) return true;
+  if (err2 instanceof JsonRpcError) return isServerOverloaded(err2.data);
+  return false;
+}
+function containsRetryLimitText(message) {
+  const lower = message.toLowerCase();
+  return lower.includes("retry limit") || lower.includes("too many failed attempts");
+}
+function isServerOverloaded(data) {
+  if (data === void 0 || data === null) return false;
+  if (typeof data === "string") return data.toLowerCase() === "server_overloaded";
+  if (Array.isArray(data)) return data.some(isServerOverloaded);
+  if (typeof data === "object") {
+    const obj = data;
+    const direct = obj["codex_error_info"] ?? obj["codexErrorInfo"] ?? obj["errorInfo"];
+    if (typeof direct === "string" && direct.toLowerCase() === "server_overloaded") return true;
+    if (direct && typeof direct === "object" && !Array.isArray(direct)) {
+      for (const v of Object.values(direct)) {
+        if (typeof v === "string" && v.toLowerCase() === "server_overloaded") return true;
+      }
+    }
+    for (const v of Object.values(obj)) {
+      if (isServerOverloaded(v)) return true;
+    }
+  }
+  return false;
+}
+function extractCodexErrorInfo(data) {
+  if (data === void 0 || data === null || typeof data !== "object") return null;
+  if (Array.isArray(data)) return null;
+  const obj = data;
+  const direct = obj["codex_error_info"] ?? obj["codexErrorInfo"] ?? obj["errorInfo"];
+  if (typeof direct === "string") return snakeCaseVariant(direct);
+  if (direct && typeof direct === "object" && !Array.isArray(direct)) {
+    const innerObj = direct;
+    const type = innerObj["type"];
+    if (typeof type === "string") return snakeCaseVariant(type);
+  }
+  return null;
+}
+function extractAdditionalDetails(data) {
+  if (data === void 0 || data === null || typeof data !== "object") return null;
+  if (Array.isArray(data)) return null;
+  const obj = data;
+  const v = obj["additional_details"] ?? obj["additionalDetails"];
+  return typeof v === "string" ? v : null;
+}
+function snakeCaseVariant(name) {
+  return name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/-/g, "_").toLowerCase();
+}
+
+// src/codex/retry.ts
+var DEFAULT_RETRY = {
+  maxAttempts: 3,
+  initialDelayMs: 250,
+  maxDelayMs: 2e3,
+  jitterRatio: 0.2
+};
+async function retryOnOverload(op, options = DEFAULT_RETRY) {
+  const { maxAttempts, initialDelayMs, maxDelayMs, jitterRatio } = options;
+  if (maxAttempts < 1) throw new Error("maxAttempts must be >= 1");
+  let delay = initialDelayMs;
+  let attempt = 0;
+  for (; ; ) {
+    attempt++;
+    try {
+      return await op();
+    } catch (e) {
+      if (attempt >= maxAttempts) throw e;
+      if (!isRetryable(e)) throw e;
+      if (e instanceof RetryLimitExceededError) throw e;
+      const cap = Math.min(maxDelayMs, delay);
+      const jitter = cap * jitterRatio;
+      const sleepMs = Math.max(0, cap + (Math.random() * 2 - 1) * jitter);
+      if (sleepMs > 0) await (0, import_promises2.setTimeout)(sleepMs);
+      delay = Math.min(maxDelayMs, delay * 2);
+    }
+  }
+}
+
+// src/codex/rpc.ts
+async function threadStart(client, params, retry = DEFAULT_RETRY) {
+  const result = await retryOnOverload(() => client.request("thread/start", params), retry);
+  return coerceLifecycle(result, "thread/start");
+}
+async function threadResume(client, threadId, retry = DEFAULT_RETRY) {
+  const result = await retryOnOverload(() => client.request("thread/resume", { threadId }), retry);
+  return coerceLifecycle(result, "thread/resume");
+}
+async function threadFork(client, threadId, atTurnId, retry = DEFAULT_RETRY) {
+  const params = { threadId };
+  if (atTurnId) params.atTurnId = atTurnId;
+  const result = await retryOnOverload(() => client.request("thread/fork", params), retry);
+  return coerceLifecycle(result, "thread/fork");
+}
+async function threadSetName(client, threadId, name) {
+  await client.request("thread/name/set", { threadId, name });
+}
+async function threadList(client, params = {}) {
+  const result = await client.request("thread/list", params);
+  const obj = asObject(result);
+  const data = Array.isArray(obj.data) ? obj.data : [];
+  return {
+    data,
+    nextCursor: obj.nextCursor ?? null,
+    backwardsCursor: obj.backwardsCursor ?? null
+  };
+}
+async function threadRead(client, threadId) {
+  const result = await client.request("thread/read", { threadId });
+  const obj = asObject(result);
+  const thread = asObject(obj.thread);
+  if (!thread.id) throw new Error(`thread/read: response missing thread.id`);
+  return { thread };
+}
+async function threadUnsubscribe(client, threadId) {
+  try {
+    await client.request("thread/unsubscribe", { threadId });
+  } catch {
+  }
+}
+async function threadTurnsList(client, threadId, opts = {}) {
+  const params = { threadId };
+  if (opts.limit !== void 0) params.limit = opts.limit;
+  if (opts.cursor !== void 0) params.cursor = opts.cursor;
+  if (opts.sortDirection !== void 0) params.sortDirection = opts.sortDirection;
+  const result = await client.request("thread/turns/list", params);
+  const obj = asObject(result);
+  return {
+    data: Array.isArray(obj.data) ? obj.data : [],
+    nextCursor: obj.nextCursor ?? null,
+    backwardsCursor: obj.backwardsCursor ?? null
+  };
+}
+async function turnStart(client, threadId, input, retry = DEFAULT_RETRY) {
+  const result = await retryOnOverload(() => client.request("turn/start", { threadId, input }), retry);
+  const obj = asObject(result);
+  const turn = asObject(obj.turn);
+  const turnId = typeof turn.id === "string" ? turn.id : null;
+  if (!turnId) throw new Error("turn/start: response missing turn.id");
+  return { turnId };
+}
+async function turnSteer(client, threadId, turnId, input, retry = DEFAULT_RETRY) {
+  await retryOnOverload(() => client.request("turn/steer", { threadId, expectedTurnId: turnId, input }), retry);
+}
+async function turnInterrupt(client, threadId, turnId) {
+  await client.request("turn/interrupt", { threadId, turnId });
+}
+function threadIdOf(resp) {
+  return resp.thread.id;
+}
+function coerceLifecycle(result, rpc) {
+  const obj = asObject(result);
+  const thread = asObject(obj.thread);
+  if (typeof thread.id !== "string" || !thread.id) {
+    throw new Error(`${rpc}: response missing thread.id`);
+  }
+  return { ...obj, thread };
+}
+function asObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  return {};
+}
+
+// src/daemon/queues.ts
+var TurnQueues = class {
+  states = /* @__PURE__ */ new Map();
+  /**
+   * Either dispatch immediately or enqueue. Returns `{ started, queued_depth }`.
+   * If no turn is active, starts a new turn and sets currentTurnId.
+   */
+  async sendOrQueue(sessionKey, client, threadId, input, retry) {
+    return await this.withSessionLock(sessionKey, async (state) => {
+      if (state.currentTurnId || state.draining) {
+        state.pending.push({ input, enqueuedAt: (/* @__PURE__ */ new Date()).toISOString() });
+        return { started: false, turn_id: state.currentTurnId, queued_depth: state.pending.length };
+      }
+      const res = await turnStart(client, threadId, input, retry);
+      state.currentTurnId = res.turnId;
+      return { started: true, turn_id: res.turnId, queued_depth: state.pending.length };
+    });
+  }
+  getCurrentTurn(sessionKey) {
+    return this.states.get(sessionKey)?.currentTurnId ?? null;
+  }
+  setCurrentTurn(sessionKey, turnId) {
+    const s = this.getOrInit(sessionKey);
+    s.currentTurnId = turnId;
+  }
+  async onTurnCompleted(sessionKey, client, threadId, retry) {
+    return await this.withSessionLock(sessionKey, async (state) => {
+      state.draining = true;
+      state.currentTurnId = null;
+      if (state.pending.length === 0 || !client) {
+        state.draining = false;
+        return null;
+      }
+      const next = state.pending.shift();
+      try {
+        const res = await turnStart(client, threadId, next.input, retry);
+        state.currentTurnId = res.turnId;
+        return res.turnId;
+      } catch (e) {
+        logger.warn("failed to dispatch queued turn", { session: sessionKey, err: e.message });
+        return null;
+      } finally {
+        state.draining = false;
+      }
+    });
+  }
+  dispose(sessionKey) {
+    const state = this.states.get(sessionKey);
+    this.states.delete(sessionKey);
+    return { dropped: state?.pending.length ?? 0 };
+  }
+  depth(sessionKey) {
+    return this.states.get(sessionKey)?.pending.length ?? 0;
+  }
+  rekey(oldKey, newKey) {
+    if (oldKey === newKey) return;
+    const state = this.states.get(oldKey);
+    if (!state) return;
+    this.states.delete(oldKey);
+    this.states.set(newKey, state);
+  }
+  getOrInit(sessionKey) {
+    let s = this.states.get(sessionKey);
+    if (!s) {
+      s = { pending: [], currentTurnId: null, draining: false, serial: Promise.resolve() };
+      this.states.set(sessionKey, s);
+    }
+    return s;
+  }
+  async withSessionLock(sessionKey, fn) {
+    const state = this.getOrInit(sessionKey);
+    const prev = state.serial;
+    let release;
+    state.serial = new Promise((resolve) => {
+      release = resolve;
+    });
+    await prev;
+    try {
+      return await fn(state);
+    } finally {
+      release();
+    }
+  }
+};
+
+// src/daemon/orphans.ts
+var import_node_fs8 = __toESM(require("fs"));
+var import_node_path8 = __toESM(require("path"));
+
+// src/daemon/processes.ts
+var import_node_fs7 = __toESM(require("fs"));
+var import_node_child_process2 = require("child_process");
+function readLinuxCmdline(pid) {
+  try {
+    const raw = import_node_fs7.default.readFileSync(`/proc/${pid}/cmdline`);
+    return raw.toString("utf8").replace(/\0/g, " ").trim() || null;
+  } catch {
+    return null;
+  }
+}
+function readPsCommand(pid) {
+  try {
+    const raw = (0, import_node_child_process2.execFileSync)("ps", ["-p", String(pid), "-o", "command="], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const cmd = raw.trim();
+    return cmd.length > 0 ? cmd : null;
+  } catch {
+    return null;
+  }
+}
+function readProcessCommandLine(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  if (process.platform === "linux") return readLinuxCmdline(pid);
+  if (process.platform === "darwin" || process.platform === "freebsd") return readPsCommand(pid);
+  return null;
+}
+function isLikelyCodexAppServerProcess(pid) {
+  const cmd = readProcessCommandLine(pid);
+  if (!cmd) return false;
+  return cmd.includes("app-server") && (cmd.includes("codex") || cmd.includes("codex-cli-bin"));
+}
+function isLikelyCodexTeamDaemonProcess(pid) {
+  const cmd = readProcessCommandLine(pid);
+  return cmd !== null && cmd.includes("--daemon-internal");
+}
+
+// src/daemon/orphans.ts
+function orphanPidsPath(dataDir) {
+  return import_node_path8.default.join(dataDir, "codex-pids.json");
+}
+function readPidFile(dataDir) {
+  const p = orphanPidsPath(dataDir);
+  if (!import_node_fs8.default.existsSync(p)) return [];
+  try {
+    const raw = import_node_fs8.default.readFileSync(p, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x) => typeof x === "number" && Number.isFinite(x));
+  } catch {
+    return [];
+  }
+}
+function writePidFile(dataDir, pids) {
+  const p = orphanPidsPath(dataDir);
+  try {
+    import_node_fs8.default.mkdirSync(import_node_path8.default.dirname(p), { recursive: true });
+    const tmp = p + ".tmp";
+    import_node_fs8.default.writeFileSync(tmp, JSON.stringify(pids));
+    import_node_fs8.default.renameSync(tmp, p);
+  } catch (e) {
+    logger.warn("failed to persist codex pid file", { err: e.message });
+  }
+}
+function reapOrphans(dataDir) {
+  const pids = readPidFile(dataDir);
+  let killed = 0;
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      continue;
+    }
+    if (!isLikelyCodexAppServerProcess(pid)) {
+      logger.warn("skipping stale non-codex pid", { pid });
+      continue;
+    }
     try {
       process.kill(pid, "SIGTERM");
+      killed++;
     } catch {
+    }
+  }
+  if (killed > 0) {
+    logger.info("reaped orphan codex processes", { count: killed });
+  }
+  writePidFile(dataDir, []);
+  return killed;
+}
+var PidTracker = class {
+  dataDir;
+  pids = /* @__PURE__ */ new Set();
+  constructor(dataDir) {
+    this.dataDir = dataDir;
+  }
+  track(pid) {
+    if (!Number.isFinite(pid) || pid <= 0) return;
+    this.pids.add(pid);
+    this.persist();
+  }
+  untrack(pid) {
+    if (this.pids.delete(pid)) this.persist();
+  }
+  snapshot() {
+    return Array.from(this.pids);
+  }
+  persist() {
+    writePidFile(this.dataDir, Array.from(this.pids));
+  }
+};
+
+// src/codex/pool.ts
+var import_node_events2 = require("events");
+
+// src/codex/appServerClient.ts
+var import_node_child_process3 = require("child_process");
+var import_node_events = require("events");
+var import_node_crypto3 = require("crypto");
+var STDERR_TAIL_LINES = 400;
+var AppServerClient = class extends import_node_events.EventEmitter {
+  proc = null;
+  buf = "";
+  pending = /* @__PURE__ */ new Map();
+  stderrTail = [];
+  lastPid = null;
+  options;
+  initialized = false;
+  constructor(options = {}) {
+    super();
+    this.options = {
+      bin: options.bin ?? "codex",
+      args: options.args ?? [],
+      cwd: options.cwd,
+      env: options.env,
+      configOverrides: options.configOverrides ?? [],
+      clientInfo: options.clientInfo,
+      experimentalApi: options.experimentalApi ?? true,
+      stderrTailLines: options.stderrTailLines ?? STDERR_TAIL_LINES
+    };
+  }
+  isAlive() {
+    return this.proc !== null && this.proc.exitCode === null && this.proc.signalCode === null;
+  }
+  pid() {
+    return this.proc?.pid ?? this.lastPid;
+  }
+  stderrTailText() {
+    return this.stderrTail.join("\n");
+  }
+  async start() {
+    if (this.proc) throw new Error("app-server already started");
+    const args = [...this.options.args];
+    for (const kv of this.options.configOverrides) args.push("--config", kv);
+    args.push("app-server", "--listen", "stdio://");
+    const env = { ...process.env, ...this.options.env ?? {} };
+    logger.debug("spawning app-server", { bin: this.options.bin, args });
+    this.proc = (0, import_node_child_process3.spawn)(this.options.bin, args, {
+      cwd: this.options.cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    this.lastPid = this.proc.pid ?? null;
+    this.proc.on("error", (err2) => {
+      logger.error("app-server spawn error", { err: err2.message });
+      this.failAllPending(new TransportClosedError(`spawn error: ${err2.message}`));
+      this.emit("error", err2);
+    });
+    this.proc.on("exit", (code, signal) => {
+      logger.info("app-server exited", { code, signal });
+      this.failAllPending(new TransportClosedError(`app-server exited (code=${code}, signal=${signal})`));
+      this.emit("close", code);
+      this.proc = null;
+      this.initialized = false;
+    });
+    this.proc.stdout.setEncoding("utf8");
+    this.proc.stdout.on("data", (chunk) => this.onStdout(chunk));
+    this.proc.stderr.setEncoding("utf8");
+    this.proc.stderr.on("data", (chunk) => this.onStderr(chunk));
+    const init = await this.request("initialize", {
+      clientInfo: this.options.clientInfo ?? { name: "codex-team", title: "codex-team", version: "0.5.0" },
+      capabilities: { experimentalApi: this.options.experimentalApi }
+    });
+    this.notify("initialized", {});
+    this.initialized = true;
+    return init;
+  }
+  async close(graceMs = 2e3) {
+    const proc = this.proc;
+    if (!proc) return;
+    this.proc = null;
+    this.initialized = false;
+    try {
+      proc.stdin.end();
+    } catch {
+    }
+    const exited = new Promise((resolve) => proc.once("exit", () => resolve()));
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+    }
+    const timer = setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+      }
+    }, graceMs);
+    try {
+      await exited;
+    } finally {
+      clearTimeout(timer);
+    }
+    this.failAllPending(new TransportClosedError("app-server closed"));
+  }
+  request(method, params = {}) {
+    if (!this.proc) return Promise.reject(new TransportClosedError("app-server is not running"));
+    if (this.proc.exitCode !== null) return Promise.reject(new TransportClosedError("app-server already exited"));
+    const id = (0, import_node_crypto3.randomUUID)();
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      try {
+        this.writeMessage({ jsonrpc: "2.0", id, method, params });
+      } catch (e) {
+        this.pending.delete(id);
+        reject(e);
+      }
+    });
+  }
+  notify(method, params = {}) {
+    if (!this.proc) throw new TransportClosedError("app-server is not running");
+    this.writeMessage({ jsonrpc: "2.0", method, params });
+  }
+  respond(id, result) {
+    if (!this.proc) return;
+    this.writeMessage({ jsonrpc: "2.0", id, result });
+  }
+  respondError(id, code, message, data) {
+    if (!this.proc) return;
+    const error = { code, message };
+    if (data !== void 0) error.data = data;
+    this.writeMessage({ jsonrpc: "2.0", id, error });
+  }
+  isInitialized() {
+    return this.initialized;
+  }
+  writeMessage(msg) {
+    const proc = this.proc;
+    if (!proc || !proc.stdin.writable) {
+      throw new TransportClosedError("app-server stdin closed");
+    }
+    const line = JSON.stringify(msg) + "\n";
+    proc.stdin.write(line);
+  }
+  onStdout(chunk) {
+    this.buf += chunk;
+    let idx;
+    while ((idx = this.buf.indexOf("\n")) >= 0) {
+      const line = this.buf.slice(0, idx);
+      this.buf = this.buf.slice(idx + 1);
+      if (!line.trim()) continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        logger.warn("malformed line from app-server", { snippet: line.slice(0, 200) });
+        continue;
+      }
+      this.dispatchIncoming(parsed);
+    }
+  }
+  onStderr(chunk) {
+    const lines = chunk.split("\n");
+    for (const line of lines) {
+      if (!line) continue;
+      this.stderrTail.push(line);
+      if (this.stderrTail.length > this.options.stderrTailLines) this.stderrTail.shift();
+    }
+  }
+  dispatchIncoming(msg) {
+    const hasId = "id" in msg;
+    const hasMethod = typeof msg.method === "string";
+    const method = typeof msg.method === "string" ? msg.method : null;
+    if (hasMethod && hasId) {
+      this.emit("server_request", {
+        id: msg.id,
+        method,
+        params: msg.params ?? null
+      });
       return;
     }
+    if (hasMethod && !hasId) {
+      this.emit("notification", { method, params: msg.params ?? null });
+      return;
+    }
+    if (hasId) {
+      const id = String(msg.id);
+      const pending = this.pending.get(id);
+      if (!pending) {
+        logger.debug("unmatched response id", { id });
+        return;
+      }
+      this.pending.delete(id);
+      if ("error" in msg && msg.error && typeof msg.error === "object") {
+        const errObj = msg.error;
+        const code = typeof errObj.code === "number" ? errObj.code : -32e3;
+        const message = typeof errObj.message === "string" ? errObj.message : "unknown";
+        pending.reject(mapJsonRpcError(code, message, errObj.data));
+      } else {
+        pending.resolve(msg.result ?? null);
+      }
+    }
   }
-  await delay(graceMs);
-  if (!isPidAlive(pid)) {
-    return;
+  failAllPending(err2) {
+    for (const [, p] of this.pending) p.reject(err2);
+    this.pending.clear();
+  }
+};
+
+// src/codex/pool.ts
+var AppServerPool = class extends import_node_events2.EventEmitter {
+  options;
+  byUser = /* @__PURE__ */ new Map();
+  byClient = /* @__PURE__ */ new Map();
+  bySession = /* @__PURE__ */ new Map();
+  inFlightAcquireBySession = /* @__PURE__ */ new Map();
+  nextClientId = 1;
+  shuttingDown = false;
+  constructor(options) {
+    super();
+    this.options = options;
+  }
+  async acquire(user, sessionKey, clientOptions) {
+    if (this.shuttingDown) throw new Error("pool is shutting down");
+    const existing = this.bySession.get(sessionKey);
+    if (existing) {
+      if (existing.user !== user) {
+        throw new Error(`session ${sessionKey} is already held by another user`);
+      }
+      return existing.client;
+    }
+    const inFlight = this.inFlightAcquireBySession.get(sessionKey);
+    if (inFlight) return await inFlight;
+    const acquirePromise = this.acquireSlow(user, sessionKey, clientOptions);
+    this.inFlightAcquireBySession.set(sessionKey, acquirePromise);
+    try {
+      return await acquirePromise;
+    } finally {
+      if (this.inFlightAcquireBySession.get(sessionKey) === acquirePromise) {
+        this.inFlightAcquireBySession.delete(sessionKey);
+      }
+    }
+  }
+  async acquireSlow(user, sessionKey, clientOptions) {
+    const existing = this.bySession.get(sessionKey);
+    if (existing) {
+      if (existing.user !== user) {
+        throw new Error(`session ${sessionKey} is already held by another user`);
+      }
+      return existing.client;
+    }
+    const managed = this.findAvailableForUser(user);
+    if (managed) {
+      managed.sessions.add(sessionKey);
+      this.bySession.set(sessionKey, managed);
+      return managed.client;
+    }
+    const fresh = await this.spawn(user, clientOptions);
+    fresh.sessions.add(sessionKey);
+    this.bySession.set(sessionKey, fresh);
+    return fresh.client;
+  }
+  release(sessionKey) {
+    const m = this.bySession.get(sessionKey);
+    if (!m) return;
+    m.sessions.delete(sessionKey);
+    this.bySession.delete(sessionKey);
+  }
+  rekeySession(oldKey, newKey) {
+    if (oldKey === newKey) return;
+    const m = this.bySession.get(oldKey);
+    if (!m) return;
+    m.sessions.delete(oldKey);
+    m.sessions.add(newKey);
+    this.bySession.delete(oldKey);
+    this.bySession.set(newKey, m);
+  }
+  async acquireForAdhoc(user, clientOptions) {
+    if (this.shuttingDown) throw new Error("pool is shutting down");
+    const existing = this.findAvailableForUser(user);
+    if (existing) return existing.client;
+    const fresh = await this.spawn(user, clientOptions);
+    return fresh.client;
+  }
+  sessionsForClient(clientId) {
+    const m = this.byClient.get(clientId);
+    return m ? Array.from(m.sessions) : [];
+  }
+  clientForSession(sessionKey) {
+    const m = this.bySession.get(sessionKey);
+    return m ? m.client : null;
+  }
+  clientById(clientId) {
+    return this.byClient.get(clientId)?.client ?? null;
+  }
+  listClients() {
+    return Array.from(this.byClient.values()).map((m) => ({
+      id: m.id,
+      user: m.user,
+      sessions: new Set(m.sessions)
+    }));
+  }
+  processCount() {
+    return this.byClient.size;
+  }
+  async shutdown() {
+    this.shuttingDown = true;
+    const closes = Array.from(this.byClient.values()).map((m) => m.client.close().catch(() => void 0));
+    await Promise.all(closes);
+    this.inFlightAcquireBySession.clear();
+    this.byUser.clear();
+    this.byClient.clear();
+    this.bySession.clear();
+  }
+  async closeUser(user) {
+    const managed = [...this.byUser.get(user) ?? []];
+    await Promise.all(managed.map((m) => m.client.close().catch(() => void 0)));
+  }
+  findAvailableForUser(user) {
+    const list = this.byUser.get(user);
+    if (!list) return null;
+    for (const m of list) {
+      if (m.client.isAlive() && m.sessions.size < this.options.maxSessionsPerProcess) return m;
+    }
+    return null;
+  }
+  async spawn(user, override) {
+    const clientOptions = { ...this.options.clientDefaults ?? {}, ...override ?? {} };
+    const client = new AppServerClient(clientOptions);
+    const id = `as-${this.nextClientId++}`;
+    const managed = { id, user, client, sessions: /* @__PURE__ */ new Set() };
+    client.on("notification", (n) => {
+      this.emit("notification", { user, clientId: id, notification: n });
+    });
+    client.on("server_request", (r) => {
+      this.emit("server_request", {
+        user,
+        clientId: id,
+        request: r,
+        respond: (result) => client.respond(r.id, result),
+        respondError: (code, message, data) => client.respondError(r.id, code, message, data)
+      });
+    });
+    client.on("close", (code) => {
+      const sessions = Array.from(managed.sessions);
+      for (const s of sessions) this.bySession.delete(s);
+      managed.sessions.clear();
+      const list2 = this.byUser.get(user);
+      if (list2) {
+        const idx = list2.indexOf(managed);
+        if (idx >= 0) list2.splice(idx, 1);
+        if (list2.length === 0) this.byUser.delete(user);
+      }
+      this.byClient.delete(id);
+      const pid2 = client.pid();
+      if (pid2 !== null && this.options.onExit) this.options.onExit(pid2);
+      this.emit("client_close", { user, clientId: id, sessions, exitCode: code });
+    });
+    client.on("error", (err2) => {
+      logger.error("app-server client error", { user, clientId: id, err: err2.message });
+    });
+    try {
+      await client.start();
+    } catch (e) {
+      try {
+        await client.close();
+      } catch {
+      }
+      throw e;
+    }
+    const pid = client.pid();
+    if (pid !== null && this.options.onSpawn) this.options.onSpawn(pid);
+    const list = this.byUser.get(user) ?? [];
+    list.push(managed);
+    this.byUser.set(user, list);
+    this.byClient.set(id, managed);
+    return managed;
+  }
+};
+
+// src/daemon/context.ts
+function buildContext() {
+  const config = new ConfigStore();
+  const dataDir = config.resolvedDataDir();
+  const sockPath = config.resolvedSockPath();
+  const logPath = config.resolvedLogPath();
+  const logLevel = config.getEffective("daemon.log_level");
+  logger.configure({
+    level: typeof logLevel === "string" ? logLevel : "info",
+    logPath
+  });
+  const users = new UserRegistry(dataDir);
+  const sessions = new SessionRegistry(dataDir);
+  sessions.loadAllUsers(users.list().map((u) => u.token));
+  const pidTracker = new PidTracker(dataDir);
+  const maxPerProcess = config.getEffective("app_server.max_sessions_per_process");
+  const pool = new AppServerPool({
+    maxSessionsPerProcess: typeof maxPerProcess === "number" ? maxPerProcess : 16,
+    onSpawn: (pid) => pidTracker.track(pid),
+    onExit: (pid) => pidTracker.untrack(pid)
+  });
+  pool.on("client_close", (e) => {
+    logger.info("app-server client closed", {
+      user: e.user,
+      client: e.clientId,
+      lost_sessions: e.sessions.length,
+      exit_code: e.exitCode
+    });
+  });
+  const retentionRaw = config.getEffective("monitor.event_log_retention");
+  const events = new EventLog(typeof retentionRaw === "number" ? retentionRaw : 1e4, dataDir);
+  const pending = new PendingRegistry();
+  const queues = new TurnQueues();
+  const activity = {
+    lastActivityAt: /* @__PURE__ */ new Date(),
+    touch() {
+      activity.lastActivityAt = /* @__PURE__ */ new Date();
+    }
+  };
+  const retryOptions = () => {
+    return {
+      maxAttempts: toInt(config.getEffective("retry.max_attempts"), 3),
+      initialDelayMs: toMs(config.getEffective("retry.initial_delay_seconds"), 250),
+      maxDelayMs: toMs(config.getEffective("retry.max_delay_seconds"), 2e3),
+      jitterRatio: 0.2
+    };
+  };
+  return {
+    startedAt: /* @__PURE__ */ new Date(),
+    config,
+    users,
+    sessions,
+    pool,
+    events,
+    pending,
+    queues,
+    activity,
+    retryOptions,
+    dataDir,
+    sockPath,
+    logPath
+  };
+}
+function toInt(v, fallback) {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v);
+  return fallback;
+}
+function toMs(v, fallback) {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v * 1e3);
+  return fallback;
+}
+
+// src/daemon/handlers/version.ts
+var version = async (_ctx, _req) => {
+  let pkgVersion = "unknown";
+  try {
+    const pkg = require_package();
+    pkgVersion = pkg.version ?? "unknown";
+  } catch {
+  }
+  return {
+    daemon_version: pkgVersion
+  };
+};
+
+// src/daemon/handlers/status.ts
+var status = async (ctx, req) => {
+  const token = req.bearer;
+  if (!token) {
+    throw new CodexTeamError("invalid_params", "status requires -b <token>");
+  }
+  const user = ctx.users.get(token);
+  if (!user) {
+    throw new CodexTeamError("user_not_found", `user '${token}' not found \u2014 run 'codex-team daemon user create ${token}'`);
+  }
+  ctx.users.touch(token);
+  return {
+    token: user.token,
+    created_at: user.created_at,
+    last_active_at: user.last_active_at,
+    live_sessions: ctx.sessions.listLive(token).length,
+    pending_events: ctx.events.pendingCount(token),
+    pending_requests: ctx.pending.listForUser(token).length,
+    daemon: {
+      pid: process.pid,
+      started_at: ctx.startedAt.toISOString(),
+      data_dir: ctx.dataDir
+    }
+  };
+};
+
+// src/daemon/handlers/daemon.ts
+var import_node_fs10 = __toESM(require("fs"));
+var import_node_child_process4 = require("child_process");
+
+// src/daemon/shutdown.ts
+var import_node_fs9 = __toESM(require("fs"));
+var shuttingDown = false;
+async function shutdownDaemon(ctx, reason, exitCode = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info("shutdown initiated", { reason });
+  try {
+    await ctx.pool.shutdown();
+  } catch (e) {
+    logger.error("pool shutdown error", { err: e.message });
   }
   try {
-    process.kill(-pid, "SIGKILL");
+    await ctx.events.flush();
+  } catch (e) {
+    logger.error("event log flush error", { err: e.message });
+  }
+  try {
+    import_node_fs9.default.unlinkSync(ctx.sockPath);
   } catch {
+  }
+  try {
+    import_node_fs9.default.unlinkSync(pidFilePath(ctx.dataDir));
+  } catch {
+  }
+  setTimeout(() => process.exit(exitCode), 10);
+}
+
+// src/daemon/handlers/daemon.ts
+var daemonStatus = async (ctx) => {
+  const uptimeMs = Date.now() - ctx.startedAt.getTime();
+  return {
+    pid: process.pid,
+    version: getPkgVersion(),
+    uptime_s: Math.floor(uptimeMs / 1e3),
+    sock: ctx.sockPath,
+    data_dir: ctx.dataDir,
+    log_path: ctx.logPath,
+    user_count: ctx.users.list().length,
+    app_server_count: ctx.pool.processCount(),
+    started_at: ctx.startedAt.toISOString()
+  };
+};
+var daemonStart = async () => {
+  return { already_running: true };
+};
+var daemonStop = async (ctx, req) => {
+  const force = isTrue(getFlag(req.params, "force"));
+  if (force) {
+    setTimeout(() => process.exit(1), 10);
+  } else {
+    setTimeout(() => void shutdownDaemon(ctx, "daemon stop"), 10);
+  }
+  return { stopping: true, force };
+};
+var daemonRestart = async (ctx) => {
+  const entry = process.argv[1];
+  (0, import_node_child_process4.spawn)(process.execPath, [entry, "--daemon-internal"], {
+    detached: true,
+    stdio: "ignore",
+    env: process.env
+  }).unref();
+  setTimeout(() => void shutdownDaemon(ctx, "daemon restart"), 100);
+  return { restarting: true };
+};
+var daemonUserCreate = async (ctx, req) => {
+  const token = reqPositional(req, 0, "token");
+  const user = ctx.users.create(token);
+  return user;
+};
+var daemonUserDestroy = async (ctx, req) => {
+  const token = reqPositional(req, 0, "token");
+  if (!ctx.users.has(token)) {
+    throw new CodexTeamError("user_not_found", `user '${token}' not found`);
+  }
+  const pending = ctx.pending.removeForUser(token);
+  for (const p of pending) {
     try {
-      process.kill(pid, "SIGKILL");
+      p.client.respondError(p.jsonrpc_id, -32e3, "user destroyed");
     } catch {
     }
+  }
+  await ctx.pool.closeUser(token);
+  const sessions = ctx.sessions.removeAllForUser(token);
+  for (const rec of sessions) {
+    ctx.queues.dispose(`${token}::${rec.name}`);
+  }
+  await ctx.events.clearUser(token);
+  ctx.users.destroy(token);
+  return { destroyed: token, sessions_closed: sessions.length, pending_canceled: pending.length };
+};
+var daemonUserList = async (ctx) => {
+  return { users: ctx.users.list() };
+};
+var daemonConfigGet = async (ctx, req) => {
+  const key = reqPositional(req, 0, "key");
+  const entry = ctx.config.get(key);
+  if (!entry) throw invalidParams(`unknown config key: ${key}`);
+  return {
+    key,
+    value: entry.value,
+    default: entry.spec.default,
+    source: entry.source,
+    needs_restart: entry.spec.needsRestart
+  };
+};
+var daemonConfigSet = async (ctx, req) => {
+  const key = reqPositional(req, 0, "key");
+  const value = reqPositional(req, 1, "value");
+  const result = ctx.config.set(key, value);
+  if (!result.ok) throw invalidParams(result.error);
+  applyHotConfigChange(ctx, key, result.value);
+  return {
+    key,
+    value: result.value,
+    needs_restart: result.needs_restart
+  };
+};
+function applyHotConfigChange(ctx, key, value) {
+  if (key === "daemon.log_level" && typeof value === "string") {
+    logger.setLevel(value);
+    return;
+  }
+  if (key === "monitor.event_log_retention" && typeof value === "number") {
+    ctx.events.setRetention(value);
+    return;
+  }
+}
+var daemonConfigUnset = async (ctx, req) => {
+  const key = reqPositional(req, 0, "key");
+  const result = ctx.config.unset(key);
+  if (!result.ok) throw invalidParams(result.error);
+  return { key, needs_restart: result.needs_restart };
+};
+var daemonConfigList = async (ctx, req) => {
+  const explicitOnly = isTrue(getFlag(req.params, "explicit-only"));
+  const snapshot = ctx.config.snapshot();
+  const rows = [];
+  for (const key of Object.keys(CONFIG_KEYS)) {
+    const spec = CONFIG_KEYS[key];
+    const isExplicit = key in snapshot.explicit;
+    if (explicitOnly && !isExplicit) continue;
+    rows.push({
+      key,
+      value: snapshot.effective[key],
+      default: spec.default,
+      explicit: isExplicit,
+      needs_restart: spec.needsRestart,
+      type: spec.type,
+      description: spec.description
+    });
+  }
+  return { config: rows };
+};
+var daemonConfigReset = async (ctx, req) => {
+  if (!isTrue(getFlag(req.params, "yes"))) {
+    throw invalidParams("pass --yes to confirm reset");
+  }
+  ctx.config.reset();
+  return { reset: true };
+};
+var daemonLogsStream = async (ctx, req, stream) => {
+  if (!stream) throw new CodexTeamError("internal", "daemonLogs requires a stream");
+  const logPath = ctx.logPath;
+  if (!import_node_fs10.default.existsSync(logPath)) {
+    stream.end();
+    return { streamed: true };
+  }
+  const follow = isTrue(getFlag(req.params, "follow")) || isTrue(getFlag(req.params, "f"));
+  const n = toInt2(getFlag(req.params, "n"), 100);
+  const level = asString(getFlag(req.params, "level"));
+  const contents = import_node_fs10.default.readFileSync(logPath, "utf8");
+  const lines = contents.split("\n").filter(Boolean);
+  const tailLines = lines.slice(Math.max(0, lines.length - n));
+  for (const line of tailLines) {
+    if (level && !lineMatchesLevel(line, level)) continue;
+    stream.chunk(safeParseOr(line, { raw: line }));
+  }
+  if (!follow) {
+    stream.end();
+    return { streamed: true };
+  }
+  const watcher = import_node_fs10.default.watch(logPath, { persistent: true }, () => {
+    try {
+      const data = import_node_fs10.default.readFileSync(logPath, "utf8");
+      const newLines = data.split("\n").filter(Boolean);
+      const diff = newLines.slice(lines.length);
+      lines.push(...diff);
+      for (const line of diff) {
+        if (level && !lineMatchesLevel(line, level)) continue;
+        stream.chunk(safeParseOr(line, { raw: line }));
+      }
+    } catch {
+    }
+  });
+  stream.onClose(() => watcher.close());
+  return { streamed: true };
+};
+function reqPositional(req, idx, name) {
+  const positionals = req.params.positionals ?? [];
+  const v = positionals[idx];
+  if (typeof v !== "string" || v.length === 0) {
+    throw invalidParams(`missing positional '${name}'`);
+  }
+  return v;
+}
+function getFlag(params, key) {
+  const flags = params.flags;
+  if (!flags || typeof flags !== "object") return void 0;
+  return flags[key];
+}
+function isTrue(v) {
+  return v === true || v === "true" || v === "1";
+}
+function toInt2(v, fallback) {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v);
+  if (typeof v === "string") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return Math.floor(n);
+  }
+  return fallback;
+}
+function asString(v) {
+  return typeof v === "string" ? v : null;
+}
+function lineMatchesLevel(line, level) {
+  try {
+    const obj = JSON.parse(line);
+    return obj.level === level;
+  } catch {
+    return false;
+  }
+}
+function safeParseOr(line, fallback) {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return fallback;
+  }
+}
+function getPkgVersion() {
+  try {
+    const pkg = require_package();
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+// src/format/markdown.ts
+function renderTag(name, attrs, body) {
+  const line = `<${name}> ${compactJson(attrs)}`;
+  if (!body || body.trim().length === 0) {
+    return `${line}
+
+<\\${name}>`;
+  }
+  return `${line}
+
+${body.trim()}
+
+<\\${name}>`;
+}
+function renderInline(name, attrs) {
+  return `<${name}>${compactJson(attrs)}<\\${name}>`;
+}
+function renderHistory(input) {
+  const attrs = {
+    session: input.session,
+    thread_id: input.thread_id,
+    count: input.turns.length,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (input.nextCursor) attrs.next_cursor = input.nextCursor;
+  const body = input.turns.map(renderTurn).join("\n\n");
+  return renderTag("history", attrs, body);
+}
+function renderTail(input) {
+  const attrs = {
+    session: input.session,
+    thread_id: input.thread_id,
+    count: input.turns.length,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (input.follow) attrs.follow = true;
+  const body = input.turns.map(renderTurn).join("\n\n");
+  return renderTag("tail", attrs, body);
+}
+function renderContext(input) {
+  const t = input.thread;
+  const attrs = {
+    session: input.session,
+    thread_id: input.thread_id,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (t) {
+    if (typeof t.model_provider === "string") attrs.model_provider = t.model_provider;
+    if (typeof t.preview === "string") attrs.preview = t.preview;
+    if (typeof t.cwd === "string") attrs.cwd = t.cwd;
+    const status2 = t.status?.type;
+    if (typeof status2 === "string") attrs.status = status2;
+    if (typeof t.created_at === "number") attrs.created_at = t.created_at;
+    if (typeof t.updated_at === "number") attrs.updated_at = t.updated_at;
+  }
+  return renderTag("context", attrs, [
+    "<!-- thread/read only returns thread metadata; for turn-level content use 'message history' -->"
+  ].join("\n"));
+}
+function renderTurn(turn) {
+  const attrs = {
+    id: turn.id,
+    status: turn.status ?? null
+  };
+  if (turn.durationMs !== void 0 && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
+  if (turn.startedAt !== void 0 && turn.startedAt !== null) attrs.started_at = turn.startedAt;
+  if (turn.completedAt !== void 0 && turn.completedAt !== null) attrs.completed_at = turn.completedAt;
+  const err2 = turn.error ?? null;
+  if (err2) attrs.error = err2;
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  if (items.length === 0) {
+    return renderInline("turn", attrs);
+  }
+  const body = items.map(renderItem).filter(Boolean).join("\n\n");
+  return renderTag("turn", attrs, body);
+}
+function renderItem(raw) {
+  if (!raw || typeof raw !== "object") return "";
+  const item = raw;
+  const type = typeof item.type === "string" ? item.type : "unknown";
+  const id = typeof item.id === "string" ? item.id : void 0;
+  const attrs = {};
+  if (id) attrs.id = id;
+  switch (type) {
+    case "agent_message": {
+      const text = typeof item.text === "string" ? item.text : stringifyMaybe(item.content);
+      return renderTag("agent-message", attrs, text ?? "");
+    }
+    case "reasoning": {
+      const text = typeof item.text === "string" ? item.text : stringifyMaybe(item.summary);
+      return renderTag("reasoning", attrs, text ?? "");
+    }
+    case "command_execution": {
+      if (item.command !== void 0) attrs.cmd = item.command;
+      if (item.exit !== void 0) attrs.exit = item.exit;
+      if (item.durationMs !== void 0) attrs.duration_ms = item.durationMs;
+      if (item.stderr !== void 0) attrs.stderr = item.stderr;
+      const body = typeof item.stdout === "string" ? item.stdout : stringifyMaybe(item.output) ?? "";
+      return renderTag("shell", attrs, body);
+    }
+    case "file_change": {
+      if (item.path !== void 0) attrs.path = item.path;
+      if (item.status !== void 0) attrs.status = item.status;
+      const body = typeof item.diff === "string" ? item.diff : stringifyMaybe(item.changes) ?? "";
+      return renderTag("file-patch", attrs, body);
+    }
+    default: {
+      attrs.type = type;
+      const body = stringifyMaybe(item) ?? "";
+      return renderTag("item", attrs, body);
+    }
+  }
+}
+function stringifyMaybe(v) {
+  if (v === void 0 || v === null) return null;
+  if (typeof v === "string") return v;
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+function compactJson(obj) {
+  return JSON.stringify(obj);
+}
+
+// src/format/table.ts
+function renderTable(rows, columns) {
+  if (rows.length === 0) return `(no rows)`;
+  const matrix = [columns];
+  for (const row of rows) {
+    matrix.push(columns.map((c) => stringify(row[c])));
+  }
+  const widths = columns.map((_, colIdx) => Math.max(...matrix.map((r) => (r[colIdx] ?? "").length)));
+  const pad = (cell, w) => cell + " ".repeat(Math.max(0, w - cell.length));
+  const sep = widths.map((w) => "-".repeat(w)).join("  ");
+  const lines = [];
+  lines.push(matrix[0].map((c, i) => pad(c, widths[i])).join("  "));
+  lines.push(sep);
+  for (let i = 1; i < matrix.length; i++) {
+    lines.push(matrix[i].map((c, j) => pad(c, widths[j])).join("  "));
+  }
+  return lines.join("\n");
+}
+function stringify(v) {
+  if (v === null || v === void 0) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+// src/daemon/handlers/session.ts
+var sessionNew = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const positionals = asPositionals(req);
+  const flags = asFlags(req);
+  const provided = positionals[0];
+  if (provided) validateSessionName(provided);
+  let name = provided ?? generateSessionName();
+  if (!provided) {
+    while (ctx.sessions.get(user, name)) name = generateSessionName();
+  } else if (ctx.sessions.get(user, name)) {
+    throw invalidParams(`session '${name}' already exists`);
+  }
+  const startParams = buildThreadStartParams(ctx, flags);
+  const client = await ctx.pool.acquire(user, keyFor(user, name));
+  let result;
+  try {
+    result = await threadStart(client, startParams, ctx.retryOptions());
+  } catch (e) {
+    ctx.pool.release(keyFor(user, name));
+    throw e;
+  }
+  const threadId = threadIdOf(result);
+  try {
+    await threadSetName(client, threadId, name);
+  } catch {
+  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const record = {
+    name,
+    thread_id: threadId,
+    state: "live",
+    model: asString2(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
+    cwd: asString2(flags["cwd"]) ?? process.cwd(),
+    sandbox: asString2(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
+    approval: asString2(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
+    effort: asString2(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
+    profile: asString2(flags["profile"]) ?? void 0,
+    base_instructions: asString2(flags["base-instructions"]) ?? void 0,
+    developer_instructions: asString2(flags["developer-instructions"]) ?? void 0,
+    created_at: now,
+    last_active_at: now,
+    turn_count: 0
+  };
+  ctx.sessions.add(user, record);
+  ctx.users.touch(user);
+  return { session: record };
+};
+var sessionAttach = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const takeover = isTrue2(flags["takeover"]);
+  const existing = ctx.sessions.get(user, identifier);
+  if (existing) {
+    ctx.sessions.touch(user, existing.name);
+    return { session: existing, noop: true };
+  }
+  const anywhere = ctx.sessions.findLiveAnywhere(identifier);
+  if (anywhere && anywhere.user !== user) {
+    if (!takeover) {
+      throw new CodexTeamError("session_busy", `session is live under user '${anywhere.user}'. Pass --takeover to seize.`);
+    }
+    await seizeFromOtherUser(ctx, anywhere.user, user, anywhere.record);
+  }
+  const threadId = looksLikeThreadId(identifier) ? identifier : anywhere?.record.thread_id ?? null;
+  if (!threadId) {
+    throw new CodexTeamError("session_not_found", `no session matches '${identifier}' in this user`);
+  }
+  const name = anywhere?.record.name ?? deriveNameFromThreadId(threadId, ctx, user);
+  const client = await ctx.pool.acquire(user, keyFor(user, name));
+  try {
+    await threadResume(client, threadId, ctx.retryOptions());
+  } catch (e) {
+    ctx.pool.release(keyFor(user, name));
+    throw e;
+  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const record = {
+    name,
+    thread_id: threadId,
+    state: "live",
+    created_at: now,
+    last_active_at: now,
+    turn_count: 0,
+    ...anywhere?.record ? {
+      model: anywhere.record.model,
+      cwd: anywhere.record.cwd,
+      sandbox: anywhere.record.sandbox,
+      approval: anywhere.record.approval,
+      effort: anywhere.record.effort,
+      profile: anywhere.record.profile
+    } : {}
+  };
+  ctx.sessions.add(user, record);
+  ctx.users.touch(user);
+  return { session: record };
+};
+var sessionDetach = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const graceful = isTrue2(flags["graceful"]);
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) {
+    return { session: null, noop: true };
+  }
+  const sessionKey = keyFor(user, rec.name);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+  if (client && !graceful && turnId) {
+    try {
+      await turnInterrupt(client, rec.thread_id, turnId);
+    } catch {
+    }
+  }
+  if (client) {
+    try {
+      await threadUnsubscribe(client, rec.thread_id);
+    } catch {
+    }
+  }
+  ctx.pool.release(sessionKey);
+  ctx.queues.dispose(sessionKey);
+  ctx.sessions.remove(user, rec.name);
+  for (const p of ctx.pending.removeForSession(user, rec.name)) {
+    try {
+      p.client.respondError(p.jsonrpc_id, -32e3, "session detached");
+    } catch {
+    }
+  }
+  return { session: rec, noop: false, graceful };
+};
+var sessionRename = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const newName = asPositional(req, 1, "new_name");
+  validateSessionName(newName);
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+  const oldName = rec.name;
+  const client = ctx.pool.clientForSession(keyFor(user, oldName));
+  if (client) {
+    try {
+      await threadSetName(client, rec.thread_id, newName);
+    } catch {
+    }
+  }
+  const updated = ctx.sessions.update(user, oldName, { name: newName });
+  ctx.pool.rekeySession(keyFor(user, oldName), keyFor(user, newName));
+  return { session: updated };
+};
+var sessionFork = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const newNameRaw = asPositionalOptional(req, 1);
+  const flags = asFlags(req);
+  const atTurn = asString2(flags["at-turn"]);
+  const source = ctx.sessions.get(user, identifier);
+  if (!source) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+  let newName = newNameRaw ?? generateSessionName();
+  if (newNameRaw) validateSessionName(newNameRaw);
+  while (ctx.sessions.get(user, newName)) newName = generateSessionName();
+  const client = await ctx.pool.acquire(user, keyFor(user, newName));
+  let forkResult;
+  try {
+    forkResult = await threadFork(client, source.thread_id, atTurn ?? void 0, ctx.retryOptions());
+  } catch (e) {
+    ctx.pool.release(keyFor(user, newName));
+    throw e;
+  }
+  const newThreadId = threadIdOf(forkResult);
+  try {
+    await threadSetName(client, newThreadId, newName);
+  } catch {
+  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const record = {
+    name: newName,
+    thread_id: newThreadId,
+    state: "live",
+    model: source.model,
+    cwd: source.cwd,
+    sandbox: source.sandbox,
+    approval: source.approval,
+    effort: source.effort,
+    profile: source.profile,
+    created_at: now,
+    last_active_at: now,
+    turn_count: 0
+  };
+  ctx.sessions.add(user, record);
+  return { session: record, forked_from: source.name, at_turn: atTurn };
+};
+var sessionInfo = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const rec = ctx.sessions.get(user, identifier);
+  if (rec) {
+    return { session: rec };
+  }
+  try {
+    const client = await ctx.pool.acquireForAdhoc(user);
+    const result = await threadRead(client, identifier);
+    return { session: null, thread: result.thread, live: false };
+  } catch (e) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not found: ${e.message}`);
+  }
+};
+var sessionContext = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const format = asString2(flags["format"]) ?? "json";
+  if (format !== "json" && format !== "markdown") {
+    throw invalidParams(`--format must be 'json' or 'markdown'`);
+  }
+  const rec = ctx.sessions.get(user, identifier);
+  let threadId;
+  let client;
+  if (rec) {
+    threadId = rec.thread_id;
+    client = ctx.pool.clientForSession(keyFor(user, rec.name));
+    if (!client) client = await ctx.pool.acquireForAdhoc(user);
+  } else {
+    if (!looksLikeThreadId(identifier)) {
+      throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+    }
+    threadId = identifier;
+    client = await ctx.pool.acquireForAdhoc(user);
+  }
+  const result = await threadRead(client, threadId);
+  if (format === "json") {
+    return { thread_id: threadId, thread: result.thread };
+  }
+  const markdown = renderContext({
+    session: rec?.name ?? null,
+    thread_id: threadId,
+    thread: result.thread
+  });
+  return {
+    thread_id: threadId,
+    format: "markdown",
+    markdown,
+    thread: result.thread
+  };
+};
+var sessionList = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const flags = asFlags(req);
+  const all = isTrue2(flags["all"]);
+  const sortField = asString2(flags["sort"]) ?? "last_active";
+  const format = asString2(flags["format"]) ?? "json";
+  if (format !== "json" && format !== "table") {
+    throw invalidParams(`--format must be 'json' or 'table'`);
+  }
+  if (!all) {
+    const live = ctx.sessions.listLive(user);
+    const sorted = sortSessions(live, sortField);
+    const response2 = { sessions: sorted, all: false, sort: sortField, format };
+    if (format === "table") {
+      response2.table = renderTable(
+        sorted,
+        ["name", "thread_id", "state", "model", "turn_count", "last_active_at"]
+      );
+    }
+    return response2;
+  }
+  const client = await ctx.pool.acquireForAdhoc(user);
+  const result = await threadList(client, {});
+  const response = {
+    sessions: result.data,
+    next_cursor: result.nextCursor,
+    all: true,
+    sort: sortField,
+    format
+  };
+  if (format === "table") {
+    response.table = renderTable(
+      result.data,
+      ["id", "status", "preview", "cwd", "updated_at"]
+    );
+  }
+  return response;
+};
+function requireUser(ctx, req) {
+  const bearer = req.bearer;
+  if (!bearer) throw invalidParams("bearer token required");
+  if (!ctx.users.has(bearer)) {
+    throw new CodexTeamError("user_not_found", `user '${bearer}' not found \u2014 run 'codex-team daemon user create ${bearer}'`);
+  }
+}
+function asFlags(req) {
+  const flags = req.params.flags;
+  if (flags && typeof flags === "object") return flags;
+  return {};
+}
+function asPositionals(req) {
+  const p = req.params.positionals;
+  return Array.isArray(p) ? p.filter((x) => typeof x === "string") : [];
+}
+function asPositional(req, idx, name) {
+  const positionals = asPositionals(req);
+  const v = positionals[idx];
+  if (typeof v !== "string" || v.length === 0) {
+    throw invalidParams(`missing positional '${name}'`);
+  }
+  return v;
+}
+function asPositionalOptional(req, idx) {
+  const positionals = asPositionals(req);
+  const v = positionals[idx];
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+function asString2(v) {
+  if (Array.isArray(v)) return v[v.length - 1] ?? null;
+  return typeof v === "string" ? v : null;
+}
+function isTrue2(v) {
+  return v === true || v === "true" || v === "1";
+}
+function buildThreadStartParams(ctx, flags) {
+  const p = {};
+  const config = {};
+  const model = asString2(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
+  if (model) p.model = model;
+  const cwd = asString2(flags["cwd"]) ?? process.cwd();
+  if (cwd) p.cwd = cwd;
+  const sandbox = asString2(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
+  if (sandbox) p.sandbox = sandbox;
+  const approval = asString2(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
+  if (approval) p.approvalPolicy = approval;
+  const effort = asString2(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
+  if (effort) config.model_reasoning_effort = effort;
+  const profile = asString2(flags["profile"]);
+  if (profile) config.profile = profile;
+  const baseInstr = asString2(flags["base-instructions"]);
+  if (baseInstr) p.baseInstructions = baseInstr;
+  const devInstr = asString2(flags["developer-instructions"]);
+  if (devInstr) p.developerInstructions = devInstr;
+  const personality = asString2(flags["personality"]);
+  if (personality) p.personality = personality;
+  if (Object.keys(config).length > 0) p.config = config;
+  return p;
+}
+function resolveDefault(ctx, key) {
+  const v = ctx.config.getEffective(key);
+  if (typeof v === "string" && v.length > 0) return v;
+  return null;
+}
+function keyFor(user, name) {
+  return `${user}::${name}`;
+}
+function deriveNameFromThreadId(threadId, ctx, user) {
+  const existing = ctx.sessions.get(user, threadId);
+  if (existing) return existing.name;
+  const tail = threadId.replace(/^th-/, "").replace(/-/g, "").slice(0, 8) || "x";
+  let candidate = `s-${tail}`;
+  while (ctx.sessions.get(user, candidate)) candidate = generateSessionName();
+  return candidate;
+}
+async function seizeFromOtherUser(ctx, fromUser, toUser, rec) {
+  const sessionKey = keyFor(fromUser, rec.name);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+  if (client) {
+    if (turnId) {
+      try {
+        await turnInterrupt(client, rec.thread_id, turnId);
+      } catch {
+      }
+    }
+    try {
+      await threadUnsubscribe(client, rec.thread_id);
+    } catch {
+    }
+  }
+  ctx.pool.release(sessionKey);
+  ctx.queues.dispose(sessionKey);
+  ctx.sessions.remove(fromUser, rec.name);
+  for (const p of ctx.pending.removeForSession(fromUser, rec.name)) {
+    try {
+      p.client.respondError(p.jsonrpc_id, -32e3, "session seized by another user");
+    } catch {
+    }
+  }
+  ctx.events.append(fromUser, {
+    type: "session.seized",
+    session: rec.name,
+    thread_id: rec.thread_id,
+    payload: { seized_by: toUser }
+  });
+}
+function sortSessions(rows, field) {
+  const f = (/* @__PURE__ */ new Set(["name", "last_active", "turn_count", "created_at"])).has(field) ? field : "last_active";
+  const copy = [...rows];
+  copy.sort((a, b) => {
+    const av = a[f === "last_active" ? "last_active_at" : f === "created_at" ? "created_at" : f];
+    const bv = b[f === "last_active" ? "last_active_at" : f === "created_at" ? "created_at" : f];
+    if (typeof av === "string" && typeof bv === "string") return bv.localeCompare(av);
+    if (typeof av === "number" && typeof bv === "number") return bv - av;
+    return 0;
+  });
+  return copy;
+}
+
+// src/daemon/handlers/message.ts
+var import_node_fs11 = __toESM(require("fs"));
+var messageSend = async (ctx, req) => {
+  const { user, rec, client } = await resolveLive(ctx, req);
+  const prompt = await readPromptInput(req);
+  const attachments = asStringArray(getFlag2(req, "attach"));
+  const input = buildUserInput(prompt, attachments);
+  const sessionKey = keyFor2(user, rec.name);
+  const result = await ctx.queues.sendOrQueue(sessionKey, client, rec.thread_id, input, ctx.retryOptions());
+  ctx.sessions.touch(user, rec.name);
+  return {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    turn_id: result.turn_id,
+    started: result.started,
+    queued_depth: result.queued_depth
+  };
+};
+var messagePeer = async (ctx, req) => {
+  const { user, rec, client } = await resolveLive(ctx, req);
+  const prompt = await readPromptInput(req);
+  const attachments = asStringArray(getFlag2(req, "attach"));
+  const input = buildUserInput(prompt, attachments);
+  const sessionKey = keyFor2(user, rec.name);
+  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+  if (!turnId) {
+    throw new CodexTeamError("invalid_params", "no active turn to peer into; use 'message send' instead");
+  }
+  await turnSteer(client, rec.thread_id, turnId, input, ctx.retryOptions());
+  ctx.sessions.touch(user, rec.name);
+  return { session: rec.name, turn_id: turnId, peered: true };
+};
+var messageInterrupt = async (ctx, req) => {
+  const { user, rec, client } = await resolveLive(ctx, req);
+  const sessionKey = keyFor2(user, rec.name);
+  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+  if (!turnId) {
+    return { session: rec.name, turn_id: null, interrupted: false, noop: true };
+  }
+  await turnInterrupt(client, rec.thread_id, turnId);
+  ctx.queues.setCurrentTurn(sessionKey, null);
+  ctx.sessions.touch(user, rec.name);
+  return { session: rec.name, turn_id: turnId, interrupted: true };
+};
+var messageApproval = async (ctx, req) => {
+  const { user, rec } = await resolveLive(ctx, req);
+  const requestId = asPositional2(req, 1, "request_id");
+  const shortcut = asPositionalOptional2(req, 2);
+  const pending = requirePending(ctx, user, requestId);
+  if (!pending.kind.startsWith("approval.")) {
+    throw new CodexTeamError("invalid_decision", `request '${requestId}' is not an approval (kind=${pending.kind})`);
+  }
+  const response = await buildResponse(req, pending, shortcut);
+  pending.client.respond(pending.jsonrpc_id, response);
+  ctx.pending.remove(requestId);
+  return {
+    session: rec.name,
+    request_id: requestId,
+    kind: pending.kind,
+    responded: true,
+    response
+  };
+};
+var messageAnswer = async (ctx, req) => {
+  const { user, rec } = await resolveLive(ctx, req);
+  const requestId = asPositional2(req, 1, "request_id");
+  const inline = asPositionalOptional2(req, 2);
+  const pending = requirePending(ctx, user, requestId);
+  if (pending.kind !== "user_input.request") {
+    throw new CodexTeamError("invalid_decision", `request '${requestId}' is not a user_input request (kind=${pending.kind})`);
+  }
+  const response = await buildAnswerResponse(req, pending, inline);
+  pending.client.respond(pending.jsonrpc_id, response);
+  ctx.pending.remove(requestId);
+  return { session: rec.name, request_id: requestId, responded: true, response };
+};
+var messageHistory = async (ctx, req) => {
+  const { rec, client } = await resolveLive(ctx, req);
+  const limitRaw = getFlag2(req, "limit");
+  const limit = typeof limitRaw === "string" ? parseInt(limitRaw, 10) : typeof limitRaw === "number" ? limitRaw : 50;
+  const sinceRaw = asString3(getFlag2(req, "since"));
+  const format = asString3(getFlag2(req, "format")) ?? "json";
+  if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
+  let cursor;
+  if (sinceRaw) {
+    if (/^-\d+$/.test(sinceRaw)) {
+      cursor = void 0;
+    } else {
+      cursor = sinceRaw;
+    }
+  }
+  const result = await threadTurnsList(client, rec.thread_id, {
+    limit: Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 50,
+    cursor,
+    sortDirection: "desc"
+  });
+  const response = {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    turns: result.data,
+    next_cursor: result.nextCursor,
+    format,
+    note: "Turn items are not included in turnsList responses (protocol limitation). Use 'session context' for per-thread metadata."
+  };
+  if (format === "markdown") {
+    response.markdown = renderHistory({
+      session: rec.name,
+      thread_id: rec.thread_id,
+      turns: result.data,
+      nextCursor: result.nextCursor
+    });
+  }
+  return response;
+};
+var messageTail = async (ctx, req, stream) => {
+  const { user, rec, client } = await resolveLive(ctx, req);
+  const nRaw = getFlag2(req, "n");
+  const n = typeof nRaw === "string" ? parseInt(nRaw, 10) : typeof nRaw === "number" ? nRaw : 3;
+  const format = asString3(getFlag2(req, "format")) ?? "json";
+  if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
+  const follow = isTrue3(getFlag2(req, "follow")) || isTrue3(getFlag2(req, "f"));
+  const snapshot = async () => {
+    const result = await threadTurnsList(client, rec.thread_id, {
+      limit: Number.isFinite(n) ? Math.max(1, Math.floor(n)) : 3,
+      sortDirection: "desc"
+    });
+    const thread = await threadRead(client, rec.thread_id).catch(() => null);
+    const response = {
+      session: rec.name,
+      turns: result.data,
+      format,
+      follow,
+      thread: thread?.thread ?? null
+    };
+    if (format === "markdown") {
+      response.markdown = renderTail({
+        session: rec.name,
+        thread_id: rec.thread_id,
+        turns: result.data,
+        thread: thread?.thread ?? null,
+        follow
+      });
+    }
+    return response;
+  };
+  if (!follow || !stream) {
+    return await snapshot();
+  }
+  stream.chunk(await snapshot());
+  const sub = ctx.events.subscribe(user, (e) => {
+    if (e.session !== rec.name) return;
+    if (e.type !== "turn.completed") return;
+    void snapshot().then((snap) => stream.chunk(snap)).catch(() => {
+    });
+  });
+  stream.onClose(() => sub.dispose());
+  return { streaming: true };
+};
+async function resolveLive(ctx, req) {
+  const user = req.bearer;
+  if (!user) throw invalidParams("bearer token required");
+  if (!ctx.users.has(user)) {
+    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
+  }
+  const identifier = asPositional2(req, 0, "session");
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
+  }
+  const client = ctx.pool.clientForSession(keyFor2(user, rec.name));
+  if (!client) {
+    const fresh = await ctx.pool.acquire(user, keyFor2(user, rec.name));
+    return { user, rec, client: fresh };
+  }
+  return { user, rec, client };
+}
+function requirePending(ctx, user, requestId) {
+  const p = ctx.pending.get(requestId);
+  if (!p) throw new CodexTeamError("invalid_params", `no pending request '${requestId}'`);
+  if (p.user !== user) throw new CodexTeamError("invalid_params", `pending request '${requestId}' belongs to another user`);
+  return p;
+}
+async function readPromptInput(req) {
+  const positional = asPositionalOptional2(req, 1);
+  const fromFile = asString3(getFlag2(req, "file"));
+  const fromStdin = isTrue3(getFlag2(req, "stdin"));
+  const sources = [positional, fromFile, fromStdin].filter((v) => v !== null && v !== false).length;
+  if (sources === 0) {
+    throw invalidParams("prompt is required: positional text, --file <path>, or --stdin");
+  }
+  if (sources > 1) {
+    throw invalidParams("prompt is ambiguous: supply exactly one of positional, --file, --stdin");
+  }
+  if (positional) return positional;
+  if (fromFile) {
+    try {
+      return import_node_fs11.default.readFileSync(fromFile, "utf8");
+    } catch (e) {
+      throw invalidParams(`--file not readable: ${e.message}`);
+    }
+  }
+  const stdinContent = asString3(req.params.stdin_content);
+  if (stdinContent === null) throw invalidParams("--stdin requested but no content forwarded from cli");
+  return stdinContent;
+}
+async function readJsonInput(req) {
+  const jsonRaw = asString3(getFlag2(req, "json"));
+  const fromFile = asString3(getFlag2(req, "file"));
+  const fromStdin = isTrue3(getFlag2(req, "stdin"));
+  const sources = [jsonRaw, fromFile, fromStdin].filter((v) => v !== null && v !== false).length;
+  if (sources === 0) return null;
+  if (sources > 1) throw invalidParams("json payload ambiguous: supply exactly one of --json, --file, --stdin");
+  let raw;
+  if (jsonRaw) raw = jsonRaw;
+  else if (fromFile) {
+    try {
+      raw = import_node_fs11.default.readFileSync(fromFile, "utf8");
+    } catch (e) {
+      throw invalidParams(`--file not readable: ${e.message}`);
+    }
+  } else {
+    const stdinContent = asString3(req.params.stdin_content);
+    if (stdinContent === null) throw invalidParams("--stdin requested but no content forwarded from cli");
+    raw = stdinContent;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw invalidParams(`invalid JSON payload: ${e.message}`);
+  }
+}
+function buildUserInput(text, attachments) {
+  const items = [{ type: "text", text }];
+  for (const path10 of attachments) {
+    assertAttachable(path10);
+    items.push({ type: "localImage", path: path10 });
+  }
+  return items;
+}
+async function buildResponse(req, pending, shortcut) {
+  const explicit = await readJsonInput(req);
+  if (explicit) {
+    if (shortcut) throw invalidParams("cannot combine shortcut and --json/--file/--stdin");
+    return explicit;
+  }
+  if (!shortcut) throw invalidParams("supply a shortcut (accept|accept-session|decline|cancel) or --json/--file/--stdin");
+  switch (pending.kind) {
+    case "approval.command_execution":
+    case "approval.file_change":
+      return { decision: commandOrFileShortcut(shortcut, pending.kind) };
+    case "approval.permissions":
+      return permissionsShortcut(shortcut, pending.raw);
+    case "approval.mcp_elicitation":
+      return mcpElicitationShortcut(shortcut, pending.raw);
+    default:
+      throw new CodexTeamError("invalid_decision", `unknown approval kind '${pending.kind}'`);
+  }
+}
+function commandOrFileShortcut(shortcut, kind) {
+  if (shortcut === "accept") return "accept";
+  if (shortcut === "accept-session") return "acceptForSession";
+  if (shortcut === "decline") return "decline";
+  if (shortcut === "cancel") return "cancel";
+  throw new CodexTeamError("invalid_decision", `shortcut '${shortcut}' not allowed for ${kind}`);
+}
+function permissionsShortcut(shortcut, raw) {
+  const requested = raw.permissions ?? {};
+  if (shortcut === "accept") return { permissions: requested, scope: "turn" };
+  if (shortcut === "accept-session") return { permissions: requested, scope: "session" };
+  if (shortcut === "decline") return { permissions: {}, scope: "turn" };
+  throw new CodexTeamError("invalid_decision", `shortcut '${shortcut}' not allowed for approval.permissions (cancel not supported)`);
+}
+function mcpElicitationShortcut(shortcut, raw) {
+  const mode = raw.mode;
+  if (shortcut === "accept") {
+    if (mode === "form") {
+      throw new CodexTeamError("invalid_decision", "mcp_elicitation form mode requires --json with content");
+    }
+    return { action: "accept", content: null, _meta: null };
+  }
+  if (shortcut === "decline") return { action: "decline", content: null, _meta: null };
+  if (shortcut === "cancel") return { action: "cancel", content: null, _meta: null };
+  throw new CodexTeamError("invalid_decision", `shortcut '${shortcut}' not allowed for approval.mcp_elicitation`);
+}
+async function buildAnswerResponse(req, pending, inline) {
+  const explicit = await readJsonInput(req);
+  if (explicit) {
+    if (inline) throw invalidParams("cannot combine positional answer and --json/--file/--stdin");
+    return explicit;
+  }
+  if (!inline) throw invalidParams("supply inline answer, --json, --file, or --stdin");
+  const questions = Array.isArray(pending.raw.questions) ? pending.raw.questions : [];
+  if (questions.length !== 1) {
+    throw invalidParams(`inline answer only supported when request has exactly one question (got ${questions.length})`);
+  }
+  const q = questions[0];
+  if (!q.id) throw new CodexTeamError("internal", "pending question missing id");
+  return { answers: { [q.id]: { answers: [inline] } } };
+}
+function keyFor2(user, name) {
+  return `${user}::${name}`;
+}
+function getFlag2(req, key) {
+  const flags = req.params.flags;
+  if (flags && typeof flags === "object") return flags[key];
+  return void 0;
+}
+function asPositional2(req, idx, name) {
+  const positionals = req.params.positionals;
+  const list = Array.isArray(positionals) ? positionals : [];
+  const v = list[idx];
+  if (typeof v !== "string" || v.length === 0) throw invalidParams(`missing positional '${name}'`);
+  return v;
+}
+function asPositionalOptional2(req, idx) {
+  const positionals = req.params.positionals;
+  const list = Array.isArray(positionals) ? positionals : [];
+  const v = list[idx];
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+function asString3(v) {
+  if (Array.isArray(v)) {
+    const last = v[v.length - 1];
+    return typeof last === "string" ? last : null;
+  }
+  return typeof v === "string" ? v : null;
+}
+function asStringArray(v) {
+  if (Array.isArray(v)) return v.filter((x) => typeof x === "string");
+  if (typeof v === "string") return [v];
+  return [];
+}
+function isTrue3(v) {
+  return v === true || v === "true" || v === "1";
+}
+function assertAttachable(filePath) {
+  let stat;
+  try {
+    stat = import_node_fs11.default.statSync(filePath);
+  } catch (e) {
+    throw invalidParams(`--attach not readable: ${filePath}: ${e.message}`);
+  }
+  if (!stat.isFile()) {
+    throw invalidParams(`--attach must point to a file: ${filePath}`);
+  }
+  if (!/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(filePath)) {
+    throw invalidParams(`--attach currently supports image files only: ${filePath}`);
+  }
+}
+
+// src/daemon/handlers/monitor.ts
+var import_node_child_process5 = require("child_process");
+var monitorEvents = async (ctx, req, stream) => {
+  if (!stream) throw new CodexTeamError("internal", "monitor events requires streaming");
+  const user = req.bearer;
+  if (!user) throw invalidParams("-b required");
+  if (!ctx.users.has(user)) {
+    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
+  }
+  const flags = asFlags2(req);
+  const streamMode = isTrue4(flags["stream"]);
+  const intervalGiven = flags["interval"] !== void 0;
+  if (streamMode && intervalGiven) throw invalidParams("--stream and --interval are mutually exclusive");
+  const intervalDefault = numConfig(ctx, "monitor.default_interval_seconds", 30);
+  const intervalS = intervalGiven ? toInt3(flags["interval"], intervalDefault) : intervalDefault;
+  if (intervalS <= 0 && !streamMode) throw invalidParams("--interval must be > 0");
+  const includeDelta = isTrue4(flags["include-delta"]);
+  const filterTypes = parseTypeList(flags["filter"]);
+  const excludeTypes = parseTypeList(flags["exclude"]);
+  const sinceId = asString4(flags["since"]);
+  const sessionFilter = asString4(flags["session"]);
+  const accept = (e) => {
+    if (!includeDelta && isDeltaType(e.type)) return false;
+    if (filterTypes && filterTypes.length > 0 && !filterTypes.includes(e.type)) return false;
+    if (excludeTypes && excludeTypes.length > 0 && excludeTypes.includes(e.type)) return false;
+    if (sessionFilter) {
+      const match = e.session === sessionFilter || e.thread_id === sessionFilter;
+      if (!match) return false;
+    }
+    return true;
+  };
+  const backlog = ctx.events.listSince(user, sinceId, { includeDelta: true });
+  if (!backlog.ok) {
+    stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
+      oldest_available_id: backlog.oldest_available_id
+    }));
+    return { streaming: true };
+  }
+  const queue = backlog.events.filter(accept);
+  if (streamMode) {
+    for (const e of queue) stream.chunk(e);
+    queue.length = 0;
+    const sub2 = ctx.events.subscribe(user, (e) => {
+      if (accept(e)) stream.chunk(e);
+    });
+    stream.onClose(() => sub2.dispose());
+    return { streaming: true };
+  }
+  const sub = ctx.events.subscribe(user, (e) => {
+    if (accept(e)) queue.push(e);
+  });
+  const timer = setInterval(() => {
+    if (queue.length === 0) return;
+    const batch = queue.splice(0, queue.length);
+    for (const e of batch) stream.chunk(e);
+  }, intervalS * 1e3);
+  if (queue.length > 0) {
+    const initial = queue.splice(0, queue.length);
+    for (const e of initial) stream.chunk(e);
+  }
+  stream.onClose(() => {
+    clearInterval(timer);
+    sub.dispose();
+  });
+  return { streaming: true };
+};
+var monitorAlarm = async (_ctx, req, stream) => {
+  if (!stream) throw new CodexTeamError("internal", "monitor alarm requires streaming");
+  const positionals = asPositionals2(req);
+  const intervalS = toInt3(positionals[0], 0);
+  if (intervalS <= 0) throw invalidParams("first positional must be interval seconds (positive integer)");
+  const command = positionals[1];
+  if (!command) throw invalidParams("missing command string");
+  const flags = asFlags2(req);
+  const once = isTrue4(flags["once"]);
+  const timeoutS = toInt3(flags["timeout"], 60);
+  let cancelled = false;
+  let timer = null;
+  const runOnce = async () => {
+    if (cancelled) return;
+    const start = Date.now();
+    await new Promise((resolve) => {
+      const child = (0, import_node_child_process5.spawn)("sh", ["-c", command], { stdio: ["ignore", "pipe", "pipe"] });
+      let stdoutBuf = "";
+      let stderrBuf = "";
+      let killed = false;
+      const killer = setTimeout(() => {
+        killed = true;
+        try {
+          child.kill("SIGTERM");
+        } catch {
+        }
+        setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+          }
+        }, 5e3);
+      }, timeoutS * 1e3);
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (c) => {
+        stdoutBuf += c;
+      });
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (c) => {
+        stderrBuf += c;
+      });
+      child.on("error", (err2) => {
+        clearTimeout(killer);
+        stream.chunk({ __alarm_event: "spawn_error", error: err2.message });
+        resolve();
+      });
+      child.on("exit", (code, signal) => {
+        clearTimeout(killer);
+        if (stdoutBuf) stream.chunk({ stdout: stdoutBuf });
+        if (stderrBuf) stream.chunk({ stderr: stderrBuf });
+        stream.chunk({
+          __alarm_event: killed ? "timeout" : "exit",
+          exit_code: code,
+          signal,
+          duration_ms: Date.now() - start
+        });
+        resolve();
+      });
+    });
+  };
+  await runOnce();
+  if (once || cancelled) {
+    stream.end();
+    return { streaming: true };
+  }
+  timer = setInterval(() => {
+    void runOnce();
+  }, intervalS * 1e3);
+  stream.onClose(() => {
+    cancelled = true;
+    if (timer) clearInterval(timer);
+  });
+  return { streaming: true };
+};
+function asFlags2(req) {
+  const f = req.params.flags;
+  return f && typeof f === "object" ? f : {};
+}
+function asPositionals2(req) {
+  const p = req.params.positionals;
+  return Array.isArray(p) ? p.filter((x) => typeof x === "string") : [];
+}
+function isTrue4(v) {
+  return v === true || v === "true" || v === "1";
+}
+function asString4(v) {
+  if (Array.isArray(v)) {
+    const last = v[v.length - 1];
+    return typeof last === "string" ? last : null;
+  }
+  return typeof v === "string" ? v : null;
+}
+function toInt3(v, fallback) {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v);
+  if (typeof v === "string") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return Math.floor(n);
+  }
+  return fallback;
+}
+function parseTypeList(v) {
+  const s = asString4(v);
+  if (!s) return null;
+  return s.split(",").map((x) => x.trim()).filter(Boolean);
+}
+function numConfig(ctx, key, fallback) {
+  const v = ctx.config.getEffective(key);
+  return typeof v === "number" ? v : fallback;
+}
+
+// src/daemon/dispatch.ts
+var HANDLERS = {
+  "version": version,
+  "status": status,
+  "daemon:status": daemonStatus,
+  "daemon:start": daemonStart,
+  "daemon:stop": daemonStop,
+  "daemon:restart": daemonRestart,
+  "daemon:logs": daemonLogsStream,
+  "daemon:user:create": daemonUserCreate,
+  "daemon:user:destroy": daemonUserDestroy,
+  "daemon:user:list": daemonUserList,
+  "daemon:config:get": daemonConfigGet,
+  "daemon:config:set": daemonConfigSet,
+  "daemon:config:unset": daemonConfigUnset,
+  "daemon:config:list": daemonConfigList,
+  "daemon:config:reset": daemonConfigReset,
+  "session:new": sessionNew,
+  "session:attach": sessionAttach,
+  "session:detach": sessionDetach,
+  "session:fork": sessionFork,
+  "session:rename": sessionRename,
+  "session:info": sessionInfo,
+  "session:context": sessionContext,
+  "session:list": sessionList,
+  "message:send": messageSend,
+  "message:peer": messagePeer,
+  "message:interrupt": messageInterrupt,
+  "message:approval": messageApproval,
+  "message:answer": messageAnswer,
+  "message:history": messageHistory,
+  "message:tail": messageTail,
+  "monitor:events": monitorEvents,
+  "monitor:alarm": monitorAlarm
+};
+function getHandler(method) {
+  const h = HANDLERS[method];
+  if (!h) throw methodNotFound(method);
+  return h;
+}
+
+// src/daemon/server.ts
+async function startServer(ctx) {
+  const server = await listenSock(ctx.sockPath);
+  server.on("connection", (socket) => handleConnection(ctx, socket));
+  logger.info("daemon listening", { sock: ctx.sockPath });
+  return server;
+}
+function handleConnection(ctx, socket) {
+  const closeCallbacks = /* @__PURE__ */ new Set();
+  onMessages(
+    socket,
+    async (msg) => {
+      if (msg.kind !== "request") return;
+      try {
+        await handleRequest(ctx, socket, msg, closeCallbacks);
+      } catch (e) {
+        sendError(socket, msg.id, e);
+      }
+    },
+    () => {
+      for (const cb of closeCallbacks) {
+        try {
+          cb();
+        } catch {
+        }
+      }
+      closeCallbacks.clear();
+    }
+  );
+  socket.on("error", (e) => {
+    logger.debug("socket error", { err: e.message });
+  });
+}
+async function handleRequest(ctx, socket, req, closeCallbacks) {
+  ctx.activity.touch();
+  const handler = getHandler(req.method);
+  const streaming = req.params?.streaming === true;
+  if (streaming) {
+    const stream = createStreamHandle(socket, req.id, closeCallbacks);
+    try {
+      await handler(ctx, req, stream);
+      stream.end();
+    } catch (e) {
+      stream.end(toCodexTeamError(e));
+    }
+    return;
+  }
+  const result = await handler(ctx, req);
+  const resp = {
+    kind: "response",
+    id: req.id,
+    result
+  };
+  writeMessage(socket, resp);
+}
+function createStreamHandle(socket, id, closeCallbacks) {
+  let ended = false;
+  return {
+    chunk(data) {
+      if (ended) return;
+      const msg = { kind: "stream_chunk", id, data };
+      writeMessage(socket, msg);
+    },
+    end(error) {
+      if (ended) return;
+      ended = true;
+      const msg = { kind: "stream_end", id };
+      if (error) {
+        msg.error = { code: error.code, message: error.message, ...error.data !== void 0 ? { data: error.data } : {} };
+      }
+      writeMessage(socket, msg);
+    },
+    onClose(cb) {
+      closeCallbacks.add(cb);
+    }
+  };
+}
+function sendError(socket, id, e) {
+  const err2 = toCodexTeamError(e);
+  const resp = {
+    kind: "response",
+    id,
+    error: {
+      code: err2.code,
+      message: err2.message,
+      ...err2.data !== void 0 ? { data: err2.data } : {}
+    }
+  };
+  writeMessage(socket, resp);
+}
+function toCodexTeamError(e) {
+  if (e instanceof CodexTeamError) return e;
+  if (e instanceof JsonRpcError) {
+    return new CodexTeamError("codex_error", e.rpcMessage, {
+      rpc_code: e.code,
+      rpc_message: e.rpcMessage,
+      codex_error_info: e.codexErrorInfo,
+      additional_details: e.additionalDetails
+    });
+  }
+  if (e instanceof Error) return new CodexTeamError("internal", e.message);
+  return new CodexTeamError("internal", String(e));
+}
+
+// src/daemon/normalize.ts
+var NOTIF_MAP = {
+  "turn/started": "turn.started",
+  "turn/completed": "turn.completed",
+  "error": "turn.error",
+  "item/started": "item.started",
+  "item/completed": "item.completed",
+  "item/mcpToolCall/progress": "item.mcp_tool_call_progress",
+  "item/fileChange/patchUpdated": "item.file_change_patch_updated",
+  "item/commandExecution/terminalInteraction": "item.command_exec_terminal_interaction",
+  "item/autoApprovalReview/started": "item.auto_approval_review_started",
+  "item/autoApprovalReview/completed": "item.auto_approval_review_completed",
+  // High-frequency deltas — will be marked as delta category
+  "item/agentMessage/delta": "item.agent_message_delta",
+  "item/commandExecution/outputDelta": "item.command_exec_output_delta",
+  "item/fileChange/outputDelta": "item.file_change_output_delta",
+  "item/reasoning/textDelta": "item.reasoning_text_delta",
+  "item/reasoning/summaryTextDelta": "item.reasoning_summary_text_delta",
+  "item/reasoning/summaryPartAdded": "item.reasoning_summary_part_added",
+  "item/plan/delta": "item.plan_delta",
+  "thread/started": "thread.started",
+  "thread/closed": "thread.closed",
+  "thread/status/changed": "thread.status_changed",
+  "thread/tokenUsage/updated": "thread.token_usage_updated",
+  "thread/name/updated": "thread.name_updated",
+  "thread/archived": "thread.archived",
+  "thread/unarchived": "thread.unarchived",
+  "thread/compacted": "context_compacted",
+  "model/rerouted": "model_rerouted",
+  "serverRequest/resolved": "server_request_resolved",
+  "fuzzyFileSearch/sessionUpdated": "fuzzy_file_search.session_updated",
+  "fuzzyFileSearch/sessionCompleted": "fuzzy_file_search.session_completed",
+  "hook/started": "hook.started",
+  "hook/completed": "hook.completed",
+  "warning": "warning",
+  "configWarning": "config_warning",
+  "deprecationNotice": "deprecation_notice",
+  "account/updated": "account.updated",
+  "account/rateLimits/updated": "account.rate_limits_updated",
+  "account/login/completed": "account.login_completed",
+  "mcpServer/startupStatus/updated": "mcp_server.status_updated",
+  "mcpServer/oauthLogin/completed": "mcp_server.oauth_login_completed",
+  "app/list/updated": "app.list_updated",
+  "skills/changed": "skills.changed",
+  "fs/changed": "fs.changed"
+};
+var REQUEST_MAP = {
+  "item/commandExecution/requestApproval": "approval.command_execution",
+  "item/fileChange/requestApproval": "approval.file_change",
+  "item/permissions/requestApproval": "approval.permissions",
+  "mcpServer/elicitation/request": "approval.mcp_elicitation",
+  "item/tool/requestUserInput": "user_input.request"
+};
+function normalizeNotification(n) {
+  const type = NOTIF_MAP[n.method] ?? fallbackType(n.method);
+  const params = asObject2(n.params);
+  const threadId = extractThreadId(params);
+  const payload = buildNotificationPayload(type, params);
+  return { type, threadId, payload, isDelta: type.endsWith("_delta") };
+}
+function normalizeServerRequest(r) {
+  const kind = REQUEST_MAP[r.method] ?? fallbackType(r.method);
+  const params = asObject2(r.params);
+  const threadId = typeof params.threadId === "string" ? params.threadId : null;
+  const payload = {
+    kind,
+    turn_id: typeof params.turnId === "string" ? params.turnId : null,
+    item_id: typeof params.itemId === "string" ? params.itemId : null,
+    raw: params
+  };
+  if (kind === "approval.command_execution") {
+    if (params.command !== void 0) payload.command = params.command;
+    if (params.cwd !== void 0) payload.cwd = params.cwd;
+    if (params.reason !== void 0) payload.reason = params.reason;
+  } else if (kind === "approval.file_change") {
+    if (params.reason !== void 0) payload.reason = params.reason;
+    if (params.grantRoot !== void 0) payload.grant_root = params.grantRoot;
+  } else if (kind === "approval.permissions") {
+    if (params.reason !== void 0) payload.reason = params.reason;
+    if (params.cwd !== void 0) payload.cwd = params.cwd;
+    if (params.permissions !== void 0) payload.permissions = params.permissions;
+  } else if (kind === "approval.mcp_elicitation") {
+    if (params.serverName !== void 0) payload.server_name = params.serverName;
+    if (params.mode !== void 0) payload.mode = params.mode;
+    if (params.message !== void 0) payload.message = params.message;
+    if (params.requestedSchema !== void 0) payload.requested_schema = params.requestedSchema;
+    if (params.url !== void 0) payload.url = params.url;
+  } else if (kind === "user_input.request") {
+    if (Array.isArray(params.questions)) payload.questions = params.questions;
+  }
+  return { type: kind, threadId, payload, kind };
+}
+function buildNotificationPayload(type, params) {
+  switch (type) {
+    case "turn.started":
+    case "turn.completed": {
+      const turn = asObject2(params.turn);
+      const items = Array.isArray(turn.items) ? turn.items : [];
+      return {
+        turn_id: turn.id ?? null,
+        status: turn.status ?? null,
+        started_at: asNumber(turn.startedAt),
+        completed_at: asNumber(turn.completedAt),
+        duration_ms: deriveDurationMs(turn),
+        item_count: items.length,
+        turn
+      };
+    }
+    case "turn.error": {
+      const err2 = asObject2(params.error);
+      return {
+        turn_id: params.turnId ?? null,
+        will_retry: Boolean(params.willRetry),
+        error: {
+          message: err2.message ?? null,
+          codex_error_info: err2.codexErrorInfo ?? null,
+          additional_details: err2.additionalDetails ?? null
+        }
+      };
+    }
+    case "item.started":
+    case "item.completed": {
+      const item = asObject2(params.item);
+      return {
+        item_id: params.itemId ?? item.id ?? null,
+        turn_id: params.turnId ?? null,
+        type: item.type ?? null,
+        status: item.status ?? null
+      };
+    }
+    case "thread.started": {
+      const thread = asObject2(params.thread);
+      return {
+        thread_id: thread.id ?? null,
+        source: thread.source ?? null,
+        cwd: thread.cwd ?? null,
+        thread
+      };
+    }
+    case "thread.closed":
+    case "thread.archived":
+    case "thread.unarchived":
+      return {};
+    case "thread.token_usage_updated":
+      return {
+        turn_id: params.turnId ?? null,
+        token_usage: params.tokenUsage ?? null
+      };
+    case "thread.name_updated":
+      return { name: params.threadName ?? null };
+    case "thread.status_changed":
+      return { status: params.status ?? null };
+    case "server_request_resolved":
+      return {
+        request_id: params.requestId ?? null
+      };
+    case "model_rerouted":
+      return { reason: params.reason ?? null };
+    case "mcp_server.status_updated":
+      return {
+        name: params.name ?? null,
+        status: params.status ?? null,
+        error: params.error ?? null
+      };
+    case "mcp_server.oauth_login_completed":
+      return {
+        name: params.name ?? null,
+        success: Boolean(params.success),
+        error: params.error ?? null
+      };
+    case "warning":
+    case "error":
+      return {
+        message: params.message ?? null,
+        thread_id: params.threadId ?? null
+      };
+    case "config_warning":
+      return {
+        summary: params.summary ?? null,
+        details: params.details ?? null,
+        path: params.path ?? null
+      };
+    case "deprecation_notice":
+      return {
+        summary: params.summary ?? null,
+        details: params.details ?? null
+      };
+    case "hook.started":
+    case "hook.completed": {
+      const run = asObject2(params.run);
+      return {
+        turn_id: params.turnId ?? null,
+        hook_id: run.id ?? null,
+        status: run.status ?? null,
+        run
+      };
+    }
+    case "context_compacted":
+      return {
+        turn_id: params.turnId ?? null
+      };
+    case "fuzzy_file_search.session_updated":
+    case "fuzzy_file_search.session_completed":
+      return {
+        search_session_id: params.searchSessionId ?? null
+      };
+    default:
+      if (type.endsWith("_delta")) {
+        return {
+          item_id: params.itemId ?? null,
+          turn_id: params.turnId ?? null,
+          delta: params.delta ?? ""
+        };
+      }
+      return { raw: params };
+  }
+}
+function deriveDurationMs(turn) {
+  const durationMs = asNumber(turn.durationMs);
+  if (durationMs !== null) return durationMs;
+  const startedAt = asNumber(turn.startedAt);
+  const completedAt = asNumber(turn.completedAt);
+  if (startedAt !== null && completedAt !== null) {
+    const deltaMs = (completedAt - startedAt) * 1e3;
+    if (Number.isFinite(deltaMs)) return Math.max(0, Math.round(deltaMs));
+  }
+  return null;
+}
+function fallbackType(method) {
+  return method.replace(/\//g, ".").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+}
+function asObject2(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  return {};
+}
+function asNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function extractThreadId(params) {
+  if (typeof params.threadId === "string") return params.threadId;
+  const thread = asObject2(params.thread);
+  return typeof thread.id === "string" ? thread.id : null;
+}
+
+// src/daemon/wire.ts
+function wireDaemonEvents(ctx) {
+  ctx.pool.on("notification", (e) => {
+    const norm = normalizeNotification(e.notification);
+    const sessionName = resolveSession(ctx, e.user, norm.threadId);
+    const event = ctx.events.append(e.user, {
+      type: norm.type,
+      session: sessionName,
+      thread_id: norm.threadId,
+      payload: norm.payload
+    });
+    void event;
+    if (norm.type === "turn.started" && sessionName) {
+      ctx.queues.setCurrentTurn(keyFor3(e.user, sessionName), norm.payload.turn_id ?? null);
+    }
+    if (norm.type === "turn.completed" && sessionName && norm.threadId) {
+      const client = ctx.pool.clientForSession(keyFor3(e.user, sessionName));
+      void ctx.queues.onTurnCompleted(keyFor3(e.user, sessionName), client, norm.threadId, ctx.retryOptions()).then((nextId) => {
+        if (nextId) logger.debug("drained queued turn", { session: sessionName, turn_id: nextId });
+      });
+    }
+    if (norm.type === "thread.closed" && sessionName) {
+      try {
+        const key = keyFor3(e.user, sessionName);
+        ctx.pool.release(key);
+        ctx.queues.dispose(key);
+        ctx.sessions.remove(e.user, sessionName);
+        for (const p of ctx.pending.removeForSession(e.user, sessionName)) {
+          try {
+            p.client.respondError(p.jsonrpc_id, -32e3, "session detached");
+          } catch {
+          }
+        }
+      } catch (err2) {
+        logger.warn("thread closed cleanup failed", { session: sessionName, err: err2.message });
+      }
+    }
+    if (norm.type === "server_request_resolved") {
+      const reqId = norm.payload.request_id;
+      if (reqId !== null && reqId !== void 0) {
+        const jsonrpcId = reqId;
+        const client = ctx.pool.clientById(e.clientId);
+        if (client) {
+          ctx.pending.removeByJsonrpcId(client, jsonrpcId);
+        } else {
+          for (const p of ctx.pending.listForUser(e.user)) {
+            if (String(p.jsonrpc_id) === String(jsonrpcId)) {
+              ctx.pending.remove(p.request_id);
+              break;
+            }
+          }
+        }
+      }
+    }
+  });
+  ctx.pool.on("server_request", (e) => {
+    const norm = normalizeServerRequest(e.request);
+    const sessionName = resolveSession(ctx, e.user, norm.threadId);
+    const effectiveClient = ctx.pool.clientById(e.clientId);
+    if (!effectiveClient) {
+      logger.warn("server_request: no client to track", { user: e.user, kind: norm.kind });
+      e.respondError(-32e3, "no client available");
+      return;
+    }
+    const pending = ctx.pending.add({
+      client: effectiveClient,
+      jsonrpc_id: e.request.id,
+      kind: norm.kind,
+      user: e.user,
+      session_name: sessionName,
+      thread_id: norm.threadId,
+      turn_id: norm.payload.turn_id ?? null,
+      raw: norm.payload.raw
+    });
+    const payload = { ...norm.payload, request_id: pending.request_id };
+    ctx.events.append(e.user, {
+      type: norm.type,
+      session: sessionName,
+      thread_id: norm.threadId,
+      payload
+    });
+  });
+  ctx.pool.on("client_close", (e) => {
+    for (const sessionKey of e.sessions) {
+      const [user, sessionName] = parseKey(sessionKey);
+      if (!user || !sessionName) continue;
+      const rec = ctx.sessions.get(user, sessionName);
+      if (!rec) continue;
+      ctx.events.append(user, {
+        type: "turn.error",
+        session: sessionName,
+        thread_id: rec.thread_id,
+        payload: {
+          will_retry: false,
+          error: {
+            message: "app-server process exited unexpectedly",
+            codex_error_info: "internal_server_error",
+            additional_details: `exit_code=${e.exitCode ?? "null"}`
+          }
+        }
+      });
+      ctx.queues.dispose(sessionKey);
+      for (const p of ctx.pending.removeForSession(user, sessionName)) {
+        void p;
+      }
+    }
+  });
+}
+function resolveSession(ctx, user, threadId) {
+  if (!threadId) return null;
+  const rec = ctx.sessions.get(user, threadId);
+  return rec ? rec.name : null;
+}
+function keyFor3(user, name) {
+  return `${user}::${name}`;
+}
+function parseKey(sessionKey) {
+  const idx = sessionKey.indexOf("::");
+  if (idx < 0) return [null, null];
+  return [sessionKey.slice(0, idx), sessionKey.slice(idx + 2)];
+}
+
+// src/daemon/run.ts
+async function runDaemon() {
+  const ctx = buildContext();
+  const waitStart = Date.now();
+  while (await probeSock(ctx.sockPath, 200)) {
+    if (Date.now() - waitStart > 3e3) {
+      logger.info("another daemon already owns the sock", { sock: ctx.sockPath });
+      return 1;
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  const pidPath = pidFilePath(ctx.dataDir);
+  const acquireStart = Date.now();
+  while (!acquirePid(pidPath, ctx.sockPath)) {
+    if (Date.now() - acquireStart > 3e3) {
+      logger.warn("another daemon pidfile is live; aborting", { pid_path: pidPath });
+      return 1;
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  unlinkSockIfStale(ctx.sockPath);
+  reapOrphans(ctx.dataDir);
+  const cleanup = () => {
+    try {
+      import_node_fs12.default.unlinkSync(ctx.sockPath);
+    } catch {
+    }
+    try {
+      import_node_fs12.default.unlinkSync(pidPath);
+    } catch {
+    }
+  };
+  process.on("exit", cleanup);
+  process.on("SIGINT", () => void shutdownDaemon(ctx, "SIGINT"));
+  process.on("SIGTERM", () => void shutdownDaemon(ctx, "SIGTERM"));
+  wireDaemonEvents(ctx);
+  try {
+    await startServer(ctx);
+    logger.info("daemon started", {
+      pid: process.pid,
+      sock: ctx.sockPath,
+      data_dir: ctx.dataDir
+    });
+  } catch (e) {
+    logger.error("failed to start server", { err: e.message });
+    try {
+      import_node_fs12.default.unlinkSync(pidPath);
+    } catch {
+    }
+    return 1;
+  }
+  scheduleIdleShutdown(ctx);
+  return await new Promise(() => {
+  });
+}
+function acquirePid(pidPath, sockPath) {
+  try {
+    import_node_fs12.default.mkdirSync(import_node_path9.default.dirname(pidPath), { recursive: true });
+    if (import_node_fs12.default.existsSync(pidPath)) {
+      const existing = readPidValue(pidPath);
+      const ageMs = Date.now() - import_node_fs12.default.statSync(pidPath).mtimeMs;
+      if (Number.isFinite(existing) && existing > 0 && isPidAlive(existing) && existing !== process.pid) {
+        if (isLikelyCodexTeamDaemonProcess(existing) || import_node_fs12.default.existsSync(sockPath) && ageMs < 5e3) {
+          return false;
+        }
+      }
+      try {
+        import_node_fs12.default.unlinkSync(pidPath);
+      } catch {
+      }
+    }
+    import_node_fs12.default.writeFileSync(pidPath, String(process.pid));
+    return true;
+  } catch {
+    return false;
   }
 }
 function isPidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-function runTaskkill(pid) {
-  return new Promise((resolve) => {
-    const child = (0, import_node_child_process.spawn)("taskkill.exe", ["/pid", String(pid), "/T", "/F"], {
-      stdio: "ignore",
-      windowsHide: true
-    });
-    child.once("exit", () => resolve());
-    child.once("error", () => resolve());
-  });
-}
-function quoteCmdLine(parts) {
-  return parts.map(quoteCmdArg).join(" ");
-}
-function quoteCmdArg(value) {
-  if (!value) {
-    return '""';
-  }
-  return `"${value.replace(/(["^&|<>()%!])/g, "^$1")}"`;
-}
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
-}
-
-// src/platform/which.ts
-var import_node_fs2 = __toESM(require("fs"));
-var import_node_path4 = __toESM(require("path"));
-var DEFAULT_PATHEXT = [".COM", ".EXE", ".BAT", ".CMD"];
-function whichExecutable(name, opts = {}) {
-  const pathEntries = (process.env.PATH || "").split(import_node_path4.default.delimiter).filter(Boolean);
-  const extensions = isWindows ? opts.pathExt || (process.env.PATHEXT || DEFAULT_PATHEXT.join(";")).split(";").filter(Boolean) : [""];
-  const nameExt = import_node_path4.default.extname(name).toUpperCase();
-  const candidates = isWindows && nameExt && extensions.map((ext) => ext.toUpperCase()).includes(nameExt) ? [name] : [name, ...extensions.map((ext) => `${name}${ext}`)];
-  for (const entry of pathEntries) {
-    for (const candidateName of candidates) {
-      const candidate = import_node_path4.default.join(entry, candidateName);
-      if (isExecutable(candidate)) {
-        return candidate;
-      }
-    }
-  }
-  return null;
-}
-function isExecutable(filePath) {
-  try {
-    if (isWindows) {
-      return import_node_fs2.default.existsSync(filePath) && import_node_fs2.default.statSync(filePath).isFile();
-    }
-    import_node_fs2.default.accessSync(filePath, import_node_fs2.default.constants.X_OK);
-    return import_node_fs2.default.statSync(filePath).isFile();
   } catch {
     return false;
   }
 }
-
-// src/platform/env.ts
-var import_node_fs3 = __toESM(require("fs"));
-var import_node_path5 = __toESM(require("path"));
-var HOOK_KEYS = [
-  "CODEX_TEAM_WORKSPACE",
-  "CODEX_TEAM_CLIENT_ID",
-  "CODEX_TEAM_SESSION_ID",
-  "CODEX_TEAM_PROJECT_DIR"
-];
-function writeHookEnvExports(entries, projectDir) {
-  const envFile = process.env.CLAUDE_ENV_FILE || "";
-  if (envFile) {
-    import_node_fs3.default.mkdirSync(import_node_path5.default.dirname(envFile), { recursive: true });
-    import_node_fs3.default.appendFileSync(
-      envFile,
-      HOOK_KEYS.map((key) => `export ${key}=${quotePosix(entries[key])}
-`).join(""),
-      "utf8"
-    );
-  }
-  if (projectDir) {
-    const filePath = clientEnvFile(projectDir);
-    import_node_fs3.default.mkdirSync(import_node_path5.default.dirname(filePath), { recursive: true });
-    import_node_fs3.default.writeFileSync(filePath, HOOK_KEYS.map((key) => `${key}=${sanitizeEnvValue(entries[key])}
-`).join(""), "utf8");
-  }
-}
-function readFallbackClientEnv(projectDir) {
-  if (!projectDir) {
-    return {};
-  }
-  const filePath = clientEnvFile(projectDir);
-  if (!import_node_fs3.default.existsSync(filePath)) {
-    return {};
-  }
+function readPidValue(pidPath) {
+  const raw = import_node_fs12.default.readFileSync(pidPath, "utf8").trim();
+  const direct = Number(raw);
+  if (Number.isFinite(direct)) return direct;
   try {
-    const out = {};
-    for (const line of import_node_fs3.default.readFileSync(filePath, "utf8").split(/\r?\n/)) {
-      const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
-      if (!match || !HOOK_KEYS.includes(match[1])) {
-        continue;
-      }
-      out[match[1]] = match[2];
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-function removeFallbackClientEnv(projectDir) {
-  if (!projectDir) {
-    return;
-  }
-  const filePath = clientEnvFile(projectDir);
-  if (import_node_fs3.default.existsSync(filePath)) {
-    import_node_fs3.default.unlinkSync(filePath);
-  }
-}
-function quotePosix(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`;
-}
-function sanitizeEnvValue(value) {
-  return String(value).replace(/[\r\n]/g, "");
-}
-
-// src/platform/signals.ts
-function installShutdownSignalHandlers(onSignal) {
-  const handlers = [];
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    const handler = () => onSignal(signal);
-    process.once(signal, handler);
-    handlers.push([signal, handler]);
-  }
-  if (process.platform !== "win32") {
-    const handler = () => onSignal("SIGHUP");
-    process.once("SIGHUP", handler);
-    handlers.push(["SIGHUP", handler]);
-  }
-  return () => {
-    for (const [signal, handler] of handlers) {
-      process.removeListener(signal, handler);
-    }
-  };
-}
-
-// src/protocol.ts
-function encodeMessage(message) {
-  return `${JSON.stringify(message)}
-`;
-}
-function decodeRequest(line) {
-  const payload = decodeJsonObject(line);
-  if (typeof payload.id !== "string" || typeof payload.cmd !== "string") {
-    throw new InvalidRequest("request must include string id and cmd");
-  }
-  const v = Number(payload.v);
-  if (v !== 2) {
-    throw new ProtocolError("request must include protocol v=2");
-  }
-  if (typeof payload.workspace !== "string" || !payload.workspace) {
-    throw new ProtocolError("request must include workspace");
-  }
-  return {
-    v,
-    id: payload.id,
-    cmd: payload.cmd,
-    workspace: payload.workspace,
-    clientId: payload.clientId == null ? null : String(payload.clientId),
-    allWorkspaces: Boolean(payload.allWorkspaces),
-    params: isObject(payload.params) ? payload.params : {}
-  };
-}
-function decodeJsonObject(line) {
-  const payload = line.replace(/\n$/, "");
-  if (!payload) {
-    throw new InvalidRequest("empty line");
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(payload);
-  } catch (error) {
-    throw new InvalidRequest(`bad JSON: ${error.message}`);
-  }
-  if (!isObject(parsed)) {
-    throw new InvalidRequest("message is not an object");
-  }
-  return parsed;
-}
-function isObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-// src/config.ts
-var DEFAULT_CONFIG = {
-  daemon: {
-    socketPath: "",
-    dataDir: "",
-    logLevel: "info",
-    codexBin: "",
-    codexHome: "",
-    launchArgsOverride: [],
-    configOverrides: [],
-    rpcTimeoutSeconds: 60
-  },
-  defaults: {
-    model: "gpt-5.4",
-    modelProvider: "",
-    sandbox: "danger_full_access",
-    approvalPolicy: "never",
-    cwd: "",
-    autoResumeOnDaemonStart: true,
-    serviceTier: "",
-    reasoningEffort: "",
-    personality: "",
-    baseInstructions: "",
-    developerInstructions: "",
-    profile: ""
-  },
-  digest: {
-    historyMdEnabled: true,
-    turnsJsonlEnabled: true,
-    commandTruncateChars: 120,
-    agentMessageFull: true,
-    reasoningCapture: false,
-    stderrTailLinesOnFail: 20,
-    maxFilesListed: 8,
-    toolArgsTruncateChars: 80,
-    historyRotationMb: 32
-  },
-  compaction: {
-    thresholdTokens: 5e5,
-    mode: "manual",
-    progressDocTemplate: "",
-    retryAttempts: 2,
-    retryDelayMs: 1500,
-    timeoutSeconds: 600
-  },
-  monitor: {
-    eventsMaxBuffer: 1e3,
-    watchdogIntervalSeconds: 1200,
-    watchdogTaskBriefFile: "",
-    watchdogTaskBriefHeadLines: 30,
-    watchdogStaleMinutes: 30,
-    subscriberQueueMax: 200,
-    watchdogEmitIdle: false,
-    watchdogTemplate: "",
-    watchdogTemplateFile: "",
-    watchdogAlarms: {},
-    watchdogWorkspaceAlarms: {}
-  },
-  heartbeat: {
-    intervalSeconds: 60,
-    turnStuckSeconds: 600,
-    selfHealOnce: true,
-    healthTimeoutSeconds: 15,
-    healthCheckConcurrency: 8,
-    resumeTimeoutSeconds: 30,
-    selfHealBackoffSeconds: 30
-  },
-  queue: {
-    maxPerSession: 5,
-    overflowPolicy: "warn"
-  },
-  profiles: {}
-};
-function defaultConfigPath() {
-  return import_node_path6.default.join(resolveConfigDir(), "config.toml");
-}
-function loadConfig(configPath = defaultConfigPath()) {
-  let cfg = cloneDefaultConfig();
-  if (import_node_fs4.default.existsSync(configPath)) {
-    let raw;
-    try {
-      raw = (0, import_smol_toml.parse)(import_node_fs4.default.readFileSync(configPath, "utf8"));
-    } catch (error) {
-      throw new ConfigError(`Invalid TOML in ${configPath}: ${error.message}`);
-    }
-    if (!isObject(raw)) {
-      throw new ConfigError(`Config root must be an object: ${configPath}`);
-    }
-    cfg = mergeConfig(cfg, raw);
-  }
-  applyEnvOverrides(cfg);
-  validateConfig(cfg);
-  return cfg;
-}
-function cloneDefaultConfig() {
-  return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
-}
-function mergeConfig(base, raw) {
-  applySection(base.daemon, raw.daemon, daemonFieldKinds);
-  applySection(base.defaults, raw.defaults, defaultsFieldKinds);
-  applySection(base.digest, raw.digest, digestFieldKinds);
-  applySection(base.compaction, raw.compaction, compactionFieldKinds);
-  applySection(base.monitor, raw.monitor, monitorFieldKinds);
-  if (isObject(raw.monitor)) {
-    const alarmsRaw = isObject(raw.monitor.watchdog_alarms) ? raw.monitor.watchdog_alarms : isObject(raw.monitor.watchdogAlarms) ? raw.monitor.watchdogAlarms : null;
-    if (alarmsRaw) {
-      applyWatchdogAlarms(base.monitor, alarmsRaw);
-    }
-  }
-  applySection(base.heartbeat, raw.heartbeat, heartbeatFieldKinds);
-  applySection(base.queue, raw.queue, queueFieldKinds);
-  if (isObject(raw.profiles)) {
-    for (const [name, value] of Object.entries(raw.profiles)) {
-      const profile = cloneProfile();
-      applySection(profile, value, profileFieldKinds);
-      base.profiles[name] = profile;
-    }
-  }
-  return base;
-}
-function cloneProfile() {
-  return {
-    model: "",
-    modelProvider: "",
-    sandbox: "",
-    approvalPolicy: "",
-    cwd: "",
-    serviceTier: "",
-    reasoningEffort: "",
-    personality: "",
-    baseInstructions: "",
-    developerInstructions: "",
-    ephemeral: false
-  };
-}
-function cloneAlarm() {
-  return {
-    enabled: true,
-    intervalSeconds: 1200,
-    taskBriefFile: "",
-    taskBriefHeadLines: 30,
-    emitIdle: false,
-    template: "",
-    templateFile: ""
-  };
-}
-function applyWatchdogAlarms(monitor, raw) {
-  for (const [workspace, value] of Object.entries(raw)) {
-    if (!isObject(value)) {
-      continue;
-    }
-    monitor.watchdogWorkspaceAlarms[workspace] = monitor.watchdogWorkspaceAlarms[workspace] || {};
-    for (const [alarmName, alarmValue] of Object.entries(value)) {
-      if (!isObject(alarmValue)) {
-        continue;
-      }
-      const alarm = cloneAlarm();
-      applySection(alarm, alarmValue, watchdogAlarmFieldKinds);
-      monitor.watchdogWorkspaceAlarms[workspace][alarmName] = alarm;
-    }
-  }
-}
-var daemonFieldKinds = {
-  socketPath: "string",
-  dataDir: "string",
-  logLevel: "string",
-  codexBin: "string",
-  codexHome: "string",
-  launchArgsOverride: "string[]",
-  configOverrides: "string[]",
-  rpcTimeoutSeconds: "number"
-};
-var defaultsFieldKinds = {
-  model: "string",
-  modelProvider: "string",
-  sandbox: "string",
-  approvalPolicy: "string",
-  cwd: "string",
-  autoResumeOnDaemonStart: "boolean",
-  serviceTier: "string",
-  reasoningEffort: "string",
-  personality: "string",
-  baseInstructions: "string",
-  developerInstructions: "string",
-  profile: "string"
-};
-var profileFieldKinds = {
-  model: "string",
-  modelProvider: "string",
-  sandbox: "string",
-  approvalPolicy: "string",
-  cwd: "string",
-  serviceTier: "string",
-  reasoningEffort: "string",
-  personality: "string",
-  baseInstructions: "string",
-  developerInstructions: "string",
-  ephemeral: "boolean"
-};
-var digestFieldKinds = {
-  historyMdEnabled: "boolean",
-  turnsJsonlEnabled: "boolean",
-  commandTruncateChars: "number",
-  agentMessageFull: "boolean",
-  reasoningCapture: "boolean",
-  stderrTailLinesOnFail: "number",
-  maxFilesListed: "number",
-  toolArgsTruncateChars: "number",
-  historyRotationMb: "number"
-};
-var compactionFieldKinds = {
-  thresholdTokens: "number",
-  mode: "string",
-  progressDocTemplate: "string",
-  retryAttempts: "number",
-  retryDelayMs: "number",
-  timeoutSeconds: "number"
-};
-var monitorFieldKinds = {
-  eventsMaxBuffer: "number",
-  watchdogIntervalSeconds: "number",
-  watchdogTaskBriefFile: "string",
-  watchdogTaskBriefHeadLines: "number",
-  watchdogStaleMinutes: "number",
-  subscriberQueueMax: "number",
-  watchdogEmitIdle: "boolean",
-  watchdogTemplate: "string",
-  watchdogTemplateFile: "string",
-  watchdogAlarms: "object",
-  watchdogWorkspaceAlarms: "object"
-};
-var watchdogAlarmFieldKinds = {
-  enabled: "boolean",
-  intervalSeconds: "number",
-  taskBriefFile: "string",
-  taskBriefHeadLines: "number",
-  emitIdle: "boolean",
-  template: "string",
-  templateFile: "string"
-};
-var heartbeatFieldKinds = {
-  intervalSeconds: "number",
-  turnStuckSeconds: "number",
-  selfHealOnce: "boolean",
-  healthTimeoutSeconds: "number",
-  healthCheckConcurrency: "number",
-  resumeTimeoutSeconds: "number",
-  selfHealBackoffSeconds: "number"
-};
-var queueFieldKinds = {
-  maxPerSession: "number",
-  overflowPolicy: "string"
-};
-function applySection(target, source, fieldKinds) {
-  if (!isObject(source)) {
-    return;
-  }
-  for (const [key, value] of Object.entries(source)) {
-    const normalizedKey = resolveFieldKey(key, fieldKinds);
-    if (!normalizedKey) {
-      continue;
-    }
-    if (normalizedKey === "watchdogAlarms" || normalizedKey === "watchdogWorkspaceAlarms") {
-      continue;
-    }
-    const kind = fieldKinds[normalizedKey];
-    target[normalizedKey] = coerceValue(
-      value,
-      kind,
-      `.${String(normalizedKey)}`
-    );
-  }
-}
-function resolveFieldKey(rawKey, fieldKinds) {
-  if (rawKey in fieldKinds) {
-    return rawKey;
-  }
-  const camelKey = rawKey.replace(/_([a-z])/g, (_match, char) => char.toUpperCase());
-  if (camelKey in fieldKinds) {
-    return camelKey;
-  }
-  return null;
-}
-function coerceValue(value, kind, label) {
-  switch (kind) {
-    case "string":
-      if (typeof value !== "string") {
-        throw new ConfigError(`Expected string at ${label}`);
-      }
-      return value;
-    case "number":
-      if (typeof value !== "number" || !Number.isFinite(value)) {
-        throw new ConfigError(`Expected finite number at ${label}`);
-      }
-      return value;
-    case "boolean":
-      if (typeof value !== "boolean") {
-        throw new ConfigError(`Expected boolean at ${label}`);
-      }
-      return value;
-    case "string[]":
-      if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
-        throw new ConfigError(`Expected string[] at ${label}`);
-      }
-      return value;
-    case "object":
-      if (!isObject(value)) {
-        throw new ConfigError(`Expected object at ${label}`);
-      }
-      return value;
-  }
-}
-var BOOL_TRUE = /* @__PURE__ */ new Set(["1", "true", "yes", "on"]);
-var BOOL_FALSE = /* @__PURE__ */ new Set(["0", "false", "no", "off"]);
-function applyEnvOverrides(cfg) {
-  applyEnvSection("daemon", cfg.daemon, daemonFieldKinds);
-  applyEnvSection("defaults", cfg.defaults, defaultsFieldKinds);
-  applyEnvSection("digest", cfg.digest, digestFieldKinds);
-  applyEnvSection("compaction", cfg.compaction, compactionFieldKinds);
-  applyEnvSection("monitor", cfg.monitor, monitorFieldKinds);
-  applyEnvSection("heartbeat", cfg.heartbeat, heartbeatFieldKinds);
-  applyEnvSection("queue", cfg.queue, queueFieldKinds);
-}
-function applyEnvSection(sectionName, target, fieldKinds) {
-  for (const [fieldName, rawKind] of Object.entries(fieldKinds)) {
-    const kind = rawKind;
-    const envKeys = [
-      `CODEX_TEAM_${sectionName.toUpperCase()}_${camelToEnvKey(fieldName)}`,
-      `CODEX_TEAM_${sectionName.toUpperCase()}_${fieldName.toUpperCase()}`
-    ];
-    const raw = envKeys.map((key) => process.env[key]).find((value) => value !== void 0);
-    if (raw === void 0) {
-      continue;
-    }
-    target[fieldName] = coerceEnvValue(raw, kind);
-  }
-}
-function camelToEnvKey(value) {
-  return value.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
-}
-function validateConfig(cfg) {
-  assertOneOf(cfg.daemon.logLevel, ["debug", "info", "warn", "error"], "daemon.log_level");
-  assertPositiveInt(cfg.daemon.rpcTimeoutSeconds, "daemon.rpc_timeout_seconds");
-  assertOneOf(cfg.compaction.mode, ["manual"], "compaction.mode");
-  assertOneOf(cfg.queue.overflowPolicy, ["warn", "reject", "drop_oldest"], "queue.overflow_policy");
-  assertPositiveInt(cfg.digest.commandTruncateChars, "digest.command_truncate_chars");
-  assertPositiveInt(cfg.digest.stderrTailLinesOnFail, "digest.stderr_tail_lines_on_fail");
-  assertPositiveInt(cfg.digest.maxFilesListed, "digest.max_files_listed");
-  assertPositiveInt(cfg.digest.toolArgsTruncateChars, "digest.tool_args_truncate_chars");
-  assertPositiveInt(cfg.digest.historyRotationMb, "digest.history_rotation_mb");
-  assertPositiveInt(cfg.compaction.thresholdTokens, "compaction.threshold_tokens");
-  assertNonNegativeInt(cfg.compaction.retryAttempts, "compaction.retry_attempts");
-  assertNonNegativeInt(cfg.compaction.retryDelayMs, "compaction.retry_delay_ms");
-  assertPositiveInt(cfg.compaction.timeoutSeconds, "compaction.timeout_seconds");
-  assertPositiveInt(cfg.monitor.eventsMaxBuffer, "monitor.events_max_buffer");
-  assertPositiveInt(cfg.monitor.watchdogIntervalSeconds, "monitor.watchdog_interval_seconds");
-  assertPositiveInt(cfg.monitor.watchdogTaskBriefHeadLines, "monitor.watchdog_task_brief_head_lines");
-  assertPositiveInt(cfg.monitor.watchdogStaleMinutes, "monitor.watchdog_stale_minutes");
-  assertPositiveInt(cfg.monitor.subscriberQueueMax, "monitor.subscriber_queue_max");
-  for (const [name, alarm] of Object.entries(cfg.monitor.watchdogAlarms)) {
-    if (!name.trim()) {
-      throw new ConfigError("watchdog alarm name cannot be empty");
-    }
-    if (name === "default") {
-      throw new ConfigError("watchdog alarm name 'default' is reserved");
-    }
-    assertPositiveInt(alarm.intervalSeconds, `monitor.watchdog_alarms.${name}.interval_seconds`);
-    assertPositiveInt(alarm.taskBriefHeadLines, `monitor.watchdog_alarms.${name}.task_brief_head_lines`);
-  }
-  for (const [workspace, alarms] of Object.entries(cfg.monitor.watchdogWorkspaceAlarms)) {
-    if (!workspace.trim() || workspace === "*") {
-      throw new ConfigError(`invalid watchdog workspace: ${workspace}`);
-    }
-    for (const [name, alarm] of Object.entries(alarms)) {
-      if (!name.trim()) {
-        throw new ConfigError(`watchdog alarm name cannot be empty in workspace ${workspace}`);
-      }
-      if (name === "default") {
-        throw new ConfigError(`watchdog alarm name 'default' is reserved in workspace ${workspace}`);
-      }
-      assertPositiveInt(alarm.intervalSeconds, `monitor.watchdog_alarms.${workspace}.${name}.interval_seconds`);
-      assertPositiveInt(alarm.taskBriefHeadLines, `monitor.watchdog_alarms.${workspace}.${name}.task_brief_head_lines`);
-    }
-  }
-  assertPositiveInt(cfg.heartbeat.intervalSeconds, "heartbeat.interval_seconds");
-  assertPositiveInt(cfg.heartbeat.turnStuckSeconds, "heartbeat.turn_stuck_seconds");
-  assertPositiveInt(cfg.heartbeat.healthTimeoutSeconds, "heartbeat.health_timeout_seconds");
-  assertPositiveInt(cfg.heartbeat.healthCheckConcurrency, "heartbeat.health_check_concurrency");
-  assertPositiveInt(cfg.heartbeat.resumeTimeoutSeconds, "heartbeat.resume_timeout_seconds");
-  assertNonNegativeInt(cfg.heartbeat.selfHealBackoffSeconds, "heartbeat.self_heal_backoff_seconds");
-  assertPositiveInt(cfg.queue.maxPerSession, "queue.max_per_session");
-  for (const [name, profile] of Object.entries(cfg.profiles)) {
-    if (!name.trim()) {
-      throw new ConfigError("profile name cannot be empty");
-    }
-    validateOptionalSandbox(profile.sandbox, `profiles.${name}.sandbox`);
-    validateOptionalApproval(profile.approvalPolicy, `profiles.${name}.approval_policy`);
-  }
-  validateOptionalSandbox(cfg.defaults.sandbox, "defaults.sandbox");
-  validateOptionalApproval(cfg.defaults.approvalPolicy, "defaults.approval_policy");
-}
-function assertOneOf(value, allowed, label) {
-  if (!allowed.includes(value)) {
-    throw new ConfigError(`${label} must be one of ${allowed.join(", ")}`);
-  }
-}
-function assertPositiveInt(value, label) {
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new ConfigError(`${label} must be a positive integer`);
-  }
-}
-function assertNonNegativeInt(value, label) {
-  if (!Number.isInteger(value) || value < 0) {
-    throw new ConfigError(`${label} must be a non-negative integer`);
-  }
-}
-function validateOptionalSandbox(value, label) {
-  const normalized = normalizeSandboxMode(value);
-  if (!normalized) {
-    return;
-  }
-  assertOneOf(normalized, ["read-only", "workspace-write", "danger-full-access"], label);
-}
-function validateOptionalApproval(value, label) {
-  const normalized = normalizeApprovalPolicy(value);
-  if (!normalized) {
-    return;
-  }
-  assertOneOf(normalized, ["never", "on-request", "on-failure", "untrusted"], label);
-}
-function coerceEnvValue(value, kind) {
-  switch (kind) {
-    case "string":
-      return value;
-    case "number": {
-      const parsed = Number(value);
-      if (!Number.isFinite(parsed)) {
-        throw new ConfigError(`Cannot coerce ${JSON.stringify(value)} to number`);
-      }
-      return parsed;
-    }
-    case "boolean": {
-      const lowered = value.trim().toLowerCase();
-      if (BOOL_TRUE.has(lowered)) {
-        return true;
-      }
-      if (BOOL_FALSE.has(lowered)) {
-        return false;
-      }
-      throw new ConfigError(`Cannot coerce ${JSON.stringify(value)} to bool`);
-    }
-    case "string[]":
-      return value.split(",").map((entry) => entry.trim()).filter(Boolean);
-    case "object":
-      throw new ConfigError("Cannot override object fields via env");
-  }
-}
-function resolveDataDir2(cfg) {
-  return resolveDataDir(cfg.daemon.dataDir);
-}
-function resolveSocketPath(cfg) {
-  return ipcAddressForConfig(cfg).address;
-}
-function resolveCodexBin(cfg) {
-  const configured = cfg.daemon.codexBin.trim();
-  if (configured) {
-    if (!import_node_fs4.default.existsSync(configured)) {
-      throw new CodexCliMissing(`codex binary not found at configured path: ${configured}`);
-    }
-    return configured;
-  }
-  const fromEnv = (process.env.CODEX_TEAM_CODEX_BIN || "").trim();
-  if (fromEnv) {
-    if (!import_node_fs4.default.existsSync(fromEnv)) {
-      throw new CodexCliMissing(`codex binary not found at CODEX_TEAM_CODEX_BIN path: ${fromEnv}`);
-    }
-    return fromEnv;
-  }
-  const pathValue = whichExecutable("codex");
-  if (pathValue) {
-    return pathValue;
-  }
-  throw new CodexCliMissing("unable to resolve codex binary");
-}
-function normalizeSandboxMode(value) {
-  if (value === void 0 || value === null) {
-    return null;
-  }
-  const normalized = value.trim();
-  return normalized ? normalized.replace(/_/g, "-") : null;
-}
-function normalizeApprovalPolicy(value) {
-  if (value === void 0 || value === null) {
-    return null;
-  }
-  const normalized = value.trim();
-  return normalized ? normalized.replace(/_/g, "-") : null;
-}
-
-// src/workspace.ts
-var import_node_crypto2 = __toESM(require("crypto"));
-var import_node_fs5 = __toESM(require("fs"));
-var import_node_os2 = __toESM(require("os"));
-var import_node_path7 = __toESM(require("path"));
-var DEFAULT_WORKSPACE = "default";
-var WORKSPACE_RE = /^[a-zA-Z0-9_.-]{1,64}$/;
-var SESSION_NAME_RE = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,63}$/;
-var WINDOWS_RESERVED_NAMES = /* @__PURE__ */ new Set([
-  "CON",
-  "PRN",
-  "AUX",
-  "NUL",
-  ...Array.from({ length: 9 }, (_value, index) => `COM${index + 1}`),
-  ...Array.from({ length: 9 }, (_value, index) => `LPT${index + 1}`)
-]);
-function validateWorkspace(value) {
-  const workspace = value.trim();
-  if (!workspace || workspace === "*" || !WORKSPACE_RE.test(workspace)) {
-    throw new InvalidRequest(
-      `invalid workspace ${JSON.stringify(value)}; expected ${WORKSPACE_RE.source} and not "*"`
-    );
-  }
-  return workspace;
-}
-function safeWorkspace(value) {
-  return validateWorkspace(value || DEFAULT_WORKSPACE);
-}
-function validateSessionName(value) {
-  const name = String(value);
-  const upper = name.toUpperCase();
-  if (name !== name.trim() || !SESSION_NAME_RE.test(name) || WINDOWS_RESERVED_NAMES.has(upper) || name.endsWith(".") || name.endsWith(" ") || /[\\/:*?"<>|\u0000]/.test(name)) {
-    throw new InvalidName(
-      `invalid session name ${JSON.stringify(value)}; use 1-64 chars matching ${SESSION_NAME_RE.source}, not a Windows reserved name`
-    );
-  }
-  return name;
-}
-function deriveProjectWorkspace(projectDir) {
-  const digest = import_node_crypto2.default.createHash("sha1").update(import_node_path7.default.resolve(projectDir)).digest("hex").slice(0, 8);
-  return `proj-${digest}`;
-}
-function workspaceEnvPath(projectDir) {
-  return import_node_path7.default.join(projectDir, ".codex-team", "workspace.env");
-}
-function readWorkspaceEnvFile(projectDir) {
-  if (!projectDir) {
-    return null;
-  }
-  const filePath = workspaceEnvPath(projectDir);
-  if (!import_node_fs5.default.existsSync(filePath)) {
-    return null;
-  }
-  const raw = import_node_fs5.default.readFileSync(filePath, "utf8");
-  for (const line of raw.split(/\r?\n/)) {
-    const match = line.match(/^\s*CODEX_TEAM_WORKSPACE\s*=\s*["']?([^"'\s#]+)["']?\s*(?:#.*)?$/);
-    if (match) {
-      return validateWorkspace(match[1]);
-    }
-  }
-  return null;
-}
-function resolveWorkspace(input = {}) {
-  const env = input.env || process.env;
-  if (input.explicit) {
-    return validateWorkspace(input.explicit);
-  }
-  if (env.CODEX_TEAM_WORKSPACE) {
-    return validateWorkspace(env.CODEX_TEAM_WORKSPACE);
-  }
-  const projectDir = input.projectDir || env.CLAUDE_PROJECT_DIR || "";
-  const fromFile = readWorkspaceEnvFile(projectDir);
-  if (fromFile) {
-    return fromFile;
-  }
-  if (projectDir) {
-    return deriveProjectWorkspace(projectDir);
-  }
-  return DEFAULT_WORKSPACE;
-}
-function workspaceSessionKey(workspace, name) {
-  return `${workspace}\0${name}`;
-}
-function workspaceDisplayName(workspace, name) {
-  return `${workspace}/${name}`;
-}
-function makeClientId(input) {
-  const seed = [
-    input.workspace,
-    input.sessionId || "",
-    input.hostname || import_node_os2.default.hostname(),
-    String(input.pid || process.pid),
-    String(input.startedAtMs || Date.now())
-  ].join("|");
-  return `c-${import_node_crypto2.default.createHash("sha1").update(seed).digest("hex").slice(0, 12)}`;
-}
-
-// src/cli.ts
-function pidAlive(pid) {
-  return isPidAlive(pid);
-}
-function diagnoseStalePid(dataDir) {
-  const pidPath = resolvePidPath(dataDir);
-  if (!import_node_fs6.default.existsSync(pidPath)) {
-    return { stale: false, pid: null, pidPath };
-  }
-  const raw = import_node_fs6.default.readFileSync(pidPath, "utf8").trim();
-  const pid = Number(raw);
-  if (!Number.isFinite(pid) || pid <= 0 || !pidAlive(pid)) {
-    return { stale: true, pid: Number.isFinite(pid) ? pid : null, pidPath };
-  }
-  return { stale: false, pid, pidPath };
-}
-function defaultRequestMeta() {
-  const projectDir = process.env.CLAUDE_PROJECT_DIR || process.env.CODEX_TEAM_PROJECT_DIR || null;
-  const fallback = readFallbackClientEnv(projectDir);
-  return {
-    workspace: validateWorkspace(
-      process.env.CODEX_TEAM_WORKSPACE || fallback.CODEX_TEAM_WORKSPACE || resolveWorkspace({ projectDir })
-    ),
-    clientId: process.env.CODEX_TEAM_CLIENT_ID || fallback.CODEX_TEAM_CLIENT_ID || null,
-    allWorkspaces: false
-  };
-}
-function extractGlobalArgs(argv) {
-  const out = [];
-  let workspaceFlag = null;
-  let allWorkspaces = false;
-  for (let index = 0; index < argv.length; index += 1) {
-    const token = argv[index];
-    if (token === "--all-workspaces") {
-      allWorkspaces = true;
-      continue;
-    }
-    if (token === "--workspace") {
-      index += 1;
-      workspaceFlag = argv[index] || "";
-      continue;
-    }
-    if (token.startsWith("--workspace=")) {
-      workspaceFlag = token.slice("--workspace=".length);
-      continue;
-    }
-    out.push(token);
-  }
-  if (workspaceFlag && allWorkspaces) {
-    throw new Error("--workspace and --all-workspaces are mutually exclusive");
-  }
-  return { argv: out, workspaceFlag, allWorkspaces };
-}
-function resolveRequestMeta(globals) {
-  const projectDir = process.env.CLAUDE_PROJECT_DIR || process.env.CODEX_TEAM_PROJECT_DIR || null;
-  const fallback = readFallbackClientEnv(projectDir);
-  return {
-    workspace: validateWorkspace(
-      globals.workspaceFlag || process.env.CODEX_TEAM_WORKSPACE || fallback.CODEX_TEAM_WORKSPACE || resolveWorkspace({ projectDir })
-    ),
-    clientId: process.env.CODEX_TEAM_CLIENT_ID || fallback.CODEX_TEAM_CLIENT_ID || null,
-    allWorkspaces: globals.allWorkspaces
-  };
-}
-async function socketReady(socketPath) {
-  const address = ipcAddressFromPath(socketPath);
-  if (address.kind === "uds" && !ipcArtifactExists(address)) {
-    return false;
-  }
-  return await ipcReady(address);
-}
-async function sendRequest(socketPath, cmd, params, meta = defaultRequestMeta()) {
-  return await new Promise((resolve, reject) => {
-    const socket = ipcConnect(ipcAddressFromPath(socketPath));
-    socket.setEncoding("utf8");
-    const rl = import_node_readline.default.createInterface({ input: socket, crlfDelay: Infinity });
-    socket.once("error", (error) => {
-      rl.close();
-      reject(new DaemonNotRunning(`no daemon at ${socketPath}: ${error.message}`));
-    });
-    socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ v: 2, id: cryptoId(), cmd, workspace: meta.workspace, clientId: meta.clientId, allWorkspaces: meta.allWorkspaces, params })}
-`);
-    });
-    void (async () => {
-      try {
-        const iterator = rl[Symbol.asyncIterator]();
-        const first = await iterator.next();
-        if (first.done || !first.value) {
-          reject(new DaemonNotRunning("daemon closed connection"));
-          return;
-        }
-        resolve(JSON.parse(first.value));
-      } catch (error) {
-        reject(error);
-      } finally {
-        rl.close();
-        socket.end();
-      }
-    })();
-  });
-}
-async function streamSubscribe(socketPath, cmd, meta) {
-  return await new Promise((resolve) => {
-    const socket = ipcConnect(ipcAddressFromPath(socketPath));
-    socket.setEncoding("utf8");
-    socket.once("error", () => {
-      process.stderr.write("daemon not running\n");
-      resolve(4);
-    });
-    socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ v: 2, id: cryptoId(), cmd, workspace: meta.workspace, clientId: meta.clientId, allWorkspaces: meta.allWorkspaces, params: {} })}
-`);
-    });
-    socket.on("data", (chunk) => {
-      process.stdout.write(chunk);
-    });
-    socket.once("close", () => resolve(0));
-  });
-}
-async function streamHistorySubscribe(socketPath, params, meta) {
-  return await new Promise((resolve) => {
-    const socket = ipcConnect(ipcAddressFromPath(socketPath));
-    socket.setEncoding("utf8");
-    socket.once("error", () => {
-      process.stderr.write("daemon not running\n");
-      resolve(4);
-    });
-    socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ v: 2, id: cryptoId(), cmd: "history.subscribe", workspace: meta.workspace, clientId: meta.clientId, allWorkspaces: meta.allWorkspaces, params })}
-`);
-    });
-    const rl = import_node_readline.default.createInterface({ input: socket, crlfDelay: Infinity });
-    void (async () => {
-      try {
-        for await (const line of rl) {
-          if (!line) {
-            continue;
-          }
-          try {
-            const event = JSON.parse(line);
-            warnIfHistoryAnchorMissing(event.payload || {});
-            const content = event.payload?.content;
-            if (typeof content === "string" && content) {
-              process.stdout.write(content);
-            }
-          } catch {
-            process.stdout.write(`${line}
-`);
-          }
-        }
-      } finally {
-        rl.close();
-      }
-    })();
-    socket.once("close", () => resolve(0));
-  });
-}
-async function followFile(filePath, startAtEnd = false) {
-  import_node_fs6.default.mkdirSync(import_node_path8.default.dirname(filePath), { recursive: true });
-  if (!import_node_fs6.default.existsSync(filePath)) {
-    import_node_fs6.default.writeFileSync(filePath, "", "utf8");
-  }
-  let offset = startAtEnd ? import_node_fs6.default.statSync(filePath).size : 0;
-  while (true) {
-    const size = import_node_fs6.default.statSync(filePath).size;
-    if (size > offset) {
-      const fd = import_node_fs6.default.openSync(filePath, "r");
-      try {
-        const buffer = Buffer.alloc(size - offset);
-        import_node_fs6.default.readSync(fd, buffer, 0, buffer.length, offset);
-        process.stdout.write(buffer.toString("utf8"));
-      } finally {
-        import_node_fs6.default.closeSync(fd);
-      }
-      offset = size;
-    }
-    await sleep(250);
-  }
-}
-function parseOptions(args, spec = {}) {
-  const options = { _: [] };
-  const booleanFlags = new Set(spec.boolean || []);
-  const stringFlags = new Set(spec.string || []);
-  for (let index = 0; index < args.length; index += 1) {
-    const token = args[index];
-    if (!token.startsWith("--")) {
-      options._.push(token);
-      continue;
-    }
-    const eqIndex = token.indexOf("=");
-    const rawFlag = token.slice(2, eqIndex >= 0 ? eqIndex : void 0);
-    const key = flagToCamel(rawFlag);
-    if (booleanFlags.has(rawFlag)) {
-      options[key] = true;
-      continue;
-    }
-    if (stringFlags.has(rawFlag)) {
-      if (eqIndex >= 0) {
-        options[key] = token.slice(eqIndex + 1);
-      } else {
-        index += 1;
-        options[key] = args[index] ?? "";
-      }
-      continue;
-    }
-    throw new Error(`unknown option: --${rawFlag}`);
-  }
-  return options;
-}
-function flagToCamel(flag) {
-  return flag.replace(/-([a-z])/g, (_match, char) => char.toUpperCase());
-}
-function parseCli(argv) {
-  const [group, action, ...rest] = argv;
-  if (!group) {
-    throw new Error("usage: codex-team <group> ...");
-  }
-  if (group === "session") {
-    const opts = parseOptions(rest, {
-      boolean: ["ephemeral", "include-turns"],
-      string: [
-        "cwd",
-        "model",
-        "model-provider",
-        "sandbox",
-        "approval-policy",
-        "service-tier",
-        "reasoning-effort",
-        "personality",
-        "profile",
-        "thread-id",
-        "base-instructions-file",
-        "developer-instructions-file"
-      ]
-    });
-    const name = opts._[0];
-    return { group, action, args: { ...opts, name } };
-  }
-  if (group === "send") {
-    const opts = parseOptions([action || "", ...rest].filter(Boolean), {
-      boolean: ["stdin", "wait"],
-      string: [
-        "prompt-file",
-        "model",
-        "cwd",
-        "effort",
-        "personality",
-        "service-tier",
-        "summary",
-        "output-schema-file"
-      ]
-    });
-    return { group, args: { ...opts, name: opts._[0], text: opts._[1] || "" } };
-  }
-  if (group === "interrupt" || group === "compact") {
-    return { group, name: action || "" };
-  }
-  if (group === "history") {
-    const opts = parseOptions([action || "", ...rest].filter(Boolean), {
-      boolean: ["follow"],
-      string: ["last-n", "since", "since-turn-id", "format"]
-    });
-    return {
-      group,
-      args: {
-        ...opts,
-        name: opts._[0],
-        lastN: Number(opts.lastN || 0)
-      }
-    };
-  }
-  if (group === "tail") {
-    const opts = parseOptions([action || "", ...rest].filter(Boolean), {
-      boolean: ["stderr"],
-      string: ["lines"]
-    });
-    return { group, args: { ...opts, name: opts._[0] } };
-  }
-  if (group === "queue") {
-    const opts = parseOptions(rest, {
-      boolean: ["wait"]
-    });
-    return { group, action, args: { ...opts, name: opts._[0] } };
-  }
-  if (group === "health") {
-    return { group, action };
-  }
-  if (group === "daemon") {
-    const opts = parseOptions(rest, {
-      boolean: ["follow", "force"]
-    });
-    return { group, action, args: opts };
-  }
-  if (group === "workspace") {
-    return { group, action, args: { name: rest[0] || "", _: rest } };
-  }
-  if (group === "client") {
-    const opts = parseOptions(rest, {
-      string: ["client-id", "session-id", "hostname", "pid", "project-dir", "started-at"]
-    });
-    return { group, action, args: { ...opts, id: opts._[0] || "" } };
-  }
-  if (group === "watch" && action === "alarm") {
-    const [subaction, ...alarmRest] = rest;
-    const opts = parseOptions(alarmRest, {
-      boolean: ["emit-idle", "disabled"],
-      string: [
-        "interval",
-        "interval-seconds",
-        "task-brief",
-        "task-brief-file",
-        "task-brief-head-lines",
-        "template",
-        "template-file"
-      ]
-    });
-    return { group, action, subaction: subaction || "list", args: { ...opts, name: opts._[0] } };
-  }
-  if (group === "monitor" && (action === "events" || action === "watchdog")) {
-    return { group, action };
-  }
-  throw new Error(`unknown command group: ${group}`);
-}
-function cryptoId() {
-  return `cli-${Math.random().toString(16).slice(2)}`;
-}
-function textContentForResponse(parsed, data) {
-  const content = data.content;
-  if (typeof content !== "string") {
-    return null;
-  }
-  if (parsed.group === "history" || parsed.group === "tail") {
-    return content;
-  }
-  if (parsed.group === "daemon" && parsed.action === "logs") {
-    return content;
-  }
-  return null;
-}
-function writeTextContent(content) {
-  process.stdout.write(content);
-  if (content && !content.endsWith("\n")) {
-    process.stdout.write("\n");
-  }
-}
-function historyAnchorWarningForResponse(data) {
-  if (data.matched_since_turn_id === false) {
-    return "codex-team: since-turn-id was not found; no history content was emitted";
-  }
-  return null;
-}
-function warnIfHistoryAnchorMissing(data) {
-  const warning = historyAnchorWarningForResponse(data);
-  if (warning) {
-    process.stderr.write(`${warning}
-`);
-  }
-}
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-var CliClient = class {
-  socketPath;
-  constructor(socketPath) {
-    this.socketPath = socketPath || resolveSocketPath(loadConfig());
-  }
-  async ensureDaemon() {
-    if (await socketReady(this.socketPath)) {
-      return;
-    }
-    await removeStaleIpcArtifact(ipcAddressFromPath(this.socketPath));
-    const cfg = loadConfig();
-    const dataDir = resolveDataDir2(cfg);
-    cfg.daemon.dataDir = dataDir;
-    import_node_fs6.default.mkdirSync(dataDir, { recursive: true });
-    const stale = diagnoseStalePid(dataDir);
-    if (stale.stale) {
-      try {
-        import_node_fs6.default.unlinkSync(stale.pidPath);
-      } catch (error) {
-        throw new DaemonNotRunning(
-          `stale pid file at ${stale.pidPath} could not be removed automatically: ${error.message}`,
-          { pid_path: stale.pidPath, stale_pid: stale.pid }
-        );
-      }
-    }
-    const errPath = import_node_path8.default.join(dataDir, "daemon-startup.err");
-    const errFd = import_node_fs6.default.openSync(errPath, "a");
-    try {
-      const child = spawnManaged({
-        command: process.execPath,
-        args: [process.argv[1] || "", "__daemon"],
-        env: {
-          ...process.env,
-          CODEX_TEAM_DAEMON_DATA_DIR: dataDir,
-          CODEX_TEAM_DAEMON_SOCKET_PATH: this.socketPath
-        },
-        detached: true,
-        stdio: ["ignore", "ignore", errFd]
-      });
-      child.unref();
-    } finally {
-      import_node_fs6.default.closeSync(errFd);
-    }
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      if (await socketReady(this.socketPath)) {
-        return;
-      }
-      await sleep(100);
-    }
-    const tail = import_node_fs6.default.existsSync(errPath) ? import_node_fs6.default.readFileSync(errPath, "utf8").split(/\r?\n/).slice(-40).join("\n") : "";
-    let hint = `daemon did not become ready at ${this.socketPath}. Check ${errPath} for the daemon stderr.`;
-    if (tail) {
-      hint += `
---- last stderr lines ---
-${tail}
---- end ---`;
-    }
-    throw new DaemonNotRunning(hint, {
-      socket_path: this.socketPath,
-      startup_err_path: errPath,
-      startup_err_tail: tail
-    });
-  }
-  async readPrompt(args) {
-    if (args.stdin) {
-      return await new Promise((resolve) => {
-        let body = "";
-        process.stdin.setEncoding("utf8");
-        process.stdin.on("data", (chunk) => {
-          body += chunk;
-        });
-        process.stdin.on("end", () => resolve(body));
-      });
-    }
-    if (typeof args.promptFile === "string" && args.promptFile) {
-      return import_node_fs6.default.readFileSync(args.promptFile, "utf8");
-    }
-    return String(args.text || "");
-  }
-  readOptionalFile(value) {
-    if (typeof value !== "string" || !value) {
-      return null;
-    }
-    return import_node_fs6.default.readFileSync(value, "utf8");
-  }
-  async run(argv = process.argv.slice(2)) {
-    const globals = extractGlobalArgs(argv);
-    const meta = resolveRequestMeta(globals);
-    const parsed = parseCli(globals.argv);
-    const noAutostart = process.env.CODEX_TEAM_NO_AUTOSTART === "1";
-    if (parsed.group === "monitor") {
-      if (!noAutostart) {
-        await this.ensureDaemon();
-      }
-      return await streamSubscribe(this.socketPath, `monitor.${parsed.action}.subscribe`, meta);
-    }
-    if (!noAutostart && !(parsed.group === "daemon" && (parsed.action === "start" || parsed.action === "restart"))) {
-      await this.ensureDaemon();
-    }
-    let response;
-    if (parsed.group === "daemon" && parsed.action === "start") {
-      await this.ensureDaemon();
-      response = { ok: true, data: { started: true } };
-    } else if (parsed.group === "daemon" && parsed.action === "restart") {
-      try {
-        await sendRequest(this.socketPath, "daemon.stop", { force: true }, meta);
-      } catch {
-      }
-      await sleep(300);
-      await this.ensureDaemon();
-      response = { ok: true, data: { restarted: true } };
-    } else if (parsed.group === "daemon" && parsed.action === "logs" && parsed.args.follow) {
-      const cfg = loadConfig();
-      return await followFile(import_node_path8.default.join(resolveDataDir2(cfg), "daemon.log"));
-    } else {
-      response = await this.handle(parsed, meta);
-    }
-    if (typeof response === "number") {
-      return response;
-    }
-    if (response.ok) {
-      const data = response.data || {};
-      const textContent = textContentForResponse(parsed, data);
-      if (textContent !== null) {
-        warnIfHistoryAnchorMissing(data);
-        writeTextContent(textContent);
-      } else {
-        process.stdout.write(`${JSON.stringify(data, null, 2)}
-`);
-      }
-      return 0;
-    }
-    const error = wireToError(response.error || {});
-    process.stderr.write(`codex-team: ${error.code}: ${error.message}
-`);
-    if (Object.keys(error.detail).length > 0) {
-      process.stderr.write(`  detail: ${JSON.stringify(error.detail)}
-`);
-    }
-    return error.exitCode;
-  }
-  async handle(parsed, meta) {
-    if (parsed.group === "session") {
-      const args = parsed.args;
-      const cmd = `session.${parsed.action.replace(/-/g, "_")}`;
-      const params = {};
-      if (args.name) {
-        params.name = String(args.name);
-      }
-      if (parsed.action === "create" || parsed.action === "attach") {
-        for (const key of [
-          "cwd",
-          "model",
-          "modelProvider",
-          "sandbox",
-          "approvalPolicy",
-          "serviceTier",
-          "reasoningEffort",
-          "personality",
-          "profile",
-          "threadId"
-        ]) {
-          if (args[key] !== void 0) {
-            params[key] = args[key];
-          }
-        }
-        params.baseInstructions = this.readOptionalFile(args.baseInstructionsFile);
-        params.developerInstructions = this.readOptionalFile(args.developerInstructionsFile);
-        params.ephemeral = Boolean(args.ephemeral);
-      } else if (parsed.action === "read") {
-        params.includeTurns = Boolean(args.includeTurns);
-      }
-      return await sendRequest(this.socketPath, cmd, params, meta);
-    }
-    if (parsed.group === "send") {
-      const outputSchema = typeof parsed.args.outputSchemaFile === "string" && parsed.args.outputSchemaFile ? JSON.parse(import_node_fs6.default.readFileSync(parsed.args.outputSchemaFile, "utf8")) : null;
-      return await sendRequest(this.socketPath, "send", {
-        name: parsed.args.name,
-        text: await this.readPrompt(parsed.args),
-        wait: Boolean(parsed.args.wait),
-        model: parsed.args.model,
-        cwd: parsed.args.cwd,
-        effort: parsed.args.effort,
-        personality: parsed.args.personality,
-        serviceTier: parsed.args.serviceTier,
-        summary: parsed.args.summary,
-        outputSchema
-      }, meta);
-    }
-    if (parsed.group === "interrupt") {
-      return await sendRequest(this.socketPath, "interrupt", { name: parsed.name }, meta);
-    }
-    if (parsed.group === "compact") {
-      return await sendRequest(this.socketPath, "compact", { name: parsed.name }, meta);
-    }
-    if (parsed.group === "history") {
-      if (parsed.args.follow) {
-        return await streamHistorySubscribe(this.socketPath, {
-          name: parsed.args.name,
-          lastN: parsed.args.lastN,
-          since: parsed.args.since,
-          sinceTurnId: parsed.args.sinceTurnId,
-          format: parsed.args.format || "md"
-        }, meta);
-      }
-      return await sendRequest(this.socketPath, "history.get", {
-        name: parsed.args.name,
-        lastN: parsed.args.lastN,
-        since: parsed.args.since,
-        sinceTurnId: parsed.args.sinceTurnId,
-        format: parsed.args.format || "md"
-      }, meta);
-    }
-    if (parsed.group === "tail") {
-      return await sendRequest(this.socketPath, "history.tail_stderr", {
-        name: parsed.args.name,
-        lines: Number(parsed.args.lines || 200)
-      }, meta);
-    }
-    if (parsed.group === "queue") {
-      return await sendRequest(this.socketPath, `queue.${parsed.action.replace(/-/g, "_")}`, {
-        name: parsed.args.name,
-        wait: Boolean(parsed.args.wait)
-      }, meta);
-    }
-    if (parsed.group === "health") {
-      return await sendRequest(this.socketPath, `health.${parsed.action}`, {}, meta);
-    }
-    if (parsed.group === "workspace") {
-      if (parsed.action === "list") {
-        return await sendRequest(this.socketPath, "workspace.list", {}, { ...meta, allWorkspaces: true });
-      }
-      return await sendRequest(this.socketPath, "workspace.show", { name: parsed.args.name }, meta);
-    }
-    if (parsed.group === "client") {
-      if (parsed.action === "list") {
-        return await sendRequest(this.socketPath, "client.list", {}, { ...meta, allWorkspaces: true });
-      }
-      if (parsed.action === "register") {
-        return await sendRequest(this.socketPath, "client.register", {
-          clientId: parsed.args.clientId,
-          sessionId: parsed.args.sessionId,
-          hostname: parsed.args.hostname,
-          pid: parsed.args.pid == null ? null : Number(parsed.args.pid),
-          claudeProjectDir: parsed.args.projectDir,
-          startedAt: parsed.args.startedAt
-        }, meta);
-      }
-      if (parsed.action === "detach") {
-        return await sendRequest(this.socketPath, "client.detach", {
-          clientId: parsed.args.id || parsed.args.clientId,
-          sessionId: parsed.args.sessionId
-        }, meta);
-      }
-    }
-    if (parsed.group === "watch") {
-      if (parsed.subaction === "list") {
-        return await sendRequest(this.socketPath, "watch.alarm.list", {}, meta);
-      }
-      if (parsed.subaction === "create") {
-        return await sendRequest(this.socketPath, "watch.alarm.create", {
-          name: parsed.args.name,
-          enabled: !Boolean(parsed.args.disabled),
-          intervalSeconds: parsed.args.intervalSeconds == null && parsed.args.interval == null ? void 0 : Number(parsed.args.intervalSeconds ?? parsed.args.interval),
-          taskBriefFile: parsed.args.taskBriefFile || parsed.args.taskBrief,
-          taskBriefHeadLines: parsed.args.taskBriefHeadLines == null ? void 0 : Number(parsed.args.taskBriefHeadLines),
-          emitIdle: Boolean(parsed.args.emitIdle),
-          template: parsed.args.template,
-          templateFile: parsed.args.templateFile
-        }, meta);
-      }
-      if (parsed.subaction === "delete") {
-        return await sendRequest(this.socketPath, "watch.alarm.delete", {
-          name: parsed.args.name
-        }, meta);
-      }
-    }
-    if (parsed.group === "daemon") {
-      return await sendRequest(this.socketPath, `daemon.${parsed.action.replace(/-/g, "_")}`, {
-        force: Boolean(parsed.args.force)
-      }, meta);
-    }
-    throw new Error("unreachable");
-  }
-};
-
-// src/daemon.ts
-var import_node_fs15 = __toESM(require("fs"));
-var import_node_path15 = __toESM(require("path"));
-
-// src/server.ts
-var import_node_fs14 = __toESM(require("fs"));
-var import_node_path14 = __toESM(require("path"));
-var import_node_readline3 = __toESM(require("readline"));
-var import_node_events = require("events");
-var import_node_os4 = __toESM(require("os"));
-
-// src/clients.ts
-var import_node_fs7 = __toESM(require("fs"));
-var import_node_os3 = __toESM(require("os"));
-var import_node_path9 = __toESM(require("path"));
-var ClientStore = class {
-  constructor(dataDir) {
-    this.dataDir = dataDir;
-  }
-  dataDir;
-  dir() {
-    return clientsDir(this.dataDir);
-  }
-  filePath(clientId) {
-    return import_node_path9.default.join(this.dir(), `${safeClientId(clientId)}.json`);
-  }
-  register(record) {
-    import_node_fs7.default.mkdirSync(this.dir(), { recursive: true });
-    import_node_fs7.default.writeFileSync(this.filePath(record.clientId), JSON.stringify(record), "utf8");
-    return record;
-  }
-  detach(clientId) {
-    const filePath = this.filePath(clientId);
-    if (!import_node_fs7.default.existsSync(filePath)) {
-      return false;
-    }
-    import_node_fs7.default.unlinkSync(filePath);
-    return true;
-  }
-  detachBySession(workspace, sessionId) {
-    const detached = [];
-    for (const record of this.list()) {
-      if (record.workspace === workspace && record.sessionId === sessionId && this.detach(record.clientId)) {
-        detached.push(record);
-      }
-    }
-    return detached;
-  }
-  list() {
-    if (!import_node_fs7.default.existsSync(this.dir())) {
-      return [];
-    }
-    const records = [];
-    for (const file of import_node_fs7.default.readdirSync(this.dir())) {
-      if (!file.endsWith(".json")) {
-        continue;
-      }
-      const raw = import_node_fs7.default.readFileSync(import_node_path9.default.join(this.dir(), file), "utf8");
-      try {
-        const parsed = JSON.parse(raw);
-        if (isObject(parsed)) {
-          records.push(normalizeClient(parsed));
-        }
-      } catch {
-      }
-    }
-    return records;
-  }
-  sweepStale(now = Date.now()) {
-    const stale = [];
-    for (const record of this.list()) {
-      const started = Date.parse(record.startedAt);
-      const olderThanSevenDays = Number.isFinite(started) && now - started > 7 * 24 * 60 * 60 * 1e3;
-      const pidDead = record.pid != null && record.pid > 0 && !pidAlive2(record.pid);
-      if (pidDead || olderThanSevenDays) {
-        this.detach(record.clientId);
-        stale.push(record);
-      }
-    }
-    return stale;
-  }
-};
-function safeClientId(clientId) {
-  if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(clientId)) {
-    throw new InvalidRequest(`invalid client id: ${clientId}`);
-  }
-  return clientId;
-}
-function normalizeClient(raw) {
-  return {
-    clientId: String(raw.clientId ?? raw.client_id ?? ""),
-    workspace: String(raw.workspace ?? "default"),
-    hostname: String(raw.hostname ?? import_node_os3.default.hostname()),
-    pid: raw.pid == null ? null : Number(raw.pid),
-    startedAt: String(raw.startedAt ?? raw.started_at ?? (/* @__PURE__ */ new Date()).toISOString()),
-    claudeProjectDir: raw.claudeProjectDir == null && raw.claude_project_dir == null ? null : String(raw.claudeProjectDir ?? raw.claude_project_dir),
-    sessionId: raw.sessionId == null && raw.session_id == null ? null : String(raw.sessionId ?? raw.session_id)
-  };
-}
-function pidAlive2(pid) {
-  return isPidAlive(pid);
-}
-
-// src/compaction.ts
-var CompactionMonitor = class {
-  constructor(cfg, registry, eventBus) {
-    this.cfg = cfg;
-    this.registry = registry;
-    this.eventBus = eventBus;
-    void this.registry;
-  }
-  cfg;
-  registry;
-  eventBus;
-  suggestedLevel = /* @__PURE__ */ new Map();
-  async observeUsage(name, usage) {
-    const metric = usage.contextTokensEstimate ?? usage.cumulativeUsageTokens ?? 0;
-    const threshold = this.cfg.compaction.thresholdTokens;
-    if (metric < threshold) {
-      return;
-    }
-    const level = Math.max(1, Math.floor(metric / threshold));
-    const key = `${usage.workspace || "default"}\0${name}`;
-    const previousLevel = this.suggestedLevel.get(key) || 0;
-    if (level <= previousLevel) {
-      return;
-    }
-    this.suggestedLevel.set(key, level);
-    this.eventBus.publish("events", {
-      workspace: usage.workspace || "default",
-      kind: "compact-suggest",
-      session: name,
-      tokens: metric,
-      level,
-      metric_kind: usage.contextTokensEstimate != null ? "context_estimate" : "cumulative_usage",
-      context_tokens_estimate: usage.contextTokensEstimate,
-      model_context_window: usage.modelContextWindow,
-      cumulative_usage_tokens: usage.cumulativeUsageTokens,
-      threshold
-    });
-  }
-  clear(name, workspace = "default") {
-    this.suggestedLevel.delete(`${workspace}\0${name}`);
-  }
-};
-
-// src/asyncQueue.ts
-var AsyncQueue = class {
-  constructor(maxSize = 0) {
-    this.maxSize = maxSize;
-  }
-  maxSize;
-  items = [];
-  waiters = [];
-  closed = false;
-  closeError = new Error("queue closed");
-  push(item) {
-    if (this.closed) {
-      return;
-    }
-    if (this.waiters.length > 0) {
-      const waiter = this.waiters.shift();
-      waiter?.resolve(item);
-      return;
-    }
-    if (this.maxSize > 0 && this.items.length >= this.maxSize) {
-      this.items.shift();
-    }
-    this.items.push(item);
-  }
-  shiftNow() {
-    return this.items.shift();
-  }
-  async shift(timeoutMs = 0, timeoutMessage = "queue shift timed out") {
-    if (this.items.length > 0) {
-      return this.items.shift();
-    }
-    if (this.closed) {
-      throw this.closeError;
-    }
-    return await new Promise((resolve, reject) => {
-      const waiter = { resolve, reject };
-      this.waiters.push(waiter);
-      if (timeoutMs > 0) {
-        setTimeout(() => {
-          const index = this.waiters.indexOf(waiter);
-          if (index >= 0) {
-            this.waiters.splice(index, 1);
-            reject(new Error(timeoutMessage));
-          }
-        }, timeoutMs);
-      }
-    });
-  }
-  get length() {
-    return this.items.length;
-  }
-  close(error = new Error("queue closed")) {
-    if (this.closed) {
-      return;
-    }
-    this.closed = true;
-    this.closeError = error;
-    for (const waiter of this.waiters.splice(0)) {
-      waiter.reject(this.closeError);
-    }
-  }
-};
-
-// src/eventBus.ts
-var EventBus = class {
-  constructor(maxBuffer = 1e3, subscriberQueueMax = 200) {
-    this.maxBuffer = maxBuffer;
-    this.subscriberQueueMax = subscriberQueueMax;
-  }
-  maxBuffer;
-  subscriberQueueMax;
-  buffers = /* @__PURE__ */ new Map();
-  seqs = /* @__PURE__ */ new Map();
-  subs = /* @__PURE__ */ new Map();
-  replaceLimits(maxBuffer, subscriberQueueMax) {
-    this.maxBuffer = maxBuffer;
-    this.subscriberQueueMax = subscriberQueueMax;
-  }
-  publish(stream, payload) {
-    const seq = (this.seqs.get(stream) || 0) + 1;
-    this.seqs.set(stream, seq);
-    const event = { seq, stream, payload };
-    const buffer = this.buffers.get(stream) || [];
-    buffer.push(event);
-    if (buffer.length > this.maxBuffer) {
-      buffer.splice(0, buffer.length - this.maxBuffer);
-    }
-    this.buffers.set(stream, buffer);
-    for (const sub of this.subs.get(stream) || []) {
-      if (eventMatchesSubscriber(event, sub)) {
-        sub.queue.push(event);
-      }
-    }
-    return event;
-  }
-  async subscribe(stream, sinceSeq = 0, options = {}) {
-    const queue = new AsyncQueue(this.subscriberQueueMax);
-    const sub = {
-      queue,
-      workspace: options.workspace || null,
-      clientId: options.clientId || null,
-      allWorkspaces: Boolean(options.allWorkspaces)
-    };
-    for (const event of this.buffers.get(stream) || []) {
-      if (event.seq > sinceSeq && eventMatchesSubscriber(event, sub)) {
-        queue.push(event);
-      }
-    }
-    let subs = this.subs.get(stream);
-    if (!subs) {
-      subs = /* @__PURE__ */ new Set();
-      this.subs.set(stream, subs);
-    }
-    subs.add(sub);
-    return queue;
-  }
-  async unsubscribe(stream, queue) {
-    const subs = this.subs.get(stream);
-    if (subs) {
-      for (const sub of subs) {
-        if (sub.queue === queue) {
-          subs.delete(sub);
-          break;
-        }
-      }
-    }
-    queue.close();
-  }
-  async detachClient(clientId) {
-    let detached = 0;
-    for (const subs of this.subs.values()) {
-      for (const sub of [...subs]) {
-        if (sub.clientId === clientId) {
-          subs.delete(sub);
-          sub.queue.close(new Error(`client ${clientId} detached`));
-          detached += 1;
-        }
-      }
-    }
-    return detached;
-  }
-  lastSeq(stream) {
-    return this.seqs.get(stream) || 0;
-  }
-};
-function eventMatchesSubscriber(event, sub) {
-  if (sub.allWorkspaces || !sub.workspace) {
-    return true;
-  }
-  const eventWorkspace = String(event.payload.workspace ?? "default");
-  return eventWorkspace === sub.workspace;
-}
-
-// src/fileIO.ts
-var import_node_fs8 = __toESM(require("fs"));
-var import_node_path10 = __toESM(require("path"));
-function ensureDirFor(filePath) {
-  import_node_fs8.default.mkdirSync(import_node_path10.default.dirname(filePath), { recursive: true });
-}
-function rotateFileIfNeeded(filePath, maxMb) {
-  if (maxMb <= 0 || !import_node_fs8.default.existsSync(filePath)) {
-    return;
-  }
-  const maxBytes = maxMb * 1024 * 1024;
-  const stat = import_node_fs8.default.statSync(filePath);
-  if (stat.size < maxBytes) {
-    return;
-  }
-  const rotated = `${filePath}.1`;
-  if (import_node_fs8.default.existsSync(rotated)) {
-    import_node_fs8.default.unlinkSync(rotated);
-  }
-  import_node_fs8.default.renameSync(filePath, rotated);
-}
-function readLastLines(filePath, lineCount) {
-  if (lineCount <= 0 || !import_node_fs8.default.existsSync(filePath)) {
-    return "";
-  }
-  const fd = import_node_fs8.default.openSync(filePath, "r");
-  try {
-    const stat = import_node_fs8.default.fstatSync(fd);
-    if (stat.size === 0) {
-      return "";
-    }
-    const chunkSize = 64 * 1024;
-    let position = stat.size;
-    let buffer = "";
-    let lines = [];
-    while (position > 0 && lines.length <= lineCount) {
-      const size = Math.min(chunkSize, position);
-      position -= size;
-      const chunk = Buffer.alloc(size);
-      import_node_fs8.default.readSync(fd, chunk, 0, size, position);
-      buffer = `${chunk.toString("utf8")}${buffer}`;
-      lines = buffer.split(/\r?\n/);
-    }
-    const trimmed = lines.filter((line) => line.length > 0);
-    return trimmed.slice(Math.max(0, trimmed.length - lineCount)).join("\n");
-  } finally {
-    import_node_fs8.default.closeSync(fd);
-  }
-}
-function readJsonlTail(filePath, lineCount) {
-  const tail = readLastLines(filePath, lineCount);
-  return tail ? tail.split(/\r?\n/).filter(Boolean) : [];
-}
-
-// src/health.ts
-var HealthMonitor = class {
-  constructor(cfg, registry, sessions, eventBus, factory) {
-    this.cfg = cfg;
-    this.registry = registry;
-    this.sessions = sessions;
-    this.eventBus = eventBus;
-    this.factory = factory;
-  }
-  cfg;
-  registry;
-  sessions;
-  eventBus;
-  factory;
-  healedAt = /* @__PURE__ */ new Map();
-  stuckTurnNotified = /* @__PURE__ */ new Map();
-  replaceConfig(cfg) {
-    this.cfg = cfg;
-  }
-  async tickOnce() {
-    const entries = this.registry.list(null, true);
-    const concurrency = Math.max(1, this.cfg.heartbeat.healthCheckConcurrency);
-    let index = 0;
-    const workers = Array.from({ length: Math.min(concurrency, entries.length || 1) }, async () => {
-      while (index < entries.length) {
-        const current = entries[index];
-        index += 1;
-        await this.checkEntry(current);
-      }
-    });
-    await Promise.all(workers);
-  }
-  async checkEntry(entry) {
-    const key = sessionKey(entry.workspace, entry.name);
-    if (entry.status === "closed") {
-      this.stuckTurnNotified.delete(key);
-      return;
-    }
-    const session = this.sessions.get(key) || this.sessions.get(entry.name);
-    if (!session) {
-      this.stuckTurnNotified.delete(key);
-      await this.onDown(entry.workspace, entry.name);
-      return;
-    }
-    this.maybeEmitTurnStuck(entry.workspace, entry.name, session);
-    try {
-      if (!session.isTransportAlive()) {
-        throw new Error("transport is not alive");
-      }
-      await withTimeout(session.healthCheck(), this.cfg.heartbeat.healthTimeoutSeconds * 1e3);
-    } catch (error) {
-      this.registry.update(entry.name, {
-        status: "errored",
-        errorMessage: error.message
-      }, entry.workspace);
-      await this.onDown(entry.workspace, entry.name, session);
-    }
-  }
-  maybeEmitTurnStuck(workspace, name, session) {
-    const key = sessionKey(workspace, name);
-    if (!session.isRunning()) {
-      this.stuckTurnNotified.delete(key);
-      return;
-    }
-    const turnId = session.currentTurnId();
-    const ageMs = session.currentTurnAgeMs();
-    if (!turnId || ageMs == null) {
-      this.stuckTurnNotified.delete(key);
-      return;
-    }
-    const thresholdMs = this.cfg.heartbeat.turnStuckSeconds * 1e3;
-    if (ageMs < thresholdMs) {
-      if (this.stuckTurnNotified.get(key) !== turnId) {
-        this.stuckTurnNotified.delete(key);
-      }
-      return;
-    }
-    if (this.stuckTurnNotified.get(key) === turnId) {
-      return;
-    }
-    this.stuckTurnNotified.set(key, turnId);
-    this.eventBus.publish("events", {
-      workspace,
-      kind: "turn-stuck",
-      session: name,
-      turn_id: turnId,
-      age_ms: ageMs,
-      threshold_ms: thresholdMs
-    });
-  }
-  async onDown(workspace, name, session) {
-    const key = sessionKey(workspace, name);
-    const entry = this.registry.get(name, workspace);
-    const lastHealedAt = this.healedAt.get(key);
-    const duringTurn = session?.isRunning() || entry.status === "running";
-    const activeTurnId = session?.currentTurnId() || entry.lastTurnId || null;
-    const turnAgeMs = session?.currentTurnAgeMs() ?? null;
-    const migratedQueue = session ? await session.detachForRecovery("auto-heal queue migration") : [];
-    if (session) {
-      this.sessions.delete(key);
-      this.sessions.delete(name);
-    }
-    const canAttemptHeal = this.cfg.heartbeat.selfHealOnce && !entry.ephemeral && (lastHealedAt == null || Date.now() - lastHealedAt >= this.cfg.heartbeat.selfHealBackoffSeconds * 1e3);
-    if (canAttemptHeal) {
-      this.healedAt.set(key, Date.now());
-      try {
-        const resumed = await withTimeout(
-          this.factory.resume(name, workspace),
-          this.cfg.heartbeat.resumeTimeoutSeconds * 1e3
-        );
-        await resumed.absorbQueue(migratedQueue);
-        this.sessions.set(key, resumed);
-        this.registry.update(name, {
-          status: "idle",
-          errorMessage: null
-        }, workspace);
-        this.eventBus.publish("events", {
-          workspace,
-          kind: duringTurn ? "auto-heal-after-crash" : "subprocess-recycled",
-          session: name,
-          heal_reason: duringTurn ? "transport_down_during_turn" : "transport_down_idle",
-          was_during_turn: duringTurn,
-          turn_id: activeTurnId,
-          turn_age_ms: turnAgeMs
-        });
-        return;
-      } catch (error) {
-        for (const item of migratedQueue) {
-          item.waitRejecter?.(new Error(`auto-heal failed for ${name}: ${error.message}`));
-        }
-        this.registry.update(name, {
-          status: "errored",
-          errorMessage: error.message
-        }, workspace);
-      }
-    }
-    if (!canAttemptHeal) {
-      for (const item of migratedQueue) {
-        item.waitRejecter?.(new Error(`session ${name} went down and could not be auto-healed`));
-      }
-    }
-    this.eventBus.publish("events", {
-      workspace,
-      kind: "session-down",
-      session: name,
-      reason: duringTurn ? "transport_down_during_turn" : "transport_down_idle",
-      was_during_turn: duringTurn,
-      turn_id: activeTurnId,
-      turn_age_ms: turnAgeMs,
-      queued_items_migrated: migratedQueue.length,
-      lastError: entry.errorMessage || "",
-      stderrTail: session?.stderrTail(20) || ""
-    });
-  }
-};
-function sessionKey(workspace, name) {
-  return workspaceSessionKey(workspace || DEFAULT_WORKSPACE, name);
-}
-async function withTimeout(promise, timeoutMs) {
-  return await Promise.race([
-    promise,
-    new Promise((_resolve, reject) => {
-      setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
-    })
-  ]);
-}
-
-// src/registry.ts
-var import_node_fs9 = __toESM(require("fs"));
-var import_node_path11 = __toESM(require("path"));
-var RegistryStore = class {
-  constructor(filePath) {
-    this.filePath = filePath;
-    this.load();
-  }
-  filePath;
-  entries = /* @__PURE__ */ new Map();
-  load() {
-    if (!import_node_fs9.default.existsSync(this.filePath)) {
-      return;
-    }
-    const raw = import_node_fs9.default.readFileSync(this.filePath, "utf8").trim();
-    if (!raw) {
-      return;
-    }
     const parsed = JSON.parse(raw);
-    if (!isObject(parsed)) {
-      return;
-    }
-    const sessions = isObject(parsed.sessions) ? parsed.sessions : {};
-    let migrated = false;
-    for (const [key, value] of Object.entries(sessions)) {
-      if (!isObject(value)) {
-        continue;
-      }
-      const entry = normalizeEntry(key, value);
-      if (value.createdByClientId === void 0) {
-        migrated = true;
-      }
-      this.entries.set(entryKey(entry.workspace, entry.name), entry);
-    }
-    if (migrated) {
-      this.save();
-    }
-  }
-  save() {
-    import_node_fs9.default.mkdirSync(import_node_path11.default.dirname(this.filePath), { recursive: true });
-    const payload = { sessions: Object.fromEntries(this.entries.entries()) };
-    const tmpPath = `${this.filePath}.tmp`;
-    import_node_fs9.default.writeFileSync(tmpPath, JSON.stringify(payload), "utf8");
-    import_node_fs9.default.renameSync(tmpPath, this.filePath);
-  }
-  create(entry) {
-    const normalized = normalizeEntry(entry.name, entry);
-    const key = entryKey(normalized.workspace, normalized.name);
-    if (this.entries.has(key)) {
-      throw new SessionExists(
-        `session ${JSON.stringify(normalized.name)} already exists in workspace ${JSON.stringify(normalized.workspace)}`
-      );
-    }
-    this.entries.set(key, cloneEntry(normalized));
-    this.save();
-  }
-  get(name, workspace = DEFAULT_WORKSPACE) {
-    const entry = this.entries.get(entryKey(workspace, name));
-    if (!entry) {
-      throw new SessionNotFound(
-        `session ${JSON.stringify(name)} not found in workspace ${JSON.stringify(workspace)}`
-      );
-    }
-    return cloneEntry(entry);
-  }
-  find(name, workspace, allWorkspaces = false) {
-    if (!allWorkspaces) {
-      const requested = workspace || DEFAULT_WORKSPACE;
-      try {
-        return this.get(name, requested);
-      } catch (error) {
-        if (error instanceof SessionNotFound) {
-          const other = [...this.entries.values()].find((entry) => entry.name === name);
-          if (other) {
-            throw new WrongWorkspace(
-              `session ${JSON.stringify(name)} is in workspace ${JSON.stringify(other.workspace)}, not ${JSON.stringify(requested)}`
-            );
-          }
-        }
-        throw error;
-      }
-    }
-    const matches = [...this.entries.values()].filter((entry) => entry.name === name);
-    if (matches.length === 0) {
-      throw new SessionNotFound(`session ${JSON.stringify(name)} not found`);
-    }
-    if (matches.length > 1) {
-      throw new SessionNotFound(
-        `session ${JSON.stringify(name)} exists in multiple workspaces; pass --workspace`
-      );
-    }
-    return cloneEntry(matches[0]);
-  }
-  list(workspace, allWorkspaces = false) {
-    const entries = [...this.entries.values()];
-    const filtered = allWorkspaces || !workspace ? entries : entries.filter((entry) => entry.workspace === workspace);
-    return filtered.map(cloneEntry);
-  }
-  workspaces() {
-    return [...new Set([...this.entries.values()].map((entry) => entry.workspace))].sort();
-  }
-  update(name, fields, workspace = DEFAULT_WORKSPACE) {
-    const key = entryKey(workspace, name);
-    const current = this.entries.get(key);
-    if (!current) {
-      throw new SessionNotFound(
-        `session ${JSON.stringify(name)} not found in workspace ${JSON.stringify(workspace)}`
-      );
-    }
-    const updated = { ...current, ...fields, workspace: current.workspace, name: current.name };
-    this.entries.set(key, updated);
-    this.save();
-    return cloneEntry(updated);
-  }
-  delete(name, workspace = DEFAULT_WORKSPACE) {
-    const key = entryKey(workspace, name);
-    if (!this.entries.has(key)) {
-      throw new SessionNotFound(
-        `session ${JSON.stringify(name)} not found in workspace ${JSON.stringify(workspace)}`
-      );
-    }
-    this.entries.delete(key);
-    this.save();
-  }
-};
-function entryKey(workspace, name) {
-  return workspaceSessionKey(workspace, name);
-}
-function cloneEntry(entry) {
-  return JSON.parse(JSON.stringify(entry));
-}
-function normalizeEntry(key, raw) {
-  const parsedKey = parseKey(key);
-  const name = String(raw.name ?? parsedKey.name);
-  if (raw.workspace == null && parsedKey.workspace == null) {
-    throw new Error(`registry entry ${JSON.stringify(key)} is missing workspace`);
-  }
-  const workspace = safeWorkspace(String(raw.workspace ?? parsedKey.workspace));
-  return {
-    workspace,
-    name,
-    createdByClientId: raw.createdByClientId == null ? null : String(raw.createdByClientId),
-    threadId: String(raw.threadId ?? ""),
-    ephemeral: raw.ephemeral == null ? false : Boolean(raw.ephemeral),
-    cwd: String(raw.cwd ?? ""),
-    model: String(raw.model ?? ""),
-    modelProvider: raw.modelProvider == null ? null : String(raw.modelProvider),
-    sandbox: String(raw.sandbox ?? ""),
-    approvalPolicy: String(raw.approvalPolicy ?? "never"),
-    serviceTier: raw.serviceTier == null ? null : String(raw.serviceTier),
-    reasoningEffort: raw.reasoningEffort == null ? null : String(raw.reasoningEffort),
-    personality: raw.personality == null ? null : String(raw.personality),
-    profile: raw.profile == null ? null : String(raw.profile),
-    createdAt: String(raw.createdAt ?? ""),
-    lastTurnId: raw.lastTurnId == null ? null : String(raw.lastTurnId),
-    lastTurnEndedAt: raw.lastTurnEndedAt == null ? null : String(raw.lastTurnEndedAt),
-    lastPromptText: raw.lastPromptText == null ? null : String(raw.lastPromptText),
-    status: raw.status || "idle",
-    appServerPid: raw.appServerPid == null ? null : Number(raw.appServerPid),
-    queueLength: Number(raw.queueLength ?? 0),
-    tokenUsageInput: Number(raw.tokenUsageInput ?? 0),
-    contextTokensEstimate: raw.contextTokensEstimate == null ? null : Number(raw.contextTokensEstimate),
-    modelContextWindow: raw.modelContextWindow == null ? null : Number(raw.modelContextWindow),
-    errorMessage: raw.errorMessage == null ? null : String(raw.errorMessage)
-  };
-}
-function parseKey(key) {
-  const nul = key.indexOf("\0");
-  if (nul > 0) {
-    return { workspace: key.slice(0, nul), name: key.slice(nul + 1) };
-  }
-  return { workspace: null, name: key };
-}
-
-// src/session.ts
-var import_node_fs11 = __toESM(require("fs"));
-var import_node_path12 = __toESM(require("path"));
-var import_node_crypto3 = __toESM(require("crypto"));
-
-// src/digest.ts
-var import_node_fs10 = __toESM(require("fs"));
-var FENCED_BLOCK = /```.*?```/gs;
-function truncate(text, limit) {
-  if (text.length <= limit) {
-    return text;
-  }
-  const indicator = ` ... (truncated, ${text.length} chars)`;
-  return `${text.slice(0, Math.max(0, limit - indicator.length))}${indicator}`;
-}
-function firstLine(text) {
-  return text.split(/\r?\n/, 1)[0] || "";
-}
-function tailLines(text, count) {
-  const lines = text.split(/\r?\n/);
-  return lines.slice(Math.max(0, lines.length - count)).join("\n");
-}
-function longestBacktickRun(text) {
-  return (text.match(/`+/g) || []).reduce((longest, run) => Math.max(longest, run.length), 0);
-}
-function codeSpan(text) {
-  const delimiter = "`".repeat(longestBacktickRun(text) + 1);
-  if (!text.includes("`")) {
-    return `${delimiter}${text}${delimiter}`;
-  }
-  return `${delimiter} ${text} ${delimiter}`;
-}
-function fencedBlock(text, language = "") {
-  const delimiter = "`".repeat(Math.max(3, longestBacktickRun(text) + 1));
-  const opening = language ? `${delimiter}${language}` : delimiter;
-  return `  ${opening}
-  ${text.split("\n").join("\n  ")}
-  ${delimiter}`;
-}
-function digestItem(item, cfg) {
-  const itemType = String(item.type ?? "");
-  if (itemType === "commandExecution") {
-    return digestCommand(item, cfg);
-  }
-  if (itemType === "fileChange") {
-    return digestFileChange(item);
-  }
-  if (itemType === "agentMessage") {
-    const phase = item.phase == null ? null : String(item.phase);
-    return {
-      kind: "agent_message",
-      text: String(item.text ?? ""),
-      isFinal: phase === "final_answer" || phase === null
-    };
-  }
-  if (itemType === "reasoning") {
-    if (!cfg.reasoningCapture) {
-      return null;
-    }
-    const summary = Array.isArray(item.summary) ? item.summary.map(String).join(" ") : String(item.summary ?? "");
-    return { kind: "agent_message", text: summary };
-  }
-  if (itemType === "webSearch") {
-    return { kind: "web_search", text: String(item.query ?? "") };
-  }
-  if (itemType === "mcpToolCall" || itemType === "dynamicToolCall") {
-    return digestToolCall(item, cfg);
-  }
-  if (itemType === "collabAgentToolCall") {
-    return { kind: "collab_agent", text: String(item.tool ?? "subagent") };
-  }
-  return null;
-}
-function digestCommand(item, cfg) {
-  const raw = String(item.command ?? "");
-  const isMultiLine = raw.includes("\n");
-  const inlineText = isMultiLine ? firstLine(raw) : raw.length > cfg.commandTruncateChars ? truncate(raw, cfg.commandTruncateChars) : raw;
-  const exitCode = item.exitCode == null ? null : Number(item.exitCode);
-  const stderr = String(item.aggregatedOutput ?? "");
-  return {
-    kind: "command",
-    text: inlineText,
-    fullText: isMultiLine ? raw : null,
-    exitCode,
-    durationMs: item.durationMs == null ? null : Number(item.durationMs),
-    stderrTail: exitCode == null || exitCode === 0 ? null : tailLines(stderr, cfg.stderrTailLinesOnFail)
-  };
-}
-function digestFileChange(item) {
-  const changes = Array.isArray(item.changes) ? item.changes : [];
-  const first = changes[0] || {};
-  const pathValue = String(first.path ?? "");
-  const content = typeof first.content === "string" ? first.content : "";
-  let linesAdded = Number(first.linesAdded ?? first.lines_added ?? 0);
-  let linesRemoved = Number(first.linesRemoved ?? first.lines_removed ?? 0);
-  if (linesAdded === 0 && linesRemoved === 0 && content) {
-    linesAdded = content.split(/\r?\n/).length;
-    linesRemoved = 0;
-  }
-  const rawKind = String(first.kind ?? "").toLowerCase();
-  const previousPath = first.previousPath ?? first.previous_path ?? null;
-  let changeKind;
-  if (rawKind === "add" || rawKind === "added" || rawKind === "create" || rawKind === "created") {
-    changeKind = "A";
-  } else if (rawKind === "delete" || rawKind === "deleted" || rawKind === "remove" || rawKind === "removed") {
-    changeKind = "D";
-  } else if (rawKind === "rename" || rawKind === "renamed" || rawKind === "move" || rawKind === "moved") {
-    changeKind = "R";
-  } else if (rawKind === "modify" || rawKind === "modified" || rawKind === "update" || rawKind === "updated") {
-    changeKind = "M";
-  } else if (linesRemoved === 0 && linesAdded > 0 && !previousPath) {
-    changeKind = "A";
-  } else if (linesAdded === 0 && linesRemoved > 0) {
-    changeKind = "D";
-  } else {
-    changeKind = "M";
-  }
-  return {
-    kind: "file_change",
-    text: `${pathValue} (+${linesAdded}/-${linesRemoved})`,
-    path: pathValue,
-    linesAdded,
-    linesRemoved,
-    changeKind
-  };
-}
-function digestToolCall(item, cfg) {
-  const server = String(item.server ?? "");
-  const tool = String(item.tool ?? "");
-  const argsRaw = item.arguments ?? item.args ?? "";
-  let argsText = "";
-  try {
-    argsText = typeof argsRaw === "string" ? argsRaw : JSON.stringify(argsRaw);
+    return typeof parsed.pid === "number" && Number.isFinite(parsed.pid) ? parsed.pid : NaN;
   } catch {
-    argsText = String(argsRaw);
+    return NaN;
   }
-  const argsHead = argsText ? truncate(argsText, cfg.toolArgsTruncateChars) : "";
-  const label = server ? `${server}/${tool}` : tool;
-  return {
-    kind: "tool_call",
-    text: argsHead ? `${label}(${argsHead})` : label,
-    toolName: label
-  };
 }
-function hasQuestion(message) {
-  const stripped = message.replace(FENCED_BLOCK, "").trimEnd();
-  return stripped.endsWith("?");
-}
-function classifyTier(lines, status, finalMessage) {
-  if (!["ok", "completed"].includes(status)) {
-    return "attn";
-  }
-  if (lines.some((line) => line.kind === "command" && line.exitCode != null && line.exitCode !== 0)) {
-    return "attn";
-  }
-  if (finalMessage && hasQuestion(finalMessage)) {
-    return "attn";
-  }
-  if (lines.some((line) => line.kind === "file_change")) {
-    return "normal";
-  }
-  return "trivial";
-}
-function buildTurnSummary(input) {
-  const filesAdded = input.lines.filter((line) => line.kind === "file_change").reduce((sum, line) => sum + Number(line.linesAdded || 0), 0);
-  const filesRemoved = input.lines.filter((line) => line.kind === "file_change").reduce((sum, line) => sum + Number(line.linesRemoved || 0), 0);
-  return {
-    ...input,
-    filesAdded,
-    filesRemoved,
-    tier: classifyTier(input.lines, input.status, input.finalMessage)
-  };
-}
-function formatLine(line) {
-  if (line.kind === "command") {
-    const status = line.exitCode === 0 ? "ok" : `FAIL exit=${line.exitCode}`;
-    const duration = line.durationMs || 0;
-    const header = `- **[cmd ${status} ${duration}ms]**`;
-    const stderrSuffix = line.stderrTail ? `
-
-  stderr:
-
-${fencedBlock(line.stderrTail)}` : "";
-    if (line.fullText) {
-      return `${header}
-
-${fencedBlock(line.fullText, "sh")}${stderrSuffix}`;
-    }
-    return `${header} ${codeSpan(line.text)}${stderrSuffix}`;
-  }
-  if (line.kind === "file_change") {
-    return `- **[file ${line.changeKind || "M"}]** ${codeSpan(line.path || "")} (+${line.linesAdded || 0}/-${line.linesRemoved || 0})`;
-  }
-  if (line.kind === "agent_message") {
-    const label = line.isFinal ? "**msg (final):**" : "**msg:**";
-    const body = (line.text || "").trimEnd();
-    return `- ${label}
-
-${fencedBlock(body, "markdown")}`;
-  }
-  if (line.kind === "tool_call") {
-    return `- **[tool]** ${codeSpan(line.toolName || line.text)}`;
-  }
-  if (line.kind === "web_search") {
-    return `- **[search]** ${codeSpan(line.text)}`;
-  }
-  if (line.kind === "collab_agent") {
-    return `- **[subagent]** ${codeSpan(line.text)}`;
-  }
-  return `- ${line.text}`;
-}
-function writeHistoryMd(filePath, summary, cfg) {
-  ensureDirFor(filePath);
-  if (cfg) {
-    rotateFileIfNeeded(filePath, cfg.historyRotationMb);
-  }
-  const parts = [
-    `
-## Turn ${summary.turnId} \xB7 ${summary.elapsedMs}ms \xB7 status=${summary.status} \xB7 tier=${summary.tier}
-`
-  ];
-  const usageBits = [];
-  if (summary.usageLastTokens != null) {
-    usageBits.push(`tokens_last=${summary.usageLastTokens}`);
-  }
-  if (summary.usageTotalTokens != null) {
-    usageBits.push(`tokens_total=${summary.usageTotalTokens}`);
-  }
-  if (summary.filesAdded || summary.filesRemoved) {
-    usageBits.push(`files=+${summary.filesAdded}/-${summary.filesRemoved}`);
-  }
-  if (usageBits.length > 0 || summary.errorMessage) {
-    parts.push("\n### Usage\n");
-    if (usageBits.length > 0) {
-      parts.push(usageBits.join(" \xB7 "));
-      parts.push("\n");
-    }
-    if (summary.errorMessage) {
-      parts.push(`error: ${summary.errorMessage}
-`);
-    }
-  }
-  if (summary.lines.length > 0) {
-    parts.push("\n### Timeline\n\n");
-    parts.push(summary.lines.map(formatLine).join("\n"));
-    parts.push("\n");
-  }
-  import_node_fs10.default.appendFileSync(filePath, parts.join(""), "utf8");
-}
-function writeTurnsJsonl(filePath, summary, cfg) {
-  ensureDirFor(filePath);
-  if (cfg) {
-    rotateFileIfNeeded(filePath, cfg.historyRotationMb);
-  }
-  import_node_fs10.default.appendFileSync(filePath, `${JSON.stringify(summary)}
-`, "utf8");
-}
-
-// src/queue.ts
-var SendQueue = class {
-  constructor(maxSize, policy) {
-    this.maxSize = maxSize;
-    this.policy = policy;
-  }
-  maxSize;
-  policy;
-  items = [];
-  enqueue(item) {
-    if (this.items.length < this.maxSize) {
-      this.items.push(item);
-      return { overflowed: false };
-    }
-    if (this.policy === "reject") {
-      throw new QueueFull(`queue full (max=${this.maxSize})`, { size: this.maxSize });
-    }
-    if (this.policy === "drop_oldest") {
-      const dropped2 = this.items.shift();
-      this.items.push(item);
-      return { overflowed: false, dropped: dropped2 };
-    }
-    const dropped = this.items.shift();
-    this.items.push(item);
-    return { overflowed: true, dropped };
-  }
-  pop() {
-    return this.items.shift();
-  }
-  snapshot() {
-    return [...this.items];
-  }
-  clear() {
-    this.items.length = 0;
-  }
-  dropOldest() {
-    return this.items.shift();
-  }
-  get length() {
-    return this.items.length;
-  }
-};
-
-// src/codex/appServerClient.ts
-var import_node_readline2 = __toESM(require("readline"));
-var BUFFERED_NOTIFICATION_METHODS = /* @__PURE__ */ new Set([
-  "item/started",
-  "item/completed",
-  "turn/started",
-  "turn/completed",
-  "thread/tokenUsageUpdated",
-  "thread/tokenUsage/updated"
-]);
-var OPT_OUT_NOTIFICATION_METHODS = [
-  "item/agentMessage/delta",
-  "item/reasoning/delta",
-  "item/reasoning/summaryTextDelta",
-  "item/commandExecution/outputDelta",
-  "item/fileChange/outputDelta",
-  "item/mcpToolCall/progress",
-  "turn/diff/updated",
-  "turn/plan/updated"
-];
-function responseErrorMessage(error) {
-  if (isObject(error)) {
-    const code = error.code == null ? "" : `code=${String(error.code)} `;
-    return `${code}${String(error.message ?? "unknown error")}`.trim();
-  }
-  return String(error);
-}
-var AppServerClient = class {
-  constructor(cfg) {
-    this.cfg = cfg;
-  }
-  cfg;
-  proc = null;
-  notifications = new AsyncQueue(1e3);
-  pending = /* @__PURE__ */ new Map();
-  stderrLines = [];
-  nextRequestId = 0;
-  readLoopStarted = false;
-  closeError = null;
-  initialized = false;
-  get pid() {
-    return this.proc?.pid ?? null;
-  }
-  isAlive() {
-    return !!this.proc && this.proc.exitCode == null && !this.proc.killed;
-  }
-  stderrSnapshot() {
-    return [...this.stderrLines];
-  }
-  stderrTail(limit = 40) {
-    return this.stderrLines.slice(Math.max(0, this.stderrLines.length - limit)).join("\n");
-  }
-  async start() {
-    if (this.proc) {
-      return;
-    }
-    const args = this.buildArgs();
-    const env = { ...process.env };
-    if (this.cfg.daemon.codexHome) {
-      env.CODEX_HOME = this.cfg.daemon.codexHome;
-    }
-    this.proc = spawnManaged({
-      command: resolveCodexBin(this.cfg),
-      args,
-      stdio: ["pipe", "pipe", "pipe"],
-      cwd: void 0,
-      env,
-      detached: true
-    });
-    this.proc.stderr.setEncoding("utf8");
-    this.proc.stderr.on("data", (chunk) => {
-      for (const line of chunk.split(/\r?\n/)) {
-        if (!line) {
-          continue;
-        }
-        this.stderrLines.push(line);
-        if (this.stderrLines.length > 400) {
-          this.stderrLines.splice(0, this.stderrLines.length - 400);
-        }
-      }
-    });
-    this.proc.once("error", (error) => {
-      this.failAll(new TransportError(`failed to start app-server: ${error.message}`));
-    });
-    this.proc.once("exit", (code, signal) => {
-      this.failAll(
-        new TransportError(
-          `app-server exited${signal ? ` via ${signal}` : ` with code ${String(code ?? 1)}`}: ${this.stderrTail(20)}`
-        )
-      );
-    });
-    this.startReadLoop();
-    await this.initialize();
-  }
-  buildArgs() {
-    if (this.cfg.daemon.launchArgsOverride.length > 0) {
-      return [...this.cfg.daemon.launchArgsOverride];
-    }
-    const args = [];
-    for (const override of this.cfg.daemon.configOverrides) {
-      args.push("--config", override);
-    }
-    args.push("app-server", "--listen", "stdio://");
-    return args;
-  }
-  startReadLoop() {
-    if (this.readLoopStarted || !this.proc) {
-      return;
-    }
-    this.readLoopStarted = true;
-    this.proc.stdout.setEncoding("utf8");
-    const rl = import_node_readline2.default.createInterface({
-      input: this.proc.stdout,
-      crlfDelay: Infinity
-    });
-    void (async () => {
-      try {
-        for await (const line of rl) {
-          if (!line) {
-            continue;
-          }
-          this.handleLine(line);
-        }
-        this.failAll(new TransportError(`app-server closed stdout: ${this.stderrTail(20)}`));
-      } catch (error) {
-        this.failAll(new TransportError(`failed to read app-server stream: ${error.message}`));
-      } finally {
-        rl.close();
-      }
-    })();
-  }
-  handleLine(line) {
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch (error) {
-      this.failAll(new TransportError(`invalid JSON-RPC line: ${error.message}`));
-      return;
-    }
-    if (!isObject(message)) {
-      return;
-    }
-    const id = message.id;
-    const method = message.method;
-    if (typeof method === "string" && id !== void 0) {
-      void this.handleServerRequest(String(id), method, isObject(message.params) ? message.params : {}).catch((error) => {
-        this.failAll(new TransportError(`failed to handle server request ${method}: ${error.message}`));
-      });
-      return;
-    }
-    if (typeof method === "string") {
-      if (!BUFFERED_NOTIFICATION_METHODS.has(method)) {
-        return;
-      }
-      this.notifications.push({
-        method,
-        params: isObject(message.params) ? message.params : {}
-      });
-      return;
-    }
-    if (id === void 0) {
-      return;
-    }
-    const pending = this.pending.get(String(id));
-    if (!pending) {
-      return;
-    }
-    this.pending.delete(String(id));
-    if (message.error !== void 0) {
-      pending.reject(new TransportError(`${pending.method}: ${responseErrorMessage(message.error)}`));
-      return;
-    }
-    pending.resolve(isObject(message.result) ? message.result : {});
-  }
-  async handleServerRequest(id, method, params) {
-    let result = {};
-    if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval" || method === "item/permissions/requestApproval") {
-      result = { decision: "accept" };
-    } else if (method === "item/tool/call") {
-      result = { success: false, content: [], structuredContent: null };
-    } else if (method === "item/commandExecution/requestCallback") {
-      result = { decision: "accept" };
-    } else {
-      void params;
-      result = {};
-    }
-    this.write({ id, result });
-  }
-  async initialize() {
-    if (this.initialized) {
-      return;
-    }
-    const payload = await this.request("initialize", {
-      clientInfo: {
-        name: "codex-team",
-        title: "Codex Team",
-        version: "0.3.0"
-      },
-      capabilities: {
-        experimentalApi: true,
-        optOutNotificationMethods: OPT_OUT_NOTIFICATION_METHODS
-      }
-    });
-    validateInitializeResponse(payload);
-    this.notify("initialized", {});
-    this.initialized = true;
-  }
-  request(method, params) {
-    if (!this.proc || this.closeError) {
-      throw this.closeError ?? new TransportError("app-server is not running");
-    }
-    const id = `rpc-${++this.nextRequestId}`;
-    return awaitResponse(
-      () => new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          this.pending.delete(id);
-          reject(new TransportError(`${method}: timed out after ${this.cfg.daemon.rpcTimeoutSeconds}s`));
-        }, this.cfg.daemon.rpcTimeoutSeconds * 1e3);
-        this.pending.set(id, {
-          method,
-          resolve: (value) => {
-            clearTimeout(timeout);
-            resolve(value);
-          },
-          reject: (error) => {
-            clearTimeout(timeout);
-            reject(error);
-          }
-        });
-        try {
-          this.write({ id, method, params });
-        } catch (error) {
-          this.pending.delete(id);
-          clearTimeout(timeout);
-          reject(error);
-        }
-      })
+function scheduleIdleShutdown(ctx) {
+  const check = () => {
+    const hours = ctx.config.getEffective("daemon.idle_shutdown_hours");
+    const threshold = typeof hours === "number" ? hours : 6;
+    const ms = threshold * 3600 * 1e3;
+    const liveSessions = Array.from(ctx.users.list()).reduce(
+      (n, u) => n + ctx.sessions.listLive(u.token).length,
+      0
     );
-  }
-  notify(method, params) {
-    if (!this.proc || this.closeError) {
-      return;
-    }
-    this.write({ method, params });
-  }
-  async nextNotification(timeoutMs = 0, timeoutMessage = "timed out waiting for notification") {
-    return await this.notifications.shift(timeoutMs, timeoutMessage);
-  }
-  async threadStart(params) {
-    const response = await this.request("thread/start", params);
-    requireThreadId(response, "thread/start");
-    return response;
-  }
-  async threadResume(threadId, params) {
-    const response = await this.request("thread/resume", { threadId, ...params });
-    requireThreadId(response, "thread/resume");
-    return response;
-  }
-  async threadRead(threadId, includeTurns = false) {
-    const response = await this.request("thread/read", { threadId, includeTurns });
-    requireThreadId(response, "thread/read");
-    return response;
-  }
-  async threadArchive(threadId) {
-    return await this.request("thread/archive", { threadId });
-  }
-  async threadCompactStart(threadId) {
-    return await this.request("thread/compact/start", { threadId });
-  }
-  async turnStart(params) {
-    const response = await this.request("turn/start", params);
-    const turn = isObject(response.turn) ? response.turn : null;
-    if (!turn || typeof turn.id !== "string" || !turn.id) {
-      throw new TransportError("turn/start response missing turn.id");
-    }
-    return response;
-  }
-  async turnInterrupt(threadId, turnId) {
-    return await this.request("turn/interrupt", { threadId, turnId });
-  }
-  kill() {
-    const proc = this.proc;
-    if (proc?.pid != null) {
-      void proc.killTree(0);
-    }
-  }
-  async close() {
-    const proc = this.proc;
-    this.proc = null;
-    this.initialized = false;
-    this.failAll(new TransportError("app-server client closed"));
-    if (!proc) {
-      return;
-    }
-    const exitPromise = new Promise((resolve) => {
-      if (proc.exitCode != null || proc.killed) {
-        resolve();
-        return;
-      }
-      proc.once("exit", () => resolve());
-    });
-    if (proc.stdin.writable) {
-      proc.stdin.end();
-    }
-    const timeout = new Promise((resolve) => {
-      setTimeout(resolve, 500);
-    });
-    await Promise.race([exitPromise, timeout]);
-    if (proc.exitCode == null && !proc.killed) {
-      await proc.killTree(1500);
-      await exitPromise.catch(() => void 0);
-    }
-  }
-  write(payload) {
-    if (!this.proc || !this.proc.stdin.writable) {
-      throw new TransportError("app-server stdin is not writable");
-    }
-    this.proc.stdin.write(`${JSON.stringify(payload)}
-`);
-  }
-  failAll(error) {
-    if (this.closeError) {
-      return;
-    }
-    this.closeError = error;
-    for (const pending of this.pending.values()) {
-      pending.reject(error);
-    }
-    this.pending.clear();
-    this.notifications.close(error);
-  }
-};
-async function awaitResponse(factory) {
-  return await factory();
-}
-function requireThreadId(response, method) {
-  const thread = isObject(response.thread) ? response.thread : null;
-  if (!thread || typeof thread.id !== "string" || !thread.id) {
-    throw new TransportError(`${method} response missing thread.id`);
-  }
-}
-function validateInitializeResponse(response) {
-  const userAgent = typeof response.userAgent === "string" ? response.userAgent.trim() : "";
-  const server = isObject(response.serverInfo) ? response.serverInfo : null;
-  let serverName = server && typeof server.name === "string" ? server.name.trim() : "";
-  let serverVersion = server && typeof server.version === "string" ? server.version.trim() : "";
-  if ((!serverName || !serverVersion) && userAgent) {
-    const parsed = splitUserAgent(userAgent);
-    serverName ||= parsed.name || "";
-    serverVersion ||= parsed.version || "";
-  }
-  if (!userAgent || !serverName || !serverVersion) {
-    throw new TransportError(
-      `initialize response missing required metadata (userAgent=${JSON.stringify(userAgent)}, serverName=${JSON.stringify(serverName)}, serverVersion=${JSON.stringify(serverVersion)})`
-    );
-  }
-}
-function splitUserAgent(userAgent) {
-  const raw = userAgent.trim();
-  if (!raw) {
-    return { name: null, version: null };
-  }
-  if (raw.includes("/")) {
-    const [name, ...rest] = raw.split("/");
-    return { name: name || null, version: rest.join("/") || null };
-  }
-  const parts = raw.split(/\s+/, 2);
-  if (parts.length === 2) {
-    return { name: parts[0] || null, version: parts[1] || null };
-  }
-  return { name: raw, version: null };
-}
-
-// src/session.ts
-function nowIso() {
-  return (/* @__PURE__ */ new Date()).toISOString();
-}
-function pendingId() {
-  return `pending-${import_node_crypto3.default.randomUUID().slice(0, 8)}`;
-}
-function asRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
-}
-var Session = class {
-  constructor(workspace, name, cfg, dataDir, registry, eventBus, compaction, client, threadId) {
-    this.workspace = workspace;
-    this.name = name;
-    this.cfg = cfg;
-    this.dataDir = dataDir;
-    this.registry = registry;
-    this.eventBus = eventBus;
-    this.compaction = compaction;
-    this.client = client;
-    this.threadId = threadId;
-    this.queue = new SendQueue(cfg.queue.maxPerSession, cfg.queue.overflowPolicy);
-  }
-  workspace;
-  name;
-  cfg;
-  dataDir;
-  registry;
-  eventBus;
-  compaction;
-  client;
-  threadId;
-  queue;
-  activeTurnId = null;
-  activeTurnStartedAtMs = null;
-  closed = false;
-  active = true;
-  running = false;
-  stateLock = Promise.resolve();
-  stderrFlushedCount = 0;
-  replaceConfig(cfg) {
-    this.cfg = cfg;
-  }
-  async send(text, options = {}) {
-    const placeholderId = pendingId();
-    let waitPromise;
-    let resolveWait;
-    let rejectWait;
-    if (options.wait) {
-      waitPromise = new Promise((resolve, reject) => {
-        resolveWait = resolve;
-        rejectWait = reject;
+    if (liveSessions > 0) return;
+    const idleMs = Date.now() - ctx.activity.lastActivityAt.getTime();
+    if (idleMs >= ms) {
+      logger.info("idle threshold exceeded, shutting down", {
+        idle_ms: idleMs,
+        threshold_ms: ms
       });
+      void shutdownDaemon(ctx, "idle timeout");
     }
-    await this.withStateLock(async () => {
-      if (this.closed) {
-        throw new SessionNotFound(this.name);
-      }
-      if (this.running) {
-        const enqueueResult = this.queue.enqueue({
-          id: placeholderId,
-          text,
-          waitResolver: resolveWait,
-          waitRejecter: rejectWait,
-          overrides: options.overrides || null
-        });
-        if (enqueueResult.dropped) {
-          this.rejectPending(enqueueResult.dropped, new Error(`queued send ${enqueueResult.dropped.id} was dropped`));
-        }
-        this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
-        if (enqueueResult.overflowed) {
-          this.eventBus.publish("events", {
-            workspace: this.workspace,
-            kind: "queue-overflow",
-            session: this.name,
-            policy: this.cfg.queue.overflowPolicy,
-            dropped_id: enqueueResult.dropped?.id ?? null
-          });
-        }
-        return;
-      }
-      this.running = true;
-      this.registry.update(this.name, { status: "running" }, this.workspace);
-      void this.runTurn(placeholderId, text, resolveWait, rejectWait, options.overrides || null);
-    });
-    if (waitPromise) {
-      return await waitPromise;
-    }
-    return placeholderId;
-  }
-  async interrupt() {
-    if (this.activeTurnId) {
-      await this.client.turnInterrupt(this.threadId, this.activeTurnId);
-    }
-  }
-  async kill(reason = "killed by operator") {
-    await this.withStateLock(async () => {
-      this.active = false;
-      this.closed = true;
-      this.running = false;
-      this.activeTurnId = null;
-      this.activeTurnStartedAtMs = null;
-      this.rejectQueuedWaiters(new Error(reason));
-      this.queue.clear();
-      this.registry.update(this.name, { queueLength: 0, appServerPid: null }, this.workspace);
-    });
-    this.client.kill();
-    await this.client.close();
-    this.registry.update(this.name, {
-      status: "errored",
-      appServerPid: null,
-      queueLength: 0,
-      errorMessage: reason
-    }, this.workspace);
-  }
-  async ackError() {
-    this.registry.update(this.name, { status: "idle", errorMessage: null }, this.workspace);
-  }
-  async compact() {
-    await this.withStateLock(async () => {
-      if (this.running) {
-        throw new SessionBusy(`session ${this.name} is running; compact after the active turn finishes`);
-      }
-      this.running = true;
-      this.registry.update(this.name, { status: "compacting" }, this.workspace);
-    });
-    const attempts = Math.max(1, this.cfg.compaction.retryAttempts + 1);
-    let lastError = null;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      try {
-        const result = await this.runCompactAttempt();
-        this.compaction?.clear(this.name, this.workspace);
-        this.registry.update(this.name, {
-          status: "idle",
-          tokenUsageInput: result.usageTotal ?? 0,
-          contextTokensEstimate: result.contextTokensEstimate ?? 0,
-          modelContextWindow: result.modelContextWindow ?? this.registry.get(this.name, this.workspace).modelContextWindow ?? null,
-          errorMessage: null
-        });
-        await this.dispatchNextQueued();
-        return;
-      } catch (error) {
-        lastError = error;
-        if (attempt >= attempts) {
-          break;
-        }
-        this.eventBus.publish("events", {
-          workspace: this.workspace,
-          kind: "compact-retry",
-          session: this.name,
-          attempt,
-          max_attempts: attempts,
-          error: lastError.message
-        });
-        await new Promise((resolve) => setTimeout(resolve, Math.max(0, this.cfg.compaction.retryDelayMs)));
-      }
-    }
-    this.registry.update(this.name, {
-      status: "errored",
-      errorMessage: lastError?.message || "compact failed"
-    }, this.workspace);
-    await this.withStateLock(async () => {
-      this.running = false;
-    });
-    throw lastError || new Error("compact failed");
-  }
-  async runCompactAttempt() {
-    await this.client.threadCompactStart(this.threadId);
-    let sawCompaction = false;
-    let usageTotal = null;
-    let contextTokensEstimate = null;
-    let modelContextWindow = null;
-    while (true) {
-      const note = await this.client.nextNotification(
-        this.cfg.compaction.timeoutSeconds * 1e3,
-        `compact timed out after ${this.cfg.compaction.timeoutSeconds}s`
-      );
-      this.handleUsageNotification(note, String(note.params.turnId ?? ""), (payload) => {
-        usageTotal = payload.usageTotalTokens;
-        contextTokensEstimate = payload.contextTokensEstimate;
-        modelContextWindow = payload.modelContextWindow;
-      });
-      if (note.method === "item/started" || note.method === "item/completed") {
-        const item = asRecord(note.params.item);
-        if (String(item.type ?? "") === "contextCompaction") {
-          sawCompaction = true;
-          if (note.method === "item/completed") {
-            continue;
-          }
-        }
-      }
-      if (sawCompaction && note.method === "turn/completed") {
-        const turn = asRecord(note.params.turn);
-        const status = String(turn.status ?? "completed");
-        if (!["completed", "ok"].includes(status)) {
-          const turnError = asRecord(turn.error);
-          throw new Error(String(turnError.message ?? `compact turn ended with status ${status}`));
-        }
-        return {
-          usageTotal,
-          contextTokensEstimate,
-          modelContextWindow
-        };
-      }
-    }
-  }
-  snapshotQueue() {
-    return this.queue.snapshot();
-  }
-  snapshotQueueJson() {
-    return this.queue.snapshot().map((item) => ({
-      id: item.id,
-      text: item.text,
-      hasWaiter: !!item.waitResolver,
-      overrides: item.overrides || {}
-    }));
-  }
-  dumpState() {
-    const sessionPath = sessionDir(this.dataDir, this.workspace, this.name);
-    return {
-      session: this.registry.get(this.name, this.workspace),
-      queue: this.snapshotQueueJson(),
-      transport_alive: this.isTransportAlive(),
-      stderr_tail: this.stderrTail(20),
-      history_path: import_node_path12.default.join(sessionPath, "history.md"),
-      turns_path: import_node_path12.default.join(sessionPath, "turns.jsonl")
-    };
-  }
-  async read(includeTurns = false) {
-    return await this.client.threadRead(this.threadId, includeTurns);
-  }
-  async archiveThread() {
-    await this.client.threadArchive(this.threadId);
-  }
-  async detachForRecovery(reason = "detached for recovery") {
-    let queued = [];
-    await this.withStateLock(async () => {
-      this.active = false;
-      this.closed = true;
-      this.running = false;
-      this.activeTurnId = null;
-      this.activeTurnStartedAtMs = null;
-      queued = this.queue.snapshot();
-      this.queue.clear();
-      this.registry.update(this.name, {
-        queueLength: 0,
-        appServerPid: null
-      }, this.workspace);
-    });
-    await this.client.close();
-    return queued;
-  }
-  async absorbQueue(items) {
-    if (items.length === 0) {
-      return;
-    }
-    await this.withStateLock(async () => {
-      for (const item of items) {
-        const enqueueResult = this.queue.enqueue(item);
-        if (enqueueResult.dropped) {
-          this.rejectPending(enqueueResult.dropped, new Error(`queued send ${enqueueResult.dropped.id} was dropped`));
-        }
-      }
-      this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
-      if (!this.running) {
-        const next = this.queue.pop();
-        this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
-        if (!next) {
-          return;
-        }
-        this.running = true;
-        this.registry.update(this.name, { status: "running" }, this.workspace);
-        void this.runTurn(next.id, next.text, next.waitResolver, next.waitRejecter, next.overrides || null);
-      }
-    });
-  }
-  clearQueue() {
-    this.rejectQueuedWaiters(new Error(`queue for ${this.name} was cleared`));
-    this.queue.clear();
-    this.registry.update(this.name, { queueLength: 0 }, this.workspace);
-  }
-  dropOldest() {
-    const dropped = this.queue.dropOldest();
-    if (dropped) {
-      this.rejectPending(dropped, new Error(`queued send ${dropped.id} was dropped`));
-    }
-    this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
-    return dropped;
-  }
-  async close() {
-    await this.withStateLock(async () => {
-      this.active = false;
-      this.closed = true;
-      this.running = false;
-      this.activeTurnId = null;
-      this.activeTurnStartedAtMs = null;
-      this.rejectQueuedWaiters(new Error(`session ${this.name} was closed`));
-      this.queue.clear();
-      this.registry.update(this.name, { queueLength: 0, appServerPid: null }, this.workspace);
-    });
-    await this.shutdownTransport();
-    this.registry.update(this.name, { status: "closed", appServerPid: null, queueLength: 0 }, this.workspace);
-  }
-  async shutdown() {
-    await this.withStateLock(async () => {
-      this.active = false;
-      this.closed = true;
-      this.running = false;
-      this.activeTurnId = null;
-      this.activeTurnStartedAtMs = null;
-      this.rejectQueuedWaiters(new Error(`session ${this.name} is shutting down`));
-      this.queue.clear();
-      this.registry.update(this.name, { queueLength: 0, appServerPid: null }, this.workspace);
-    });
-    await this.shutdownTransport();
-    const current = this.registry.get(this.name, this.workspace);
-    if (current.status === "closed") {
-      return;
-    }
-    this.registry.update(this.name, {
-      status: current.errorMessage ? "errored" : "idle",
-      appServerPid: null,
-      queueLength: 0
-    }, this.workspace);
-  }
-  async healthCheck() {
-    await this.read(false);
-  }
-  isTransportAlive() {
-    return this.client.isAlive();
-  }
-  isRunning() {
-    return this.running;
-  }
-  currentTurnId() {
-    return this.activeTurnId;
-  }
-  currentTurnAgeMs() {
-    if (!this.running || this.activeTurnStartedAtMs == null) {
-      return null;
-    }
-    return Date.now() - this.activeTurnStartedAtMs;
-  }
-  stderrTail(limit = 40) {
-    return this.client.stderrTail(limit);
-  }
-  async shutdownTransport() {
-    this.persistStderrLog();
-    await this.client.close();
-  }
-  persistStderrLog() {
-    const lines = this.client.stderrSnapshot();
-    if (lines.length === 0) {
-      return;
-    }
-    if (this.stderrFlushedCount > lines.length) {
-      this.stderrFlushedCount = 0;
-    }
-    const pending = lines.slice(this.stderrFlushedCount);
-    if (pending.length === 0) {
-      return;
-    }
-    const filePath = import_node_path12.default.join(sessionDir(this.dataDir, this.workspace, this.name), "app-server.stderr.log");
-    ensureDirFor(filePath);
-    import_node_fs11.default.appendFileSync(filePath, `${pending.join("\n")}
-`, "utf8");
-    this.stderrFlushedCount = lines.length;
-  }
-  rejectQueuedWaiters(error) {
-    for (const item of this.queue.snapshot()) {
-      this.rejectPending(item, error);
-    }
-  }
-  rejectPending(item, error) {
-    try {
-      item.waitRejecter?.(error);
-    } catch {
-    }
-  }
-  async withStateLock(fn) {
-    const previous = this.stateLock;
-    let release;
-    this.stateLock = new Promise((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release();
-    }
-  }
-  async runTurn(pendingTurnId, text, resolveWait, rejectWait, overrides) {
-    const lines = [];
-    let finalMessage = null;
-    let status = "completed";
-    let errorMessage = null;
-    let turnId = "unknown";
-    let usageLast = null;
-    let usageTotal = null;
-    let contextTokensEstimate = null;
-    let modelContextWindow = null;
-    const started = Date.now();
-    let waitSettled = false;
-    this.registry.update(this.name, { lastPromptText: text }, this.workspace);
-    try {
-      const response = await this.client.turnStart(buildTurnStartParams(this.threadId, text, overrides));
-      turnId = String(asRecord(response.turn).id ?? turnId);
-      this.activeTurnId = turnId;
-      this.activeTurnStartedAtMs = Date.now();
-      this.eventBus.publish("events", {
-        workspace: this.workspace,
-        kind: "turn-start",
-        session: this.name,
-        queued_or_turn_id: pendingTurnId,
-        turn_id: turnId
-      });
-      while (true) {
-        const notification = await this.client.nextNotification();
-        this.handleUsageNotification(notification, turnId, (payload) => {
-          usageLast = payload.usageLastTokens;
-          usageTotal = payload.usageTotalTokens;
-          contextTokensEstimate = payload.contextTokensEstimate;
-          modelContextWindow = payload.modelContextWindow;
-        });
-        if (notification.method === "item/completed") {
-          const params = notification.params;
-          if (String(params.turnId ?? "") !== turnId) {
-            continue;
-          }
-          const item = asRecord(params.item);
-          const line = digestItem(item, this.cfg.digest);
-          if (line) {
-            lines.push(line);
-            if (line.kind === "agent_message") {
-              const phase = item.phase == null ? null : String(item.phase);
-              if (phase === "final_answer" || phase === null) {
-                finalMessage = line.text;
-              }
-            }
-          }
-          continue;
-        }
-        if (notification.method === "turn/completed") {
-          const params = notification.params;
-          const turn = asRecord(params.turn);
-          if (String(turn.id ?? "") !== turnId) {
-            continue;
-          }
-          status = String(turn.status ?? status);
-          const turnError = asRecord(turn.error);
-          errorMessage = turn.error == null ? null : String(turnError.message ?? "turn failed");
-          break;
-        }
-      }
-    } catch (error) {
-      status = "failed";
-      errorMessage = error.message;
-      if (rejectWait) {
-        rejectWait(error);
-        waitSettled = true;
-      }
-    } finally {
-      this.activeTurnId = null;
-      this.activeTurnStartedAtMs = null;
-    }
-    const completedAt = nowIso();
-    const summary = buildTurnSummary({
-      workspace: this.workspace,
-      session: this.name,
-      turnId,
-      elapsedMs: Date.now() - started,
-      status: status === "completed" ? "ok" : status,
-      lines,
-      finalMessage,
-      usageLastTokens: usageLast,
-      usageTotalTokens: usageTotal,
-      contextTokensEstimate,
-      modelContextWindow,
-      errorMessage,
-      completedAt
-    });
-    const sessionPath = sessionDir(this.dataDir, this.workspace, this.name);
-    if (this.cfg.digest.historyMdEnabled) {
-      writeHistoryMd(import_node_path12.default.join(sessionPath, "history.md"), summary, this.cfg.digest);
-    }
-    if (this.cfg.digest.turnsJsonlEnabled) {
-      writeTurnsJsonl(import_node_path12.default.join(sessionPath, "turns.jsonl"), summary, this.cfg.digest);
-    }
-    if (usageTotal != null || contextTokensEstimate != null) {
-      await this.compaction?.observeUsage(this.name, {
-        workspace: this.workspace,
-        contextTokensEstimate,
-        modelContextWindow,
-        cumulativeUsageTokens: usageTotal
-      });
-    }
-    this.persistStderrLog();
-    if (!this.active) {
-      if (rejectWait && !waitSettled) {
-        rejectWait(new Error(`session ${this.name} is no longer active`));
-      }
-      return;
-    }
-    this.registry.update(this.name, {
-      status: summary.status === "ok" ? "idle" : "errored",
-      lastTurnId: turnId,
-      lastTurnEndedAt: completedAt,
-      queueLength: this.queue.length,
-      tokenUsageInput: usageTotal || 0,
-      contextTokensEstimate,
-      modelContextWindow,
-      errorMessage,
-      appServerPid: this.client.pid
-    }, this.workspace);
-    this.eventBus.publish("events", {
-      workspace: this.workspace,
-      kind: summary.tier === "attn" ? "turn-attn" : "turn-done",
-      session: this.name,
-      ...summaryToWire(summary)
-    });
-    if (resolveWait && summary.status === "ok") {
-      resolveWait(summaryToWire(summary));
-      waitSettled = true;
-    } else if (rejectWait && !waitSettled) {
-      rejectWait(new Error(summary.errorMessage || `turn ${summary.turnId} finished with status ${summary.status}`));
-      waitSettled = true;
-    }
-    await this.dispatchNextQueued();
-  }
-  async dispatchNextQueued() {
-    let next;
-    await this.withStateLock(async () => {
-      next = this.queue.pop();
-      this.registry.update(this.name, { queueLength: this.queue.length }, this.workspace);
-      if (!next) {
-        this.running = false;
-      } else {
-        this.running = true;
-        this.registry.update(this.name, { status: "running" }, this.workspace);
-      }
-    });
-    if (next) {
-      void this.runTurn(next.id, next.text, next.waitResolver, next.waitRejecter, next.overrides || null);
-    }
-    return next;
-  }
-  handleUsageNotification(notification, turnId, setUsage) {
-    if (notification.method !== "thread/tokenUsageUpdated" && notification.method !== "thread/tokenUsage/updated") {
-      return;
-    }
-    if (String(notification.params.turnId ?? "") !== turnId) {
-      return;
-    }
-    const tokenUsage = asRecord(notification.params.tokenUsage);
-    const last = asRecord(tokenUsage.last);
-    const total = asRecord(tokenUsage.total);
-    const inputTokens = last.inputTokens == null ? null : Number(last.inputTokens);
-    const cachedInputTokens = last.cachedInputTokens == null ? null : Number(last.cachedInputTokens);
-    setUsage({
-      usageLastTokens: last.totalTokens == null ? null : Number(last.totalTokens),
-      usageTotalTokens: total.totalTokens == null ? null : Number(total.totalTokens),
-      contextTokensEstimate: inputTokens == null && cachedInputTokens == null ? null : (inputTokens || 0) + (cachedInputTokens || 0),
-      modelContextWindow: tokenUsage.modelContextWindow == null ? null : Number(tokenUsage.modelContextWindow)
-    });
-  }
-};
-var SessionFactory = class {
-  constructor(cfg, registry, eventBus, compaction = null, clientFactory = (cfg2) => new AppServerClient(cfg2)) {
-    this.cfg = cfg;
-    this.registry = registry;
-    this.eventBus = eventBus;
-    this.compaction = compaction;
-    this.clientFactory = clientFactory;
-  }
-  cfg;
-  registry;
-  eventBus;
-  compaction;
-  clientFactory;
-  replaceConfig(cfg) {
-    this.cfg = cfg;
-  }
-  dataDir() {
-    return this.cfg.daemon.dataDir;
-  }
-  async create(name, options = {}, context = {}) {
-    name = validateSessionName(name);
-    const workspace = context.workspace || DEFAULT_WORKSPACE;
-    const clientId = context.clientId || null;
-    this.ensureNameAvailable(workspace, name);
-    const resolved = this.resolveOptions(options);
-    const client = this.clientFactory(this.cfg);
-    await client.start();
-    let threadId = "";
-    try {
-      const response = await client.threadStart(buildThreadStartParams(resolved));
-      const thread = asRecord(response.thread);
-      threadId = String(thread.id ?? "");
-      if (threadId) {
-        await client.threadRead(threadId, false);
-      }
-    } catch (error) {
-      await client.close();
-      throw error;
-    }
-    const entry = buildRegistryEntry(workspace, name, threadId, resolved, client.pid, clientId);
-    this.registry.create(entry);
-    return new Session(
-      workspace,
-      name,
-      this.cfg,
-      this.dataDir(),
-      this.registry,
-      this.eventBus,
-      this.compaction,
-      client,
-      threadId
-    );
-  }
-  async attach(name, threadId, options = {}, context = {}) {
-    name = validateSessionName(name);
-    const workspace = context.workspace || DEFAULT_WORKSPACE;
-    const clientId = context.clientId || null;
-    const targetThreadId = threadId.trim();
-    if (!targetThreadId) {
-      throw new InvalidRequest("thread_id required");
-    }
-    if (options.ephemeral) {
-      throw new InvalidRequest("session attach cannot use --ephemeral for an existing thread");
-    }
-    this.ensureNameAvailable(workspace, name);
-    this.ensureThreadUnclaimed(workspace, targetThreadId);
-    const resolved = this.resolveOptions({ ...options, ephemeral: false }, { forcePersistent: true });
-    const client = this.clientFactory(this.cfg);
-    await client.start();
-    let resumedThreadId = targetThreadId;
-    try {
-      const response = await client.threadResume(targetThreadId, buildThreadResumeParams(resolved));
-      const thread = asRecord(response.thread);
-      resumedThreadId = String(thread.id ?? targetThreadId);
-      this.ensureThreadUnclaimed(workspace, resumedThreadId);
-      await client.threadRead(resumedThreadId, false);
-    } catch (error) {
-      await client.close();
-      throw error;
-    }
-    const entry = buildRegistryEntry(workspace, name, resumedThreadId, resolved, client.pid, clientId);
-    this.registry.create(entry);
-    return new Session(
-      workspace,
-      name,
-      this.cfg,
-      this.dataDir(),
-      this.registry,
-      this.eventBus,
-      this.compaction,
-      client,
-      resumedThreadId
-    );
-  }
-  async resume(name, workspace = DEFAULT_WORKSPACE) {
-    const entry = this.registry.get(name, workspace);
-    if (entry.ephemeral) {
-      throw new InvalidRequest(
-        `session ${name} is ephemeral and cannot be resumed after its app-server exits`
-      );
-    }
-    const client = this.clientFactory(this.cfg);
-    await client.start();
-    let resumedThreadId = entry.threadId;
-    try {
-      const resolved = sessionOptionsFromRegistryEntry(entry, this.cfg, this.dataDir());
-      const response = await client.threadResume(entry.threadId, buildThreadResumeParams(resolved));
-      const thread = asRecord(response.thread);
-      resumedThreadId = String(thread.id ?? entry.threadId);
-      this.ensureThreadUnclaimed(workspace, resumedThreadId, name);
-      await client.threadRead(resumedThreadId, false);
-      if (resumedThreadId !== entry.threadId) {
-        this.registry.update(name, { threadId: resumedThreadId }, workspace);
-      }
-    } catch (error) {
-      await client.close();
-      throw error;
-    }
-    this.registry.update(name, {
-      status: "idle",
-      errorMessage: null,
-      appServerPid: client.pid
-    }, workspace);
-    return new Session(
-      workspace,
-      name,
-      this.cfg,
-      this.dataDir(),
-      this.registry,
-      this.eventBus,
-      this.compaction,
-      client,
-      resumedThreadId
-    );
-  }
-  ensureNameAvailable(workspace, name) {
-    try {
-      this.registry.get(name, workspace);
-      throw new SessionExists(`${workspaceDisplayName(workspace, name)} already exists`);
-    } catch (error) {
-      if (!(error instanceof SessionNotFound)) {
-        throw error;
-      }
-    }
-  }
-  ensureThreadUnclaimed(workspace, threadId, ownerName = null) {
-    const existing = this.registry.list(workspace).find((entry) => entry.threadId === threadId && entry.name !== ownerName);
-    if (existing) {
-      throw new InvalidRequest(
-        `thread ${JSON.stringify(threadId)} is already registered as session ${JSON.stringify(existing.name)}`
-      );
-    }
-  }
-  resolveOptions(options, behavior = {}) {
-    const requestedProfile = options.profile || this.cfg.defaults.profile || "";
-    const selectedProfile = requestedProfile ? this.cfg.profiles[requestedProfile] : void 0;
-    if (requestedProfile && !selectedProfile) {
-      throw new InvalidRequest(`unknown profile: ${requestedProfile}`);
-    }
-    return {
-      cwd: options.cwd || selectedProfile?.cwd || this.cfg.defaults.cwd || this.dataDir(),
-      model: options.model || selectedProfile?.model || this.cfg.defaults.model,
-      modelProvider: options.modelProvider || selectedProfile?.modelProvider || this.cfg.defaults.modelProvider || null,
-      sandbox: normalizeSandboxMode(
-        options.sandbox || selectedProfile?.sandbox || this.cfg.defaults.sandbox
-      ),
-      approvalPolicy: normalizeApprovalPolicy(
-        options.approvalPolicy || selectedProfile?.approvalPolicy || this.cfg.defaults.approvalPolicy
-      ),
-      serviceTier: options.serviceTier || selectedProfile?.serviceTier || this.cfg.defaults.serviceTier || null,
-      reasoningEffort: options.reasoningEffort || selectedProfile?.reasoningEffort || this.cfg.defaults.reasoningEffort || null,
-      personality: options.personality || selectedProfile?.personality || this.cfg.defaults.personality || null,
-      baseInstructions: options.baseInstructions || selectedProfile?.baseInstructions || this.cfg.defaults.baseInstructions || null,
-      developerInstructions: options.developerInstructions || selectedProfile?.developerInstructions || this.cfg.defaults.developerInstructions || null,
-      ephemeral: behavior.forcePersistent ? false : options.ephemeral ?? selectedProfile?.ephemeral ?? false,
-      profile: requestedProfile || null
-    };
-  }
-};
-function buildThreadStartParams(resolved) {
-  const params = buildThreadConfigParams(resolved);
-  params.ephemeral = resolved.ephemeral;
-  params.experimentalRawEvents = false;
-  params.persistExtendedHistory = false;
-  params.serviceName = "codex-team";
-  return params;
-}
-function buildThreadResumeParams(resolved) {
-  const params = buildThreadConfigParams(resolved);
-  params.persistExtendedHistory = false;
-  return params;
-}
-function buildThreadConfigParams(resolved) {
-  const params = {
-    model: resolved.model,
-    cwd: resolved.cwd
   };
-  if (resolved.modelProvider) {
-    params.modelProvider = resolved.modelProvider;
-  }
-  if (resolved.sandbox) {
-    params.sandbox = resolved.sandbox;
-  }
-  if (resolved.approvalPolicy) {
-    params.approvalPolicy = resolved.approvalPolicy;
-  }
-  if (resolved.serviceTier) {
-    params.serviceTier = resolved.serviceTier;
-  }
-  if (resolved.personality) {
-    params.personality = resolved.personality;
-  }
-  if (resolved.baseInstructions) {
-    params.baseInstructions = resolved.baseInstructions;
-  }
-  if (resolved.developerInstructions) {
-    params.developerInstructions = resolved.developerInstructions;
-  }
-  if (resolved.reasoningEffort) {
-    params.config = { model_reasoning_effort: resolved.reasoningEffort };
-  }
-  return params;
-}
-function buildRegistryEntry(workspace, name, threadId, resolved, appServerPid, createdByClientId) {
-  return {
-    workspace,
-    name,
-    createdByClientId,
-    threadId,
-    cwd: resolved.cwd,
-    model: resolved.model,
-    modelProvider: resolved.modelProvider,
-    sandbox: resolved.sandbox || "danger-full-access",
-    approvalPolicy: resolved.approvalPolicy || "never",
-    serviceTier: resolved.serviceTier,
-    reasoningEffort: resolved.reasoningEffort,
-    personality: resolved.personality,
-    profile: resolved.profile,
-    createdAt: nowIso(),
-    lastTurnId: null,
-    lastTurnEndedAt: null,
-    lastPromptText: null,
-    status: "idle",
-    appServerPid,
-    ephemeral: resolved.ephemeral,
-    queueLength: 0,
-    tokenUsageInput: 0,
-    contextTokensEstimate: 0,
-    modelContextWindow: null,
-    errorMessage: null
-  };
-}
-function sessionOptionsFromRegistryEntry(entry, cfg, fallbackDataDir) {
-  const selectedProfile = entry.profile ? cfg.profiles[entry.profile] : void 0;
-  return {
-    cwd: entry.cwd || selectedProfile?.cwd || cfg.defaults.cwd || fallbackDataDir,
-    model: entry.model || selectedProfile?.model || cfg.defaults.model,
-    modelProvider: entry.modelProvider || selectedProfile?.modelProvider || cfg.defaults.modelProvider || null,
-    sandbox: normalizeSandboxMode(entry.sandbox || selectedProfile?.sandbox || cfg.defaults.sandbox),
-    approvalPolicy: normalizeApprovalPolicy(
-      entry.approvalPolicy || selectedProfile?.approvalPolicy || cfg.defaults.approvalPolicy
-    ),
-    serviceTier: entry.serviceTier || selectedProfile?.serviceTier || cfg.defaults.serviceTier || null,
-    reasoningEffort: entry.reasoningEffort || selectedProfile?.reasoningEffort || cfg.defaults.reasoningEffort || null,
-    personality: entry.personality || selectedProfile?.personality || cfg.defaults.personality || null,
-    baseInstructions: selectedProfile?.baseInstructions || cfg.defaults.baseInstructions || null,
-    developerInstructions: selectedProfile?.developerInstructions || cfg.defaults.developerInstructions || null,
-    ephemeral: false,
-    profile: entry.profile
-  };
-}
-function buildTurnStartParams(threadId, text, overrides) {
-  const params = {
-    threadId,
-    input: [{ type: "text", text }]
-  };
-  if (!overrides) {
-    return params;
-  }
-  for (const [key, value] of Object.entries(overrides)) {
-    if (value === void 0 || value === null || value === "") {
-      continue;
-    }
-    if (key === "outputSchema") {
-      params.outputSchema = value;
-      continue;
-    }
-    params[key] = value;
-  }
-  return params;
-}
-function summaryToWire(summary) {
-  return {
-    session: summary.session,
-    turn_id: summary.turnId,
-    elapsed_ms: summary.elapsedMs,
-    status: summary.status,
-    tier: summary.tier,
-    final_message: summary.finalMessage,
-    files_added: summary.filesAdded,
-    files_removed: summary.filesRemoved,
-    lines: summary.lines,
-    usage_last_tokens: summary.usageLastTokens ?? null,
-    usage_total_tokens: summary.usageTotalTokens ?? null,
-    context_tokens_estimate: summary.contextTokensEstimate ?? null,
-    model_context_window: summary.modelContextWindow ?? null,
-    error_message: summary.errorMessage ?? null,
-    completed_at: summary.completedAt ?? null
-  };
-}
-
-// src/watchdog.ts
-var import_node_fs12 = __toESM(require("fs"));
-var WatchdogTimer = class {
-  constructor(cfg, registry, eventBus, sessions) {
-    this.cfg = cfg;
-    this.registry = registry;
-    this.eventBus = eventBus;
-    this.sessions = sessions;
-  }
-  cfg;
-  registry;
-  eventBus;
-  sessions;
-  readBrief(alarm) {
-    const filePath = alarm?.taskBriefFile || this.cfg.monitor.watchdogTaskBriefFile;
-    if (!filePath || !import_node_fs12.default.existsSync(filePath)) {
-      return "";
-    }
-    const headLines = alarm?.taskBriefHeadLines || this.cfg.monitor.watchdogTaskBriefHeadLines;
-    return import_node_fs12.default.readFileSync(filePath, "utf8").split(/\r?\n/).slice(0, headLines).join("\n");
-  }
-  readTemplate(alarm) {
-    const filePath = alarm?.templateFile || this.cfg.monitor.watchdogTemplateFile;
-    if (filePath && import_node_fs12.default.existsSync(filePath)) {
-      return import_node_fs12.default.readFileSync(filePath, "utf8");
-    }
-    return alarm?.template || this.cfg.monitor.watchdogTemplate || defaultWatchdogTemplate();
-  }
-  async tickOnce(options = {}) {
-    const workspace = options.workspace || DEFAULT_WORKSPACE;
-    const now = /* @__PURE__ */ new Date();
-    const sentAt = now.toISOString();
-    const localTime = formatLocalTime(now);
-    const sessions = this.registry.list(workspace).map((entry) => {
-      const advisories = [];
-      const compactionMetric = entry.contextTokensEstimate ?? entry.tokenUsageInput;
-      if (compactionMetric >= this.cfg.compaction.thresholdTokens) {
-        advisories.push("crossed compaction threshold");
-      }
-      if (entry.status === "errored") {
-        advisories.push("errored");
-      }
-      if (entry.queueLength > 0) {
-        advisories.push(`queue=${entry.queueLength}`);
-      }
-      const live = this.sessions.get(workspaceSessionKey(entry.workspace, entry.name));
-      if (live) {
-        if (!live.isTransportAlive()) {
-          advisories.push("transport-down");
-        }
-        if (live.isRunning()) {
-          const turnAgeMs = live.currentTurnAgeMs();
-          if (turnAgeMs != null) {
-            advisories.push(`running=${Math.floor(turnAgeMs / 1e3)}s`);
-            if (turnAgeMs >= this.cfg.heartbeat.turnStuckSeconds * 1e3) {
-              advisories.push("turn-stuck-threshold");
-            }
-          }
-        }
-      }
-      if (entry.lastTurnEndedAt) {
-        const last = new Date(entry.lastTurnEndedAt);
-        if (!Number.isNaN(last.getTime())) {
-          const idleMinutes = (now.getTime() - last.getTime()) / 6e4;
-          if (idleMinutes > this.cfg.monitor.watchdogStaleMinutes) {
-            advisories.push(`idle > ${this.cfg.monitor.watchdogStaleMinutes}m`);
-          }
-        }
-      }
-      return {
-        name: entry.name,
-        status: entry.status,
-        threadIdShort: entry.threadId.slice(0, 8),
-        tokens: compactionMetric,
-        metricKind: entry.contextTokensEstimate != null ? "context_estimate" : "cumulative_usage",
-        queue: entry.queueLength,
-        transportAlive: live ? live.isTransportAlive() : false,
-        currentTurnId: live?.currentTurnId() || null,
-        currentTurnAgeMs: live?.currentTurnAgeMs() || null,
-        advisories
-      };
-    });
-    const taskBrief = this.readBrief(options.alarm) || null;
-    const emitIdle = options.alarm?.emitIdle ?? this.cfg.monitor.watchdogEmitIdle;
-    const hasSignal = options.force || Boolean(taskBrief) || sessions.some((session) => session.advisories.length > 0 || session.status === "running");
-    if (!hasSignal && !emitIdle) {
-      return;
-    }
-    const summary = {
-      total: sessions.length,
-      running: sessions.filter((session) => session.status === "running").length,
-      errored: sessions.filter((session) => session.status === "errored").length,
-      queued: sessions.reduce((sum, session) => sum + Number(session.queue || 0), 0)
-    };
-    const alarmName = options.alarmName || "default";
-    const message = renderWatchdogTemplate(this.readTemplate(options.alarm), {
-      at: sentAt,
-      sentAt,
-      localTime,
-      alarm: alarmName,
-      workspace,
-      taskBrief,
-      summary,
-      sessions
-    });
-    this.eventBus.publish("watchdog", {
-      workspace,
-      kind: "watchdog-tick",
-      at: sentAt,
-      sentAt,
-      localTime,
-      alarm: alarmName,
-      taskBrief,
-      message,
-      summary,
-      sessions
-    });
-  }
-};
-function defaultWatchdogTemplate() {
-  return [
-    "Codex team watchdog",
-    "alarm={{alarm}}",
-    "sent_at={{sentAt}}",
-    "local_time={{localTime}}",
-    "sessions={{summary.total}} running={{summary.running}} errored={{summary.errored}} queued={{summary.queued}}",
-    "{{#if taskBrief}}",
-    "",
-    "Task brief:",
-    "{{taskBrief}}",
-    "{{/if}}",
-    "{{#if sessionsText}}",
-    "",
-    "Sessions:",
-    "{{sessionsText}}",
-    "{{/if}}"
-  ].join("\n");
-}
-function renderWatchdogTemplate(template, input) {
-  const sessionsText = input.sessions.map((session) => {
-    const advisory = session.advisories.length > 0 ? ` [${session.advisories.join(", ")}]` : "";
-    const turn = session.currentTurnId ? ` turn=${session.currentTurnId}${session.currentTurnAgeMs == null ? "" : ` age=${Math.floor(session.currentTurnAgeMs / 1e3)}s`}` : "";
-    return `- ${session.name}: ${session.status} queue=${session.queue} tokens=${session.tokens} ${session.metricKind}${turn}${advisory}`;
-  }).join("\n");
-  const variables = {
-    at: input.at,
-    sentAt: input.sentAt,
-    localTime: input.localTime,
-    alarm: input.alarm,
-    workspace: input.workspace,
-    taskBrief: input.taskBrief || "",
-    sessionsText,
-    "summary.total": String(input.summary.total),
-    "summary.running": String(input.summary.running),
-    "summary.errored": String(input.summary.errored),
-    "summary.queued": String(input.summary.queued)
-  };
-  let out = template.replace(/{{#if ([\w.]+)}}([\s\S]*?){{\/if}}/g, (_match, key, body) => {
-    return variables[key] ? body : "";
-  });
-  out = out.replace(/{{\s*([\w.]+)\s*}}/g, (_match, key) => variables[key] ?? "");
-  return out.trim();
-}
-function formatLocalTime(date) {
-  return date.toLocaleString(void 0, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-    timeZoneName: "short"
-  });
-}
-
-// src/history.ts
-function filterHistoryMarkdown(content, options = {}) {
-  const sections = splitMarkdownSections(content);
-  let matchedSinceTurnId = true;
-  let filtered = sections;
-  if (options.sinceTurnId) {
-    const index = sections.findIndex((section) => section.turnId === options.sinceTurnId);
-    if (index < 0) {
-      matchedSinceTurnId = false;
-      filtered = [];
-    } else {
-      filtered = sections.slice(index + 1);
-    }
-  }
-  if (options.lastN && options.lastN > 0) {
-    filtered = filtered.slice(-options.lastN);
-  }
-  return {
-    content: filtered.map((section) => section.block).join(""),
-    matchedSinceTurnId
-  };
-}
-function filterTurnsJsonl(content, options = {}) {
-  const allLines = content.split(/\r?\n/).filter(Boolean);
-  let matchedSinceTurnId = true;
-  let started = !options.sinceTurnId;
-  let lines = [];
-  for (const line of allLines) {
-    let payload = null;
-    try {
-      payload = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const turnId = String(payload.turnId ?? payload.turn_id ?? "");
-    if (!started && options.sinceTurnId) {
-      if (turnId === options.sinceTurnId) {
-        started = true;
-      }
-      continue;
-    }
-    if (options.since) {
-      const completedAt = String(payload.completedAt ?? payload.completed_at ?? "");
-      if (completedAt && completedAt < options.since) {
-        continue;
-      }
-    }
-    lines.push(line);
-  }
-  if (options.sinceTurnId && !started) {
-    matchedSinceTurnId = false;
-    lines = [];
-  }
-  if (options.lastN && options.lastN > 0) {
-    lines = lines.slice(-options.lastN);
-  }
-  return {
-    content: lines.length > 0 ? `${lines.join("\n")}
-` : "",
-    matchedSinceTurnId
-  };
-}
-function splitMarkdownSections(content) {
-  const pattern = /^## Turn ([^\s]+).*$/gm;
-  const matches = [...content.matchAll(pattern)];
-  if (matches.length === 0) {
-    return [];
-  }
-  return matches.map((match, index) => {
-    const start = match.index ?? 0;
-    const end = index + 1 < matches.length ? matches[index + 1].index ?? content.length : content.length;
-    return {
-      turnId: match[1],
-      block: content.slice(start, end)
-    };
-  });
-}
-
-// src/runtimeAlarms.ts
-var import_node_fs13 = __toESM(require("fs"));
-var import_node_path13 = __toESM(require("path"));
-var RuntimeAlarmStore = class {
-  constructor(dataDir) {
-    this.dataDir = dataDir;
-  }
-  dataDir;
-  upsert(record) {
-    const normalized = normalizeRecord(record);
-    const dir = workspaceAlarmsDir(this.dataDir, normalized.workspace);
-    import_node_fs13.default.mkdirSync(dir, { recursive: true });
-    import_node_fs13.default.writeFileSync(this.filePath(normalized.workspace, normalized.name), JSON.stringify(normalized), "utf8");
-    return normalized;
-  }
-  delete(workspace, name) {
-    const filePath = this.filePath(workspace, name);
-    if (!import_node_fs13.default.existsSync(filePath)) {
-      return false;
-    }
-    import_node_fs13.default.unlinkSync(filePath);
-    return true;
-  }
-  deleteByClient(clientId) {
-    let count = 0;
-    for (const record of this.list(null, true)) {
-      if (record.clientId === clientId && this.delete(record.workspace, record.name)) {
-        count += 1;
-      }
-    }
-    return count;
-  }
-  list(workspace, allWorkspaces = false) {
-    const root = alarmsDir(this.dataDir);
-    if (!import_node_fs13.default.existsSync(root)) {
-      return [];
-    }
-    const workspaces = allWorkspaces || !workspace ? import_node_fs13.default.readdirSync(root) : [workspace];
-    const records = [];
-    for (const ws of workspaces) {
-      const dir = workspaceAlarmsDir(this.dataDir, ws);
-      if (!import_node_fs13.default.existsSync(dir)) {
-        continue;
-      }
-      for (const file of import_node_fs13.default.readdirSync(dir)) {
-        if (!file.endsWith(".json")) {
-          continue;
-        }
-        try {
-          const parsed = JSON.parse(import_node_fs13.default.readFileSync(import_node_path13.default.join(dir, file), "utf8"));
-          if (isObject(parsed)) {
-            records.push(normalizeRecord(parsed));
-          }
-        } catch {
-        }
-      }
-    }
-    return records;
-  }
-  filePath(workspace, name) {
-    return import_node_path13.default.join(workspaceAlarmsDir(this.dataDir, safePart(workspace)), `${safePart(name)}.json`);
-  }
-};
-function runtimeAlarmToWire(record) {
-  return {
-    workspace: record.workspace,
-    name: record.name,
-    client_id: record.clientId,
-    created_at: record.createdAt,
-    updated_at: record.updatedAt,
-    ...alarmToWire(record.alarm)
-  };
-}
-function normalizeRecord(raw) {
-  return {
-    workspace: safePart(String(raw.workspace ?? "default")),
-    name: safePart(String(raw.name ?? "")),
-    clientId: raw.clientId == null && raw.client_id == null ? null : String(raw.clientId ?? raw.client_id),
-    alarm: normalizeAlarm(isObject(raw.alarm) ? raw.alarm : raw),
-    createdAt: String(raw.createdAt ?? raw.created_at ?? (/* @__PURE__ */ new Date()).toISOString()),
-    updatedAt: String(raw.updatedAt ?? raw.updated_at ?? (/* @__PURE__ */ new Date()).toISOString())
-  };
-}
-function normalizeAlarm(raw) {
-  return {
-    enabled: raw.enabled == null ? true : Boolean(raw.enabled),
-    intervalSeconds: numberValue(raw.intervalSeconds ?? raw.interval_seconds, 1200),
-    taskBriefFile: String(raw.taskBriefFile ?? raw.task_brief_file ?? ""),
-    taskBriefHeadLines: numberValue(raw.taskBriefHeadLines ?? raw.task_brief_head_lines, 30),
-    emitIdle: raw.emitIdle == null && raw.emit_idle == null ? false : Boolean(raw.emitIdle ?? raw.emit_idle),
-    template: String(raw.template ?? ""),
-    templateFile: String(raw.templateFile ?? raw.template_file ?? "")
-  };
-}
-function alarmToWire(alarm) {
-  return {
-    enabled: alarm.enabled,
-    interval_seconds: alarm.intervalSeconds,
-    task_brief_file: alarm.taskBriefFile,
-    task_brief_head_lines: alarm.taskBriefHeadLines,
-    emit_idle: alarm.emitIdle,
-    template: alarm.template,
-    template_file: alarm.templateFile
-  };
-}
-function numberValue(value, fallback) {
-  const parsed = Number(value ?? fallback);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-function safePart(value) {
-  if (!/^[a-zA-Z0-9_.-]{1,64}$/.test(value) || value === "*") {
-    throw new InvalidRequest(`invalid alarm path component: ${value}`);
-  }
-  return value;
-}
-
-// src/server.ts
-function asString(value) {
-  return String(value ?? "");
-}
-function optionalString(value) {
-  return value == null ? null : String(value);
-}
-function threadIdFromParams(params) {
-  return asString(params.threadId ?? params.thread_id).trim();
-}
-function sessionOptionsFromParams(params) {
-  return {
-    cwd: optionalString(params.cwd),
-    model: optionalString(params.model),
-    modelProvider: optionalString(params.modelProvider),
-    sandbox: optionalString(params.sandbox),
-    approvalPolicy: optionalString(params.approvalPolicy),
-    serviceTier: optionalString(params.serviceTier),
-    reasoningEffort: optionalString(params.reasoningEffort),
-    personality: optionalString(params.personality),
-    baseInstructions: optionalString(params.baseInstructions),
-    developerInstructions: optionalString(params.developerInstructions),
-    profile: optionalString(params.profile),
-    ephemeral: Boolean(params.ephemeral)
-  };
-}
-function sessionKey2(workspace, name) {
-  return workspaceSessionKey(workspace, name);
-}
-function targetEntries(registry, workspace, allWorkspaces) {
-  return registry.list(workspace, allWorkspaces);
-}
-var DaemonServer = class {
-  constructor(cfg, socketPath, shutdownCallback, clientFactory = (cfg2) => new AppServerClient(cfg2)) {
-    this.cfg = cfg;
-    this.socketPath = socketPath;
-    this.shutdownCallback = shutdownCallback;
-    this.clientFactory = clientFactory;
-    this.eventBus = new EventBus(cfg.monitor.eventsMaxBuffer, cfg.monitor.subscriberQueueMax);
-    this.registry = new RegistryStore(import_node_path14.default.join(cfg.daemon.dataDir, "registry.json"));
-    this.clients = new ClientStore(cfg.daemon.dataDir);
-    this.runtimeAlarms = new RuntimeAlarmStore(cfg.daemon.dataDir);
-    this.compaction = new CompactionMonitor(cfg, this.registry, this.eventBus);
-    this.factory = new SessionFactory(cfg, this.registry, this.eventBus, this.compaction, this.clientFactory);
-    this.watchdog = new WatchdogTimer(cfg, this.registry, this.eventBus, this.sessions);
-    this.health = new HealthMonitor(cfg, this.registry, this.sessions, this.eventBus, this.factory);
-    this.installHandlers();
-  }
-  cfg;
-  socketPath;
-  shutdownCallback;
-  clientFactory;
-  eventBus;
-  registry;
-  clients;
-  runtimeAlarms;
-  factory;
-  sessions = /* @__PURE__ */ new Map();
-  compaction;
-  watchdog;
-  health;
-  handlers = /* @__PURE__ */ new Map();
-  sessionLocks = /* @__PURE__ */ new Map();
-  server = null;
-  watchdogTimers = [];
-  heartbeatTimer = null;
-  clientSweepTimer = null;
-  replaceConfig(cfg) {
-    cfg.daemon.dataDir = cfg.daemon.dataDir || this.cfg.daemon.dataDir;
-    cfg.daemon.socketPath = cfg.daemon.socketPath || this.cfg.daemon.socketPath;
-    this.cfg = cfg;
-    this.eventBus.replaceLimits(cfg.monitor.eventsMaxBuffer, cfg.monitor.subscriberQueueMax);
-    this.factory.replaceConfig(cfg);
-    this.health.replaceConfig(cfg);
-    for (const session of this.sessions.values()) {
-      session.replaceConfig(cfg);
-    }
-    if (this.server) {
-      this.restartBackgroundLoops();
-    }
-  }
-  async start() {
-    const address = ipcAddressFromPath(this.socketPath);
-    await removeStaleIpcArtifact(address);
-    this.server = await ipcListen(address, (socket) => {
-      void this.handleSocket(socket);
-    });
-    this.restartBackgroundLoops();
-    for (const workspace of this.activeWorkspaces()) {
-      await this.watchdog.tickOnce({ force: true, alarmName: "default", workspace });
-    }
-    for (const item of this.scheduledAlarms()) {
-      await this.watchdog.tickOnce({
-        force: true,
-        alarmName: item.name,
-        alarm: item.alarm,
-        workspace: item.workspace
-      });
-    }
-  }
-  async stop() {
-    this.stopBackgroundLoops();
-    if (this.server) {
-      await new Promise((resolve) => {
-        this.server?.close(() => resolve());
-      });
-      this.server = null;
-    }
-    for (const session of [...this.sessions.values()]) {
-      await session.shutdown();
-    }
-    this.sessions.clear();
-    await removeStaleIpcArtifact(ipcAddressFromPath(this.socketPath));
-  }
-  stopBackgroundLoops() {
-    for (const timer of this.watchdogTimers) {
-      clearInterval(timer);
-    }
-    this.watchdogTimers = [];
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
-    if (this.clientSweepTimer) {
-      clearInterval(this.clientSweepTimer);
-      this.clientSweepTimer = null;
-    }
-  }
-  restartBackgroundLoops() {
-    this.stopBackgroundLoops();
-    this.watchdogTimers.push(
-      setInterval(() => {
-        for (const workspace of this.activeWorkspaces()) {
-          void this.watchdog.tickOnce({ alarmName: "default", workspace });
-        }
-      }, this.cfg.monitor.watchdogIntervalSeconds * 1e3)
-    );
-    for (const item of this.scheduledAlarms()) {
-      this.watchdogTimers.push(
-        setInterval(() => {
-          void this.watchdog.tickOnce({
-            alarmName: item.name,
-            alarm: item.alarm,
-            workspace: item.workspace
-          });
-        }, item.alarm.intervalSeconds * 1e3)
-      );
-    }
-    this.heartbeatTimer = setInterval(() => {
-      void this.health.tickOnce();
-    }, this.cfg.heartbeat.intervalSeconds * 1e3);
-    this.clientSweepTimer = setInterval(() => {
-      void this.sweepStaleClients();
-    }, 6e4);
-  }
-  installHandlers() {
-    this.handlers.set("session.create", async (message) => {
-      this.refreshConfigFromDisk();
-      const name = asString(message.params.name);
-      if (!name) {
-        throw new InvalidRequest("name required");
-      }
-      const options = sessionOptionsFromParams(message.params);
-      const threadId = threadIdFromParams(message.params);
-      return await this.withSessionAttachLock(name, threadId, async () => {
-        const session = threadId ? await this.factory.attach(name, threadId, options, {
-          workspace: message.workspace,
-          clientId: message.clientId
-        }) : await this.factory.create(name, options, {
-          workspace: message.workspace,
-          clientId: message.clientId
-        });
-        this.setLiveSession(session);
-        const entry = this.registry.get(session.name, session.workspace);
-        return { workspace: session.workspace, name: session.name, thread_id: entry.threadId, attached: Boolean(threadId) };
-      });
-    });
-    this.handlers.set("session.attach", async (message) => {
-      this.refreshConfigFromDisk();
-      const name = asString(message.params.name);
-      if (!name) {
-        throw new InvalidRequest("name required");
-      }
-      const threadId = threadIdFromParams(message.params);
-      if (!threadId) {
-        throw new InvalidRequest("thread_id required");
-      }
-      return await this.withSessionAttachLock(name, threadId, async () => {
-        const session = await this.factory.attach(name, threadId, sessionOptionsFromParams(message.params), {
-          workspace: message.workspace,
-          clientId: message.clientId
-        });
-        this.setLiveSession(session);
-        const entry = this.registry.get(session.name, session.workspace);
-        return { workspace: session.workspace, name: session.name, thread_id: entry.threadId, attached: true };
-      });
-    });
-    this.handlers.set("session.list", async (message) => ({
-      workspace: message.allWorkspaces ? "*" : message.workspace,
-      sessions: targetEntries(this.registry, message.workspace, message.allWorkspaces)
-    }));
-    this.handlers.set("session.status", async (message) => {
-      const entry = this.registry.find(asString(message.params.name), message.workspace, message.allWorkspaces);
-      return { ...entry };
-    });
-    this.handlers.set("session.read", async (message) => {
-      const name = asString(message.params.name);
-      const includeTurns = Boolean(message.params.includeTurns);
-      const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
-      const live = this.getLiveSession(entry.workspace, name);
-      if (live) {
-        return await live.read(includeTurns);
-      }
-      if (entry.ephemeral) {
-        throw new InvalidRequest(
-          `session ${name} is ephemeral and can only be read while its app-server is still alive`
-        );
-      }
-      const temp = this.clientFactory(this.cfg);
-      try {
-        await temp.start();
-        return await temp.threadRead(entry.threadId, includeTurns);
-      } finally {
-        await temp.close();
-      }
-    });
-    this.handlers.set("session.close", async (message) => {
-      const name = asString(message.params.name);
-      return await this.withSessionOperationLock(name, async () => {
-        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
-        const session = this.getLiveSession(entry.workspace, name);
-        if (session) {
-          await session.close();
-          this.deleteLiveSession(entry.workspace, name);
-        } else {
-          this.registry.update(name, { status: "closed", appServerPid: null, queueLength: 0 }, entry.workspace);
-        }
-        return { workspace: entry.workspace, name, closed: true };
-      });
-    });
-    this.handlers.set("session.ack_error", async (message) => {
-      const name = asString(message.params.name);
-      return await this.withSessionOperationLock(name, async () => {
-        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
-        const session = this.getLiveSession(entry.workspace, name);
-        if (session) {
-          await session.ackError();
-        } else {
-          this.registry.update(name, { status: "idle", errorMessage: null }, entry.workspace);
-        }
-        return { workspace: entry.workspace, name, acked: true };
-      });
-    });
-    this.handlers.set("session.dump", async (message) => {
-      const name = asString(message.params.name);
-      const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
-      const session = this.getLiveSession(entry.workspace, name);
-      if (session) {
-        return session.dumpState();
-      }
-      const stderrPath = sessionFilePath(this.cfg.daemon.dataDir, entry.workspace, name, "app-server.stderr.log");
-      const stderrTail = readLastLines(stderrPath, 20);
-      return {
-        session: entry,
-        queue: [],
-        transport_alive: false,
-        stderr_tail: stderrTail,
-        history_path: historyFilePath(this.cfg.daemon.dataDir, entry.workspace, name, "md"),
-        turns_path: historyFilePath(this.cfg.daemon.dataDir, entry.workspace, name, "jsonl")
-      };
-    });
-    this.handlers.set("session.resume", async (message) => {
-      this.refreshConfigFromDisk();
-      const name = asString(message.params.name);
-      return await this.withSessionOperationLock(name, async () => {
-        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
-        const session = await this.factory.resume(name, entry.workspace);
-        this.setLiveSession(session);
-        return { workspace: session.workspace, name, resumed: true };
-      });
-    });
-    this.handlers.set("session.restart", async (message) => {
-      this.refreshConfigFromDisk();
-      const name = asString(message.params.name);
-      return await this.withSessionOperationLock(name, async () => {
-        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
-        const existing = this.getLiveSession(entry.workspace, name);
-        if (entry.ephemeral) {
-          if (!existing) {
-            throw new InvalidRequest(
-              `session ${name} is ephemeral and cannot be restarted after its app-server exits`
-            );
-          }
-          await existing.kill("restarting ephemeral session");
-          this.deleteLiveSession(entry.workspace, name);
-          this.registry.delete(name, entry.workspace);
-          const recreated = await this.factory.create(name, {
-            cwd: entry.cwd,
-            model: entry.model,
-            modelProvider: entry.modelProvider,
-            sandbox: entry.sandbox,
-            approvalPolicy: entry.approvalPolicy,
-            serviceTier: entry.serviceTier,
-            reasoningEffort: entry.reasoningEffort,
-            personality: entry.personality,
-            profile: entry.profile,
-            ephemeral: true
-          }, { workspace: entry.workspace, clientId: message.clientId });
-          this.setLiveSession(recreated);
-          return { workspace: entry.workspace, name, restarted: true, recreated: true, ephemeral: true };
-        }
-        if (existing) {
-          await existing.close();
-          this.deleteLiveSession(entry.workspace, name);
-        }
-        const session = await this.factory.resume(name, entry.workspace);
-        this.setLiveSession(session);
-        return { workspace: entry.workspace, name, restarted: true };
-      });
-    });
-    this.handlers.set("session.kill", async (message) => {
-      const name = asString(message.params.name);
-      return await this.withSessionOperationLock(name, async () => {
-        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
-        const session = this.getLiveSession(entry.workspace, name);
-        if (!session) {
-          throw new SessionNotFound(name);
-        }
-        await session.kill("killed by operator");
-        this.deleteLiveSession(entry.workspace, name);
-        return { workspace: entry.workspace, name, killed: true };
-      });
-    });
-    this.handlers.set("session.forget", async (message) => {
-      const name = asString(message.params.name);
-      return await this.withSessionOperationLock(name, async () => {
-        const entry = this.registry.find(name, message.workspace, message.allWorkspaces);
-        const session = this.getLiveSession(entry.workspace, name);
-        let archived = false;
-        if (session) {
-          if (!entry.ephemeral) {
-            try {
-              await session.archiveThread();
-              archived = true;
-            } catch {
-            }
-          }
-          await session.close();
-          this.deleteLiveSession(entry.workspace, name);
-        } else {
-          if (!entry.ephemeral) {
-            const temp = this.clientFactory(this.cfg);
-            try {
-              await temp.start();
-              await temp.threadArchive(entry.threadId);
-              archived = true;
-            } catch {
-            } finally {
-              await temp.close();
-            }
-          }
-        }
-        try {
-          this.registry.delete(name, entry.workspace);
-        } catch {
-        }
-        return { workspace: entry.workspace, name, forgotten: true, archived_thread: archived };
-      });
-    });
-    this.handlers.set("send", async (message) => {
-      const name = asString(message.params.name);
-      const session = this.getLiveSession(message.workspace, name);
-      if (!session) {
-        throw new SessionNotFound(name);
-      }
-      const wait = Boolean(message.params.wait);
-      const overrides = compactObject({
-        cwd: message.params.cwd,
-        model: message.params.model,
-        effort: message.params.effort,
-        personality: message.params.personality,
-        serviceTier: message.params.serviceTier,
-        summary: message.params.summary,
-        outputSchema: message.params.outputSchema
-      });
-      const result = await session.send(asString(message.params.text), { wait, overrides });
-      if (typeof result === "string") {
-        return { workspace: message.workspace, name, queued_or_turn_id: result };
-      }
-      return { workspace: message.workspace, name, summary: result };
-    });
-    this.handlers.set("interrupt", async (message) => {
-      const name = asString(message.params.name);
-      const session = this.getLiveSession(message.workspace, name);
-      if (!session) {
-        throw new SessionNotFound(name);
-      }
-      await session.interrupt();
-      return { workspace: message.workspace, name, interrupted: true };
-    });
-    this.handlers.set("compact", async (message) => {
-      const name = asString(message.params.name);
-      return await this.withSessionOperationLock(name, async () => {
-        const session = this.getLiveSession(message.workspace, name);
-        if (!session) {
-          throw new SessionNotFound(name);
-        }
-        const before = this.registry.get(name, message.workspace).tokenUsageInput;
-        await session.compact();
-        const after = this.registry.get(name, message.workspace).tokenUsageInput;
-        this.eventBus.publish("events", {
-          workspace: message.workspace,
-          kind: "compact-done",
-          session: name,
-          before,
-          after
-        });
-        return { workspace: message.workspace, name, compacted: true };
-      });
-    });
-    this.handlers.set("history.get", async (message) => {
-      const name = asString(message.params.name);
-      let workspace = message.workspace;
-      try {
-        workspace = this.registry.find(name, message.workspace, message.allWorkspaces).workspace;
-      } catch {
-      }
-      const format = message.params.format === "jsonl" ? "jsonl" : "md";
-      const filePath = historyFilePath(this.cfg.daemon.dataDir, workspace, name, format);
-      if (!import_node_fs14.default.existsSync(filePath)) {
-        return { workspace, name, content: "" };
-      }
-      const sinceTurnId = message.params.sinceTurnId == null ? "" : asString(message.params.sinceTurnId);
-      if (format === "md") {
-        const filtered2 = filterHistoryMarkdown(import_node_fs14.default.readFileSync(filePath, "utf8"), {
-          lastN: Number(message.params.lastN || 0),
-          sinceTurnId: sinceTurnId || void 0
-        });
-        return {
-          name,
-          workspace,
-          content: filtered2.content,
-          matched_since_turn_id: filtered2.matchedSinceTurnId
-        };
-      }
-      const lastN = Number(message.params.lastN || 0);
-      const since = message.params.since == null ? "" : asString(message.params.since);
-      const source = lastN > 0 && !since && !sinceTurnId ? readJsonlTail(filePath, lastN).join("\n") : import_node_fs14.default.readFileSync(filePath, "utf8");
-      const filtered = filterTurnsJsonl(source, {
-        lastN,
-        since: since || void 0,
-        sinceTurnId: sinceTurnId || void 0
-      });
-      return {
-        name,
-        workspace,
-        content: filtered.content,
-        matched_since_turn_id: filtered.matchedSinceTurnId
-      };
-    });
-    this.handlers.set("history.tail_stderr", async (message) => {
-      const name = asString(message.params.name);
-      const lines = Number(message.params.lines || 200);
-      let workspace = message.workspace;
-      try {
-        workspace = this.registry.find(name, message.workspace, message.allWorkspaces).workspace;
-      } catch {
-      }
-      const filePath = sessionFilePath(this.cfg.daemon.dataDir, workspace, name, "app-server.stderr.log");
-      if (!import_node_fs14.default.existsSync(filePath)) {
-        return { workspace, name, content: "" };
-      }
-      return {
-        workspace,
-        name,
-        content: readLastLines(filePath, lines)
-      };
-    });
-    this.handlers.set("queue.show", async (message) => {
-      const name = asString(message.params.name);
-      const session = this.getLiveSession(message.workspace, name);
-      if (!session) {
-        throw new SessionNotFound(name);
-      }
-      const items = session.snapshotQueueJson();
-      return { workspace: message.workspace, name, length: items.length, items };
-    });
-    this.handlers.set("queue.clear", async (message) => {
-      const name = asString(message.params.name);
-      return await this.withSessionOperationLock(name, async () => {
-        const session = this.getLiveSession(message.workspace, name);
-        if (!session) {
-          throw new SessionNotFound(name);
-        }
-        session.clearQueue();
-        return { workspace: message.workspace, name, cleared: true };
-      });
-    });
-    this.handlers.set("queue.drop_oldest", async (message) => {
-      const name = asString(message.params.name);
-      return await this.withSessionOperationLock(name, async () => {
-        const session = this.getLiveSession(message.workspace, name);
-        if (!session) {
-          throw new SessionNotFound(name);
-        }
-        const dropped = session.dropOldest();
-        return { workspace: message.workspace, name, dropped: dropped?.id ?? null };
-      });
-    });
-    this.handlers.set("queue.retry_last", async (message) => {
-      const name = asString(message.params.name);
-      const session = this.getLiveSession(message.workspace, name);
-      if (!session) {
-        throw new SessionNotFound(name);
-      }
-      const entry = this.registry.get(name, message.workspace);
-      if (!entry.lastPromptText) {
-        throw new InvalidRequest(`session ${name} has no last prompt to retry`);
-      }
-      const result = await session.send(entry.lastPromptText, { wait: Boolean(message.params.wait) });
-      return { workspace: message.workspace, name, retried: true, result };
-    });
-    this.handlers.set("health.check", async (message) => {
-      await this.health.tickOnce();
-      return {
-        workspace: message.allWorkspaces ? "*" : message.workspace,
-        checked: true,
-        sessions: targetEntries(this.registry, message.workspace, message.allWorkspaces).length
-      };
-    });
-    this.handlers.set("health.issues", async (message) => ({
-      workspace: message.allWorkspaces ? "*" : message.workspace,
-      issues: collectIssues(targetEntries(this.registry, message.workspace, message.allWorkspaces), this.sessions)
-    }));
-    this.handlers.set("health.report", async (message) => ({
-      workspace: message.allWorkspaces ? "*" : message.workspace,
-      summary: summarizeEntries(targetEntries(this.registry, message.workspace, message.allWorkspaces)),
-      issues: collectIssues(targetEntries(this.registry, message.workspace, message.allWorkspaces), this.sessions),
-      sessions: targetEntries(this.registry, message.workspace, message.allWorkspaces).map((entry) => ({
-        workspace: entry.workspace,
-        name: entry.name,
-        status: entry.status,
-        queue_length: entry.queueLength,
-        app_server_pid: entry.appServerPid,
-        last_turn_id: entry.lastTurnId,
-        last_error: entry.errorMessage,
-        transport_alive: this.getLiveSession(entry.workspace, entry.name)?.isTransportAlive() || false,
-        ephemeral: Boolean(entry.ephemeral)
-      }))
-    }));
-    this.handlers.set("health.repair", async (message) => {
-      this.refreshConfigFromDisk();
-      for (const entry of targetEntries(this.registry, message.workspace, message.allWorkspaces)) {
-        await this.withSessionOperationLock(entry.name, async () => {
-          const latest = this.registry.get(entry.name, entry.workspace);
-          if (latest.status !== "errored") {
-            return;
-          }
-          if (latest.ephemeral) {
-            this.registry.update(latest.name, {
-              errorMessage: "ephemeral session cannot be repaired after its app-server exits"
-            }, latest.workspace);
-            return;
-          }
-          try {
-            const session = await this.factory.resume(latest.name, latest.workspace);
-            this.setLiveSession(session);
-          } catch (error) {
-            this.registry.update(latest.name, { errorMessage: error.message }, latest.workspace);
-          }
-        });
-      }
-      return { workspace: message.allWorkspaces ? "*" : message.workspace, repaired: true };
-    });
-    this.handlers.set("daemon.status", async () => ({
-      sessions: this.registry.list(null, true).length,
-      summary: summarizeEntries(this.registry.list(null, true)),
-      workspaces: summarizeWorkspaces(this.registry, this.clients.list(), this.runtimeAlarms, this.cfg),
-      clients: this.clients.list().length,
-      pid: process.pid,
-      socket_path: this.socketPath,
-      data_dir: this.cfg.daemon.dataDir,
-      events_last_seq: this.eventBus.lastSeq("events"),
-      watchdog_last_seq: this.eventBus.lastSeq("watchdog")
-    }));
-    this.handlers.set("daemon.doctor", async () => {
-      const ipc = ipcAddressFromPath(this.socketPath);
-      return {
-        pid: process.pid,
-        socket_path: this.socketPath,
-        socket_exists: ipcArtifactExists(ipc),
-        ipc_kind: ipc.kind,
-        ipc_endpoint: ipc.display,
-        ipc_ready: await ipcReady(ipc),
-        data_dir: this.cfg.daemon.dataDir,
-        registry_path: import_node_path14.default.join(this.cfg.daemon.dataDir, "registry.json"),
-        log_path: import_node_path14.default.join(this.cfg.daemon.dataDir, "daemon.log"),
-        uptime_seconds: Math.floor(process.uptime()),
-        summary: summarizeEntries(this.registry.list(null, true)),
-        workspaces: summarizeWorkspaces(this.registry, this.clients.list(), this.runtimeAlarms, this.cfg),
-        clients_path: clientsDir(this.cfg.daemon.dataDir),
-        clients: this.clients.list(),
-        sessions: this.registry.list(null, true).map((entry) => ({
-          workspace: entry.workspace,
-          name: entry.name,
-          status: entry.status,
-          thread_id: entry.threadId,
-          ephemeral: Boolean(entry.ephemeral),
-          transport_alive: this.getLiveSession(entry.workspace, entry.name)?.isTransportAlive() || false
-        }))
-      };
-    });
-    this.handlers.set("daemon.stop", async (message) => {
-      const active = this.registry.list(null, true).filter((entry) => entry.status !== "closed");
-      if (active.length > 0 && !message.params.force) {
-        throw new InvalidRequest(
-          `daemon stop would affect ${active.length} non-closed session(s) across workspaces; rerun with --force after confirming`,
-          {
-            active_sessions: active.map((entry) => ({
-              workspace: entry.workspace,
-              name: entry.name,
-              status: entry.status,
-              queue_length: entry.queueLength
-            }))
-          }
-        );
-      }
-      return { stopping: true, active_sessions: active.length, forced: Boolean(message.params.force) };
-    });
-    this.handlers.set("daemon.logs", async () => {
-      const filePath = import_node_path14.default.join(this.cfg.daemon.dataDir, "daemon.log");
-      return { content: import_node_fs14.default.existsSync(filePath) ? import_node_fs14.default.readFileSync(filePath, "utf8") : "" };
-    });
-    this.handlers.set("daemon.reload_config", async () => {
-      this.refreshConfigFromDisk();
-      return { reloaded: true };
-    });
-    this.handlers.set("workspace.list", async () => ({
-      workspaces: summarizeWorkspaces(this.registry, this.clients.list(), this.runtimeAlarms, this.cfg)
-    }));
-    this.handlers.set("workspace.show", async (message) => {
-      const workspace = asString(message.params.name || message.workspace) || message.workspace;
-      const sessions = this.registry.list(workspace);
-      const clients = this.clients.list().filter((client) => client.workspace === workspace);
-      return {
-        workspace,
-        sessions,
-        clients,
-        alarms: alarmsForWorkspace(workspace, this.runtimeAlarms, this.cfg)
-      };
-    });
-    this.handlers.set("client.register", async (message) => {
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      const requestedId = asString(message.params.clientId || message.clientId);
-      const record = {
-        clientId: requestedId || makeClientId({
-          workspace: message.workspace,
-          sessionId: optionalString(message.params.sessionId),
-          hostname: optionalString(message.params.hostname),
-          pid: message.params.pid == null ? null : Number(message.params.pid),
-          startedAtMs: Date.now()
-        }),
-        workspace: message.workspace,
-        hostname: optionalString(message.params.hostname) || import_node_os4.default.hostname(),
-        pid: message.params.pid == null ? null : Number(message.params.pid),
-        startedAt: optionalString(message.params.startedAt) || now,
-        claudeProjectDir: optionalString(message.params.claudeProjectDir),
-        sessionId: optionalString(message.params.sessionId)
-      };
-      this.clients.register(record);
-      return recordToWire(record);
-    });
-    this.handlers.set("client.list", async () => ({ clients: this.clients.list().map(recordToWire) }));
-    this.handlers.set("client.detach", async (message) => {
-      const clientId = asString(message.params.clientId || message.clientId);
-      const sessionId = asString(message.params.sessionId || message.params.session_id);
-      if (!clientId && sessionId) {
-        const result = await this.detachClientBySession(message.workspace, sessionId);
-        return {
-          session_id: sessionId,
-          workspace: message.workspace,
-          detached: true,
-          detached_clients: result.clients,
-          detached_subscribers: result.subscribers
-        };
-      }
-      if (!clientId) {
-        throw new InvalidRequest("client_id or session_id required");
-      }
-      const detached_subscribers = await this.detachClient(clientId);
-      return { client_id: clientId, detached: true, detached_subscribers };
-    });
-    this.handlers.set("watch.alarm.create", async (message) => {
-      const name = asString(message.params.name).trim();
-      if (!name) {
-        throw new InvalidRequest("alarm name required");
-      }
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      const record = this.runtimeAlarms.upsert({
-        workspace: message.workspace,
-        name,
-        clientId: message.clientId,
-        createdAt: now,
-        updatedAt: now,
-        alarm: {
-          enabled: message.params.enabled == null ? true : Boolean(message.params.enabled),
-          intervalSeconds: positiveNumber(message.params.intervalSeconds ?? message.params.interval_seconds, 1200),
-          taskBriefFile: asString(message.params.taskBriefFile ?? message.params.task_brief_file),
-          taskBriefHeadLines: positiveNumber(message.params.taskBriefHeadLines ?? message.params.task_brief_head_lines, 30),
-          emitIdle: Boolean(message.params.emitIdle ?? message.params.emit_idle),
-          template: asString(message.params.template),
-          templateFile: asString(message.params.templateFile ?? message.params.template_file)
-        }
-      });
-      if (this.server) {
-        this.restartBackgroundLoops();
-      }
-      return { alarm: runtimeAlarmToWire(record) };
-    });
-    this.handlers.set("watch.alarm.list", async (message) => ({
-      workspace: message.allWorkspaces ? "*" : message.workspace,
-      alarms: this.runtimeAlarms.list(message.workspace, message.allWorkspaces).map(runtimeAlarmToWire)
-    }));
-    this.handlers.set("watch.alarm.delete", async (message) => {
-      const name = asString(message.params.name).trim();
-      if (!name) {
-        throw new InvalidRequest("alarm name required");
-      }
-      const deleted = this.runtimeAlarms.delete(message.workspace, name);
-      if (deleted && this.server) {
-        this.restartBackgroundLoops();
-      }
-      return { workspace: message.workspace, name, deleted };
-    });
-  }
-  refreshConfigFromDisk() {
-    const reloaded = loadConfig();
-    reloaded.daemon.dataDir = this.cfg.daemon.dataDir;
-    reloaded.daemon.socketPath = this.cfg.daemon.socketPath;
-    this.replaceConfig(reloaded);
-  }
-  getLiveSession(workspace, name) {
-    return this.sessions.get(sessionKey2(workspace, name));
-  }
-  setLiveSession(session) {
-    this.sessions.set(sessionKey2(session.workspace, session.name), session);
-  }
-  deleteLiveSession(workspace, name) {
-    this.sessions.delete(sessionKey2(workspace, name));
-  }
-  activeWorkspaces() {
-    const names = new Set(this.registry.workspaces());
-    for (const client of this.clients.list()) {
-      names.add(client.workspace);
-    }
-    if (names.size === 0) {
-      names.add(DEFAULT_WORKSPACE);
-    }
-    return [...names].sort();
-  }
-  scheduledAlarms() {
-    const items = [];
-    for (const [workspace, alarms] of Object.entries(this.cfg.monitor.watchdogWorkspaceAlarms)) {
-      for (const [name, alarm] of Object.entries(alarms)) {
-        if (alarm.enabled) {
-          items.push({ workspace, name, alarm });
-        }
-      }
-    }
-    for (const record of this.runtimeAlarms.list(null, true)) {
-      if (record.alarm.enabled) {
-        items.push({ workspace: record.workspace, name: record.name, alarm: record.alarm });
-      }
-    }
-    return items;
-  }
-  async sweepStaleClients() {
-    for (const record of this.clients.sweepStale()) {
-      await this.detachClient(record.clientId);
-    }
-  }
-  async detachClient(clientId) {
-    this.clients.detach(clientId);
-    const detached = await this.eventBus.detachClient(clientId);
-    const deletedAlarms = this.runtimeAlarms.deleteByClient(clientId);
-    if (deletedAlarms > 0 && this.server) {
-      this.restartBackgroundLoops();
-    }
-    if (!hasNonClosedSessions(this.registry)) {
-      setImmediate(() => this.shutdownCallback?.());
-    }
-    return detached;
-  }
-  async detachClientBySession(workspace, sessionId) {
-    const records = this.clients.detachBySession(workspace, sessionId);
-    let subscribers = 0;
-    for (const record of records) {
-      subscribers += await this.eventBus.detachClient(record.clientId);
-      const deletedAlarms = this.runtimeAlarms.deleteByClient(record.clientId);
-      if (deletedAlarms > 0 && this.server) {
-        this.restartBackgroundLoops();
-      }
-    }
-    if (!hasNonClosedSessions(this.registry)) {
-      setImmediate(() => this.shutdownCallback?.());
-    }
-    return { clients: records.map((record) => record.clientId), subscribers };
-  }
-  async withSessionOperationLock(name, fn) {
-    const previous = this.sessionLocks.get(name) || Promise.resolve();
-    let release;
-    const current = new Promise((resolve) => {
-      release = resolve;
-    });
-    const chained = previous.then(() => current);
-    this.sessionLocks.set(name, chained);
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release();
-      if (this.sessionLocks.get(name) === chained) {
-        this.sessionLocks.delete(name);
-      }
-    }
-  }
-  async withSessionAttachLock(name, threadId, fn) {
-    if (!threadId) {
-      return await this.withSessionOperationLock(name, fn);
-    }
-    return await this.withSessionOperationLock(`thread:${threadId}`, async () => {
-      return await this.withSessionOperationLock(name, fn);
-    });
-  }
-  async handleMonitorSubscribe(stream, sinceSeq, options, socket) {
-    const queue = await this.eventBus.subscribe(stream, sinceSeq, options);
-    const onClosed = () => {
-      queue.close(new Error("monitor socket closed"));
-    };
-    socket.once("close", onClosed);
-    socket.once("error", onClosed);
-    try {
-      while (!socket.destroyed) {
-        const event = await queue.shift();
-        const writable = socket.write(
-          encodeMessage({
-            kind: "event",
-            stream,
-            seq: event.seq,
-            payload: event.payload
-          })
-        );
-        if (!writable && !socket.destroyed) {
-          await Promise.race([
-            (0, import_node_events.once)(socket, "drain"),
-            (0, import_node_events.once)(socket, "close"),
-            (0, import_node_events.once)(socket, "error")
-          ]).catch(() => void 0);
-        }
-      }
-    } catch {
-    } finally {
-      socket.off("close", onClosed);
-      socket.off("error", onClosed);
-      await this.eventBus.unsubscribe(stream, queue);
-    }
-  }
-  async handleHistorySubscribe(params, options, socket) {
-    const name = asString(params.name);
-    let workspace = options.workspace;
-    try {
-      workspace = this.registry.find(name, options.workspace, options.allWorkspaces).workspace;
-    } catch {
-    }
-    const format = params.format === "jsonl" ? "jsonl" : "md";
-    const filePath = historyFilePath(this.cfg.daemon.dataDir, workspace, name, format);
-    const queue = await this.eventBus.subscribe("events", this.eventBus.lastSeq("events"), {
-      ...options,
-      workspace
-    });
-    const snapshot = this.readHistorySnapshot(workspace, name, filePath, format, params);
-    let seq = 0;
-    socket.write(
-      JSON.stringify({
-        kind: "event",
-        stream: "history",
-        seq,
-        payload: {
-          kind: "history-snapshot",
-          workspace,
-          session: name,
-          format,
-          ...snapshot.payload
-        }
-      }) + "\n"
-    );
-    let cursor = snapshot.cursor;
-    const onClosed = () => {
-      queue.close(new Error("history socket closed"));
-    };
-    socket.once("close", onClosed);
-    socket.once("error", onClosed);
-    try {
-      while (!socket.destroyed) {
-        const event = await queue.shift();
-        if (event.payload.session !== name || String(event.payload.workspace ?? DEFAULT_WORKSPACE) !== workspace) {
-          continue;
-        }
-        if (!["turn-done", "turn-attn"].includes(String(event.payload.kind))) {
-          continue;
-        }
-        let content = "";
-        if (import_node_fs14.default.existsSync(filePath)) {
-          const size = import_node_fs14.default.statSync(filePath).size;
-          if (size < cursor) {
-            cursor = 0;
-          }
-          if (size > cursor) {
-            const fd = import_node_fs14.default.openSync(filePath, "r");
-            try {
-              const buffer = Buffer.alloc(size - cursor);
-              import_node_fs14.default.readSync(fd, buffer, 0, buffer.length, cursor);
-              content = buffer.toString("utf8");
-            } finally {
-              import_node_fs14.default.closeSync(fd);
-            }
-            cursor = size;
-          }
-        }
-        seq += 1;
-        const writable = socket.write(
-          JSON.stringify({
-            kind: "event",
-            stream: "history",
-            seq,
-            payload: {
-              kind: "history-append",
-              workspace,
-              session: name,
-              format,
-              content,
-              event: event.payload
-            }
-          }) + "\n"
-        );
-        if (!writable && !socket.destroyed) {
-          await Promise.race([
-            (0, import_node_events.once)(socket, "drain"),
-            (0, import_node_events.once)(socket, "close"),
-            (0, import_node_events.once)(socket, "error")
-          ]).catch(() => void 0);
-        }
-      }
-    } catch {
-    } finally {
-      socket.off("close", onClosed);
-      socket.off("error", onClosed);
-      await this.eventBus.unsubscribe("events", queue);
-    }
-  }
-  readHistorySnapshot(workspace, name, filePath, format, params) {
-    if (!import_node_fs14.default.existsSync(filePath)) {
-      return { cursor: 0, payload: { workspace, name, content: "", matched_since_turn_id: true } };
-    }
-    const cursor = import_node_fs14.default.statSync(filePath).size;
-    const lastN = Number(params.lastN || 0);
-    const sinceTurnId = params.sinceTurnId == null ? "" : asString(params.sinceTurnId);
-    if (format === "md") {
-      const filtered2 = filterHistoryMarkdown(import_node_fs14.default.readFileSync(filePath, "utf8"), {
-        lastN,
-        sinceTurnId: sinceTurnId || void 0
-      });
-      return {
-        cursor,
-        payload: {
-          name,
-          workspace,
-          content: filtered2.content,
-          matched_since_turn_id: filtered2.matchedSinceTurnId
-        }
-      };
-    }
-    const since = params.since == null ? "" : asString(params.since);
-    const source = lastN > 0 && !since && !sinceTurnId ? readJsonlTail(filePath, lastN).join("\n") : import_node_fs14.default.readFileSync(filePath, "utf8");
-    const filtered = filterTurnsJsonl(source, {
-      lastN,
-      since: since || void 0,
-      sinceTurnId: sinceTurnId || void 0
-    });
-    return {
-      cursor,
-      payload: {
-        name,
-        workspace,
-        content: filtered.content,
-        matched_since_turn_id: filtered.matchedSinceTurnId
-      }
-    };
-  }
-  async handleSocket(socket) {
-    socket.setEncoding("utf8");
-    const rl = import_node_readline3.default.createInterface({
-      input: socket,
-      crlfDelay: Infinity
-    });
-    try {
-      for await (const line of rl) {
-        if (!line) {
-          continue;
-        }
-        let request;
-        try {
-          request = decodeRequest(line);
-        } catch (error) {
-          socket.write(
-            encodeMessage({
-              id: "?",
-              ok: false,
-              error: errorToWire(asCodexTeamError(error))
-            })
-          );
-          continue;
-        }
-        if (request.cmd === "monitor.events.subscribe") {
-          await this.handleMonitorSubscribe("events", Number(request.params.sinceSeq || 0), {
-            workspace: request.workspace,
-            clientId: request.clientId,
-            allWorkspaces: request.allWorkspaces
-          }, socket);
-          return;
-        }
-        if (request.cmd === "monitor.watchdog.subscribe") {
-          await this.handleMonitorSubscribe("watchdog", Number(request.params.sinceSeq || 0), {
-            workspace: request.workspace,
-            clientId: request.clientId,
-            allWorkspaces: request.allWorkspaces
-          }, socket);
-          return;
-        }
-        if (request.cmd === "history.subscribe") {
-          await this.handleHistorySubscribe(request.params, {
-            workspace: request.workspace,
-            clientId: request.clientId,
-            allWorkspaces: request.allWorkspaces
-          }, socket);
-          return;
-        }
-        const handler = this.handlers.get(request.cmd);
-        if (!handler) {
-          socket.write(
-            encodeMessage({
-              id: request.id,
-              ok: false,
-              error: errorToWire(new InvalidRequest(`unknown cmd: ${request.cmd}`))
-            })
-          );
-          continue;
-        }
-        try {
-          const data = await handler(request);
-          socket.write(encodeMessage({ v: 2, id: request.id, ok: true, workspace: request.workspace, data }));
-          if (request.cmd === "daemon.stop") {
-            setImmediate(() => {
-              this.shutdownCallback?.();
-            });
-          }
-        } catch (error) {
-          socket.write(
-            encodeMessage({
-              id: request.id,
-              ok: false,
-              workspace: request.workspace,
-              error: errorToWire(asCodexTeamError(error))
-            })
-          );
-        }
-      }
-    } finally {
-      rl.close();
-      socket.end();
-    }
-  }
-};
-function compactObject(input) {
-  return Object.fromEntries(
-    Object.entries(input).filter(([, value]) => value !== void 0 && value !== null && value !== "")
-  );
-}
-function historyFilePath(dataDir, workspace, name, format) {
-  return sessionFilePath(dataDir, workspace, name, format === "md" ? "history.md" : "turns.jsonl");
-}
-function sessionFilePath(dataDir, workspace, name, file) {
-  return import_node_path14.default.join(sessionDir(dataDir, validateWorkspace(workspace), validateSessionName(name)), file);
-}
-function positiveNumber(value, fallback) {
-  const parsed = Number(value ?? fallback);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-function hasNonClosedSessions(registry) {
-  return registry.list(null, true).some((entry) => entry.status !== "closed");
-}
-function summarizeEntries(entries) {
-  const summary = {
-    total: entries.length,
-    idle: 0,
-    running: 0,
-    errored: 0,
-    closed: 0,
-    compacting: 0,
-    queued_items: 0
-  };
-  for (const entry of entries) {
-    summary.queued_items += Number(entry.queueLength || 0);
-    if (entry.status in summary) {
-      summary[entry.status] += 1;
-    }
-  }
-  return summary;
-}
-function summarizeWorkspaces(registry, clients, runtimeAlarms, cfg) {
-  const names = new Set(registry.workspaces());
-  for (const client of clients) {
-    names.add(client.workspace);
-  }
-  for (const alarm of runtimeAlarms.list(null, true)) {
-    names.add(alarm.workspace);
-  }
-  for (const workspace of Object.keys(cfg.monitor.watchdogWorkspaceAlarms)) {
-    names.add(workspace);
-  }
-  return [...names].sort().map((workspace) => {
-    const sessions = registry.list(workspace);
-    const alarms = alarmsForWorkspace(workspace, runtimeAlarms, cfg);
-    return {
-      workspace,
-      sessions: sessions.length,
-      clients: clients.filter((client) => client.workspace === workspace).length,
-      alarms: alarms.length,
-      summary: summarizeEntries(sessions)
-    };
-  });
-}
-function alarmsForWorkspace(workspace, runtimeAlarms, cfg) {
-  const configured = Object.entries(cfg.monitor.watchdogWorkspaceAlarms[workspace] || {}).map(([name, alarm]) => ({
-    source: "config",
-    workspace,
-    name,
-    ...runtimeAlarmToWire({
-      workspace,
-      name,
-      clientId: null,
-      createdAt: "",
-      updatedAt: "",
-      alarm
-    })
-  }));
-  const runtime = runtimeAlarms.list(workspace).map((record) => ({
-    source: "runtime",
-    ...runtimeAlarmToWire(record)
-  }));
-  return [...configured, ...runtime];
-}
-function recordToWire(record) {
-  return {
-    client_id: record.clientId,
-    workspace: record.workspace,
-    hostname: record.hostname,
-    pid: record.pid,
-    started_at: record.startedAt,
-    claude_project_dir: record.claudeProjectDir,
-    session_id: record.sessionId
-  };
-}
-function collectIssues(entries, sessions) {
-  const issues = [];
-  for (const entry of entries) {
-    const workspace = entry.workspace || DEFAULT_WORKSPACE;
-    const live = sessions.get(sessionKey2(workspace, entry.name));
-    if (entry.status === "errored") {
-      issues.push({
-        workspace,
-        session: entry.name,
-        kind: "errored",
-        last_error: entry.errorMessage
-      });
-      continue;
-    }
-    if (entry.queueLength > 0) {
-      issues.push({
-        workspace,
-        session: entry.name,
-        kind: "queue-backlog",
-        queue_length: entry.queueLength
-      });
-    }
-    if (live && live.isRunning()) {
-      const ageMs = live.currentTurnAgeMs();
-      if (ageMs != null) {
-        issues.push({
-          workspace,
-          session: entry.name,
-          kind: "running",
-          turn_id: live.currentTurnId(),
-          age_ms: ageMs,
-          last_turn_id: entry.lastTurnId
-        });
-      }
-    } else if (live && !live.isTransportAlive()) {
-      issues.push({
-        workspace,
-        session: entry.name,
-        kind: "transport-down"
-      });
-    }
-  }
-  return issues;
-}
-
-// src/daemon.ts
-function appendLogLine(logPath, message) {
-  import_node_fs15.default.mkdirSync(import_node_path15.default.dirname(logPath), { recursive: true });
-  import_node_fs15.default.appendFileSync(logPath, `${(/* @__PURE__ */ new Date()).toISOString()} ${message}
-`, "utf8");
-}
-function isAlive(pid) {
-  return isPidAlive(pid);
-}
-function acquirePidLock(pidPath) {
-  import_node_fs15.default.mkdirSync(import_node_path15.default.dirname(pidPath), { recursive: true });
-  if (import_node_fs15.default.existsSync(pidPath)) {
-    const raw = import_node_fs15.default.readFileSync(pidPath, "utf8").trim();
-    const pid = Number(raw);
-    if (Number.isFinite(pid) && pid > 0 && isAlive(pid)) {
-      throw new DaemonAlreadyRunning(
-        `another daemon is already running (pid=${pid}, pid_file=${pidPath}).`
-      );
-    }
-    import_node_fs15.default.unlinkSync(pidPath);
-  }
-  import_node_fs15.default.writeFileSync(pidPath, String(process.pid), "utf8");
-}
-function releasePidLock(pidPath) {
-  if (import_node_fs15.default.existsSync(pidPath)) {
-    import_node_fs15.default.unlinkSync(pidPath);
-  }
-}
-async function runDaemon(configPath) {
-  const cfg = loadConfig(configPath || import_node_path15.default.join(resolveConfigDir(), "config.toml"));
-  const dataDir = resolveDataDir2(cfg);
-  const socketPath = resolveSocketPath(cfg);
-  cfg.daemon.dataDir = dataDir;
-  cfg.daemon.socketPath = socketPath;
-  import_node_fs15.default.mkdirSync(dataDir, { recursive: true });
-  const pidPath = resolvePidPath(cfg.daemon.dataDir);
-  const logPath = resolveLogPath(dataDir);
-  acquirePidLock(pidPath);
-  appendLogLine(logPath, "daemon starting");
-  let stopResolve;
-  const stopPromise = new Promise((resolve) => {
-    stopResolve = resolve;
-  });
-  const server = new DaemonServer(cfg, socketPath, () => stopResolve());
-  const disposeSignals = installShutdownSignalHandlers(() => stopResolve());
-  try {
-    await server.start();
-    if (cfg.defaults.autoResumeOnDaemonStart) {
-      for (const entry of server.registry.list(null, true)) {
-        if (!["idle", "running", "errored", "compacting"].includes(entry.status)) {
-          continue;
-        }
-        if (entry.ephemeral) {
-          appendLogLine(logPath, `skipping auto-resume for ephemeral session ${entry.name}`);
-          server.registry.update(entry.name, {
-            status: "closed",
-            appServerPid: null,
-            errorMessage: "ephemeral session expired when daemon stopped"
-          }, entry.workspace);
-          continue;
-        }
-        try {
-          const session = await server.factory.resume(entry.name, entry.workspace);
-          server.sessions.set(`${entry.workspace}\0${entry.name}`, session);
-        } catch (error) {
-          server.registry.update(entry.name, {
-            status: "errored",
-            appServerPid: null,
-            errorMessage: error.message
-          }, entry.workspace);
-          appendLogLine(logPath, `failed to auto-resume ${entry.name}: ${error.message}`);
-        }
-      }
-    }
-    await stopPromise;
-    appendLogLine(logPath, "daemon stopping");
-    await server.stop();
-    appendLogLine(logPath, "daemon stopped");
-  } finally {
-    disposeSignals();
-    releasePidLock(pidPath);
-  }
-  return 0;
-}
-
-// src/hooks/common.ts
-var import_node_fs16 = __toESM(require("fs"));
-var import_node_path16 = __toESM(require("path"));
-async function readStdinJson() {
-  const body = await new Promise((resolve) => {
-    let text = "";
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => {
-      text += chunk;
-    });
-    process.stdin.on("end", () => resolve(text));
-    if (process.stdin.isTTY) {
-      resolve("");
-    }
-  });
-  if (!body.trim()) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(body);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-function projectDirFromHook(input) {
-  const workspace = typeof input.workspace === "object" && input.workspace !== null ? input.workspace : {};
-  return String(
-    process.env.CLAUDE_PROJECT_DIR || input.cwd || workspace.current_dir || process.env.CODEX_TEAM_PROJECT_DIR || ""
-  );
-}
-function sessionIdFromHook(input) {
-  return String(input.session_id || input.sessionId || process.env.CODEX_TEAM_SESSION_ID || "");
-}
-function maybePinWorkspace(projectDir, workspace) {
-  if (!projectDir || process.env.CODEX_TEAM_PIN_WORKSPACE !== "1") {
-    return;
-  }
-  const filePath = workspaceEnvFile(projectDir);
-  if (import_node_fs16.default.existsSync(filePath)) {
-    return;
-  }
-  import_node_fs16.default.mkdirSync(import_node_path16.default.dirname(filePath), { recursive: true });
-  import_node_fs16.default.writeFileSync(filePath, `CODEX_TEAM_WORKSPACE=${validateWorkspace(workspace)}
-`, "utf8");
-}
-
-// src/hooks/sessionEnd.ts
-async function runSessionEndHook() {
-  let projectDir = "";
-  try {
-    const input = await readStdinJson();
-    projectDir = projectDirFromHook(input);
-    const fallback = readFallbackClientEnv(projectDir);
-    const workspace = validateWorkspace(
-      process.env.CODEX_TEAM_WORKSPACE || fallback.CODEX_TEAM_WORKSPACE || resolveWorkspace({ projectDir })
-    );
-    const clientId = process.env.CODEX_TEAM_CLIENT_ID || fallback.CODEX_TEAM_CLIENT_ID || "";
-    const sessionId = sessionIdFromHook(input) || fallback.CODEX_TEAM_SESSION_ID || "";
-    const socketPath = resolveSocketPath(loadConfig());
-    if (clientId) {
-      await sendRequest(
-        socketPath,
-        "client.detach",
-        { clientId },
-        { workspace, clientId, allWorkspaces: false }
-      ).catch(() => void 0);
-    } else if (sessionId) {
-      await sendRequest(
-        socketPath,
-        "client.detach",
-        { sessionId },
-        { workspace, clientId: null, allWorkspaces: false }
-      ).catch(() => void 0);
-    }
-  } catch (error) {
-    process.stderr.write(`codex-team hook session-end: ${error.message}
-`);
-  } finally {
-    removeFallbackClientEnv(projectDir || process.env.CODEX_TEAM_PROJECT_DIR || process.env.CLAUDE_PROJECT_DIR || null);
-  }
-  return 0;
-}
-
-// src/hooks/sessionStart.ts
-var import_node_os5 = __toESM(require("os"));
-async function runSessionStartHook() {
-  try {
-    const input = await readStdinJson();
-    const projectDir = projectDirFromHook(input);
-    const fallback = readFallbackClientEnv(projectDir);
-    const workspace = validateWorkspace(
-      process.env.CODEX_TEAM_WORKSPACE || fallback.CODEX_TEAM_WORKSPACE || resolveWorkspace({ projectDir })
-    );
-    const sessionId = sessionIdFromHook(input);
-    const clientId = process.env.CODEX_TEAM_CLIENT_ID || makeClientId({
-      workspace,
-      sessionId,
-      hostname: import_node_os5.default.hostname(),
-      pid: null,
-      startedAtMs: Date.now()
-    });
-    process.env.CODEX_TEAM_WORKSPACE = workspace;
-    process.env.CODEX_TEAM_CLIENT_ID = clientId;
-    process.env.CODEX_TEAM_SESSION_ID = sessionId;
-    process.env.CODEX_TEAM_PROJECT_DIR = projectDir;
-    maybePinWorkspace(projectDir, workspace);
-    writeHookEnvExports(
-      {
-        CODEX_TEAM_WORKSPACE: workspace,
-        CODEX_TEAM_CLIENT_ID: clientId,
-        CODEX_TEAM_SESSION_ID: sessionId,
-        CODEX_TEAM_PROJECT_DIR: projectDir
-      },
-      projectDir || null
-    );
-    const cli = new CliClient();
-    await cli.ensureDaemon();
-    await sendRequest(
-      cli.socketPath,
-      "client.register",
-      {
-        clientId,
-        sessionId,
-        hostname: import_node_os5.default.hostname(),
-        pid: null,
-        claudeProjectDir: projectDir,
-        startedAt: (/* @__PURE__ */ new Date()).toISOString()
-      },
-      { workspace, clientId, allWorkspaces: false }
-    );
-  } catch (error) {
-    process.stderr.write(`codex-team hook session-start: ${error.message}
-`);
-  }
-  return 0;
-}
-
-// src/hooks/index.ts
-async function runHook(argv) {
-  const action = argv[0] || "";
-  if (action === "session-start") {
-    return await runSessionStartHook();
-  }
-  if (action === "session-end") {
-    return await runSessionEndHook();
-  }
-  process.stderr.write("usage: codex-team hook <session-start|session-end>\n");
-  return 2;
+  setInterval(check, 60 * 1e3).unref();
 }
 
 // src/main.ts
-async function main(argv) {
-  if (argv[0] === "__daemon") {
-    return await runDaemon();
+async function main() {
+  const argv = process.argv.slice(2);
+  const daemonIdx = argv.indexOf("--daemon-internal");
+  if (daemonIdx >= 0) {
+    argv.splice(daemonIdx, 1);
+    const code2 = await runDaemon();
+    process.exit(code2);
   }
-  if (argv[0] === "hook") {
-    return await runHook(argv.slice(1));
-  }
-  return await new CliClient().run(argv);
+  const code = await runCli(argv);
+  process.exit(code);
 }
-void main(process.argv.slice(2)).then((code) => {
-  process.exitCode = code;
-}).catch((error) => {
-  process.stderr.write(`${error.message}
+main().catch((e) => {
+  process.stderr.write(`fatal: ${e.message ?? e}
 `);
-  process.exitCode = 1;
+  process.exit(1);
 });
