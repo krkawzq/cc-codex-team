@@ -187,7 +187,7 @@ function renderItemWithContext(item: TurnItem, ctx: RenderContext): string {
 function createRenderContext(options: MarkdownRenderOptions = {}): RenderContext {
   const normalized = normalizeTruncateOption(options.truncate);
   return {
-    inlineMaxBytes: normalized === 0 ? INLINE_MAX_BYTES : normalized ?? INLINE_MAX_BYTES,
+    inlineMaxBytes: normalized === 0 ? INLINE_MAX_BYTES : Math.min(normalized ?? INLINE_MAX_BYTES, INLINE_MAX_BYTES),
     truncateBytes: normalized === 0 ? null : normalized ?? INLINE_MAX_BYTES,
   };
 }

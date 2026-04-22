@@ -26,6 +26,10 @@ class FakeStream {
     this.closeCb = cb;
   }
 
+  onAck(): void {
+    // monitorEvents only uses acks when a cursor is tracked; these tests do not exercise that path.
+  }
+
   close(): void {
     this.closeCb?.();
   }

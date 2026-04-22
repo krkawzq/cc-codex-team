@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { CodexTeamError, invalidParams, methodNotFound, notImplemented } from "../src/errors";
 import { err, ok } from "../src/result";
-import { renderContext, renderHistory, renderInline, renderItem, renderSessionInfo, renderTag } from "../src/format/markdown";
+import { INLINE_MAX_BYTES, renderContext, renderHistory, renderInline, renderItem, renderSessionInfo, renderTag } from "../src/format/markdown";
 import { renderTable } from "../src/format/table";
 import { status } from "../src/daemon/handlers/status";
 
@@ -161,6 +161,17 @@ describe("format helpers", () => {
     expect(rendered).toContain("<mcp-args>{\"q\":\"markdown\"}<\\mcp-args>");
     expect(rendered).toContain("<mcp-result> {}");
     expect(rendered).toContain("1 result");
+  });
+
+  it("keeps large userMessage bodies in block form even when truncate exceeds the inline limit", () => {
+    const rendered = renderItem({
+      id: "item-5",
+      type: "userMessage",
+      text: "x".repeat(INLINE_MAX_BYTES + 1024),
+    }, "", { truncate: 4096 });
+
+    expect(rendered).toContain("<user-input> {\"id\":\"item-5\"}");
+    expect(rendered).not.toContain("\"text\":");
   });
 });
 

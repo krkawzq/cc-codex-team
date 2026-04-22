@@ -1,22 +1,33 @@
 import { encodeToken } from "../paths";
 
 export function formatShort(method: string, data: unknown): string {
+  const value = asObject(data);
+  let body: string;
   switch (method) {
     case "status":
-      return formatStatus(data);
+      body = formatStatus(data);
+      break;
     case "daemon:status":
-      return formatDaemonStatus(data);
+      body = formatDaemonStatus(data);
+      break;
     case "daemon:user:list":
-      return formatDaemonUserList(data);
+      body = formatDaemonUserList(data);
+      break;
     case "session:info":
-      return formatSessionInfo(data);
+      body = formatSessionInfo(data);
+      break;
     case "session:list":
-      return formatSessionList(data);
+      body = formatSessionList(data);
+      break;
     case "message:history":
-      return formatMessageHistory(data);
+      body = formatMessageHistory(data);
+      break;
     default:
       throw new Error(`--short is not supported for '${method}'`);
   }
+
+  const footerLines = extractFooterLines(method, value);
+  return footerLines.length > 0 ? `${body}\n${footerLines.join("\n")}` : body;
 }
 
 function formatStatus(data: unknown): string {
@@ -333,3 +344,65 @@ export function shortTokenPrefix(token: unknown): string {
 export const __private__ = {
   humanizeMs,
 };
+
+function extractFooterLines(method: string, value: Record<string, unknown>): string[] {
+  switch (method) {
+    case "session:list":
+      return extractSessionListFooters(value);
+    case "message:history":
+      return extractMessageHistoryFooters(value);
+    default:
+      return [];
+  }
+}
+
+function extractSessionListFooters(value: Record<string, unknown>): string[] {
+  const nextCursor = asString(value.next_cursor);
+  const includeContract = value.all === true || nextCursor !== null;
+  if (!includeContract) return [];
+
+  const fields = [
+    ["next_cursor", nextCursor],
+    ["all", value.all],
+    ["sort", asString(value.sort)],
+    ["format", asString(value.format)],
+  ] as const;
+
+  const footer = formatFooterLine(fields);
+  return footer ? [footer] : [];
+}
+
+function extractMessageHistoryFooters(value: Record<string, unknown>): string[] {
+  const lines: string[] = [];
+  const meta = formatFooterLine([
+    ["next_cursor", asString(value.next_cursor)],
+    ["relative_since", asFiniteNumber(value.relative_since)],
+    ["format", asString(value.format)],
+  ]);
+  if (meta) lines.push(meta);
+
+  const note = asString(value.note);
+  if (note) {
+    const noteLine = formatFooterLine([["note", note]]);
+    if (noteLine) lines.push(noteLine);
+  }
+
+  return lines;
+}
+
+function formatFooterLine(entries: ReadonlyArray<readonly [string, unknown]>): string | null {
+  const parts = entries
+    .flatMap(([key, value]) => {
+      const encoded = encodeFooterValue(value);
+      return encoded === null ? [] : [`${key}=${encoded}`];
+    });
+
+  return parts.length > 0 ? `# ${parts.join(" ")}` : null;
+}
+
+function encodeFooterValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.length === 0) return null;
+  const encoded = JSON.stringify(value);
+  return typeof encoded === "string" ? encoded : null;
+}

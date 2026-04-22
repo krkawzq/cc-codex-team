@@ -50,6 +50,7 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   let effectiveSinceId = sinceId;
   let persistedCursorEventId: string | null = null;
   let lastObservedEventId: string | null = null;
+  let lastAckedEventId: string | null = null;
   let cursorWriteChain = Promise.resolve();
 
   if (cursorName) {
@@ -61,28 +62,33 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     effectiveSinceId = cursor.event_id;
     persistedCursorEventId = cursor.event_id;
     lastObservedEventId = cursor.event_id;
+    lastAckedEventId = cursor.event_id;
   }
 
   const emit = (event: TeamEvent): void => {
     stream.chunk(summaryMode ? summarizeEvent(event) : event);
   };
-  const scheduleCursorUpdate = (): void => {
+  const scheduleCursorPersist = (): void => {
     if (!cursorName) return;
-    const nextEventId = lastObservedEventId;
+    const nextEventId = lastAckedEventId;
     if (!nextEventId || nextEventId === persistedCursorEventId) return;
     cursorWriteChain = cursorWriteChain
       .catch(() => undefined)
       .then(async () => {
         if (!nextEventId || nextEventId === persistedCursorEventId) return;
-        await ctx.cursors.save(user, {
+        await ctx.cursors.saveBestEffort(user, {
           name: cursorName,
           event_id: nextEventId,
           auto_update: true,
         });
         persistedCursorEventId = nextEventId;
-      })
-      .catch(() => undefined);
+      });
   };
+  stream.onAck((ack) => {
+    if (!ack.event_id) return;
+    lastAckedEventId = ack.event_id;
+    scheduleCursorPersist();
+  });
 
   const accept = (e: TeamEvent): boolean => {
     if (!includeDelta && isDeltaType(e.type)) return false;
@@ -162,7 +168,6 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
       if (accept(e)) emit(e);
     });
     stream.onClose(() => {
-      scheduleCursorUpdate();
       sub.dispose();
     });
     return { streaming: true };
@@ -194,9 +199,6 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
       emit(event);
     }
     draining = false;
-    if (batch.length > 0 || overflowEvent || lastObservedEventId !== persistedCursorEventId) {
-      scheduleCursorUpdate();
-    }
     if (overflowDropped > 0 || queue.length > 0) scheduleDrain(1);
   };
   const timer = setInterval(() => {
@@ -207,15 +209,12 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   // Emit any initial backlog immediately (otherwise user waits up to intervalS for first response).
   if (overflowDropped > 0 || queue.length > 0) {
     scheduleDrain(0);
-  } else if (backlog.events.length > 0) {
-    scheduleCursorUpdate();
   }
 
   stream.onClose(() => {
     closed = true;
     clearInterval(timer);
     if (drainTimer) clearTimeout(drainTimer);
-    scheduleCursorUpdate();
     sub.dispose();
   });
   return { streaming: true };

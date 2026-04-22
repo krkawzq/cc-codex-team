@@ -19,6 +19,10 @@ class FakeStream {
     this.closeCb = cb;
   }
 
+  onAck(): void {
+    // summary-mode tests do not exercise cursor tracking.
+  }
+
   close(): void {
     this.closeCb?.();
   }
