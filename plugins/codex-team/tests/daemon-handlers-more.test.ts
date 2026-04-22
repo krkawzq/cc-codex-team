@@ -84,6 +84,9 @@ describe("daemon handlers", () => {
         list: () => [{ token: "user-1" }, { token: "user-2" }],
         create: vi.fn().mockReturnValue({ token: "user-3" }),
       },
+      sessions: {
+        listLive: (token: string) => token === "user-1" ? [{ name: "a" }, { name: "b" }] : [{ name: "c" }],
+      },
       pool: {
         processCount: () => 4,
       },
@@ -92,6 +95,7 @@ describe("daemon handlers", () => {
     expect(await daemonStatus(ctx as never, makeReq() as never)).toMatchObject({
       sock: "/tmp/daemon.sock",
       data_dir: "/tmp/data",
+      session_count: 3,
       user_count: 2,
       app_server_count: 4,
     });

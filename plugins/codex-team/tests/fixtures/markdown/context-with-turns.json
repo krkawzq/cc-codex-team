@@ -1,0 +1,64 @@
+{
+  "renderer": "context",
+  "input": {
+    "session": "sess-ctx",
+    "thread_id": "th-ctx",
+    "thread": {
+      "id": "th-ctx",
+      "preview": "Repository status review",
+      "model_provider": "openai",
+      "cwd": "/repo/project",
+      "status": {
+        "type": "running"
+      },
+      "created_at": 1735689000,
+      "updated_at": 1735689600,
+      "turns": [
+        {
+          "id": "turn-1",
+          "status": "completed",
+          "durationMs": 1500,
+          "items": [
+            {
+              "id": "item-user-1",
+              "type": "userMessage",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Summarize the repository status."
+                }
+              ]
+            },
+            {
+              "id": "item-agent-1",
+              "type": "agentMessage",
+              "phase": "analysis",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Repository has 2 pending changes."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "turn-2",
+          "status": "running",
+          "startedAt": 1735689720,
+          "items": [
+            {
+              "id": "item-cmd-1",
+              "type": "commandExecution",
+              "command": "git status --short",
+              "cwd": "/repo/project",
+              "exit": 0,
+              "durationMs": 45,
+              "stdout": "M src/app.ts"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

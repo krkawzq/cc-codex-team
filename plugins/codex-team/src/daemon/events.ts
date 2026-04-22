@@ -35,6 +35,7 @@ const DEFAULT_FLUSH_DELAY_MS = 25;
 const OVERFLOW_FLUSH_DELAY_MS = 250;
 const FLUSH_RETRY_DELAY_MS = 250;
 const MAX_PENDING_WRITE_BYTES = 1024 * 1024;
+const EVENT_ID_SOFT_LIMIT = 2 ** 52;
 
 export const AUTO_APPROVED_EVENT_TYPE = "auto_approved";
 export const SESSION_CLOSED_EVENT_TYPE = "session.closed";
@@ -55,6 +56,7 @@ export class EventLog {
   private writeChains = new Map<string, Promise<void>>();
   private userOps = new Map<string, Promise<void>>();
   private overflowWarned = new Set<string>();
+  private eventIdOverflowWarned = new Set<string>();
 
   constructor(retention = 10000, dataDir: string | null = null) {
     this.retention = Math.max(100, retention);
@@ -112,7 +114,11 @@ export class EventLog {
 
   async append(user: string, input: Omit<TeamEvent, "id" | "ts">): Promise<TeamEvent> {
     await this.ensureLoaded(user);
-    return await this.withUserLock(user, async () => this.appendLoaded(user, input));
+    return await this.withUserLock(user, async () => {
+      const overflowError = this.guardEventIdOverflow(user, input);
+      if (overflowError) throw overflowError;
+      return this.appendLoaded(user, input);
+    });
   }
 
   async flush(): Promise<void> {
@@ -155,6 +161,7 @@ export class EventLog {
     this.loaded.delete(user);
     this.loadPromises.delete(user);
     this.overflowWarned.delete(user);
+    this.eventIdOverflowWarned.delete(user);
   }
 
   subscribe(user: string, cb: EventListener): EventSubscription {
@@ -307,6 +314,37 @@ export class EventLog {
     this.dispatchSubscribers(user, event);
     if (opts.persist !== false) this.appendToFile(user, event);
     return event;
+  }
+
+  private guardEventIdOverflow(user: string, input: Omit<TeamEvent, "id" | "ts">): Error | null {
+    this.ensureUserState(user);
+    const nextId = (this.counters.get(user) ?? 0) + 1;
+    if (nextId <= EVENT_ID_SOFT_LIMIT) return null;
+
+    const message = `event id counter exceeded safe limit (${EVENT_ID_SOFT_LIMIT}); refusing to append new events`;
+    if (!this.eventIdOverflowWarned.has(user)) {
+      this.eventIdOverflowWarned.add(user);
+      logger.error("event id counter exceeded safe limit", {
+        user,
+        next_event_id: nextId,
+        limit: EVENT_ID_SOFT_LIMIT,
+        dropped_event_type: input.type,
+      });
+      this.appendLoaded(user, {
+        type: "warning",
+        session: null,
+        thread_id: null,
+        payload: {
+          message,
+          kind: "event_id_overflow",
+          limit: EVENT_ID_SOFT_LIMIT,
+          next_event_id: nextId,
+          dropped_event_type: input.type,
+        },
+      });
+    }
+
+    return new Error(message);
   }
 
   private dispatchSubscribers(user: string, event: TeamEvent): void {

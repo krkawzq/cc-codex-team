@@ -11,6 +11,7 @@ import {
   SESSION_CRASHED_EVENT_TYPE,
   isDeltaType,
 } from "../src/daemon/events";
+import { logger } from "../src/logger";
 import { encodeToken } from "../src/paths";
 
 function mkTmpDir() {
@@ -221,6 +222,48 @@ describe("EventLog", () => {
 
     const log = new EventLog(100, dir);
     expect(() => log.loadUser("user-1")).toThrow(/schema_version/i);
+  });
+
+  it("emits one warning and refuses new events when the id counter exceeds the soft limit", async () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const log = new EventLog(100, dir);
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+
+    log.loadUser("user-1");
+    (log as unknown as { counters: Map<string, number> }).counters.set("user-1", 2 ** 52);
+
+    await expect(log.append("user-1", {
+      type: "turn.completed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: { attempt: 1 },
+    })).rejects.toThrow(/event id counter exceeded safe limit/i);
+
+    await expect(log.append("user-1", {
+      type: "turn.completed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: { attempt: 2 },
+    })).rejects.toThrow(/event id counter exceeded safe limit/i);
+
+    const listed = await log.listSince("user-1", null);
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(listed).toEqual({
+      ok: true,
+      events: [
+        expect.objectContaining({
+          id: `evt-${2 ** 52 + 1}`,
+          type: "warning",
+          payload: expect.objectContaining({
+            kind: "event_id_overflow",
+            dropped_event_type: "turn.completed",
+            next_event_id: 2 ** 52 + 1,
+          }),
+        }),
+      ],
+    });
   });
 });
 

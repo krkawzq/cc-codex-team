@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { INLINE_MAX_BYTES, renderHistory, renderItem, renderTail, type MarkdownRenderOptions, type TurnItem } from "../src/format/markdown";
+import { INLINE_MAX_BYTES, renderContext, renderHistory, renderItem, renderTail, type MarkdownRenderOptions, type TurnItem } from "../src/format/markdown";
 
 type Fixture =
   | {
@@ -21,6 +21,10 @@ type Fixture =
       renderer: "tail";
       options?: MarkdownRenderOptions;
       input: Parameters<typeof renderTail>[0];
+    }
+  | {
+      renderer: "context";
+      input: Parameters<typeof renderContext>[0];
     };
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -38,6 +42,8 @@ function renderFixture(fixture: Fixture): string {
       return renderHistory(fixture.input, fixture.options);
     case "tail":
       return renderTail(fixture.input, fixture.options);
+    case "context":
+      return renderContext(fixture.input);
   }
 }
 

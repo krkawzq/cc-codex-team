@@ -3282,6 +3282,7 @@ var DEFAULT_FLUSH_DELAY_MS = 25;
 var OVERFLOW_FLUSH_DELAY_MS = 250;
 var FLUSH_RETRY_DELAY_MS = 250;
 var MAX_PENDING_WRITE_BYTES = 1024 * 1024;
+var EVENT_ID_SOFT_LIMIT = 2 ** 52;
 var AUTO_APPROVED_EVENT_TYPE = "auto_approved";
 var SESSION_CLOSED_EVENT_TYPE = "session.closed";
 var SESSION_CRASHED_EVENT_TYPE = "session.crashed";
@@ -3300,6 +3301,7 @@ var EventLog = class {
   writeChains = /* @__PURE__ */ new Map();
   userOps = /* @__PURE__ */ new Map();
   overflowWarned = /* @__PURE__ */ new Set();
+  eventIdOverflowWarned = /* @__PURE__ */ new Set();
   constructor(retention = 1e4, dataDir = null) {
     this.retention = Math.max(100, retention);
     this.dataDir = dataDir;
@@ -3350,7 +3352,11 @@ var EventLog = class {
   }
   async append(user, input) {
     await this.ensureLoaded(user);
-    return await this.withUserLock(user, async () => this.appendLoaded(user, input));
+    return await this.withUserLock(user, async () => {
+      const overflowError = this.guardEventIdOverflow(user, input);
+      if (overflowError) throw overflowError;
+      return this.appendLoaded(user, input);
+    });
   }
   async flush() {
     const users = /* @__PURE__ */ new Set([
@@ -3391,6 +3397,7 @@ var EventLog = class {
     this.loaded.delete(user);
     this.loadPromises.delete(user);
     this.overflowWarned.delete(user);
+    this.eventIdOverflowWarned.delete(user);
   }
   subscribe(user, cb) {
     let set = this.subscribers.get(user);
@@ -3522,6 +3529,34 @@ var EventLog = class {
     this.dispatchSubscribers(user, event);
     if (opts.persist !== false) this.appendToFile(user, event);
     return event;
+  }
+  guardEventIdOverflow(user, input) {
+    this.ensureUserState(user);
+    const nextId = (this.counters.get(user) ?? 0) + 1;
+    if (nextId <= EVENT_ID_SOFT_LIMIT) return null;
+    const message = `event id counter exceeded safe limit (${EVENT_ID_SOFT_LIMIT}); refusing to append new events`;
+    if (!this.eventIdOverflowWarned.has(user)) {
+      this.eventIdOverflowWarned.add(user);
+      logger.error("event id counter exceeded safe limit", {
+        user,
+        next_event_id: nextId,
+        limit: EVENT_ID_SOFT_LIMIT,
+        dropped_event_type: input.type
+      });
+      this.appendLoaded(user, {
+        type: "warning",
+        session: null,
+        thread_id: null,
+        payload: {
+          message,
+          kind: "event_id_overflow",
+          limit: EVENT_ID_SOFT_LIMIT,
+          next_event_id: nextId,
+          dropped_event_type: input.type
+        }
+      });
+    }
+    return new Error(message);
   }
   dispatchSubscribers(user, event) {
     const listeners = Array.from(this.subscribers.get(user) ?? []);
@@ -5406,6 +5441,11 @@ async function shutdownDaemon(ctx, reason, exitCode = 0) {
 var daemonStatus = async (ctx) => {
   const uptimeMs = Date.now() - ctx.startedAt.getTime();
   const distFreshness = await getDistFreshness();
+  const users = ctx.users.list();
+  const sessionCount = users.reduce(
+    (count, user) => count + ctx.sessions.listLive(user.token).length,
+    0
+  );
   return {
     pid: process.pid,
     version: getPkgVersion(),
@@ -5413,7 +5453,8 @@ var daemonStatus = async (ctx) => {
     sock: ctx.sockPath,
     data_dir: ctx.dataDir,
     log_path: ctx.logPath,
-    user_count: ctx.users.list().length,
+    session_count: sessionCount,
+    user_count: users.length,
     app_server_count: ctx.pool.processCount(),
     started_at: ctx.startedAt.toISOString(),
     ...distFreshness

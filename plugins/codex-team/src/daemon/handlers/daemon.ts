@@ -13,6 +13,11 @@ import { PACKAGE_ROOT, VERSION } from "../../version";
 export const daemonStatus: HandlerFn = async (ctx) => {
   const uptimeMs = Date.now() - ctx.startedAt.getTime();
   const distFreshness = await getDistFreshness();
+  const users = ctx.users.list();
+  const sessionCount = users.reduce(
+    (count, user) => count + ctx.sessions.listLive(user.token).length,
+    0,
+  );
   return {
     pid: process.pid,
     version: getPkgVersion(),
@@ -20,7 +25,8 @@ export const daemonStatus: HandlerFn = async (ctx) => {
     sock: ctx.sockPath,
     data_dir: ctx.dataDir,
     log_path: ctx.logPath,
-    user_count: ctx.users.list().length,
+    session_count: sessionCount,
+    user_count: users.length,
     app_server_count: ctx.pool.processCount(),
     started_at: ctx.startedAt.toISOString(),
     ...distFreshness,
