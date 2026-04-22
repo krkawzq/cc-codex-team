@@ -569,11 +569,19 @@ const sessionGroup: HelpNode = {
     leaf({
       name: "info",
       summary: "Show metadata for one session.",
-      usage: "codex-team -b <token> session info <name|thread_id>",
+      usage: "codex-team -b <token> session info <name|thread_id> [flags]",
       positionals: [
         { ...SESSION_TARGET },
       ],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout.",
+        },
+      ],
       examples: [
         "codex-team -b $TOKEN session info audit",
       ],
@@ -626,6 +634,13 @@ const sessionGroup: HelpNode = {
           default: "json",
           required: false,
           description: "Render output as json or table.",
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per session to stdout.",
         },
       ],
       examples: [

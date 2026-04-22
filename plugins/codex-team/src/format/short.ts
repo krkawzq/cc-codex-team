@@ -6,6 +6,10 @@ export function formatShort(method: string, data: unknown): string {
       return formatStatus(data);
     case "daemon:status":
       return formatDaemonStatus(data);
+    case "session:info":
+      return formatSessionInfo(data);
+    case "session:list":
+      return formatSessionList(data);
     default:
       throw new Error(`--short is not supported for '${method}'`);
   }
@@ -51,6 +55,43 @@ function formatDaemonAge(data: Record<string, unknown>): string {
   return formatAgeFromDateish(data.started_at);
 }
 
+function formatSessionInfo(data: unknown): string {
+  const value = asObject(data);
+  const session = asObject(value.session);
+  const thread = asObject(value.thread);
+  const turn = resolveCurrentTurn(value, session, thread);
+  const threadId = asString(session.thread_id) ?? asString(thread.id) ?? "unknown";
+
+  return [
+    sessionLabel(session, thread),
+    `state=${sessionState(value, session, thread)}`,
+    `thread=${shortId(threadId)}`,
+    `model=${formatScalar(session.model ?? value.model ?? thread.model ?? thread.model_provider)}`,
+    `busy=${busyFlag(value.busy ?? session.busy ?? thread.busy, turn)}`,
+    `turn=${currentTurnId(turn)}`,
+    `items=${itemCount(turn)}`,
+  ].join(" ");
+}
+
+function formatSessionList(data: unknown): string {
+  const value = asObject(data);
+  const sessions = Array.isArray(value.sessions) ? value.sessions : [];
+  if (sessions.length === 0) return "(no sessions)";
+
+  return sessions
+    .map((entry) => {
+      const session = asObject(entry);
+      const turn = resolveCurrentTurn(session, session, session);
+      return [
+        sessionLabel(session, session),
+        sessionState(session, session, session),
+        formatScalar(session.model ?? session.model_provider),
+        `busy=${busyFlag(session.busy, turn)}`,
+      ].join("  ");
+    })
+    .join("\n");
+}
+
 function formatAgeFromDateish(value: unknown): string {
   const date = parseDate(value);
   if (!date) return "unknown";
@@ -77,6 +118,63 @@ function humanizeMs(ms: number): string {
 function shortPath(value: string): string {
   if (value.length <= 28) return value;
   return `...${value.slice(-25)}`;
+}
+
+function shortId(value: string): string {
+  if (value.length <= 16) return value;
+  return `${value.slice(0, 8)}...${value.slice(-4)}`;
+}
+
+function sessionLabel(session: Record<string, unknown>, thread: Record<string, unknown>): string {
+  return formatScalar(session.name ?? thread.name ?? thread.id);
+}
+
+function sessionState(
+  root: Record<string, unknown>,
+  session: Record<string, unknown>,
+  thread: Record<string, unknown>,
+): string {
+  const status = session.state ?? extractStatus(thread.status) ?? (root.live === false ? "retained" : undefined);
+  return formatScalar(status);
+}
+
+function extractStatus(value: unknown): string | null {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const type = (value as { type?: unknown }).type;
+    return typeof type === "string" && type.length > 0 ? type : null;
+  }
+  return null;
+}
+
+function resolveCurrentTurn(
+  root: Record<string, unknown>,
+  session: Record<string, unknown>,
+  thread: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const candidate = root.current_turn ?? root.turn ?? session.current_turn ?? session.turn ?? thread.current_turn ?? thread.turn;
+  if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+    return candidate as Record<string, unknown>;
+  }
+  return null;
+}
+
+function busyFlag(value: unknown, turn: Record<string, unknown> | null): string {
+  if (value === true) return "y";
+  if (value === false) return "n";
+  if (turn) return "y";
+  return "unknown";
+}
+
+function currentTurnId(turn: Record<string, unknown> | null): string {
+  if (!turn) return "unknown";
+  return formatScalar(turn.id ?? turn.turn_id ?? turn.turnId);
+}
+
+function itemCount(turn: Record<string, unknown> | null): string {
+  if (!turn) return "unknown";
+  if (Array.isArray(turn.items)) return String(turn.items.length);
+  return formatScalar(turn.item_count ?? turn.itemCount ?? turn.items_count);
 }
 
 function parseDate(value: unknown): Date | null {

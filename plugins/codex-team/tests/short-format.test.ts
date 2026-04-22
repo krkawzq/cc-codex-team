@@ -35,6 +35,33 @@ describe("formatShort", () => {
       },
       "pid=4242 sock=...ery/long/path/daemon.sock age=1h sessions=5 users=2 dist_age=3m",
     ],
+    [
+      "session:info",
+      {
+        session: {
+          name: "audit",
+          state: "live",
+          thread_id: "th-1234567890abcdef",
+          model: "gpt-5.4",
+        },
+        busy: true,
+        current_turn: {
+          id: "turn-42",
+          items: [{ id: "item-1" }, { id: "item-2" }],
+        },
+      },
+      "audit state=live thread=th-12345...cdef model=gpt-5.4 busy=y turn=turn-42 items=2",
+    ],
+    [
+      "session:list",
+      {
+        sessions: [
+          { name: "audit", state: "live", model: "gpt-5.4", busy: true },
+          { name: "notes", state: "live", model: "gpt-5.4-mini", busy: false },
+        ],
+      },
+      "audit  live  gpt-5.4  busy=y\nnotes  live  gpt-5.4-mini  busy=n",
+    ],
   ])("renders %s compactly", (method, data, expected) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-23T01:00:00.000Z"));
@@ -63,6 +90,25 @@ describe("formatShort", () => {
       user_count: 1,
     })).toBe(
       "pid=7 sock=/tmp/daemon.sock age=5s sessions=unknown users=1 dist_age=unknown",
+    );
+
+    expect(formatShort("session:info", {
+      session: {
+        name: "audit",
+        state: "live",
+        thread_id: "th-1",
+        model: "gpt-5.4",
+      },
+    })).toBe(
+      "audit state=live thread=th-1 model=gpt-5.4 busy=unknown turn=unknown items=unknown",
+    );
+
+    expect(formatShort("session:list", {
+      sessions: [
+        { id: "th-1", status: "completed", model_provider: "openai" },
+      ],
+    })).toBe(
+      "th-1  completed  openai  busy=unknown",
     );
   });
 });
