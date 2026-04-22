@@ -35,6 +35,7 @@ import {
   validateParsedAutoApprovePatterns,
 } from "../auto-approve";
 import { SESSION_CLOSED_EVENT_TYPE } from "../events";
+import { cancelPendingWithEvent } from "../pending-cancel";
 import { renderContext } from "../../format/markdown";
 import { renderTable } from "../../format/table";
 
@@ -209,10 +210,8 @@ export const sessionDetach: HandlerFn = async (ctx, req) => {
 
   ctx.pool.release(sessionKey);
   ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
   ctx.sessions.remove(user, rec.name);
-  for (const p of ctx.pending.removeForSession(user, rec.name)) {
-    try { p.client.respondError(p.jsonrpc_id, -32000, "session detached"); } catch { /* ignore */ }
-  }
   await appendSessionClosed(ctx, user, rec, "user_detach");
   return { session: rec, noop: false, graceful };
 };
@@ -461,13 +460,11 @@ export const sessionHeal: HandlerFn = async (ctx, req) => {
   }
   if (force) {
     ctx.queues.dispose(sessionKey);
-    if (ctx.pending && typeof ctx.pending.abortForSession === "function") {
-      ctx.pending.abortForSession(user, rec.name, "session_crashed", {
-        reason: "session_heal_force_reset",
-        session: rec.name,
-        thread_id: rec.thread_id,
-      });
-    }
+    await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "session_heal_force_reset");
+    ctx.sessions.update(user, rec.name, {
+      pending_approvals: 0,
+      pending_user_inputs: 0,
+    });
   }
 
   const client = await ctx.pool.acquire(
@@ -686,12 +683,8 @@ async function seizeFromOtherUser(
   }
   ctx.pool.release(sessionKey);
   ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, fromUser, rec.name, rec.thread_id, "session_seized");
   ctx.sessions.remove(fromUser, rec.name);
-
-  // Cancel any pending approval/user_input for the session (best-effort).
-  for (const p of ctx.pending.removeForSession(fromUser, rec.name)) {
-    try { p.client.respondError(p.jsonrpc_id, -32000, "session seized by another user"); } catch { /* ignore */ }
-  }
 
   await ctx.events.append(fromUser, {
     type: "session.seized",

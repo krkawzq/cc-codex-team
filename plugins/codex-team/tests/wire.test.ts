@@ -355,6 +355,19 @@ describe("wireDaemonEvents", () => {
 
   it("marks unexpected app-server exits as crashed and cancels pending requests", async () => {
     const pool = new FakePool();
+    const pendingClient = { respondError: vi.fn() };
+    const pendingEntry = {
+      request_id: "req-1",
+      kind: "approval.permissions",
+      user: "user-1",
+      session_name: "sess-1",
+      thread_id: "th-1",
+      turn_id: "turn-1",
+      jsonrpc_id: 11,
+      client: pendingClient,
+      raw: {},
+      created_at: "2025-01-01T00:00:00.000Z",
+    };
     const ctx = makeContext(pool, {
       queues: {
         setCurrentTurn: vi.fn(),
@@ -369,8 +382,8 @@ describe("wireDaemonEvents", () => {
         removeForSession: vi.fn().mockReturnValue([]),
         removeByJsonrpcId: vi.fn(),
         abortForSession: vi.fn().mockReturnValue([{ request_id: "req-1" }]),
-        listForUser: vi.fn().mockReturnValue([]),
-        remove: vi.fn(),
+        listForUser: vi.fn().mockReturnValue([pendingEntry]),
+        remove: vi.fn().mockReturnValue(pendingEntry),
         add: vi.fn(),
       },
     });
@@ -386,7 +399,7 @@ describe("wireDaemonEvents", () => {
     });
 
     await vi.waitFor(() => {
-      expect(ctx.events.append).toHaveBeenCalledTimes(3);
+      expect(ctx.events.append).toHaveBeenCalledTimes(4);
     });
 
     expect(ctx.sessions.update).toHaveBeenCalledWith("user-1", "sess-1", expect.objectContaining({
@@ -414,6 +427,15 @@ describe("wireDaemonEvents", () => {
       }),
     }));
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "approval.request_cancelled",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: expect.objectContaining({
+        request_id: "req-1",
+        reason: "session_crashed",
+      }),
+    }));
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
       type: "session.closed",
       session: "sess-1",
       thread_id: "th-1",
@@ -422,11 +444,7 @@ describe("wireDaemonEvents", () => {
       }),
     }));
     expect(ctx.queues.onClientClosed).toHaveBeenCalledWith("user-1::sess-1");
-    expect(ctx.pending.abortForSession).toHaveBeenCalledWith("user-1", "sess-1", "session_crashed", {
-      reason: "session_crashed",
-      session: "sess-1",
-      thread_id: "th-1",
-    });
+    expect(pendingClient.respondError).toHaveBeenCalledWith(11, -32000, "session_crashed");
     expect(pool.acquire).not.toHaveBeenCalled();
   });
 
@@ -449,13 +467,13 @@ describe("wireDaemonEvents", () => {
       },
     });
 
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(ctx.sessions.remove).toHaveBeenCalledWith("user-1", "sess-1");
+    });
 
     expect(vi.mocked(threadUnsubscribe)).toHaveBeenCalledWith({}, "th-1", {});
     expect(pool.release).toHaveBeenCalledWith("user-1::sess-1");
     expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
-    expect(ctx.sessions.remove).toHaveBeenCalledWith("user-1", "sess-1");
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
       type: "session.closed",
       session: "sess-1",

@@ -236,6 +236,18 @@ describe("session handlers", () => {
     vi.mocked(threadUnsubscribe).mockResolvedValue(undefined as never);
 
     const pendingClient = { respondError: vi.fn() };
+    const pendingEntry = {
+      request_id: "req-1",
+      kind: "approval.permissions",
+      user: "user-1",
+      session_name: "sess-1",
+      thread_id: "th-1",
+      turn_id: "turn-1",
+      jsonrpc_id: 42,
+      client: pendingClient,
+      raw: {},
+      created_at: "2025-01-01T00:00:00.000Z",
+    };
     const ctx = {
       users: {
         has: vi.fn().mockReturnValue(true),
@@ -254,9 +266,8 @@ describe("session handlers", () => {
         dispose: vi.fn(),
       },
       pending: {
-        removeForSession: vi.fn().mockReturnValue([
-          { client: pendingClient, jsonrpc_id: 42 },
-        ]),
+        listForUser: vi.fn().mockReturnValue([pendingEntry]),
+        remove: vi.fn().mockReturnValue(pendingEntry),
       },
       events: {
         append: vi.fn().mockResolvedValue(undefined),
@@ -270,6 +281,15 @@ describe("session handlers", () => {
     expect(vi.mocked(threadUnsubscribe)).toHaveBeenCalledWith({}, "th-1", {});
     expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
     expect(pendingClient.respondError).toHaveBeenCalledWith(42, -32000, "session detached");
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "approval.request_cancelled",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: expect.objectContaining({
+        request_id: "req-1",
+        reason: "user_detach",
+      }),
+    }));
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
       type: "session.closed",
       payload: expect.objectContaining({ reason: "user_detach" }),
