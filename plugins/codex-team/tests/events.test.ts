@@ -41,6 +41,10 @@ describe("EventLog", () => {
       reason: "id_rotated",
       oldest_available_id: "evt-6",
     });
+    expect(log.listSince("user-1", "evt-999")).toEqual({
+      ok: false,
+      reason: "invalid_since",
+    });
 
     const listed = log.listSince("user-1", null, { includeDelta: false });
     expect(listed.ok).toBe(true);

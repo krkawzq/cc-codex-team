@@ -22,7 +22,12 @@ export interface ListSinceRotated {
   oldest_available_id: string | null;
 }
 
-export type ListSinceResult = ListSinceOk | ListSinceRotated;
+export interface ListSinceInvalid {
+  ok: false;
+  reason: "invalid_since";
+}
+
+export type ListSinceResult = ListSinceOk | ListSinceRotated | ListSinceInvalid;
 
 const DELTA_SUFFIX = "_delta";
 const SCHEMA_VERSION = 1;
@@ -207,7 +212,7 @@ export class EventLog {
         if (buf.length > 0 && compareSeq(sinceId, buf[0].id) < 0) {
           return { ok: false, reason: "id_rotated", oldest_available_id: buf[0].id };
         }
-        slice = [];
+        return { ok: false, reason: "invalid_since" };
       } else {
         slice = buf.slice(idx + 1);
       }

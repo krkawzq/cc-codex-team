@@ -41,9 +41,13 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
 
   const backlog = ctx.events.listSince(user, sinceId, { includeDelta: true });
   if (!backlog.ok) {
-    stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
-      oldest_available_id: backlog.oldest_available_id,
-    }));
+    if (backlog.reason === "id_rotated") {
+      stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
+        oldest_available_id: backlog.oldest_available_id,
+      }));
+    } else {
+      stream.end(invalidParams(`event '${sinceId}' not found`));
+    }
     return { streaming: true };
   }
 
