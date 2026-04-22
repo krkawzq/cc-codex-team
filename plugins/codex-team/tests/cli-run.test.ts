@@ -70,6 +70,42 @@ describe("runCli", () => {
     expect(sockMocks.probeSock).not.toHaveBeenCalled();
   });
 
+  it("emits raw markdown for successful read responses with --format markdown", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            format: "markdown",
+            markdown: "<history>{\"session\":\"sess-1\"}<\\history>",
+          },
+        });
+      }, 0);
+    });
+
+    const code = await runCli(["-b", "token-1", "message", "history", "sess-1", "--format", "markdown"]);
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith("<history>{\"session\":\"sess-1\"}<\\history>\n");
+    expect(stdoutSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("\"ok\":true"),
+    );
+  });
+
   it("treats abnormal stream socket close as failure", async () => {
     const listeners: Record<string, ((...args: unknown[]) => void)[]> = {};
     const socket = {
@@ -239,5 +275,54 @@ describe("runCli", () => {
     expect(socket.resume).toHaveBeenCalledTimes(1);
     expect(socket.end).toHaveBeenCalledTimes(1);
     expect(code).toBe(0);
+  });
+
+  it("emits raw markdown stream chunks for message tail --follow --format markdown", async () => {
+    let streamHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      streamHandler = handler;
+    });
+
+    const pending = runCli([
+      "-b",
+      "token-1",
+      "message",
+      "tail",
+      "sess-1",
+      "--follow",
+      "--format",
+      "markdown",
+    ]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const reqId = sockMocks.writeMessage.mock.calls[0]?.[1]?.id;
+
+    streamHandler?.({
+      kind: "stream_chunk",
+      id: reqId,
+      data: { markdown: "<tail>{\"session\":\"sess-1\"}<\\tail>" },
+    });
+    streamHandler?.({
+      kind: "stream_end",
+      id: reqId,
+    });
+
+    const code = await pending;
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith("<tail>{\"session\":\"sess-1\"}<\\tail>\n");
+    expect(stdoutSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("\"markdown\""),
+    );
   });
 });
