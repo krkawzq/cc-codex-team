@@ -131,6 +131,11 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
       process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
       return 1;
     }
+    const markdown = extractMarkdownResult(resp.result, parsed.flags.format);
+    if (markdown !== null) {
+      process.stdout.write(markdown + "\n");
+      return 0;
+    }
     process.stdout.write(JSON.stringify({ ok: true, data: resp.result }) + "\n");
     return 0;
   } catch (e) {
@@ -218,7 +223,12 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
 
     onMessages(sock, (msg) => {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
-        writeStdout(JSON.stringify(msg.data) + "\n");
+        const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
+        if (markdown !== null) {
+          writeStdout(markdown + "\n");
+        } else {
+          writeStdout(JSON.stringify(msg.data) + "\n");
+        }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
           writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
@@ -380,6 +390,15 @@ function randomId(): string {
 
 function truthy(v: unknown): boolean {
   return v === true || v === "true" || v === "1";
+}
+
+function extractMarkdownResult(result: unknown, format: unknown): string | null {
+  if (format !== "markdown" || !result || typeof result !== "object" || Array.isArray(result)) {
+    return null;
+  }
+
+  const markdown = (result as { markdown?: unknown }).markdown;
+  return typeof markdown === "string" ? markdown : null;
 }
 
 function isTransientConnectError(err: Error & { code?: string }): boolean {
