@@ -1,0 +1,16 @@
+{
+  "renderer": "item",
+  "options": {
+    "truncate": 96
+  },
+  "item": {
+    "id": "user-long-1",
+    "type": "userMessage",
+    "content": [
+      {
+        "type": "text",
+        "text": "Please inspect the markdown renderer, hook formatter, tool formatter, and truncation behavior before writing the final note."
+      }
+    ]
+  }
+}

@@ -104,6 +104,7 @@ describe("parseArgs", () => {
       "--attach", "/tmp/b.png",
       "--since", "-3",
       "--format=markdown",
+      "--truncate", "4096",
       "--experimental-tools", "ask-user-question,request-permissions",
     ]);
 
@@ -113,6 +114,7 @@ describe("parseArgs", () => {
     expect(parsed.flags.attach).toEqual(["/tmp/a.png", "/tmp/b.png"]);
     expect(parsed.flags.since).toBe("-3");
     expect(parsed.flags.format).toBe("markdown");
+    expect(parsed.flags.truncate).toBe("4096");
     expect(parsed.flags["experimental-tools"]).toBe("ask-user-question,request-permissions");
   });
 

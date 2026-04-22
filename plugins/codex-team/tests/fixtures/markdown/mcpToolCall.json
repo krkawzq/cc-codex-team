@@ -1,0 +1,27 @@
+{
+  "renderer": "item",
+  "options": {
+    "truncate": 80
+  },
+  "item": {
+    "id": "mcp-1",
+    "type": "mcpToolCall",
+    "server": "docs",
+    "tool": "searchDocs",
+    "status": "completed",
+    "durationMs": 87,
+    "args": {
+      "query": "markdown renderer",
+      "filters": [
+        "docs",
+        "code",
+        "tests"
+      ],
+      "include": {
+        "body": true,
+        "snippets": true
+      }
+    },
+    "output": "- markdown.ts renderer summary\n- html-md-format.md spec note\n- tests/markdown-snapshot.test.ts coverage"
+  }
+}

@@ -815,6 +815,13 @@ const messageGroup: HelpNode = {
           required: false,
           description: "Render output as json or markdown.",
         },
+        {
+          long: "--truncate",
+          type: "int",
+          default: "2048",
+          required: false,
+          description: "Clip long markdown bodies to this many bytes; use 0 to disable clipping.",
+        },
       ],
       examples: [
         "codex-team -b $TOKEN message history audit --since -3 --format markdown",
@@ -850,6 +857,13 @@ const messageGroup: HelpNode = {
           default: "json",
           required: false,
           description: "Render output as json or markdown.",
+        },
+        {
+          long: "--truncate",
+          type: "int",
+          default: "2048",
+          required: false,
+          description: "Clip long markdown bodies to this many bytes; use 0 to disable clipping.",
         },
       ],
       examples: [

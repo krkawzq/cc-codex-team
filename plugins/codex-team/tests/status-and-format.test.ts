@@ -105,7 +105,7 @@ describe("format helpers", () => {
     });
 
     expect(rendered).toBe(
-      "<item>{\"id\":\"item-1\",\"type\":\"userMessage\",\"text\":\"Fix the markdown renderer.\"}<\\item>",
+      "<user-input>{\"id\":\"item-1\",\"text\":\"Fix the markdown renderer.\"}<\\user-input>",
     );
   });
 
@@ -117,12 +117,12 @@ describe("format helpers", () => {
       content: [{ type: "text", text: "Here is the result:\n\n- fixed A\n- fixed B" }],
     });
 
-    expect(rendered).toContain("<item> {\"id\":\"item-2\",\"type\":\"agentMessage\",\"phase\":\"final_answer\"}");
+    expect(rendered).toContain("<agent-message> {\"id\":\"item-2\",\"phase\":\"final_answer\"}");
     expect(rendered).toContain("Here is the result:\n\n- fixed A\n- fixed B");
     expect(rendered).not.toContain("\"content\":");
   });
 
-  it("renders commandExecution items with nested shell tags", () => {
+  it("renders commandExecution items as shell tags", () => {
     const rendered = renderItem({
       id: "item-3",
       type: "commandExecution",
@@ -134,24 +134,25 @@ describe("format helpers", () => {
       stderr: "drwxr-xr-x 5 user staff 160",
     });
 
-    expect(rendered).toContain("<item> {\"id\":\"item-3\",\"type\":\"commandExecution\"}");
-    expect(rendered).toContain("<shell> {\"cmd\":\"ls -la\",\"cwd\":\"/repo\",\"exit\":0,\"duration_ms\":32}");
+    expect(rendered).toContain("<shell> {\"id\":\"item-3\",\"cmd\":\"ls -la\",\"cwd\":\"/repo\",\"exit\":0,\"duration_ms\":32}");
     expect(rendered).toContain("total 24\ndrwxr-xr-x 5 user staff 160");
     expect(rendered).not.toContain("\"stdout\":");
   });
 
-  it("renders fallback items inline without dumping JSON bodies", () => {
+  it("renders mcpToolCall items with nested args and result tags", () => {
     const rendered = renderItem({
       id: "item-4",
       type: "mcpToolCall",
       server: "docs",
+      tool: "search",
       args: { q: "markdown" },
-      output: "ignored body",
+      output: "1 result",
     });
 
-    expect(rendered).toBe(
-      "<item>{\"id\":\"item-4\",\"type\":\"mcpToolCall\",\"server\":\"docs\",\"args\":{\"q\":\"markdown\"}}<\\item>",
-    );
+    expect(rendered).toContain("<tool.search> {\"id\":\"item-4\",\"server\":\"docs\",\"tool\":\"search\"}");
+    expect(rendered).toContain("<mcp-args>{\"q\":\"markdown\"}<\\mcp-args>");
+    expect(rendered).toContain("<mcp-result> {}");
+    expect(rendered).toContain("1 result");
   });
 });
 

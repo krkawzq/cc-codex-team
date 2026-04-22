@@ -1,0 +1,12 @@
+{
+  "renderer": "item",
+  "item": {
+    "id": "hook-post-1",
+    "type": "hook.post_command",
+    "hook_id": "hook-17",
+    "status": "completed",
+    "command": "npm run lint",
+    "cwd": "/repo",
+    "stdout": "Checked 42 files.\n0 warnings."
+  }
+}

@@ -83,4 +83,11 @@ describe("renderHelp", () => {
     expect(renderHelp(["cursor"])).toContain("delete");
     expect(help).toContain("--event-id");
   });
+
+  it("documents truncate on markdown history output", () => {
+    const help = renderHelp(["message", "history"]);
+
+    expect(help).toContain("--truncate");
+    expect(help).toContain("use 0 to disable clipping");
+  });
 });

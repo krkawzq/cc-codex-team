@@ -655,3 +655,14 @@ DFS 前序遍历；每条：
 - **空正文**：`<tag>` 后直接空行 + `<\tag>`，或内联 `<tag>{}<\tag>` 均可
 - **正文首尾空白**：消费侧应 `.trim()`；生产侧开闭 tag 前后留空行是为了渲染，不是内容的一部分
 - **渲染**：markdown 渲染器大概率会把 `<tag>` 当未知元素穿透、`<\tag>` 当字面量——两种都不影响正文 markdown 的渲染
+
+## Regenerating Snapshots
+
+当 markdown renderer 有意变更时，用下面的命令重写 `tests/fixtures/markdown/*.expected.md`：
+
+```bash
+npm test -- -u
+```
+
+- `-u` / `--update` 会让 `tests/markdown-snapshot.test.ts` 重新渲染每个 JSON fixture 并覆盖对应的 `.expected.md`
+- 提交前仍然跑一次常规 `npm test`，确认无需更新时快照保持稳定
