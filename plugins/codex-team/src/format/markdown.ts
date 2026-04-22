@@ -3,6 +3,17 @@ import type { Thread, TurnListItem } from "../codex/rpc";
 
 export type TurnItem = Record<string, unknown>;
 
+export interface MarkdownRenderOptions {
+  truncate?: number | null;
+}
+
+interface RenderContext {
+  inlineMaxBytes: number;
+  truncateBytes: number | null;
+}
+
+export const INLINE_MAX_BYTES = 2048;
+
 export function renderTag(name: string, attrs: Record<string, unknown>, body: string): string {
   const line = `<${name}> ${compactJson(attrs)}`;
   const normalizedBody = stripOuterNewlines(body);
@@ -16,12 +27,16 @@ export function renderInline(name: string, attrs: Record<string, unknown>): stri
   return `<${name}>${compactJson(attrs)}<\\${name}>`;
 }
 
-export function renderHistory(input: {
-  session: string;
-  thread_id: string;
-  turns: TurnListItem[];
-  nextCursor?: string | null;
-}): string {
+export function renderHistory(
+  input: {
+    session: string;
+    thread_id: string;
+    turns: TurnListItem[];
+    nextCursor?: string | null;
+  },
+  options: MarkdownRenderOptions = {},
+): string {
+  const ctx = createRenderContext(options);
   const attrs: Record<string, unknown> = {
     session: input.session,
     thread_id: input.thread_id,
@@ -30,17 +45,21 @@ export function renderHistory(input: {
   };
   if (input.nextCursor) attrs.next_cursor = input.nextCursor;
 
-  const body = input.turns.map(renderTurn).join("\n\n");
+  const body = input.turns.map((turn) => renderTurn(turn, ctx)).join("\n\n");
   return renderTag("history", attrs, body);
 }
 
-export function renderTail(input: {
-  session: string;
-  thread_id: string;
-  turns: TurnListItem[];
-  thread: Thread | null;
-  follow: boolean;
-}): string {
+export function renderTail(
+  input: {
+    session: string;
+    thread_id: string;
+    turns: TurnListItem[];
+    thread: Thread | null;
+    follow: boolean;
+  },
+  options: MarkdownRenderOptions = {},
+): string {
+  const ctx = createRenderContext(options);
   const attrs: Record<string, unknown> = {
     session: input.session,
     thread_id: input.thread_id,
@@ -48,7 +67,7 @@ export function renderTail(input: {
     generated_at: new Date().toISOString(),
   };
   if (input.follow) attrs.follow = true;
-  const body = input.turns.map(renderTurn).join("\n\n");
+  const body = input.turns.map((turn) => renderTurn(turn, ctx)).join("\n\n");
   return renderTag("tail", attrs, body);
 }
 
@@ -57,6 +76,7 @@ export function renderContext(input: {
   thread_id: string;
   thread: Thread | null;
 }): string {
+  const ctx = createRenderContext();
   const t = input.thread;
   const attrs: Record<string, unknown> = {
     session: input.session,
@@ -76,13 +96,17 @@ export function renderContext(input: {
   const turns = Array.isArray((t as { turns?: unknown[] } | null)?.turns)
     ? (((t as unknown as { turns: unknown[] })).turns)
         .filter((turn): turn is TurnListItem => !!turn && typeof turn === "object")
-        .map(renderTurn)
+        .map((turn) => renderTurn(turn, ctx))
         .filter(Boolean)
     : [];
 
-  return renderTag("context", attrs, turns.length > 0
-    ? turns.join("\n\n")
-    : "<!-- thread/read only returns thread metadata; for turn-level content use 'message history' -->");
+  return renderTag(
+    "context",
+    attrs,
+    turns.length > 0
+      ? turns.join("\n\n")
+      : "<!-- thread/read only returns thread metadata; for turn-level content use 'message history' -->",
+  );
 }
 
 export function renderSessionInfo(rec: SessionRecord): string {
@@ -106,7 +130,7 @@ export function renderSessionInfo(rec: SessionRecord): string {
   return renderTag("session-info", attrs, bodyLines.join("\n"));
 }
 
-function renderTurn(turn: TurnListItem): string {
+function renderTurn(turn: TurnListItem, ctx: RenderContext): string {
   const attrs: Record<string, unknown> = {
     id: turn.id,
     status: turn.status ?? null,
@@ -125,38 +149,53 @@ function renderTurn(turn: TurnListItem): string {
   }
   const body = items
     .filter((item): item is TurnItem => !!item && typeof item === "object")
-    .map((item) => renderItem(item))
+    .map((item) => renderItemWithContext(item, ctx))
     .filter(Boolean)
     .join("\n\n");
   return renderTag("turn", attrs, body);
 }
 
-export function renderItem(item: TurnItem, indent = ""): string {
-  const type = normalizeItemType(item.type);
-  const rendered = (() => {
-    switch (type) {
-      case "userMessage":
-        return renderUserMessage(item);
-      case "agentMessage":
-        return renderAgentMessage(item);
-      case "commandExecution":
-        return renderCommandExecution(item);
-      case "fileChange":
-      case "file-patch":
-        return renderFileChange(item);
-      case "mcpToolCall":
-        return renderMcpToolCall(item);
-      case "autoApprovalReview":
-        return renderAutoApprovalReview(item);
-      case "reasoning":
-        return renderReasoning(item);
-      default:
-        if (type.startsWith("hook.")) return renderHook(item, type);
-        return renderInline("item", sanitizeInlineAttrs(item));
-    }
-  })();
-
+export function renderItem(item: TurnItem, indent = "", options: MarkdownRenderOptions = {}): string {
+  const rendered = renderItemWithContext(item, createRenderContext(options));
   return indent ? indentBlock(rendered, indent) : rendered;
+}
+
+function renderItemWithContext(item: TurnItem, ctx: RenderContext): string {
+  const type = normalizeItemType(item.type);
+  switch (type) {
+    case "userMessage":
+      return renderUserMessage(item, ctx);
+    case "agentMessage":
+      return renderAgentMessage(item, ctx);
+    case "commandExecution":
+      return renderCommandExecution(item, ctx);
+    case "fileChange":
+    case "file-patch":
+      return renderFileChange(item, ctx);
+    case "mcpToolCall":
+      return renderMcpToolCall(item, ctx);
+    case "autoApprovalReview":
+      return renderAutoApprovalReview(item, ctx);
+    case "reasoning":
+      return renderReasoning(item, ctx);
+    default:
+      if (type.startsWith("hook.")) return renderHook(item, type, ctx);
+      return renderInline("item", sanitizeInlineAttrs(item, ctx));
+  }
+}
+
+function createRenderContext(options: MarkdownRenderOptions = {}): RenderContext {
+  const normalized = normalizeTruncateOption(options.truncate);
+  return {
+    inlineMaxBytes: normalized === 0 ? INLINE_MAX_BYTES : normalized ?? INLINE_MAX_BYTES,
+    truncateBytes: normalized === 0 ? null : normalized ?? INLINE_MAX_BYTES,
+  };
+}
+
+function normalizeTruncateOption(value: number | null | undefined): number | null {
+  if (value === undefined || value === null) return null;
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Math.floor(value));
 }
 
 function compactJson(value: unknown): string {
@@ -167,24 +206,40 @@ function renderInlineValue(name: string, value: unknown): string {
   return `<${name}>${compactJson(value)}<\\${name}>`;
 }
 
-function renderUserMessage(item: TurnItem): string {
+function renderBodyTag(name: string, attrs: Record<string, unknown>, body: string, ctx: RenderContext): string {
+  return renderTag(name, attrs, applyBodyTruncation(body, ctx));
+}
+
+function renderJsonValueTag(name: string, value: unknown, ctx: RenderContext): string {
+  const compact = compactJson(value);
+  if (byteLength(compact) <= ctx.inlineMaxBytes) {
+    return renderInlineValue(name, value);
+  }
+  return renderBodyTag(name, {}, prettyJson(value), ctx);
+}
+
+function renderUserMessage(item: TurnItem, ctx: RenderContext): string {
   const attrs = baseItemAttrs(item, { includeType: false });
   const text = extractMessageText(item);
-  if (text) attrs.text = text;
+  if (!text) return renderInline("user-input", attrs);
+  if (byteLength(text) > ctx.inlineMaxBytes) {
+    return renderBodyTag("user-input", attrs, text, ctx);
+  }
+  attrs.text = text;
   return renderInline("user-input", attrs);
 }
 
-function renderAgentMessage(item: TurnItem): string {
+function renderAgentMessage(item: TurnItem, ctx: RenderContext): string {
   const attrs = baseItemAttrs(item, { includeType: false });
   const body = extractMessageText(item);
   if (!body) return renderInline("agent-message", attrs);
-  return renderTag("agent-message", attrs, body);
+  return renderBodyTag("agent-message", attrs, body, ctx);
 }
 
-function renderCommandExecution(item: TurnItem): string {
+function renderCommandExecution(item: TurnItem, ctx: RenderContext): string {
   const attrs = baseItemAttrs(item, { includeType: false });
   const cmd = extractCommand(item);
-  if (cmd) attrs.cmd = cmd;
+  if (cmd) attrs.cmd = fitInlineText(cmd, ctx);
   const cwd = asString(item.cwd);
   if (cwd) attrs.cwd = cwd;
   const exit = item.exit ?? item.exitCode;
@@ -192,19 +247,19 @@ function renderCommandExecution(item: TurnItem): string {
   const durationMs = item.duration_ms ?? item.durationMs;
   if (durationMs !== undefined) attrs.duration_ms = durationMs;
   const shellBody = extractCommandOutput(item) ?? "";
-  return renderTag("shell", attrs, shellBody);
+  return renderBodyTag("shell", attrs, shellBody, ctx);
 }
 
-function renderFileChange(item: TurnItem): string {
+function renderFileChange(item: TurnItem, ctx: RenderContext): string {
   const attrs = baseItemAttrs(item, { includeType: false });
   const path = asString(item.path);
   if (path) attrs.path = path;
   if (item.status !== undefined) attrs.status = item.status;
   const diffBody = extractDiff(item) ?? "";
-  return renderTag("file-patch", attrs, diffBody);
+  return renderBodyTag("file-patch", attrs, diffBody, ctx);
 }
 
-function renderMcpToolCall(item: TurnItem): string {
+function renderMcpToolCall(item: TurnItem, ctx: RenderContext): string {
   const attrs = baseItemAttrs(item, { includeType: false });
   const server = asString(item.server) ?? asString(item.serverName);
   if (server) attrs.server = server;
@@ -215,15 +270,15 @@ function renderMcpToolCall(item: TurnItem): string {
 
   const bodyParts: string[] = [];
   const args = extractMcpArgs(item);
-  if (args !== undefined) bodyParts.push(renderInlineValue("mcp-args", args));
+  if (args !== undefined) bodyParts.push(renderJsonValueTag("mcp-args", args, ctx));
 
   const result = extractMcpResult(item);
-  if (result) bodyParts.push(renderTag("mcp-result", {}, result));
+  if (result) bodyParts.push(renderBodyTag("mcp-result", {}, result, ctx));
 
   return renderTag(`tool.${toTagSegment(tool)}`, attrs, bodyParts.join("\n\n"));
 }
 
-function renderHook(item: TurnItem, type: string): string {
+function renderHook(item: TurnItem, type: string, ctx: RenderContext): string {
   const run = asObject(item.run);
   const attrs = baseItemAttrs(item, { includeType: false });
 
@@ -232,7 +287,7 @@ function renderHook(item: TurnItem, type: string): string {
   const status = asString(item.status) ?? asString(run.status);
   if (status) attrs.status = status;
   const command = extractCommand(item) ?? extractCommand(run);
-  if (command) attrs.command = command;
+  if (command) attrs.command = fitInlineText(command, ctx);
   const cwd = asString(item.cwd) ?? asString(run.cwd);
   if (cwd) attrs.cwd = cwd;
   const exit = item.exit ?? item.exitCode ?? run.exit ?? run.exitCode;
@@ -243,10 +298,10 @@ function renderHook(item: TurnItem, type: string): string {
   const output = extractHookOutput(item, run);
   const tagName = typeToTagName(type);
   if (!output) return renderInline(tagName, attrs);
-  return renderTag(tagName, attrs, renderTag("hook-output", {}, output));
+  return renderTag(tagName, attrs, renderBodyTag("hook-output", {}, output, ctx));
 }
 
-function renderAutoApprovalReview(item: TurnItem): string {
+function renderAutoApprovalReview(item: TurnItem, ctx: RenderContext): string {
   const review = asObject(item.review);
   const attrs = baseItemAttrs(item, { includeType: false });
 
@@ -263,10 +318,10 @@ function renderAutoApprovalReview(item: TurnItem): string {
     ?? asString(review.matched_pattern)
     ?? asString(review.matchedPattern)
     ?? asString(review.pattern);
-  if (matchedPattern) attrs.matched_pattern = matchedPattern;
+  if (matchedPattern) attrs.matched_pattern = fitInlineText(matchedPattern, ctx);
 
   const commandPreview = extractCommandPreview(item, review);
-  if (commandPreview) attrs.command_preview = commandPreview;
+  if (commandPreview) attrs.command_preview = fitInlineText(commandPreview, ctx);
 
   const decision = asString(item.decision)
     ?? asString(item.action)
@@ -274,16 +329,20 @@ function renderAutoApprovalReview(item: TurnItem): string {
     ?? asString(item.decisionSource)
     ?? asString(review.decision)
     ?? asString(review.action);
-  if (decision) attrs.decision = decision;
+  if (decision) attrs.decision = fitInlineText(decision, ctx);
 
   return renderInline("auto-approval-review", attrs);
 }
 
-function renderReasoning(item: TurnItem): string {
+function renderReasoning(item: TurnItem, ctx: RenderContext): string {
   const attrs = baseItemAttrs(item, { includeType: false });
   const text = extractReasoningText(item);
-  if (text) attrs.text = text;
-  return renderInline("reasoning", attrs);
+  if (!text) return renderInline("reasoning", attrs);
+  if (byteLength(text) <= ctx.inlineMaxBytes) {
+    attrs.text = text;
+    return renderInline("reasoning", attrs);
+  }
+  return renderBodyTag("reasoning", attrs, text, ctx);
 }
 
 function baseItemAttrs(item: TurnItem, options: { includeType?: boolean } = {}): Record<string, unknown> {
@@ -298,11 +357,11 @@ function baseItemAttrs(item: TurnItem, options: { includeType?: boolean } = {}):
   return attrs;
 }
 
-function sanitizeInlineAttrs(item: TurnItem): Record<string, unknown> {
+function sanitizeInlineAttrs(item: TurnItem, ctx: RenderContext): Record<string, unknown> {
   const attrs: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(item)) {
     if (value === undefined || OMIT_INLINE_KEYS.has(key)) continue;
-    attrs[key] = value;
+    attrs[key] = typeof value === "string" ? fitInlineText(value, ctx) : value;
   }
   if (!("id" in attrs) && typeof item.id === "string") attrs.id = item.id;
   if (!("type" in attrs)) attrs.type = normalizeItemType(item.type);
@@ -387,12 +446,7 @@ function extractMcpArgs(item: TurnItem): unknown {
 }
 
 function extractMcpResult(item: TurnItem): string | null {
-  return extractRichBody(
-    item.result,
-    item.output,
-    item.content,
-    item.text,
-  );
+  return extractRichBody(item.result, item.output, item.content, item.text);
 }
 
 function extractHookOutput(item: TurnItem, run: TurnItem): string | null {
@@ -462,6 +516,63 @@ function extractTextEntry(entry: unknown): string | null {
   if (typeof obj.text === "string" && obj.text.length > 0) return obj.text;
   if (Array.isArray(obj.content)) return extractText(obj.content);
   return null;
+}
+
+function applyBodyTruncation(text: string, ctx: RenderContext): string {
+  if (ctx.truncateBytes === null) return text;
+  const truncated = truncateText(text, ctx.truncateBytes);
+  return truncated.truncatedBytes > 0
+    ? `${truncated.text}\n${buildTruncationMarker(truncated.truncatedBytes)}`
+    : text;
+}
+
+function fitInlineText(text: string, ctx: RenderContext): string {
+  if (ctx.truncateBytes === null) return text;
+  const truncated = truncateText(text, ctx.truncateBytes);
+  return truncated.truncatedBytes > 0
+    ? `${truncated.text}${buildTruncationMarker(truncated.truncatedBytes)}`
+    : text;
+}
+
+function truncateText(text: string, maxBytes: number): { text: string; truncatedBytes: number } {
+  const totalBytes = byteLength(text);
+  if (totalBytes <= maxBytes) {
+    return { text, truncatedBytes: 0 };
+  }
+
+  const chars = Array.from(text);
+  let low = 0;
+  let high = chars.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidate = chars.slice(0, mid).join("");
+    if (byteLength(candidate) <= maxBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  const truncatedText = chars.slice(0, low).join("");
+  return {
+    text: stripOuterNewlines(truncatedText),
+    truncatedBytes: totalBytes - byteLength(truncatedText),
+  };
+}
+
+function buildTruncationMarker(truncatedBytes: number): string {
+  return `…[${truncatedBytes} bytes truncated; use --truncate 0 to disable]`;
+}
+
+function prettyJson(value: unknown): string {
+  if (value === undefined) return "{}";
+  if (typeof value === "string") return value;
+  const serialized = JSON.stringify(value, null, 2);
+  return serialized ?? String(value);
+}
+
+function byteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
 }
 
 function joinText(values: Array<string | null>, separator: string): string | null {

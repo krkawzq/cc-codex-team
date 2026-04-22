@@ -156,6 +156,7 @@ export const messageHistory: HandlerFn = async (ctx, req) => {
   const limit = typeof limitRaw === "string" ? parseInt(limitRaw, 10) : typeof limitRaw === "number" ? limitRaw : 50;
   const sinceRaw = asString(getFlag(req, "since"));
   const format = asString(getFlag(req, "format")) ?? "json";
+  const truncate = parseTruncateFlag(getFlag(req, "truncate"));
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
 
   const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit as number)) : 50;
@@ -183,7 +184,7 @@ export const messageHistory: HandlerFn = async (ctx, req) => {
       thread_id: rec.thread_id,
       turns: result.data,
       nextCursor: result.nextCursor,
-    });
+    }, { truncate });
   }
   return response;
 };
@@ -193,6 +194,7 @@ export const messageTail: HandlerFn = async (ctx, req, stream) => {
   const nRaw = getFlag(req, "n");
   const n = typeof nRaw === "string" ? parseInt(nRaw, 10) : typeof nRaw === "number" ? nRaw : 3;
   const format = asString(getFlag(req, "format")) ?? "json";
+  const truncate = parseTruncateFlag(getFlag(req, "truncate"));
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
   const follow = isTrue(getFlag(req, "follow")) || isTrue(getFlag(req, "f"));
 
@@ -216,7 +218,7 @@ export const messageTail: HandlerFn = async (ctx, req, stream) => {
         turns: result.data,
         thread: thread?.thread ?? null,
         follow,
-      });
+      }, { truncate });
     }
     return response;
   };
@@ -457,6 +459,19 @@ function asStringArray(v: unknown): string[] {
 
 function isTrue(v: unknown): boolean {
   return v === true || v === "true" || v === "1";
+}
+
+function parseTruncateFlag(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const normalized = Math.floor(value);
+    if (normalized >= 0) return normalized;
+    throw invalidParams("--truncate must be a non-negative integer");
+  }
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    return parseInt(value, 10);
+  }
+  throw invalidParams("--truncate must be a non-negative integer");
 }
 
 async function assertAttachable(filePath: string): Promise<void> {

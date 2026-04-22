@@ -54,4 +54,11 @@ describe("renderHelp", () => {
     expect(help).toContain("permissions: cancel is invalid.");
     expect(help).toContain("mcp_elicitation: accept-session is invalid; form mode needs --json.");
   });
+
+  it("documents truncate on markdown history output", () => {
+    const help = renderHelp(["message", "history"]);
+
+    expect(help).toContain("--truncate");
+    expect(help).toContain("use 0 to disable clipping");
+  });
 });
