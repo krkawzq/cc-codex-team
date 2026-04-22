@@ -1,160 +1,92 @@
-# Playbook: Map-Reduce
-
-**Team size:** N (3-6 typical) · **Pattern:** Each worker handles one independent chunk; Claude aggregates.
+# Map-reduce
 
 ## Adoption signal
 
-- Task decomposes into ≥3 **mechanically independent** subtasks (no cross-chunk dependencies).
-- Each subtask has the same shape — same brief applies, only the target differs.
-- You need actual parallelism, not just concurrency.
+- Task decomposes into N similar subtasks that don't need to see each other's state
+- Examples: "migrate every file in src/legacy/ to the new API", "run the linter over every subdirectory and collect warnings", "summarise each of these 12 documents"
+- Workers can run in parallel
+- An aggregator step synthesises the outputs
 
-Examples:
+## Team
 
-- Bulk review across N PRs.
-- Porting N modules of the same library.
-- Running the same refactor on N files/services.
-- Auditing N repos for the same class of issue.
-
-Not this playbook when:
-
-- Chunks depend on each other → `pipeline.md`.
-- Chunks produce conflicting changes to the same file → merge-conflict hell; decompose differently.
-- The task is really one big thing, not N small ones → `solo-worker.md` or `plan-execute-verify.md`.
-
-## Team composition
-
-| Session | Role | Profile |
+| Count | Role | Profile |
 |---|---|---|
-| `worker-<chunk-id>` × N | Each handles one chunk independently. Same profile across all. | `worker` or `quickfix` (depending on chunk size) |
+| N | `mapper-<i>` | role-specific (often `fixer` or `explorer`) |
+| 1 | `reducer` | `reviewer` or `planner` |
 
-Name each worker by chunk dimension — `reviewer-pr-123`, `port-mod-auth`, `port-mod-users`, etc.
+N depends on how much parallelism codex account can handle. 4–8 is usually sweet.
 
 ## Shared artefacts
 
-- **Brief** (shared across all workers): `/<repo>/docs/briefs/<task>-brief.md`. Defines the per-chunk procedure; chunks are passed as parameters.
-- **Chunk list**: embedded in brief or a separate `/<repo>/docs/briefs/<task>-chunks.md` — explicit enumeration of what each worker should target.
-- **Work doc per worker**: `/<repo>/docs/worker/<session-name>-work.md`. One per session, never shared.
-- **Aggregate report** (Claude writes, workers don't touch): `/<repo>/docs/aggregates/<task>-summary.md`.
+- `<cwd>/.codex-team/brief.md` — overall brief
+- `<cwd>/.codex-team/partition.json` — list of N tasks, one per mapper
+- `<cwd>/.codex-team/mapper-<i>.md` — each mapper's output
 
-## Communication flow
+## Orchestration
 
-```
-                    brief (shared)
-                    chunk list
-                        │
-      ┌───────────┬─────┴─────┬───────────┐
-      ▼           ▼           ▼           ▼
-  [worker-1] [worker-2]  [worker-3]  [worker-N]
-      │           │           │           │
-   work-1      work-2      work-3      work-N
-      │           │           │           │
-      └───────────┴───────────┴───────────┘
-                        │
-                        ▼
-              Claude reads all, writes
-              aggregate summary
-```
+```bash
+TOK=claude-$(date +%s)
+codex-team daemon user create $TOK >/dev/null
 
-**No cross-worker communication.** If worker-1 and worker-2 need to share info, the playbook is wrong — decompose differently or use `pipeline.md`.
+cd /repo
+mkdir -p .codex-team
+echo "$BRIEF" > .codex-team/brief.md
 
-## Iteration loop
+# Claude computes the partition — a JSON list of tasks
+cat > .codex-team/partition.json <<'EOF'
+[
+  {"id": 0, "target": "src/legacy/auth.ts"},
+  {"id": 1, "target": "src/legacy/billing.ts"},
+  ...
+]
+EOF
 
-```
-1. Prepare brief + explicit chunk list.
-2. Create one session per chunk, same profile.
-3. Dispatch all N workers in parallel (N sends, one per worker, then sleep).
-4. Events arrive as workers finish; each turn-done is a chunk outcome.
-5. On each turn-done:
-   - Mark chunk done in your local tracking.
-   - Read worker's work doc's Findings (light read; don't descend).
-6. When all workers done OR all stragglers hit a planned deadline:
-   - Read each work doc's Progress + Findings.
-   - Write aggregate summary: cross-chunk patterns, outliers, per-chunk status.
-7. Close sessions.
+N=$(jq length .codex-team/partition.json)
+for i in $(seq 0 $((N-1))); do
+  codex-team -b $TOK session new "mapper-$i" --profile fixer --cwd "$(pwd)"
+done
+codex-team -b $TOK session new reducer --profile reviewer --cwd "$(pwd)"
 ```
 
-Claude doesn't serialise worker turns — each worker runs its entire task at its own pace. You wake on `turn-done`, tally, then go back to sleep.
+### Dispatch map phase
 
-## Send templates
+Claude:
 
-**First send — each worker:**
-
-```
-codex-team send worker-<chunk-id> "execute the brief at <brief-path> for chunk <chunk-id>. Chunk-specific parameters: <params>. Create the work doc at <work-path>; update Progress/Findings/Next up; reply 'done' with a one-line summary and any outlier flag"
-```
-
-**Re-dispatch a stuck chunk:**
-
-```
-codex-team send worker-<chunk-id> "your chunk <chunk-id> turn returned <reason>. Read <work-path>, continue from Next up; reply 'done' when complete"
+```bash
+for i in $(seq 0 $((N-1))); do
+  codex-team -b $TOK message send "mapper-$i" "Your task: partition.json[$i].target. Read .codex-team/brief.md. Write your output to .codex-team/mapper-$i.md."
+done
 ```
 
-**Ask a worker to cross-verify** (only if its neighbour flagged something relevant):
+All N mappers run concurrently. Events flow in. Claude tracks which mappers have fired `turn.completed`.
 
-```
-codex-team send worker-<chunk-id> "a neighbouring chunk flagged <issue>. Check whether your chunk is affected by the same pattern; append findings to <work-path>'s Findings section; reply 'checked' with yes/no"
-```
+### Reduce phase
 
-(This is the only sanctioned cross-worker communication — mediated by Claude, never direct.)
+When all N mappers are done:
 
-## Aggregate summary shape
-
-Write to `/<repo>/docs/aggregates/<task>-summary.md`:
-
-```markdown
-# <task> summary
-
-## Per-chunk status
-
-| Chunk | Session | Status | Key finding | Work doc |
-|---|---|---|---|---|
-| pr-123 | reviewer-pr-123 | ok | No critical issues | <path> |
-| pr-124 | reviewer-pr-124 | attn | Race condition in <file:line> | <path> |
-| ... |
-
-## Cross-chunk patterns
-- <pattern 1>
-- <pattern 2>
-
-## Outliers (needs attention)
-- <chunk>: <issue>
-
-## Next steps
-- ...
+```bash
+codex-team -b $TOK message send reducer "Read .codex-team/brief.md and every mapper-<i>.md file. Produce the final synthesis as stdout in your reply."
 ```
 
-## Exit criteria
+Claude reads `message tail reducer -n 1 --format markdown` to get the aggregated result.
 
-All of:
+## Scaling notes
 
-- Every worker's `turn-done` received.
-- Aggregate summary written and reviewed.
-- Any outlier chunks addressed (either re-dispatched, re-assigned, or explicitly accepted).
+- Live mapper sessions are isolated by default, so wide fan-out mainly costs you more `codex app-server` processes and memory. `app_server.max_sessions_per_process` now mostly matters for reusable adhoc/read-only clients, not the mapper turns themselves.
+- Codex account rate limits will bite long before process limits. Watch for `server_overloaded` events; daemon auto-retries but sustained pressure means N is too high.
+- Approvals are per-session. N mappers = N independent approval streams. Surface them with `--session` filter per session if you want a dedicated panel per mapper.
 
-Then close all sessions.
+## Termination
 
-## Failure modes
+```bash
+for i in $(seq 0 $((N-1))); do
+  codex-team -b $TOK session detach "mapper-$i"
+done
+codex-team -b $TOK session detach reducer
+```
 
-| Smell | Fix |
-|---|---|
-| Workers step on each other's files | Chunks aren't independent. Re-decompose. |
-| One worker is much slower than the rest | Inspect that one's `work.md`; may be stuck on something the brief didn't cover. Either answer the blocker or accept the partial result. |
-| "Chunks have lots of shared context" | That's pipeline-shaped work, not map-reduce. Pick `pipeline.md`. |
-| Aggregate summary is just a list of work doc contents | You haven't cross-read. The value of map-reduce's aggregate step is Claude spotting cross-chunk patterns. |
-| Workers keep asking Claude about the brief | Brief is ambiguous. Edit it, then re-dispatch any workers that had the question. |
-| `queue-overflow` event | You're dispatching faster than workers complete. For map-reduce that means one worker is queue-bound — probably the map is wrong shape. |
-| You keep `grep`-ing across worker work docs | You're treating the aggregate as a search problem. Write a summary instead; future reads of this task will be lighter. |
+## Anti-patterns
 
-## Scaling guidance
-
-- 3 workers: minimum for the playbook to be worth it over serial dispatch.
-- 6 workers: upper end for a single human-in-the-loop Claude orchestration.
-- 10+ workers: consider splitting into batches of 6, or automating with a script — interactive orchestration stops helping past ~6 concurrent.
-
-Each worker is a `codex app-server` subprocess. Remember the global rate limit.
-
-## Related
-
-- If each chunk itself deserves a reviewer → each worker session becomes a `worker-reviewer.md` pair; you manage N pairs.
-- If the chunks feed each other → not map-reduce; pick `pipeline.md`.
-- If chunks share a critic → `reflexion.md` nested inside each chunk.
+- Letting mappers touch each other's files. They should each get their own targets.
+- Reducer runs before all mappers complete. Always wait for the final `turn.completed`.
+- Fanning out so wide that you spend more time coordinating than the sequential version would take. Rule of thumb: if each subtask is <30s, a loop in one session beats N parallel sessions.

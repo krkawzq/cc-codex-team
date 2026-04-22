@@ -1,101 +1,107 @@
-# Known Codex quirks (look like failures, aren't)
+# Known quirks
 
-Reference for `recover-codex-team`. Behaviour that looks broken on first encounter but does **not** warrant the escalation ladder. Read before climbing.
+These aren't bugs in codex-team — they're characteristics of the underlying codex app-server protocol. Learn them once, don't debug them again.
 
----
+## 1. Zero-turn threads aren't persistent
 
-## The long-context prompt-apply skip
+If you `session new` and immediately `session detach` without sending any turn, codex does not write a rollout file. The thread_id is effectively gone — `session attach <that-uuid>` will fail with `codex_error`: `no rollout found for thread id …`.
 
-**Symptom.** After many turns in a single thread, Codex occasionally returns a reply that does **not** match the prompt you just sent — as though it applied an earlier turn's context instead of the current one.
+**Mitigation**: send at least one turn before detaching, or don't detach a brand-new session you plan to reuse.
 
-You can spot it because the reply:
+## 2. `thread/turns/list` returns turns with empty `items`
 
-- Talks about the wrong file (a file you didn't reference).
-- Answers a question you didn't ask.
-- Continues old work verbatim instead of acting on the new send.
+The protocol explicitly defines `Turn.items` as populated only on `thread/resume` or `thread/fork` responses. `message history` and `message tail` use `thread/turns/list` under the hood, so they return turn metadata (id, status, timings) but no item content.
 
-**Response.** **Re-send the exact same prompt, unchanged.**
+**Mitigation**: use `session context` (`thread/read`) for a thread-level snapshot, or parse `item.completed` events as they arrive for live progress.
 
-Do not:
+## 3. `thread/read` doesn't return items either
 
-- Treat it as a recovery case (don't `interrupt` / `restart` / `kill`).
-- Rephrase the prompt — that introduces new ambiguity.
-- Assume the session is confused and needs a reset.
+Thread/read returns the `Thread` object only (`{ thread: Thread }`). There's no protocol method that returns past turn items for a session. Items come from the event stream (`item.completed`) while the turn is running.
 
-One re-send typically resolves it. **Two consecutive re-sends with the same bad behaviour** = genuine problem → escalate via the ladder.
+**Mitigation**: listen to events in real time. After a turn completes, the items are only recoverable via codex's on-disk rollout files (`~/.codex/sessions/<date>/rollout-*.json`) — codex-team does not parse those.
 
-**Why it happens.** Long-thread state drift. You can't prevent it; you can only recognise it. The one-time re-send is effectively free — the worker applies the current prompt on the retry.
+## 4. Long-context reply mismatch (first occurrence is usually spurious)
 
-→ `philosophy.md` §5 for the cultural framing.
+Under high context load, codex occasionally returns a reply that doesn't seem to match the prompt — e.g. you asked about `auth.ts` and it describes `http.ts`. First occurrence: ignore, re-send the prompt. Second occurrence: the thread context is probably misaligned; fork from an earlier turn and replay.
 
----
+**Not** a protocol bug — it's a model quirk under pressure.
 
-## Turns legitimately take minutes
+## 5. `turn/interrupt` and `turn/steer` during review/compact turns
 
-A turn that has been running 2–5 minutes is **not stuck**. Codex turns can legitimately take that long when:
+Codex runs internal review and compact turns between user turns (part of the approvals-reviewer mechanism). During these, both `turn/interrupt` and `turn/steer` return:
 
-- Running a long test suite.
-- Compiling / type-checking a large project.
-- Walking a deep code path in `reasoning_effort=high`.
-- Downloading dependencies.
-
-**Don't intervene** until:
-
-- The `turn-stuck` event fires (heartbeat sees `currentTurnAgeMs > heartbeat.turn_stuck_seconds`, default 600s).
-- OR you have strong evidence (`session dump` shows `transport_alive=false` or `stderr_tail` with an actual fault).
-
-The most expensive mistake is interrupting a turn that was about to finish. Waiting is free; interrupting drops the queue (if any) and wastes the turn's progress.
-
----
-
-## Reasoning-effort effort reality
-
-**Symptom.** `reasoning_effort=high` worker spends 10× longer and burns 2–3× the tokens compared to `medium`.
-
-**Not a bug.** `high` is for ambiguous or deep problems. For a well-specified task with a tight brief, `medium` (or even `low` / `minimal`) is often strictly better. See `configure-codex-team/codex-tricks.md`.
-
----
-
-## Final-answer phase
-
-**Symptom.** A single turn emits multiple agent messages; only the last one is the "final answer".
-
-**Not a bug.** Codex workers narrate as they execute. The digest captures every `agentMessage` item in order; the one with `item.phase === "final_answer"` is marked as such in the turn history (see `docs/refactor-history-display.md`). When you want the bottom line, read `final_message` on the `turn-done` payload.
-
----
-
-## `auto-heal` when `was_during_turn=false`
-
-**Symptom.** `session-down` fires, then `auto-heal` fires, but the worker wasn't in a turn.
-
-**Not a bug.** The `codex app-server` child was recycled (idle timeout or minor OOM). The thread is intact; nothing was lost. Continue without re-dispatching.
-
-`was_during_turn=true`, on the other hand, means the in-flight turn died. The `auto-heal` restored the session but not the turn — re-send that prompt.
-
----
-
-## Cumulative vs context-window tokens
-
-**Symptom.** `usage_total_tokens=2,400,000` looks terrifying. The worker is nowhere near compaction.
-
-**Not a bug.** `usage_total_tokens` is cumulative across the entire thread (all turns, all inputs, all outputs). Compaction is decided on `usage_last_tokens` (the current context-window snapshot). Only `usage_last_tokens >= threshold_tokens` (default 500k) triggers `compact-suggest`.
-
----
-
-## Queue behaviour during recovery
-
-**Symptom.** After `session kill`, queued sends are gone.
-
-**Not a bug.** Destructive recovery drops queued waiters with an error, by design — there's no silent hang. Before killing, inspect:
-
-```bash
-codex-team queue show <name>
+```
+codex_error_info: active_turn_not_steerable
 ```
 
-Decide what to preserve, then kill.
+with `turnKind: "Review"` or `"Compact"`.
 
----
+**Mitigation**: wait for the internal turn to finish (usually 5–30s). The daemon does NOT retry these — it's not an overload error.
 
-## Red flag: treating any quirk as a failure
+## 6. Turn completed notifications arrive with `turn.items = []`
 
-The ladder is for real failures. Every entry above has a specific, non-destructive response. If you find yourself running `interrupt` / `restart` / `kill` as the *first* action for any of the symptoms on this page, stop and re-read.
+The wire-level `turn.completed` notification does include a `Turn` object, but its `items` field is always empty (per protocol spec). Turn content arrives through separate `item.completed` notifications during the turn. codex-team normalizes `turn.completed`'s payload to a summary (`turn_id`, `status`, `started_at`, `completed_at`, `duration_ms`, `item_count`, and the raw `turn`) and drops the empty `items`.
+
+**Mitigation**: collect items via `item.completed` events during the turn; `turn.completed` is a boundary marker, not a content source.
+
+## 7. Token case: camelCase on the wire, snake_case in codex-team events
+
+Codex app-server uses `camelCase` (`threadId`, `turnId`, `codexErrorInfo`). codex-team events normalize to `snake_case` (`thread_id`, `turn_id`, `codex_error_info`). Within `payload.raw` (unnormalised passthrough on server requests), casing is still camelCase.
+
+## 8. `thread/name/set` (not `thread/setName`)
+
+A historical slash-based method name. codex-team-team got this wrong in early drafts; now correct. If you call the codex app-server directly, use `thread/name/set`.
+
+Similarly: `thread/turns/list` not `thread/turnsList`; `thread/compact/start` not `thread/compactStart`.
+
+## 9. `sortDirection` is `"asc"` / `"desc"`
+
+Not `"ascending"` / `"descending"`. API rejected the longer forms in testing.
+
+## 10. app-server stdout/stderr go through separate channels
+
+The JSON-RPC messages come on stdout; free-form log output goes to stderr. The AppServerClient keeps the last ~400 stderr lines as a diagnostic tail — accessible via `client.stderrTailText()` if you're debugging protocol issues.
+
+## 11. Non-standard `<\tag>` close in markdown output
+
+The markdown format uses `<\tag>` (backslash) as the close marker. This is deliberate non-HTML so markdown viewers don't try to interpret it as an element. Don't "fix" this to `</tag>` — tag-text visibility is the design goal.
+
+## 12. orphan reap is best-effort on startup
+
+`codex-pids.json` tracks spawned codex PIDs so that on next daemon start, `reapOrphans()` can SIGTERM leftovers. The daemon now sanity-checks that a live pid still looks like `codex app-server` before killing it, but on some platforms process-command inspection is best-effort. Worst case, an old orphan survives until manual cleanup; the daemon itself still starts.
+
+## 13. `app_server.max_sessions_per_process` mainly affects reusable adhoc clients
+
+Live sessions are isolated onto dedicated app-server clients by default, so changing `app_server.max_sessions_per_process` mostly affects reusable adhoc/read-only clients (`thread/list`, `thread/read`, etc.). The setting is still hot-but-sticky for already-spawned reusable clients; `daemon restart` forces a clean slate.
+
+## 14. Takeover cancels pending requests
+
+When user A has a pending `approval.command_execution` and user B runs `session attach --takeover`, codex-team cancels the pending request on user A's side by responding to codex with `-32000 session seized`. User A will see their pending event vanish but NOT receive a `server_request_resolved` (they receive `session.seized` instead). Codex treats the cancelled approval as declined.
+
+## 15. Persisted state is schema-versioned and newer versions are rejected
+
+`users/*/sessions.json` and the per-user `events.log` carry `schema_version`. If a file was written by a newer codex-team build, this build refuses to load it rather than guessing.
+
+**Mitigation**: do not downgrade the daemon onto a newer data dir. If you must inspect or recover data, use the newer binary or move the old data dir aside and start with a fresh one.
+
+## 16. Daemon log follow is rotation-safe
+
+`daemon logs --follow` now tails by byte offset, debounces bursts, and keeps working across rename-based log rotation. If a log file disappears briefly during rotation, the follower resets its offset and resumes when the file reappears.
+
+**Mitigation**: if a follow stream looks quiet during rotation, wait for the next write before assuming logging stopped.
+
+## 17. Windows shutdown is cooperative first, shell wrappers are exercised
+
+On Windows, child-process shutdown now tries `stdin.end()` before `kill()` so app-server and monitor children get a chance to exit cleanly under back-pressure. The `.cmd` wrapper path is also covered and expected to chain through `call`, so nested launcher scripts should return control to the parent shell correctly.
+
+**Mitigation**: if you still see a stuck Windows child, treat it as a real process issue rather than an expected wrapper limitation.
+
+## 18. Orphan reap and pidfile ownership are identity-based, not pid-only
+
+`codex-pids.json` tracks `pid + start_time + nonce`, and daemon startup also checks whether a pidfile owner still looks like a `codex-team` daemon before refusing to start. This avoids killing or blocking on an unrelated process that inherited the same PID later.
+
+If startup still refuses with "another daemon pidfile is live", verify the pid in `daemon.pid` really belongs to codex-team before deleting anything:
+
+1. Inspect the pid from the error or pidfile.
+2. Check its command line / process details.
+3. Only remove the pidfile manually if that process is gone or is not a codex-team daemon.

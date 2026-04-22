@@ -9,10 +9,10 @@ if "%CLAUDE_PLUGIN_ROOT%"=="" (
 
 if not "%CLAUDE_PLUGIN_DATA%"=="" (
   if not "%CLAUDE_PLUGIN_ROOT%"=="" (
-    if "%CODEX_TEAM_DAEMON_DATA_DIR%"=="" set "CODEX_TEAM_DAEMON_DATA_DIR=%CLAUDE_PLUGIN_DATA%\data"
+    if "%CODEX_TEAM_DATA_DIR%"=="" set "CODEX_TEAM_DATA_DIR=%CLAUDE_PLUGIN_DATA%\data"
   ) else (
     echo %CLAUDE_PLUGIN_DATA% | findstr /I /C:"codex-team" >nul
-    if not errorlevel 1 if "%CODEX_TEAM_DAEMON_DATA_DIR%"=="" set "CODEX_TEAM_DAEMON_DATA_DIR=%CLAUDE_PLUGIN_DATA%\data"
+    if not errorlevel 1 if "%CODEX_TEAM_DATA_DIR%"=="" set "CODEX_TEAM_DATA_DIR=%CLAUDE_PLUGIN_DATA%\data"
   )
 )
 

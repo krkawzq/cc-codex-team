@@ -1,93 +1,116 @@
 ---
 name: configure-codex-team
 description: >-
-  Entry for codex-team configuration + codex tuning tricks. Trigger when setting up a new profile, defining a persistent watchdog alarm, tuning a daemon / monitor / queue knob, debugging unexpected session defaults, verifying Node / Codex CLI prerequisites, picking reasoning_effort / model / personality / summary for a session, or looking up a CLI subcommand. Not for: session lifecycle (`manage-codex-team`), failure triage (`recover-codex-team`), picking a collaboration pattern (`codex-team-playbooks`).
+  CLI reference, daemon config, codex profiles, and environment overrides for codex-team. Trigger when looking up a command/flag, wanting to change a daemon knob (`daemon config set …`), adjusting codex.default_* values, verifying Node/codex prerequisites, or troubleshooting env var routing. Not for: session lifecycle (`manage-codex-team`), failure triage (`recover-codex-team`), collaboration patterns (`codex-team-playbooks`).
 ---
 
 # Configure codex-team
 
-> **You are reading this because you need to tune, look up, or adjust behaviour that isn't session-lifecycle-level.** This skill is a thin index over four reference files; pick the one you need.
-
-The Node daemon talks directly to `codex app-server` over JSON-RPC. No Python bootstrap, no SDK package. Config is TOML-first; profiles layer on top; env vars override scalar keys at runtime.
+> You need to look up a command, tune a daemon knob, or set a default. This skill is an index — jump straight to the reference you need.
 
 ## Reference files
 
 | File | Use when |
 |---|---|
-| `config-schema.md` | You need to know what a TOML key does, its default, or how it's env-overridden. Also: persistent watchdog alarms, template variables, data-dir resolution. |
-| `profiles.md` | You want to define / pick / modify a per-session profile (model, effort, personality, developer instructions). |
-| `codex-tricks.md` | You want to pick `--model` / `--effort` / `--personality` / `--summary` for a specific send or session. Behavioural tips, cost/quality trade-offs, sandbox edges. |
-| `cli-cheatsheet.md` | You forgot a CLI subcommand or its flags. Quick lookup. |
+| `cli-reference.md` | Every CLI command, positional, flag, error code |
+| `config-keys.md` | Every `daemon config` key: type, default, hot vs restart |
+| `profiles.md` | How to use codex profiles (`--profile`) with session new |
+| `env-vars.md` | `CODEX_TEAM_DATA_DIR`, `CODEX_TEAM_SOCK`, `CLAUDE_PLUGIN_DATA` routing |
 
-## Runtime prerequisites
+## Quick lookups
 
-| Dependency | Role |
-|---|---|
-| Node.js 18+ | Runs `dist/main.js` and the wrapper. |
-| `codex` CLI | Daemon spawns `codex app-server --listen stdio://` subprocesses. |
+### Change daemon idle threshold from 6h to 2h
+
+```bash
+codex-team daemon config set daemon.idle_shutdown_hours 2
+```
+
+Key is hot — effective next check cycle (next minute).
+
+### Make every new session default to gpt-5.4
+
+```bash
+codex-team daemon config set codex.default_model gpt-5.4
+```
+
+Hot. `session new` without `--model` now uses this.
+
+### Increase retained events per user
+
+```bash
+codex-team daemon config set monitor.event_log_retention 50000
+```
+
+Hot. Buffer in memory grows on next `append`; runtime compaction now happens without waiting for a restart.
+
+### Change the sock path (debug / isolate tests)
+
+```bash
+codex-team daemon config set daemon.sock_path /tmp/codex-team-test.sock
+codex-team daemon restart  # cold key — restart required
+```
+
+Or one-off via env:
+
+```bash
+CODEX_TEAM_SOCK=/tmp/alt.sock codex-team daemon status
+```
+
+### Inspect all config
+
+```bash
+codex-team daemon config list
+```
+
+Returns every key with current value, default, type, whether explicit, and hot/cold.
+
+### Reset a single key
+
+```bash
+codex-team daemon config unset codex.default_sandbox
+```
+
+### Reset everything
+
+```bash
+codex-team daemon config reset --yes
+```
+
+## Prerequisites
+
+codex-team expects:
+
+- **Node ≥ 18** (ES2022 target; Node 24 tested)
+- **`codex` binary on PATH** — the official Codex CLI. Any version with `codex app-server --listen stdio://` support.
+- **Write access to `~/.codex-team/`** (or wherever `daemon.data_dir` points)
 
 Verify:
 
 ```bash
 node --version
-codex --version
-codex login
-# from plugin checkout:
-npm install && npm run typecheck && npm run build
+which codex && codex --version
+ls -la ~/.codex-team/ 2>/dev/null || echo "first run will create it"
 ```
 
-Common failures:
+## Invariants around config
 
-| Symptom | Fix |
-|---|---|
-| `node: command not found` | Install Node 18+. |
-| `dist/main.js missing` | `npm install && npm run build` in plugin checkout. |
-| `E_NO_CODEX_BIN` | `npm install -g @openai/codex && codex login`; or pin `[daemon].codex_bin` (→ `config-schema.md`). |
+- **Hot keys** take effect without restart. Changes to `daemon.log_level`, `monitor.event_log_retention`, `codex.default_*`, `retry.*`, `monitor.default_interval_seconds`, `app_server.idle_unload_minutes`, `daemon.idle_shutdown_hours` are live immediately (or on next check cycle).
+- **Cold keys** require `daemon restart`: `daemon.log_path`, `daemon.data_dir`, `daemon.sock_path`. Response includes `needs_restart: true`.
+- **`app_server.max_sessions_per_process`** is hot but only affects *new* reusable app-server processes; live sessions are isolated by default.
+- **Config is stored at `<data_dir>/config.json`**, written atomically (tmp + rename). Hand-editing works but run `daemon restart` if the daemon was already using the old value.
 
-## Hot-reload behaviour
+## Default data layout
 
-- `session create` / `session resume` / `session restart` / `health repair` refresh `config.toml` from disk before acting. New profiles do **not** require a daemon restart.
-- `daemon reload-config` reapplies heartbeat / watchdog intervals + alarm definitions immediately.
-- Runtime alarms (`watch alarm create|delete`) restart background loops automatically.
-- `compact` retries automatically on failure — tune with `compaction.retry_attempts` / `compaction.retry_delay_ms`.
-- `history_rotation_mb` enforces rotation for both `history.md` and `turns.jsonl`.
-- `launch_args_override` replaces the default app-server argv entirely — reach for it only when you need complete control. Use `config_overrides` for single-flag tweaks.
-
-## When to tune which knob
-
-| Goal | Knob / file |
-|---|---|
-| Different default model | `[defaults].model` or `[profiles.X].model` → `profiles.md` |
-| Change session-level effort | `[profiles.X].reasoning_effort` → `profiles.md` |
-| Lower cost on one turn | `codex-team send ... --effort low` (no config change) → `codex-tricks.md` |
-| More/fewer parallel queued sends | `[queue].max_per_session` → `config-schema.md` |
-| Stricter queue behaviour | `[queue].overflow_policy = "reject"` → `config-schema.md` |
-| One-off task reminder | `codex-team watch alarm create …` (runtime) → `config-schema.md` §Watchdog alarms |
-| Permanent project-wide reminder | `[monitor.watchdog_alarms.<ws>.<name>]` (config) → `config-schema.md` §Watchdog alarms |
-| Silent drift detector | Any alarm with `emit_idle = false` (the default) |
-| Faster turn-stuck detection | `[heartbeat].turn_stuck_seconds` |
-| Different compact threshold | `[compaction].threshold_tokens` |
-| Pin a specific Codex binary | `[daemon].codex_bin` |
-
-## Red flags
-
-| Thought | Correction |
-|---|---|
-| "I need to install a Python SDK first." | No. Node talks to app-server directly. |
-| "I'll set `launch_args_override` for a tiny tweak." | Use `config_overrides`. Replace argv only when necessary. |
-| "Cut `watchdog_interval_seconds` to 30 for fast feedback." | Fast feedback = `events` stream. Watchdog is low-frequency reminder. |
-| "Define an alarm so I'll know the moment a session breaks." | That's the `events` stream's job (`session-down`, `turn-err`). Watchdog is reminder + self-check. |
-| "Add `emit_idle = true` to every alarm." | Only for fixed-cadence briefings. Otherwise silence-on-no-signal is a feature. |
-| "I'll write a runtime alarm that spans multiple workspaces." | Alarms are workspace-scoped by design. |
-| "Edit config then restart the daemon." | Most changes hot-reload. `daemon reload-config` first. |
-| "I'll put one-off task reminders in `config.toml`." | Runtime CLI (`watch alarm create`). Config alarms are for permanent setups. |
-| "Crank `reasoning_effort` to high on every send for 'better' answers." | Burns 2-3× tokens for well-specified tasks. → `codex-tricks.md`. |
-
-## Cross-references
-
-- Session lifecycle: `manage-codex-team`
-- Event stream arming: `manage-codex-team` §Arming events
-- Watchdog (when to arm at all): `manage-codex-team` §Watchdog
-- Failure triage: `recover-codex-team`
-- Quick runtime alarm + Monitor arming: `/codex-team:watch`
-- Workspace concept + resolution order: `using-codex-team` §Workspaces
+```text
+~/.codex-team/
+├── config.json
+├── daemon.log
+├── daemon.pid
+├── daemon.sock          # Unix only; Windows uses a named pipe derived from sock_path/data_dir
+├── codex-pids.json
+└── users/
+    └── <url-safe-base64(token)>/
+        ├── metadata.json
+        ├── sessions.json
+        └── events.log
+```

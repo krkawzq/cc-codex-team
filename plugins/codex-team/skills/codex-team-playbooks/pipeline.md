@@ -1,154 +1,108 @@
-# Playbook: Pipeline / Relay
-
-**Team size:** N (2-4 typical) · **Pattern:** Sequential stages. Each stage's output feeds the next via a stage doc.
+# Pipeline
 
 ## Adoption signal
 
-- Task has natural sequential stages: **design → implement → test → document** (or a subset).
-- Each stage is substantive enough to deserve its own session (otherwise fold into `solo-worker.md`).
-- Stage-k depends on stage-(k-1) — work doesn't parallelise.
+- Task has distinct sequential stages, each transforming the output of the previous
+- Each stage is a specialist role
+- Stages can't be merged without losing quality (otherwise use solo-worker)
 
 Examples:
 
-- New feature: architect designs it, implementer builds it, tester writes tests, docs-writer documents.
-- Data migration: planner drafts migration, executor runs it, validator checks data integrity.
-- API refactor: designer produces spec, implementer lands the change, doc-writer updates public docs.
+- `explore → design → implement → test → review`
+- `parse → normalize → migrate → validate`
+- `spec → draft → edit → publish`
 
-Not this playbook when:
+## Team
 
-- Stages can run concurrently → `map-reduce.md`.
-- Work iterates between two roles → `worker-reviewer.md` or `reflexion.md`.
-- You're just chaining two sends in the same session → don't use sessions per step.
+One session per stage. Roles and profiles are stage-specific:
 
-## Team composition
-
-| Session | Role | Profile |
-|---|---|---|
-| `stage-1-<name>` (e.g. `architect`) | Owns stage 1's artefact. | `worker` (or role-specific profile) |
-| `stage-2-<name>` (e.g. `implementer`) | Consumes stage 1's output; produces stage 2. | `worker` |
-| `stage-3-<name>` (e.g. `tester`) | Consumes stage 2; produces stage 3. | `worker` |
-| `stage-N-<name>` (e.g. `doc-writer`) | Final stage. | `worker` |
-
-Each stage is its own session; don't reuse one session across stages even if it would technically work — you lose the role-specific profile + focused work doc.
+| Stage | Profile |
+|---|---|
+| `explorer` | `explorer` (read-only) |
+| `designer` | `planner` (read-only, xhigh effort) |
+| `implementer` | `fixer` (workspace-write) |
+| `tester` | `tester` (workspace-write, medium effort) |
+| `reviewer` | `reviewer` (read-only, xhigh effort) |
 
 ## Shared artefacts
 
-- **Master brief**: `/<repo>/docs/briefs/<task>-brief.md`. Describes overall goal, all stages, stage contracts (what each stage must produce for the next).
-- **Stage docs**: one per stage. The *output* of stage k — `/<repo>/docs/pipeline/<task>-stage-1-design.md`, `<task>-stage-2-impl-notes.md`, etc.
-- **Per-session work doc**: `/<repo>/docs/worker/<session-name>-work.md`. Progress / Findings / Next up for that stage only.
+- `<cwd>/.codex-team/brief.md` — overall brief
+- `<cwd>/.codex-team/<stage-name>.md` — each stage writes its handoff file
 
-**Stage docs are the baton.** Stage k writes its stage doc; stage (k+1) reads it.
+## Orchestration
 
-## Communication flow
+```bash
+TOK=claude-$(date +%s)
+codex-team daemon user create $TOK >/dev/null
 
-```
-                     master brief
-                         │
-                         ▼
-  [stage-1] ── writes ── stage-1.md
-                         │
-                         ▼ (baton)
-  [stage-2] ── reads ── stage-1.md
-             ── writes ── stage-2.md
-                         │
-                         ▼ (baton)
-  [stage-3] ── reads ── stage-2.md
-             ── writes ── stage-3.md
-                         │
-                         ▼
-                      Claude
+cd /repo
+mkdir -p .codex-team
+echo "$BRIEF" > .codex-team/brief.md
+
+stages=(explorer designer implementer tester reviewer)
+profiles=(explorer planner fixer tester reviewer)
+
+for i in "${!stages[@]}"; do
+  codex-team -b $TOK session new "${stages[$i]}" --profile "${profiles[$i]}" --cwd "$(pwd)"
+done
 ```
 
-Claude controls the baton pass. When stage k's session emits `turn-done` with the stage doc complete, Claude closes stage k (or leaves idle) and fires stage (k+1).
+### Run the stages
 
-## Iteration loop
-
-```
-1. Write master brief with clearly named stages and their contracts.
-2. Create all N sessions upfront? Or just stage 1 and create next stages on-demand?
-   → Create stage 1 now; create next stages when baton passes.
-   (Avoids resource cost for later stages that may not be reached.)
-3. Dispatch stage 1.
-4. On stage-1 turn-done:
-   - Read stage-1.md.
-   - Verify it meets stage 1's contract from the master brief.
-   - If yes: create stage-2 session, dispatch. Close stage-1 (thread preserved).
-   - If no: re-dispatch stage 1 with specific feedback.
-5. Repeat per stage.
-6. After last stage: Claude merges + final review.
-```
-
-## Send templates
-
-**First send — stage 1:**
+Claude runs each sequentially, waiting for `turn.completed` before starting the next:
 
 ```
-codex-team send <stage-1-name> "start: read <master-brief>; your stage is <stage-1-role>; deliver <stage-1-contract> to <stage-1-doc-path>; create the work doc at <work-path>; reply 'stage 1 done' with a one-line summary"
+stage explorer:
+  message send explorer "Read brief.md. Survey the codebase. Write findings to .codex-team/explorer.md."
+  wait for turn.completed.
+
+stage designer:
+  message send designer "Read brief.md and .codex-team/explorer.md. Propose a design in .codex-team/designer.md."
+  wait.
+
+stage implementer:
+  message send implementer "Read brief.md and .codex-team/designer.md. Implement the design. Log your progress in .codex-team/implementer.md."
+  wait.
+
+stage tester:
+  message send tester "Run the test suite. Log results in .codex-team/tester.md."
+  wait.
+
+stage reviewer:
+  message send reviewer "Read everything in .codex-team/*.md. Write .codex-team/reviewer.md with verdict + any concerns."
+  wait.
+
+Claude reads reviewer.md, decides to ship or loop back.
 ```
 
-**Baton-pass send — stage k:**
+## Handling stage failures
 
-```
-codex-team send <stage-k-name> "start: read <master-brief> for context; read <stage-(k-1)-doc-path> — that is your input from the previous stage; your stage is <stage-k-role>; deliver <stage-k-contract> to <stage-k-doc-path>; create the work doc at <work-path>; reply 'stage <k> done' with a one-line summary"
-```
+Each stage's exit verdict can be: `accept`, `retry`, `back-up-N-stages`. Claude reads the stage's output file + latest `turn.completed` status:
 
-**Re-dispatch stage k** (after Claude rejected its first attempt):
+- `turn.status == "failed"` → look at `codex_error_info`; maybe retry the stage
+- Stage output empty or unusable → message the stage again with a sharpened prompt
+- Stage output says "blocked by earlier stage's mistake" → go back N stages and redo from there
 
-```
-codex-team send <stage-k-name> "rework: your stage <k> output at <stage-k-doc-path> is missing <specific-gap>. Read <stage-(k-1)-doc-path>'s section <relevant-section>. Update <stage-k-doc-path> to address <specific-gap>; reply 'stage <k> done' when the gap is closed"
-```
+Cap: don't back up more than once per pipeline run; escalate to plan-execute-verify or worker-reviewer if you're thrashing.
 
-## Contract example (in master brief)
+## Parallel early stages
 
-Make the stage contracts explicit in the master brief so each stage knows what to deliver:
+When two stages are independent (e.g. `explorer` and `read-prior-art`), kick them off in parallel:
 
-```markdown
-## Stages
-
-### Stage 1: Design (session: architect)
-- Produce <task>-stage-1-design.md with sections: Architecture, Interfaces, Alternatives considered, Decision.
-- Must not include implementation details beyond interface shapes.
-
-### Stage 2: Implement (session: implementer)
-- Read Stage 1 output.
-- Produce the code change + <task>-stage-2-impl-notes.md with sections: Files changed, Key decisions, Open questions, Deviation from design (if any).
-
-### Stage 3: Test (session: tester)
-- Read Stage 1 + 2 outputs.
-- Produce new tests + <task>-stage-3-test-notes.md with sections: Tests added, Tests updated, Coverage gaps, Failures encountered.
-
-### Stage 4: Document (session: doc-writer)
-- Read all prior stages.
-- Update public docs + <task>-stage-4-doc-changes.md with section: Doc files changed.
+```bash
+codex-team -b $TOK message send explorer "..."
+codex-team -b $TOK message send prior-art "..."
+# wait for both turn.completed, then proceed to designer
 ```
 
-The explicit contracts are what makes this playbook work. Without them, stage (k+1) doesn't know what it can rely on.
+## Termination
 
-## Exit criteria
+```bash
+for s in "${stages[@]}"; do codex-team -b $TOK session detach "$s"; done
+```
 
-- Every stage's doc meets its contract.
-- Final stage's `turn-done` received.
-- Claude has reviewed all stage docs in order and approved the pipeline's output.
+## Anti-patterns
 
-Close sessions in reverse order (last stage first is conventional but arbitrary).
-
-## Failure modes
-
-| Smell | Fix |
-|---|---|
-| Stage k produces an ambiguous artefact; stage (k+1) is confused | Master brief's stage contract is weak. Edit + re-dispatch stage k. |
-| Stage (k+1) re-does stage k's work | You didn't close stage k's session or didn't anchor stage (k+1) at stage k's doc. Re-anchor with specific path. |
-| A stage stalls waiting for a decision only you can make | Read the `Open questions` in that stage's work doc; answer in next send. |
-| Stage doc and work doc end up the same file | They're different. Stage doc = output, designed to be read by the next stage. Work doc = session's internal progress log. |
-| Claude skips reviewing stage k before dispatching (k+1) | Don't. Every baton-pass is a checkpoint. Spending one read per stage is the whole point. |
-| You want to run stages in parallel | Then it's not a pipeline; it's map-reduce. |
-
-## Variants
-
-- **Pipeline with feedback loops**: stage 3 discovers a stage 1 flaw; re-open stage 1. Model this explicitly in the brief's failure-mode section. Don't silently rewind.
-- **Pipeline with inner reflexion**: stage k may internally use `reflexion.md` (critic + worker) to refine its artefact before declaring done. You (outer-pipeline Claude) see it as one stage; the inner critic is stage k's concern.
-
-## Related
-
-- Each stage may adopt its own inner playbook — e.g. stage 3's tester session might run `reflexion.md` with a critic verifier. Outer pipeline doesn't care how a stage reaches its done state.
-- For non-sequential but multi-phase work where role transitions are dynamic → `swarm.md`.
+- Using a pipeline for work that's actually one stage. Adds 5× context without quality gain.
+- Skipping stages because "this task is easy". If you decide you don't need a stage, remove it from the playbook — don't just stop calling it.
+- Stages writing to each other's files. One file per stage, owned by that stage.

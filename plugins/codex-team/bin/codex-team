@@ -3,12 +3,12 @@ set -euo pipefail
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
-# Trust CLAUDE_PLUGIN_DATA only when Claude is actually running this plugin
-# (CLAUDE_PLUGIN_ROOT is set) or when the data path clearly belongs to
-# codex-team. This prevents manual absolute-path calls from inheriting another
-# plugin's CLAUDE_PLUGIN_DATA and reusing the wrong daemon socket/registry.
+# When invoked by Claude Code, route persistent state under the plugin data dir
+# so multiple plugin instances don't stomp on each other. Only honour
+# CLAUDE_PLUGIN_DATA when we're certain this invocation is from Claude (i.e.
+# CLAUDE_PLUGIN_ROOT is set) or the plugin data path clearly belongs to us.
 if [[ -n "${CLAUDE_PLUGIN_DATA:-}" && ( -n "${CLAUDE_PLUGIN_ROOT:-}" || "${CLAUDE_PLUGIN_DATA}" == *codex-team* ) ]]; then
-  export CODEX_TEAM_DAEMON_DATA_DIR="${CODEX_TEAM_DAEMON_DATA_DIR:-${CLAUDE_PLUGIN_DATA}/data}"
+  export CODEX_TEAM_DATA_DIR="${CODEX_TEAM_DATA_DIR:-${CLAUDE_PLUGIN_DATA}/data}"
 fi
 
 ENTRY="${PLUGIN_ROOT}/dist/main.js"

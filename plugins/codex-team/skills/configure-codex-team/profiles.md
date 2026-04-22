@@ -1,129 +1,106 @@
-# Profiles
+# Codex profiles
 
-Reference for `configure-codex-team`. The profile system lets you specialise a session at creation without passing a dozen flags.
+codex-team does not own the profile concept — it's native to Codex. `session new --profile <name>` passes the selected profile through to app-server as part of the thread-start config payload; codex then resolves that profile from its own config.
 
-A profile layers over `[defaults]` — set only what you want different.
+## Where profiles live
 
----
+Codex reads profiles from `~/.codex/config.toml` (or wherever `CODEX_HOME` points). The codex-team daemon does NOT read this file.
 
-## Defining a profile
-
-In `config.toml`:
-
-```toml
-[profiles.<name>]
-model = "gpt-5.4"                    # optional override
-model_provider = ""
-reasoning_effort = "high"            # low | medium | high | minimal
-approval_policy = "never"            # never | on-request | on-failure
-sandbox = "danger_full_access"
-personality = ""                     # concise | default | verbose | …
-service_tier = ""
-base_instructions = ""               # prepended to every turn
-developer_instructions = """
-Review correctness, risk, and tests. Do not commit.
-"""
-```
-
-All keys are optional; missing keys inherit from `[defaults]`.
-
-## Applying a profile
-
-```bash
-codex-team session create <name> --cwd <abs-path> --profile <name>
-```
-
-Per-turn overrides (without touching the profile):
-
-```bash
-codex-team send <name> "<prompt>" --effort low --personality concise
-```
-
-Per-turn overrides are for exceptions. If you find yourself overriding the same flag on most sends, promote it to the profile.
-
-## Suggested shapes
-
-Minimal baseline; workers do targeted, well-scoped tasks:
-
-```toml
-[profiles.worker]
-model = "gpt-5.4"
-reasoning_effort = "medium"
-developer_instructions = """
-Execute the task in the work doc you were pointed at. Update Progress / Findings / Next up.
-Do not run git commit|merge|push|branch|tag — Claude owns version control.
-"""
-```
-
-Code reviewer; higher effort, concise output:
+Example `~/.codex/config.toml`:
 
 ```toml
 [profiles.reviewer]
 model = "gpt-5.4"
-reasoning_effort = "high"
-personality = "concise"
-developer_instructions = """
-Review correctness, risk, style, and tests. Report findings in the work doc.
-Do not commit. Do not modify code unless explicitly asked; suggest diffs instead.
-"""
-```
+reasoning_effort = "xhigh"
+approval_policy = "never"
+sandbox_mode = "read-only"
 
-Critic / reflexion loop; iterating on the same deliverable:
-
-```toml
-[profiles.critic]
+[profiles.fixer]
 model = "gpt-5.4"
 reasoning_effort = "high"
-personality = "concise"
-developer_instructions = """
-You are the critic. Point at the current deliverable, identify the top 3 weaknesses with line refs, and propose specific fixes. Do not rewrite the deliverable yourself.
-"""
-```
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
 
-Quickfix; for small bugs where `high` is wasteful:
-
-```toml
-[profiles.quickfix]
-model = "gpt-5.4-mini"
-reasoning_effort = "low"
-```
-
-Ephemeral scratch; for exploratory probes you won't resume:
-
-```toml
-[profiles.scratch]
+[profiles.explorer]
 model = "gpt-5.4-mini"
 reasoning_effort = "medium"
+approval_policy = "never"
+sandbox_mode = "read-only"
 ```
 
-Usage:
+## Usage with codex-team
 
 ```bash
-codex-team session create probe --cwd <abs-path> --profile scratch --ephemeral
+codex-team -b $TOK session new review-worker --profile reviewer --cwd /repo
 ```
 
-Ephemeral sessions die with their app-server; cannot be resumed after daemon shutdown.
+Precedence when `--profile` is combined with individual flags:
 
-## Profile naming
+```
+  explicit single flag  >  profile field  >  codex-team default  >  codex internal default
+```
 
-- Keep names descriptive of the **role**, not the task — `reviewer`, `worker`, `critic`, `quickfix`, `scratch`.
-- A playbook in `codex-team-playbooks/` typically names which profile each role should use. Define those profiles once; reuse across tasks.
+So:
 
-## Interaction with per-turn overrides
+```bash
+# profile says sandbox=read-only, but we override just for this session
+codex-team -b $TOK session new demo --profile reviewer --sandbox workspace-write
+```
 
-| Source | Wins over |
-|---|---|
-| Per-turn flag (`send --effort X`) | profile value |
-| Profile value | `[defaults]` |
-| `[defaults]` | built-in default |
+## Recipe: worker roles
 
-Command-line visible; profile-invisible; defaults-implicit. When in doubt, `codex-team session status <name>` reports the effective values.
+Define once, reuse:
 
-## Red flags
+```toml
+# ~/.codex/config.toml
+[profiles.reviewer]
+model = "gpt-5.4"
+reasoning_effort = "xhigh"
+approval_policy = "never"
+sandbox_mode = "read-only"
 
-| Thought | Correction |
-|---|---|
-| "I'll add every override as a CLI flag for clarity." | Flag lists longer than ~3 items → make a profile. |
-| "One profile to rule them all — `universal`." | Profile per role, not per project. A reviewer profile, a worker profile, etc. |
-| "Crank `reasoning_effort=high` on every profile." | → `codex-tricks.md`. `high` is for ambiguous/deep problems. |
-| "Ship a `danger_full_access=false` profile for safety." | The plugin's `never` approval + full-access sandbox is intentional. Narrowing defeats the async loop. If the user asks for safety, build a named profile (e.g. `sandbox-gated`) and use only on their explicit request. |
+[profiles.fixer]
+model = "gpt-5.4"
+reasoning_effort = "high"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[profiles.tester]
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+```
+
+Spin up a review-fix-test team:
+
+```bash
+TOK=claude-$(date +%s)
+codex-team daemon user create $TOK
+
+for role in reviewer fixer tester; do
+  codex-team -b $TOK session new "$role" --profile "$role" --cwd /repo
+done
+```
+
+See `skills/codex-team-playbooks/worker-reviewer.md` for orchestration.
+
+## Inspecting a loaded profile
+
+After `session new`, the session record shows what codex-team requested / defaulted locally (`model`, `sandbox`, `approval`, `effort`, `profile`). Codex does not echo a fully expanded "resolved profile" object back over `thread/start`, so treat this as the requested launch shape, not a proof that every profile field was applied.
+
+Check the stored session metadata with:
+
+```bash
+codex-team -b $TOK session info <name>
+```
+
+## Not profiles
+
+These belong to `daemon config`, not `~/.codex/config.toml`:
+
+- daemon-side defaults for when `--profile` is unused: `codex.default_*`
+- retry behaviour
+- sock path / log path
+
+See `config-keys.md`.

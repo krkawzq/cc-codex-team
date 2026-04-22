@@ -1,0 +1,233 @@
+# CLI reference
+
+Every command in `codex-team`. Output is always a single JSON object (`{"ok":true,"data":...}` or `{"ok":false,"error":{...}}`), except streaming commands which emit NDJSON.
+
+## Global
+
+```
+codex-team [global-flags] <command> [args] [flags]
+```
+
+| Flag | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `-b, --bearer <token>` | string | Yes (except `daemon` group + `version`) | — | User identity |
+| `-v, --verbose` | bool | No | false | cli-side debug to stderr |
+| `--daemon-sock <path>` | path | No | from config | Override sock for debug/test |
+| `-h, --help` | bool | No | false | Print help |
+
+Top-level convenience: `codex-team version` (no `-b`).
+Per-command help works too: `codex-team session --help`, `codex-team session new --help`, `codex-team daemon config set --help`, etc.
+`--help` is a parse terminator: `codex-team daemon --help user create` prints help for `daemon` and ignores the trailing `user create`.
+
+## daemon group (no `-b` required)
+
+| Command | Purpose |
+|---|---|
+| `daemon status` | Daemon pid / uptime / sock / data_dir / user count / app-server count |
+| `daemon start` | Explicit spawn (idempotent; noop if running) |
+| `daemon stop [--force]` | Graceful shutdown. `--force` = SIGKILL |
+| `daemon restart` | Hand off to a new daemon process (3s sock-vacate window) |
+| `daemon logs [-f] [-n <N>] [--level <lvl>]` | Stream daemon log file |
+| `daemon user create <token>` | Register a user |
+| `daemon user destroy <token> [--force]` | Remove user + their sessions, pending requests, and retained events (`--force` required if live sessions remain) |
+| `daemon user list` | All registered users |
+| `daemon config get <key>` | `{value, default, source, needs_restart}` |
+| `daemon config set <key> <value>` | Apply (hot) or queue for restart (cold) |
+| `daemon config unset <key>` | Revert to default |
+| `daemon config list [--explicit-only]` | Dump all config |
+| `daemon config reset --yes` | Wipe all overrides |
+
+## status (user-scoped, requires `-b`)
+
+```
+codex-team -b <token> status
+```
+
+Returns your user's live session count, retained event count, pending requests, plus a daemon summary.
+
+## session group
+
+### `session new [name]`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--model <m>` | string | `codex.default_model` config | Codex model id |
+| `--cwd <path>` | path | current dir | Codex working directory |
+| `--sandbox <mode>` | enum | `codex.default_sandbox` | `read-only` / `workspace-write` / `danger-full-access` |
+| `--approval <policy>` | enum | `codex.default_approval` | `never` / `on-request` / `on-failure` / `untrusted` |
+| `--effort <level>` | enum | `codex.default_effort` | `minimal` / `low` / `medium` / `high` / `xhigh` |
+| `--personality <preset>` | string | — | Codex personality preset |
+| `--base-instructions <file>` | path | — | System-level instructions file |
+| `--developer-instructions <file>` | path | — | Developer-level instructions file |
+| `--profile <name>` | string | — | Codex config profile. Single flags override same-name fields |
+
+Session auto-goes live on creation. Name rules: `^[A-Za-z0-9_\-]{1,128}$`, not UUID, not `th-*`.
+
+### `session attach <name|thread_id>`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--takeover` | bool | false | Seize a session currently live under another user |
+
+Notes:
+- By name, attach only resolves your own live registry entry or a uniquely live session under another user.
+- For detached threads, use the `thread_id`.
+- If another user has the same session name live and the name is ambiguous, attach errors instead of picking one arbitrarily.
+
+### `session detach <name|thread_id>`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--graceful` | bool | false | Skip `turn/interrupt`; wait for the current turn to go idle before detaching |
+
+### `session fork <source> [new_name]`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--at-turn <turn_id>` | string | tip | Fork point |
+
+### `session rename <name|thread_id> <new_name>`
+
+No flags. Target must already be live in your user registry.
+
+### `session info <name|thread_id>`
+
+No flags. Live names work directly; detached lookup is only reliable by `thread_id`, and the fallback returns thread metadata only.
+
+### `session context <name|thread_id>`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--format <fmt>` | enum | `json` | `json` / `markdown` |
+
+### `session list`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--all` | bool | false | Include non-live threads (from `thread/list`) |
+| `--sort <field>` | enum | `last_active` | `name` / `last_active` / `turn_count` / `created_at` |
+| `--format <fmt>` | enum | `json` | `json` / `table` |
+
+## message group
+
+### `message send <session> [prompt]`
+
+| Input | | |
+|---|---|---|
+| `[prompt]` positional | conditional | Or use `--stdin` / `--file` / `--attach` |
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--stdin` | bool | false | Read prompt from stdin |
+| `--file <path>` | path | — | Read prompt from file |
+| `--attach <path>` | repeatable | — | Attach local image file(s) only (`png/jpg/jpeg/gif/webp/bmp/svg`) |
+
+Non-blocking. Returns `{ started, turn_id, queue_id, queued_depth }`. `queue_id` is `null` when the turn starts immediately.
+
+### `message peer <session> [prompt]`
+
+Same flags as `send`. Calls `turn/steer` — only valid during an active turn.
+
+### `message interrupt <session>`
+
+No flags. Hard cancel.
+
+### `message approval <session> <request_id> [shortcut]`
+
+| Input | |
+|---|---|
+| `<request_id>` | From the `approval.*` event `payload.request_id` |
+| `[shortcut]` | `accept` / `accept-session` / `decline` / `cancel` |
+
+| Flag | | Notes |
+|---|---|---|
+| `--json <payload>` | string | Complete response JSON |
+| `--file <path>` | path | Read JSON from file |
+| `--stdin` | bool | Read JSON from stdin |
+
+Shortcut validity depends on approval kind:
+
+- `approval.permissions` allows `accept`, `accept-session`, `decline`; `cancel` is invalid.
+- `approval.mcp_elicitation` allows `accept`, `decline`, `cancel`; `accept-session` is invalid.
+- `approval.mcp_elicitation` in `mode:"form"` requires `--json` for `accept` because `content` must be supplied.
+
+### `message answer <session> <request_id> [answer]`
+
+| Input | |
+|---|---|
+| `[answer]` | Inline free text — only works if request has exactly one question |
+
+Flags: `--json` / `--file` / `--stdin` for multi-question.
+
+### `message history <session>`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--limit <n>` | int | 50 | Max turns returned |
+| `--since <cursor\|-N>` | string\|int | tip | Pagination cursor from a previous response, or relative `-N` = start N turns back from tip |
+| `--format <fmt>` | enum | `json` | `json` / `markdown` |
+
+Output is newest-to-oldest.
+
+### `message tail <session>`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `-n <count>` | int | 3 | Return last N turns |
+| `-f, --follow` | bool | false | Stream new turn snapshots as they complete |
+| `--format <fmt>` | enum | `json` | `json` / `markdown` |
+
+## monitor group
+
+### `monitor events`
+
+Streaming. Emits NDJSON.
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--interval <s>` | int | `monitor.default_interval_seconds` | Batch-push cadence (mutually exclusive with `--stream`) |
+| `--stream` | bool | false | Push each event as it arrives |
+| `--filter <type,...>` | string | — | Whitelist |
+| `--exclude <type,...>` | string | — | Blacklist |
+| `--include-delta` | bool | false | Include `*_delta` events |
+| `--since <id>` | string | — | Resume from event id. `id_rotated` if evicted; `invalid_params` if the id never existed in the current log |
+| `--session <name\|uuid>` | string | — | Only events for this session |
+
+### `monitor alarm <interval_s> <command>`
+
+Streaming. Runs `<command>` via the platform shell every `<interval_s>` seconds (`$SHELL -c` on Unix, `cmd.exe /d /s /c` on Windows).
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--once` | bool | false | Run once and end |
+| `--timeout <s>` | int | 60 | SIGTERM after this many seconds, SIGKILL 5s later; emits `__alarm_event: timeout` |
+
+Emits `{stdout, stderr, __alarm_event: exit|timeout|spawn_error, exit_code, duration_ms}` per run.
+
+## Error codes
+
+| Code | Typical cause |
+|---|---|
+| `daemon_unreachable` | Sock missing / daemon not ready (cli waits up to 15s, with per-attempt connect retries) |
+| `user_not_found` | Bearer token hasn't been `daemon user create`'d |
+| `user_already_exists` | Idempotent signal; treat as success for re-register |
+| `session_not_found` | Session name/thread_id not in your user's live set |
+| `session_not_live` | Command requires live; target is detached |
+| `session_busy` | Target is live under another user — use `--takeover` |
+| `invalid_params` | Missing positional, mutually-exclusive flags, bad enum |
+| `invalid_decision` | Shortcut mismatches approval kind |
+| `id_rotated` | `--since <id>` points at an evicted event |
+| `codex_error` | codex JSON-RPC returned an error — `data.codex_error_info` has the type |
+| `internal` | Daemon bug — check `daemon logs` |
+| `not_implemented` / `method_not_found` | Typo in the command path |
+
+`codex_error` envelope `data`:
+
+```json
+{
+  "rpc_code": -32602,
+  "rpc_message": "...",
+  "codex_error_info": "context_window_exceeded" | "server_overloaded" | ... | null,
+  "additional_details": null | "..."
+}
+```

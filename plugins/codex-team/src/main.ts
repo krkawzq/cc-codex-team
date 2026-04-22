@@ -1,22 +1,21 @@
-import { CliClient } from "./cli";
-import { runDaemon } from "./daemon";
-import { runHook } from "./hooks";
+import { runCli } from "./cli/run";
+import { runDaemon } from "./daemon/run";
 
-async function main(argv: string[]): Promise<number> {
-  if (argv[0] === "__daemon") {
-    return await runDaemon();
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+
+  const daemonIdx = argv.indexOf("--daemon-internal");
+  if (daemonIdx >= 0) {
+    argv.splice(daemonIdx, 1);
+    const code = await runDaemon();
+    process.exit(code);
   }
-  if (argv[0] === "hook") {
-    return await runHook(argv.slice(1));
-  }
-  return await new CliClient().run(argv);
+
+  const code = await runCli(argv);
+  process.exit(code);
 }
 
-void main(process.argv.slice(2))
-  .then((code) => {
-    process.exitCode = code;
-  })
-  .catch((error) => {
-    process.stderr.write(`${(error as Error).message}\n`);
-    process.exitCode = 1;
-  });
+main().catch((e) => {
+  process.stderr.write(`fatal: ${(e as Error).message ?? e}\n`);
+  process.exit(1);
+});
