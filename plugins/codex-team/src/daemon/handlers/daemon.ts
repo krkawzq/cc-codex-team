@@ -7,6 +7,7 @@ import { CodexTeamError, invalidParams } from "../../errors";
 import type { HandlerFn } from "../dispatch";
 import { shutdownDaemon } from "../shutdown";
 import { logger } from "../../logger";
+import { VERSION } from "../../version";
 
 export const daemonStatus: HandlerFn = async (ctx) => {
   const uptimeMs = Date.now() - ctx.startedAt.getTime();
@@ -299,11 +300,5 @@ async function readBytes(filePath: string, start: number, length: number): Promi
 }
 
 function getPkgVersion(): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const pkg = require("../../../package.json");
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
-  }
+  return VERSION;
 }

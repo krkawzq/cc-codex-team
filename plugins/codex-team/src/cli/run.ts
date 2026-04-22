@@ -9,6 +9,7 @@ import { parseArgs, commandKey, type ParsedArgs } from "./args";
 import { renderHelp } from "./help";
 import { err, ok } from "../result";
 import { ConfigStore } from "../daemon/config";
+import { VERSION } from "../version";
 
 const DAEMON_POLL_INTERVAL_MS = 100;
 const DEFAULT_DAEMON_READY_TIMEOUT_MS = 15000;
@@ -376,12 +377,7 @@ function spawnDaemon(): void {
 }
 
 function getCliVersion(): string {
-  try {
-    const pkg = require("../../package.json");
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
-  }
+  return VERSION;
 }
 
 function randomId(): string {
