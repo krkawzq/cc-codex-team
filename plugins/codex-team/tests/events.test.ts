@@ -115,6 +115,16 @@ describe("EventLog", () => {
     const dir = mkTmpDir();
     dirs.push(dir);
     const log = new EventLog(100, dir);
+    // Prime the user's event-log file so subsequent flushes take the appendFile
+    // path rather than the one-shot writeFile-with-header path for a fresh file.
+    await log.append("user-1", {
+      type: "warning",
+      session: null,
+      thread_id: null,
+      payload: { prime: true },
+    });
+    await log.flush();
+
     const originalAppendFile = fs.promises.appendFile.bind(fs.promises);
     const appendFileSpy = vi.spyOn(fs.promises, "appendFile")
       .mockRejectedValueOnce(new Error("disk full"))
@@ -132,11 +142,11 @@ describe("EventLog", () => {
 
     const filePath = path.join(dir, "users", encodeToken("user-1"), "events.log");
     const lines = fs.readFileSync(filePath, "utf8").trim().split("\n");
-    const events = lines.map((line) => JSON.parse(line)).filter((entry) => entry.kind !== "event_log_header");
+    const events = lines.map((line) => JSON.parse(line)).filter((entry) => entry.kind !== "event_log_header" && entry?.payload?.prime !== true);
     expect(appendFileSpy).toHaveBeenCalledTimes(2);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
-      id: "evt-1",
+      id: "evt-2",
       payload: { attempt: 1 },
     });
   });

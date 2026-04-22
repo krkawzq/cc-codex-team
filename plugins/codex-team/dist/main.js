@@ -72,30 +72,41 @@ var APP = "codex-team";
 var WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\";
 var UNIX_SOCKET_MAX_BYTES = 90;
 function homeDir() {
+  if (process.platform === "win32") {
+    const nativeHome = import_node_os.default.homedir();
+    if (nativeHome) return nativeHome;
+    if (process.env.USERPROFILE) return process.env.USERPROFILE;
+    if (process.env.HOMEDRIVE && process.env.HOMEPATH) return `${process.env.HOMEDRIVE}${process.env.HOMEPATH}`;
+    if (process.env.HOME) return process.env.HOME;
+    return "\\";
+  }
   return process.env.HOME || import_node_os.default.homedir() || "/";
 }
 function defaultDataDir() {
-  return process.env.CODEX_TEAM_DATA_DIR || import_node_path.default.join(homeDir(), `.${APP}`);
+  const configured = process.env.CODEX_TEAM_DATA_DIR;
+  if (configured) return expandUserPath(configured);
+  return import_node_path.default.join(homeDir(), `.${APP}`);
 }
 function defaultSockPath(dataDir = defaultDataDir(), platform = process.platform) {
   const configured = process.env.CODEX_TEAM_SOCK;
-  if (configured) return normalizeSockPath(configured, platform);
-  if (platform === "win32") return namedPipePath(dataDir);
-  const candidate = import_node_path.default.join(dataDir, "daemon.sock");
+  if (configured) return normalizeSockPath(expandUserPath(configured, platform), platform);
+  const resolvedDataDir = expandUserPath(dataDir, platform);
+  if (platform === "win32") return namedPipePath(resolvedDataDir);
+  const candidate = import_node_path.default.join(resolvedDataDir, "daemon.sock");
   if (Buffer.byteLength(candidate, "utf8") <= UNIX_SOCKET_MAX_BYTES) return candidate;
-  return import_node_path.default.join(import_node_os.default.tmpdir(), `${APP}-${pathHash(dataDir)}.sock`);
+  return import_node_path.default.join(import_node_os.default.tmpdir(), `${APP}-${pathHash(resolvedDataDir)}.sock`);
 }
 function defaultLogPath(dataDir = defaultDataDir()) {
-  return import_node_path.default.join(dataDir, "daemon.log");
+  return import_node_path.default.join(expandUserPath(dataDir), "daemon.log");
 }
 function configFilePath(dataDir = defaultDataDir()) {
-  return import_node_path.default.join(dataDir, "config.json");
+  return import_node_path.default.join(expandUserPath(dataDir), "config.json");
 }
 function pidFilePath(dataDir = defaultDataDir()) {
-  return import_node_path.default.join(dataDir, "daemon.pid");
+  return import_node_path.default.join(expandUserPath(dataDir), "daemon.pid");
 }
 function usersDir(dataDir = defaultDataDir()) {
-  return import_node_path.default.join(dataDir, "users");
+  return import_node_path.default.join(expandUserPath(dataDir), "users");
 }
 function userDir(token, dataDir = defaultDataDir()) {
   return import_node_path.default.join(usersDir(dataDir), encodeToken(token));
@@ -119,6 +130,15 @@ function isNamedPipePath(sockPath) {
 }
 function isFilesystemSockPath(sockPath, platform = process.platform) {
   return !isNamedPipePath(normalizeSockPath(sockPath, platform));
+}
+function expandUserPath(input, platform = process.platform, home = homeDir()) {
+  if (/^~[^\\/]/.test(input)) {
+    throw new Error(`unsupported user-home path '${input}'; only '~' is supported`);
+  }
+  if (input !== "~" && !input.startsWith("~/") && !input.startsWith("~\\")) return input;
+  const pathModule = platform === "win32" ? import_node_path.default.win32 : import_node_path.default.posix;
+  const suffix = input === "~" ? "" : input.slice(1).replace(/^[\\/]+/, "");
+  return suffix.length > 0 ? pathModule.join(home, suffix) : home;
 }
 function encodeToken(token) {
   return Buffer.from(token, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -225,6 +245,10 @@ function probeSock(sockPath, timeoutMs = 200) {
     });
     sock.once("error", () => {
       clearTimeout(timer);
+      try {
+        sock.destroy();
+      } catch {
+      }
       resolve(false);
     });
   });
@@ -273,7 +297,15 @@ var COMMANDS = /* @__PURE__ */ new Set([
   "monitor:events",
   "monitor:alarm"
 ]);
-var COMMAND_GROUPS = /* @__PURE__ */ new Set(["daemon", "session", "message", "monitor"]);
+var HELP_PATHS = /* @__PURE__ */ new Set([
+  ...COMMANDS,
+  "daemon",
+  "daemon:user",
+  "daemon:config",
+  "session",
+  "message",
+  "monitor"
+]);
 var GLOBAL_FLAGS = {
   "-b": { name: "bearer", takesValue: true },
   "--bearer": { name: "bearer", takesValue: true },
@@ -312,17 +344,16 @@ function parseArgs(argv) {
       else if (spec.name === "daemonSock") result.daemonSock = v;
     } else {
       if (spec.name === "verbose") result.verbose = true;
-      else if (spec.name === "help") result.help = true;
+      else if (spec.name === "help") {
+        result.help = true;
+        break;
+      }
     }
   }
-  const matched = matchCommand(nonGlobal);
+  const matched = matchCommand(nonGlobal, result.help ? HELP_PATHS : COMMANDS);
   if (!matched) {
     if (nonGlobal.length === 0) {
       result.help = true;
-      return result;
-    }
-    if (result.help && nonGlobal.length === 1 && COMMAND_GROUPS.has(nonGlobal[0])) {
-      result.commandPath = [nonGlobal[0]];
       return result;
     }
     result.unknown = `unknown command: ${nonGlobal.join(" ")}`;
@@ -390,110 +421,1063 @@ function setFlag(flags, key, value) {
     flags[key] = value;
   }
 }
-function matchCommand(tokens) {
+function matchCommand(tokens, available) {
   const maxDepth = Math.min(tokens.length, 3);
   for (let len = maxDepth; len >= 1; len--) {
     const key = tokens.slice(0, len).join(":");
-    if (COMMANDS.has(key)) {
+    if (available.has(key)) {
       return { path: tokens.slice(0, len), remaining: tokens.slice(len) };
     }
   }
   return null;
 }
-function commandKey(path11) {
-  return path11.join(":");
+function commandKey(path12) {
+  return path12.join(":");
 }
 
 // src/cli/help.ts
-var HELP_TEXT = `codex-team \u2014 cli + daemon for orchestrating codex app-server sessions
-
-USAGE
-  codex-team -b <token> <command> [args] [flags]
-
-GLOBAL FLAGS
-  -b, --bearer <token>     user identity (required, except for 'daemon' subcommands)
-  -v, --verbose            cli debug logs to stderr
-  --daemon-sock <path>     override daemon sock path (for debug/test isolation)
-  -h, --help               show this help
-
-TOP-LEVEL
-  version                  print cli + daemon version
-  status                   summary of current user (requires -b)
-
-COMMAND GROUPS
-  daemon   <subcmd>        daemon-level management (no -b needed)
-  session  <subcmd>        session management
-  message  <subcmd>        message / turn operations on a live session
-  monitor  <subcmd>        event subscription & alarms
-
-Run 'codex-team <group> --help' for details on each group.
-Full specification: plugins/codex-team/docs/\u8BBE\u8BA1\u6587\u6863.md
-`;
-var GROUP_HELP = {
-  daemon: `codex-team daemon \u2014 daemon management
-
-USAGE
-  codex-team daemon <subcmd> [flags]
-
-SUBCOMMANDS
-  status
-  start
-  stop [--force]
-  restart
-  logs [--n <N>] [--level <level>] [--follow]
-  user create <token>
-  user destroy <token>
-  user list
-  config get <key>
-  config set <key> <value>
-  config unset <key>
-  config list [--explicit-only]
-  config reset --yes
-`,
-  session: `codex-team session \u2014 live session management
-
-USAGE
-  codex-team -b <token> session <subcmd> [args] [flags]
-
-SUBCOMMANDS
-  new [name]
-  attach <name|thread_id> [--takeover]
-  detach <name|thread_id> [--graceful]
-  fork <name|thread_id> [new_name] [--at-turn <turn_id>]
-  rename <name|thread_id> <new_name>
-  info <name|thread_id>
-  context <name|thread_id> [--format json|markdown]
-  list [--all] [--sort <field>] [--format json|table]
-`,
-  message: `codex-team message \u2014 turn operations on a live session
-
-USAGE
-  codex-team -b <token> message <subcmd> [args] [flags]
-
-SUBCOMMANDS
-  send <session> <text>|--file <path>|--stdin [--attach <image>...]
-  peer <session> <text>|--file <path>|--stdin [--attach <image>...]
-  interrupt <session>
-  approval <session> <request_id> <shortcut>|--json <payload>|--file <path>|--stdin
-  answer <session> <request_id> <text>|--json <payload>|--file <path>|--stdin
-  history <session> [--since <cursor|-N>] [--limit <N>] [--format json|markdown]
-  tail <session> [--n <N>] [--follow] [--format json|markdown]
-`,
-  monitor: `codex-team monitor \u2014 event streams and alarms
-
-USAGE
-  codex-team -b <token> monitor <subcmd> [args] [flags]
-
-SUBCOMMANDS
-  events [--stream|--follow] [--since <event_id>] [--interval <seconds>]
-  alarm <session> <command> [--interval <seconds>] [--timeout <seconds>]
-`
-};
-function helpTextFor(commandPath) {
-  if (commandPath.length === 1) {
-    return GROUP_HELP[commandPath[0]] ?? HELP_TEXT;
+function leaf(node) {
+  return { ...node, subcommands: [] };
+}
+var PROMPT_SOURCE_FLAGS = [
+  {
+    long: "--stdin",
+    type: "bool",
+    default: "false",
+    required: false,
+    description: "Read the prompt from stdin."
+  },
+  {
+    long: "--file",
+    type: "path",
+    required: false,
+    description: "Read the prompt from a file."
+  },
+  {
+    long: "--attach",
+    type: "path[]",
+    required: false,
+    description: "Attach input files such as images."
   }
-  return HELP_TEXT;
+];
+var JSON_RESPONSE_FLAGS = [
+  {
+    long: "--json",
+    type: "string",
+    required: false,
+    description: "Pass the full JSON response inline."
+  },
+  {
+    long: "--file",
+    type: "path",
+    required: false,
+    description: "Read the full JSON response from a file."
+  },
+  {
+    long: "--stdin",
+    type: "bool",
+    default: "false",
+    required: false,
+    description: "Read the full JSON response from stdin."
+  }
+];
+var SESSION_TARGET = {
+  name: "name|thread_id",
+  required: true,
+  description: "Session name or thread ID."
+};
+var LIVE_SESSION_TARGET = {
+  name: "name|thread_id",
+  required: true,
+  description: "Target live session name or thread ID."
+};
+var REQUEST_ID = {
+  name: "request_id",
+  required: true,
+  description: "Request ID from event payload.request_id."
+};
+var daemonUserGroup = {
+  name: "user",
+  summary: "Manage daemon users keyed by bearer token.",
+  usage: "codex-team daemon user <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team daemon user list"
+  ],
+  subcommands: [
+    leaf({
+      name: "create",
+      summary: "Create a daemon user for a bearer token.",
+      usage: "codex-team daemon user create <token>",
+      positionals: [
+        {
+          name: "token",
+          required: true,
+          description: "Bearer token for the new user."
+        }
+      ],
+      flags: [],
+      examples: [
+        "codex-team daemon user create agent-a"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "destroy",
+      summary: "Delete a daemon user and its tracked state.",
+      usage: "codex-team daemon user destroy <token> [flags]",
+      positionals: [
+        {
+          name: "token",
+          required: true,
+          description: "Bearer token for the user to delete."
+        }
+      ],
+      flags: [
+        {
+          long: "--force",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Delete the user even if live sessions remain."
+        }
+      ],
+      examples: [
+        "codex-team daemon user destroy agent-a --force"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "list",
+      summary: "List all daemon users and their activity.",
+      usage: "codex-team daemon user list",
+      positionals: [],
+      flags: [],
+      examples: [
+        "codex-team daemon user list"
+      ],
+      needs_bearer: false
+    })
+  ],
+  needs_bearer: false
+};
+var daemonConfigGroup = {
+  name: "config",
+  summary: "Read and update daemon configuration.",
+  usage: "codex-team daemon config <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team daemon config set codex.default_model gpt-5.4"
+  ],
+  subcommands: [
+    leaf({
+      name: "get",
+      summary: "Read one daemon configuration key.",
+      usage: "codex-team daemon config get <key>",
+      positionals: [
+        {
+          name: "key",
+          required: true,
+          description: "Config key such as daemon.idle_shutdown_hours."
+        }
+      ],
+      flags: [],
+      examples: [
+        "codex-team daemon config get codex.default_model"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "set",
+      summary: "Set one daemon configuration key.",
+      usage: "codex-team daemon config set <key> <value>",
+      positionals: [
+        {
+          name: "key",
+          required: true,
+          description: "Config key to write."
+        },
+        {
+          name: "value",
+          required: true,
+          description: "Value parsed according to the key type."
+        }
+      ],
+      flags: [],
+      examples: [
+        "codex-team daemon config set monitor.default_interval_seconds 10"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "unset",
+      summary: "Restore one daemon configuration key to default.",
+      usage: "codex-team daemon config unset <key>",
+      positionals: [
+        {
+          name: "key",
+          required: true,
+          description: "Config key to reset."
+        }
+      ],
+      flags: [],
+      examples: [
+        "codex-team daemon config unset codex.default_model"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "list",
+      summary: "List daemon configuration values and sources.",
+      usage: "codex-team daemon config list [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--explicit-only",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Show only keys set explicitly by the user."
+        }
+      ],
+      examples: [
+        "codex-team daemon config list --explicit-only"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "reset",
+      summary: "Reset every daemon configuration key to default.",
+      usage: "codex-team daemon config reset [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--yes",
+          type: "bool",
+          default: "false",
+          required: true,
+          description: "Confirm the full reset operation."
+        }
+      ],
+      examples: [
+        "codex-team daemon config reset --yes"
+      ],
+      needs_bearer: false
+    })
+  ],
+  needs_bearer: false
+};
+var daemonGroup = {
+  name: "daemon",
+  summary: "Manage the shared daemon and daemon-owned resources.",
+  usage: "codex-team daemon <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team daemon status",
+    "codex-team daemon logs -f --level warn"
+  ],
+  subcommands: [
+    leaf({
+      name: "status",
+      summary: "Show daemon process, socket, and resource status.",
+      usage: "codex-team daemon status",
+      positionals: [],
+      flags: [],
+      examples: [
+        "codex-team daemon status"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "start",
+      summary: "Start the daemon if it is not already running.",
+      usage: "codex-team daemon start",
+      positionals: [],
+      flags: [],
+      examples: [
+        "codex-team daemon start"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "stop",
+      summary: "Stop the daemon and persist its state.",
+      usage: "codex-team daemon stop [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--force",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Kill the daemon without detach or persistence."
+        }
+      ],
+      examples: [
+        "codex-team daemon stop --force"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "restart",
+      summary: "Restart the daemon.",
+      usage: "codex-team daemon restart",
+      positionals: [],
+      flags: [],
+      examples: [
+        "codex-team daemon restart"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "logs",
+      summary: "Print daemon logs with optional tail-style streaming.",
+      usage: "codex-team daemon logs [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--follow",
+          short: "-f",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Stream new log lines as they arrive."
+        },
+        {
+          long: "-n",
+          type: "int",
+          default: "100",
+          required: false,
+          description: "Print this many trailing lines first."
+        },
+        {
+          long: "--level",
+          type: "enum",
+          required: false,
+          description: "Filter by error, warn, info, debug, or trace."
+        }
+      ],
+      examples: [
+        "codex-team daemon logs -f --level warn"
+      ],
+      needs_bearer: false
+    }),
+    daemonUserGroup,
+    daemonConfigGroup
+  ],
+  needs_bearer: false
+};
+var sessionGroup = {
+  name: "session",
+  summary: "Manage live Codex sessions for the current user.",
+  usage: "codex-team -b <token> session <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team -b $TOKEN session list --all"
+  ],
+  subcommands: [
+    leaf({
+      name: "new",
+      summary: "Create a live session with optional runtime settings.",
+      usage: "codex-team -b <token> session new [name] [flags]",
+      positionals: [
+        {
+          name: "name",
+          required: false,
+          description: "Human-friendly session name."
+        }
+      ],
+      flags: [
+        {
+          long: "--model",
+          type: "string",
+          default: "codex.default_model",
+          required: false,
+          description: "Model name such as gpt-5.4."
+        },
+        {
+          long: "--cwd",
+          type: "path",
+          default: "current directory",
+          required: false,
+          description: "Working directory for Codex."
+        },
+        {
+          long: "--sandbox",
+          type: "enum",
+          default: "codex.default_sandbox",
+          required: false,
+          description: "Sandbox mode for the session."
+        },
+        {
+          long: "--approval",
+          type: "enum",
+          default: "codex.default_approval",
+          required: false,
+          description: "Approval policy for risky actions."
+        },
+        {
+          long: "--effort",
+          type: "enum",
+          default: "codex.default_effort",
+          required: false,
+          description: "Reasoning effort level."
+        },
+        {
+          long: "--personality",
+          type: "string",
+          required: false,
+          description: "Personality preset name."
+        },
+        {
+          long: "--base-instructions",
+          type: "path",
+          required: false,
+          description: "Load system-level instructions from a file."
+        },
+        {
+          long: "--developer-instructions",
+          type: "path",
+          required: false,
+          description: "Load developer instructions from a file."
+        },
+        {
+          long: "--profile",
+          type: "string",
+          required: false,
+          description: "Use a Codex config profile for defaults."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN session new audit --model gpt-5.4 --cwd /repo",
+        "codex-team -b $TOKEN session new --profile fast-review"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "attach",
+      summary: "Mark an existing Codex session as live for this user.",
+      usage: "codex-team -b <token> session attach <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET }
+      ],
+      flags: [
+        {
+          long: "--takeover",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Seize a live session from another user."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN session attach th-abc123 --takeover"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "detach",
+      summary: "Stop tracking a live session and release its runtime.",
+      usage: "codex-team -b <token> session detach <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET }
+      ],
+      flags: [
+        {
+          long: "--graceful",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Wait for the current turn before detaching."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN session detach audit --graceful"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "fork",
+      summary: "Fork a session into a new live session.",
+      usage: "codex-team -b <token> session fork <name|thread_id> [new_name] [flags]",
+      positionals: [
+        { ...SESSION_TARGET, description: "Source session name or thread ID." },
+        {
+          name: "new_name",
+          required: false,
+          description: "Name for the forked session."
+        }
+      ],
+      flags: [
+        {
+          long: "--at-turn",
+          type: "string",
+          default: "tip",
+          required: false,
+          description: "Fork from the specified turn ID."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN session fork audit audit-fix --at-turn turn-42"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "rename",
+      summary: "Rename a session without attaching it.",
+      usage: "codex-team -b <token> session rename <name|thread_id> <new_name>",
+      positionals: [
+        { ...SESSION_TARGET, description: "Current session name or thread ID." },
+        {
+          name: "new_name",
+          required: true,
+          description: "New session name."
+        }
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN session rename audit audit-review"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "info",
+      summary: "Show metadata for one session.",
+      usage: "codex-team -b <token> session info <name|thread_id>",
+      positionals: [
+        { ...SESSION_TARGET }
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN session info audit"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "context",
+      summary: "Show the compacted session context from Codex.",
+      usage: "codex-team -b <token> session context <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET }
+      ],
+      flags: [
+        {
+          long: "--format",
+          type: "enum",
+          default: "json",
+          required: false,
+          description: "Render output as json or markdown."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN session context audit --format markdown"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "list",
+      summary: "List live sessions or every known Codex session.",
+      usage: "codex-team -b <token> session list [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--all",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "List every known session, not only live ones."
+        },
+        {
+          long: "--sort",
+          type: "enum",
+          default: "last_active",
+          required: false,
+          description: "Sort by name, last_active, turn_count, or created_at."
+        },
+        {
+          long: "--format",
+          type: "enum",
+          default: "json",
+          required: false,
+          description: "Render output as json or table."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN session list --all --format table"
+      ],
+      needs_bearer: true
+    })
+  ],
+  needs_bearer: true
+};
+var messageGroup = {
+  name: "message",
+  summary: "Send prompts and inspect turns on a live session.",
+  usage: "codex-team -b <token> message <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team -b $TOKEN message history audit --limit 10"
+  ],
+  subcommands: [
+    leaf({
+      name: "send",
+      summary: "Queue a prompt on a live session without interrupting it.",
+      usage: "codex-team -b <token> message send <name|thread_id> [prompt] [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGET },
+        {
+          name: "prompt",
+          required: false,
+          description: "Prompt text when not using --stdin or --file."
+        }
+      ],
+      flags: PROMPT_SOURCE_FLAGS,
+      examples: [
+        'codex-team -b $TOKEN message send audit "Summarize the failing tests."',
+        "codex-team -b $TOKEN message send audit --file prompt.md --attach screenshot.png"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "peer",
+      summary: "Soft-interrupt the session, then send a prompt.",
+      usage: "codex-team -b <token> message peer <name|thread_id> [prompt] [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGET },
+        {
+          name: "prompt",
+          required: false,
+          description: "Prompt text when not using --stdin or --file."
+        }
+      ],
+      flags: PROMPT_SOURCE_FLAGS,
+      examples: [
+        'codex-team -b $TOKEN message peer audit "Stop after the current file write."'
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "interrupt",
+      summary: "Hard-interrupt the current work on a live session.",
+      usage: "codex-team -b <token> message interrupt <name|thread_id>",
+      positionals: [
+        { ...LIVE_SESSION_TARGET }
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN message interrupt audit"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "approval",
+      summary: "Resolve an approval request on a live session.",
+      usage: "codex-team -b <token> message approval <name|thread_id> <request_id> [shortcut] [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGET, description: "Session that owns the request." },
+        { ...REQUEST_ID },
+        {
+          name: "shortcut",
+          required: false,
+          description: "Use a shortcut that matches the approval kind."
+        }
+      ],
+      flags: JSON_RESPONSE_FLAGS,
+      notes: [
+        "command_execution and file_change: all shortcuts are valid.",
+        "permissions: cancel is invalid.",
+        "mcp_elicitation: accept-session is invalid; form mode needs --json."
+      ],
+      examples: [
+        "codex-team -b $TOKEN message approval audit req-17 accept-session",
+        "codex-team -b $TOKEN message approval audit req-17 --file approval.json"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "answer",
+      summary: "Answer a user_input request on a live session.",
+      usage: "codex-team -b <token> message answer <name|thread_id> <request_id> [answer] [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGET, description: "Session that owns the request." },
+        { ...REQUEST_ID },
+        {
+          name: "answer",
+          required: false,
+          description: "Single-answer shortcut for a one-question request."
+        }
+      ],
+      flags: JSON_RESPONSE_FLAGS,
+      examples: [
+        'codex-team -b $TOKEN message answer audit req-21 "Use the staging URL."',
+        `codex-team -b $TOKEN message answer audit req-21 --json '{"answers":{}}'`
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "history",
+      summary: "Show runtime history for a session from newest to oldest.",
+      usage: "codex-team -b <token> message history <name|thread_id> [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGET, description: "Session to inspect." }
+      ],
+      flags: [
+        {
+          long: "--limit",
+          type: "int",
+          default: "50",
+          required: false,
+          description: "Return at most this many history entries."
+        },
+        {
+          long: "--since",
+          type: "string|int",
+          default: "tip",
+          required: false,
+          description: "Start from a turn ID or a relative negative offset."
+        },
+        {
+          long: "--format",
+          type: "enum",
+          default: "json",
+          required: false,
+          description: "Render output as json or markdown."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN message history audit --since -3 --format markdown"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "tail",
+      summary: "Show recent turns and optionally follow new ones.",
+      usage: "codex-team -b <token> message tail <name|thread_id> [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGET, description: "Session to inspect." }
+      ],
+      flags: [
+        {
+          long: "--follow",
+          short: "-f",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Keep printing turns until the CLI exits."
+        },
+        {
+          long: "-n",
+          type: "int",
+          default: "3",
+          required: false,
+          description: "Return this many recent turns first."
+        },
+        {
+          long: "--format",
+          type: "enum",
+          default: "json",
+          required: false,
+          description: "Render output as json or markdown."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN message tail audit -n 5 --follow"
+      ],
+      needs_bearer: true
+    })
+  ],
+  needs_bearer: true
+};
+var monitorGroup = {
+  name: "monitor",
+  summary: "Stream events and run interval alarms.",
+  usage: "codex-team -b <token> monitor <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team -b $TOKEN monitor events --stream"
+  ],
+  subcommands: [
+    leaf({
+      name: "events",
+      summary: "Stream normalized daemon events as NDJSON.",
+      usage: "codex-team -b <token> monitor events [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--interval",
+          type: "int",
+          default: "monitor.default_interval_seconds",
+          required: false,
+          description: "Poll in batches every N seconds; cannot be used with --stream."
+        },
+        {
+          long: "--stream",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Emit events immediately; cannot be used with --interval."
+        },
+        {
+          long: "--filter",
+          type: "string",
+          required: false,
+          description: "Comma-separated event type allowlist."
+        },
+        {
+          long: "--exclude",
+          type: "string",
+          required: false,
+          description: "Comma-separated event type denylist."
+        },
+        {
+          long: "--include-delta",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Include high-frequency *.delta events."
+        },
+        {
+          long: "--since",
+          type: "string",
+          required: false,
+          description: "Resume from the given event ID."
+        },
+        {
+          long: "--session",
+          type: "string",
+          required: false,
+          description: "Filter to one session name or thread ID."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN monitor events --stream --session audit"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "alarm",
+      summary: "Run a shell command at a fixed interval.",
+      usage: "codex-team -b <token> monitor alarm <interval_s> <command> [flags]",
+      positionals: [
+        {
+          name: "interval_s",
+          required: true,
+          description: "Execution interval in seconds."
+        },
+        {
+          name: "command",
+          required: true,
+          description: "Shell command string to run."
+        }
+      ],
+      flags: [
+        {
+          long: "--once",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Run the command once and exit."
+        },
+        {
+          long: "--timeout",
+          type: "int",
+          default: "60",
+          required: false,
+          description: "Kill one run if it exceeds this many seconds."
+        }
+      ],
+      examples: [
+        'codex-team -b $TOKEN monitor alarm 30 "codex-team -b $TOKEN status"'
+      ],
+      needs_bearer: true
+    })
+  ],
+  needs_bearer: true
+};
+var HELP_TREE = {
+  name: "codex-team",
+  summary: "CLI and daemon for orchestrating Codex app-server sessions.",
+  usage: "codex-team [-b <token>] <command> [args] [flags]",
+  positionals: [],
+  flags: [
+    {
+      long: "--bearer",
+      short: "-b",
+      type: "string",
+      required: false,
+      description: "User identity token for user-scoped commands."
+    },
+    {
+      long: "--verbose",
+      short: "-v",
+      type: "bool",
+      default: "false",
+      required: false,
+      description: "Write CLI debug logs to stderr."
+    },
+    {
+      long: "--daemon-sock",
+      type: "path",
+      default: "config value",
+      required: false,
+      description: "Override the daemon socket path."
+    },
+    {
+      long: "--help",
+      short: "-h",
+      type: "bool",
+      default: "false",
+      required: false,
+      description: "Show help for the resolved command path."
+    }
+  ],
+  examples: [
+    "codex-team --help",
+    "codex-team -b $TOKEN session new audit --model gpt-5.4"
+  ],
+  subcommands: [
+    leaf({
+      name: "version",
+      summary: "Print the CLI version and the daemon version when available.",
+      usage: "codex-team version",
+      positionals: [],
+      flags: [],
+      examples: [
+        "codex-team version"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "status",
+      summary: "Show live sessions, pending events, and recent activity.",
+      usage: "codex-team -b <token> status",
+      positionals: [],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN status"
+      ],
+      needs_bearer: true
+    }),
+    daemonGroup,
+    sessionGroup,
+    messageGroup,
+    monitorGroup
+  ],
+  needs_bearer: false
+};
+function findNode(path12, node = HELP_TREE) {
+  if (path12.length === 0) return node;
+  const [head, ...rest] = path12;
+  const child = node.subcommands.find((entry) => entry.name === head);
+  if (!child) return null;
+  return findNode(rest, child);
+}
+function formatCommandPath(path12) {
+  return path12.length === 0 ? "codex-team" : `codex-team ${path12.join(" ")}`;
+}
+function formatPositional(positional) {
+  return positional.required ? `<${positional.name}>` : `[${positional.name}]`;
+}
+function formatFlag(flag) {
+  return flag.short ? `${flag.short}, ${flag.long}` : flag.long;
+}
+function renderTable(headers, rows) {
+  const widths = headers.map(
+    (header, index) => Math.max(header.length, ...rows.map((row) => row[index]?.length ?? 0))
+  );
+  return [
+    `  ${headers.map((header, index) => header.padEnd(widths[index])).join("  ")}`,
+    `  ${widths.map((width) => "-".repeat(width)).join("  ")}`,
+    ...rows.map(
+      (row) => `  ${row.map((cell, index) => cell.padEnd(widths[index])).join("  ")}`
+    )
+  ];
+}
+function renderPositionals(node) {
+  const lines = ["POSITIONALS"];
+  if (node.positionals.length === 0) {
+    lines.push("  None.");
+    return lines;
+  }
+  lines.push(
+    ...renderTable(
+      ["Name", "Required", "Description"],
+      node.positionals.map((positional) => [
+        formatPositional(positional),
+        positional.required ? "yes" : "no",
+        positional.description
+      ])
+    )
+  );
+  return lines;
+}
+function renderFlags(node, title = "FLAGS") {
+  const lines = [title];
+  if (node.flags.length === 0) {
+    lines.push("  None.");
+    return lines;
+  }
+  lines.push(
+    ...renderTable(
+      ["Flag", "Type", "Default", "Required", "Description"],
+      node.flags.map((flag) => [
+        formatFlag(flag),
+        flag.type,
+        flag.default ?? "-",
+        flag.required ? "yes" : "no",
+        flag.description
+      ])
+    )
+  );
+  return lines;
+}
+function renderNotes(node) {
+  return [
+    "NOTES",
+    ...(node.notes ?? []).map((note) => `  ${note}`)
+  ];
+}
+function renderSubcommands(node) {
+  return [
+    "SUBCOMMANDS",
+    ...renderTable(
+      ["Command", "Summary"],
+      node.subcommands.map((subcommand) => [subcommand.name, subcommand.summary])
+    )
+  ];
+}
+function renderExamples(node) {
+  return [
+    "EXAMPLES",
+    ...node.examples.map((example) => `  ${example}`)
+  ];
+}
+function renderHelp(path12) {
+  const node = findNode(path12) ?? HELP_TREE;
+  const resolvedPath = findNode(path12) ? path12 : [];
+  const sections = [
+    [formatCommandPath(resolvedPath), node.summary],
+    ["USAGE", `  ${node.usage}`]
+  ];
+  if (resolvedPath.length === 0) {
+    sections.push(renderSubcommands(node));
+    sections.push(renderFlags(node, "GLOBAL FLAGS"));
+  } else if (node.subcommands.length > 0) {
+    sections.push(renderSubcommands(node));
+  } else {
+    sections.push(renderPositionals(node));
+    sections.push(renderFlags(node));
+    if (node.notes && node.notes.length > 0) sections.push(renderNotes(node));
+  }
+  sections.push(renderExamples(node));
+  return `${sections.map((section) => section.join("\n")).join("\n\n")}
+`;
 }
 
 // src/result.ts
@@ -616,17 +1600,17 @@ var ConfigStore = class {
   }
   resolvedLogPath() {
     const explicit = this.explicit["daemon.log_path"];
-    if (typeof explicit === "string" && explicit.trim().length > 0) return explicit;
+    if (typeof explicit === "string" && explicit.trim().length > 0) return expandUserPath(explicit);
     return defaultLogPath(this.resolvedDataDir());
   }
   resolvedSockPath() {
     const explicit = this.explicit["daemon.sock_path"];
-    if (typeof explicit === "string" && explicit.trim().length > 0) return normalizeSockPath(explicit);
+    if (typeof explicit === "string" && explicit.trim().length > 0) return normalizeSockPath(expandUserPath(explicit));
     return defaultSockPath(this.resolvedDataDir());
   }
   resolvedDataDir() {
     const explicit = this.explicit["daemon.data_dir"];
-    if (typeof explicit === "string" && explicit.trim().length > 0) return explicit;
+    if (typeof explicit === "string" && explicit.trim().length > 0) return expandUserPath(explicit);
     return defaultDataDir();
   }
 };
@@ -700,7 +1684,7 @@ async function runCli(argv) {
     return 1;
   }
   if (parsed.help || parsed.commandPath.length === 0) {
-    process.stdout.write(helpTextFor(parsed.commandPath));
+    process.stdout.write(renderHelp(parsed.commandPath));
     return 0;
   }
   const method = commandKey(parsed.commandPath);
@@ -791,6 +1775,10 @@ async function dispatchCommand(sockPath, parsed, method) {
 async function runStream(sock, parsed, method) {
   return await new Promise((resolve) => {
     let finished = false;
+    const stdoutQueue = [];
+    const pendingFinalizers = [];
+    let stdoutBlocked = false;
+    let socketPaused = false;
     const finish = (code) => {
       if (finished) return;
       finished = true;
@@ -798,6 +1786,50 @@ async function runStream(sock, parsed, method) {
       process.off("SIGTERM", onInterrupt);
       process.off("SIGBREAK", onInterrupt);
       resolve(code);
+    };
+    const maybeResumeSocket = () => {
+      if (!socketPaused) return;
+      socketPaused = false;
+      if (typeof sock.resume === "function") sock.resume();
+    };
+    const flushFinalizers = () => {
+      if (stdoutBlocked || stdoutQueue.length > 0) return;
+      while (pendingFinalizers.length > 0) pendingFinalizers.shift()?.();
+    };
+    const flushStdout = () => {
+      if (stdoutBlocked) return;
+      while (stdoutQueue.length > 0) {
+        const next = stdoutQueue[0];
+        const ok2 = process.stdout.write(next.line);
+        if (!ok2) {
+          stdoutBlocked = true;
+          if (!socketPaused && typeof sock.pause === "function") {
+            socketPaused = true;
+            sock.pause();
+          }
+          process.stdout.once("drain", () => {
+            stdoutBlocked = false;
+            const flushed = stdoutQueue.shift();
+            flushed?.afterWrite?.();
+            maybeResumeSocket();
+            flushStdout();
+            flushFinalizers();
+          });
+          return;
+        }
+        stdoutQueue.shift();
+        next.afterWrite?.();
+      }
+      maybeResumeSocket();
+      flushFinalizers();
+    };
+    const writeStdout = (line, afterWrite) => {
+      stdoutQueue.push({ line, afterWrite });
+      flushStdout();
+    };
+    const afterStdout = (cb) => {
+      pendingFinalizers.push(cb);
+      flushFinalizers();
     };
     const reqId = randomId();
     const params = {
@@ -816,23 +1848,31 @@ async function runStream(sock, parsed, method) {
     };
     onMessages(sock, (msg) => {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
-        process.stdout.write(JSON.stringify(msg.data) + "\n");
+        writeStdout(JSON.stringify(msg.data) + "\n");
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
-          process.stdout.write(JSON.stringify({ ok: false, error: msg.error }) + "\n");
-          finish(1);
+          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+            finish(1);
+            sock.end();
+          });
         } else {
-          finish(0);
+          afterStdout(() => {
+            finish(0);
+            sock.end();
+          });
         }
-        sock.end();
       } else if (msg.kind === "response" && msg.id === reqId) {
         if (msg.error) {
-          process.stdout.write(JSON.stringify({ ok: false, error: msg.error }) + "\n");
-          finish(1);
+          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+            finish(1);
+            sock.end();
+          });
         } else {
-          finish(0);
+          afterStdout(() => {
+            finish(0);
+            sock.end();
+          });
         }
-        sock.end();
       }
     }, () => {
       finish(finished ? 0 : 1);
@@ -972,7 +2012,7 @@ function toMs(v, fallback) {
 
 // src/daemon/run.ts
 var import_node_fs13 = __toESM(require("fs"));
-var import_node_path10 = __toESM(require("path"));
+var import_node_path11 = __toESM(require("path"));
 
 // src/daemon/users.ts
 var import_node_fs3 = __toESM(require("fs"));
@@ -997,6 +2037,7 @@ function methodNotFound(method) {
 }
 
 // src/daemon/users.ts
+var SCHEMA_VERSION = 1;
 var UserRegistry = class {
   users = /* @__PURE__ */ new Map();
   dataDir;
@@ -1012,12 +2053,19 @@ var UserRegistry = class {
       if (import_node_fs3.default.existsSync(metaPath)) {
         try {
           const raw = import_node_fs3.default.readFileSync(metaPath, "utf8");
-          const user = JSON.parse(raw);
+          const parsed = JSON.parse(raw);
+          const user = normalizePersistedUser(parsed);
           if (user && typeof user.token === "string") {
-            validateToken(user.token);
-            this.users.set(user.token, user);
+            try {
+              validateToken(user.token);
+              this.users.set(user.token, user);
+            } catch {
+            }
           }
-        } catch {
+        } catch (e) {
+          if (isCanonicalUserDir(dirname)) {
+            throw new Error(`failed to load metadata.json for '${dirname}': ${e.message}`);
+          }
         }
         continue;
       }
@@ -1074,7 +2122,10 @@ var UserRegistry = class {
     import_node_fs3.default.mkdirSync(dir, { recursive: true });
     const metaPath = userMetadataPath(user.token, this.dataDir);
     const tmp = metaPath + ".tmp";
-    import_node_fs3.default.writeFileSync(tmp, JSON.stringify(user, null, 2));
+    import_node_fs3.default.writeFileSync(tmp, JSON.stringify({
+      schema_version: SCHEMA_VERSION,
+      user
+    }, null, 2));
     import_node_fs3.default.renameSync(tmp, metaPath);
   }
 };
@@ -1084,6 +2135,24 @@ function validateToken(token) {
   }
   if (token.length > 256) {
     throw new CodexTeamError("invalid_params", "token too long (max 256)");
+  }
+}
+function normalizePersistedUser(parsed) {
+  if (parsed && typeof parsed === "object" && "schema_version" in parsed) {
+    const env = parsed;
+    if (typeof env.schema_version === "number" && env.schema_version > SCHEMA_VERSION) {
+      throw new Error(`metadata.json schema_version ${env.schema_version} is newer than supported ${SCHEMA_VERSION}`);
+    }
+    return env.user ?? null;
+  }
+  return parsed;
+}
+function isCanonicalUserDir(dirname) {
+  try {
+    const token = decodeToken(dirname);
+    return encodeToken(token) === dirname;
+  } catch {
+    return false;
   }
 }
 
@@ -1153,7 +2222,7 @@ var logger = new Logger();
 // src/daemon/sessions.ts
 var NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-var SCHEMA_VERSION = 1;
+var SCHEMA_VERSION2 = 1;
 var SessionRegistry = class {
   dataDir;
   users = /* @__PURE__ */ new Map();
@@ -1166,20 +2235,26 @@ var SessionRegistry = class {
   loadForUser(user) {
     if (this.users.has(user)) return;
     const bucket = this.emptyBucket();
-    this.users.set(user, bucket);
     const p = userSessionsPath(user, this.dataDir);
-    if (!import_node_fs5.default.existsSync(p)) return;
+    if (!import_node_fs5.default.existsSync(p)) {
+      this.users.set(user, bucket);
+      return;
+    }
     try {
       const raw = import_node_fs5.default.readFileSync(p, "utf8");
       const parsed = JSON.parse(raw);
+      if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION2) {
+        throw new Error(`sessions.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION2}`);
+      }
       for (const rec of parsed.sessions ?? []) {
         if (!rec || typeof rec.name !== "string" || typeof rec.thread_id !== "string" || rec.thread_id.length === 0) continue;
         bucket.byName.set(rec.name, rec);
         bucket.byThreadId.set(rec.thread_id, rec);
         this.globalByThreadId.set(rec.thread_id, user);
       }
+      this.users.set(user, bucket);
     } catch (e) {
-      logger.warn("failed to load sessions.json", { user, err: e.message });
+      throw new Error(`failed to load sessions.json for '${user}': ${e.message}`);
     }
   }
   loadAllUsers(userTokens) {
@@ -1250,6 +2325,7 @@ var SessionRegistry = class {
     }
     if (patch.last_active_at !== void 0) rec.last_active_at = patch.last_active_at;
     if (patch.turn_count !== void 0) rec.turn_count = patch.turn_count;
+    if (patch.recovery_state !== void 0) rec.recovery_state = patch.recovery_state ?? void 0;
     if (patch.model !== void 0) rec.model = patch.model;
     if (patch.cwd !== void 0) rec.cwd = patch.cwd;
     if (patch.sandbox !== void 0) rec.sandbox = patch.sandbox;
@@ -1314,7 +2390,7 @@ var SessionRegistry = class {
     const p = userSessionsPath(user, this.dataDir);
     const bucket = this.users.get(user);
     const payload = {
-      schema_version: SCHEMA_VERSION,
+      schema_version: SCHEMA_VERSION2,
       sessions: bucket ? Array.from(bucket.byName.values()) : []
     };
     const tmp = p + ".tmp";
@@ -1362,6 +2438,11 @@ function looksLikeThreadId(s) {
 var import_node_fs6 = __toESM(require("fs"));
 var import_node_path7 = __toESM(require("path"));
 var DELTA_SUFFIX = "_delta";
+var SCHEMA_VERSION3 = 1;
+var DEFAULT_FLUSH_DELAY_MS = 25;
+var OVERFLOW_FLUSH_DELAY_MS = 250;
+var FLUSH_RETRY_DELAY_MS = 250;
+var MAX_PENDING_WRITE_BYTES = 1024 * 1024;
 var EventLog = class {
   retention;
   dataDir;
@@ -1369,44 +2450,47 @@ var EventLog = class {
   buffers = /* @__PURE__ */ new Map();
   subscribers = /* @__PURE__ */ new Map();
   loaded = /* @__PURE__ */ new Set();
+  loadPromises = /* @__PURE__ */ new Map();
   rotatedSinceCompact = /* @__PURE__ */ new Map();
   pendingLines = /* @__PURE__ */ new Map();
+  pendingBytes = /* @__PURE__ */ new Map();
   flushTimers = /* @__PURE__ */ new Map();
   writeChains = /* @__PURE__ */ new Map();
+  userOps = /* @__PURE__ */ new Map();
+  overflowWarned = /* @__PURE__ */ new Set();
   constructor(retention = 1e4, dataDir = null) {
     this.retention = Math.max(100, retention);
     this.dataDir = dataDir;
   }
-  /** Load user's persisted events from disk (idempotent). */
   loadUser(user) {
     if (this.loaded.has(user)) return;
-    this.loaded.add(user);
-    if (!this.dataDir) return;
-    const filePath = userEventLogPath(user, this.dataDir);
-    if (!import_node_fs6.default.existsSync(filePath)) return;
-    try {
-      const raw = import_node_fs6.default.readFileSync(filePath, "utf8");
-      const lines = raw.split("\n").filter(Boolean);
-      const tail = lines.slice(Math.max(0, lines.length - this.retention));
-      const buf = [];
-      let maxSeq = 0;
-      for (const line of tail) {
-        try {
-          const ev = JSON.parse(line);
-          if (ev && typeof ev.id === "string") {
-            buf.push(ev);
-            const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
-            if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
-          }
-        } catch {
-        }
-      }
-      this.buffers.set(user, buf);
-      this.counters.set(user, maxSeq);
-      if (lines.length > this.retention * 1.5) this.compactFile(user, buf);
-    } catch (e) {
-      logger.warn("failed to load event log", { user, err: e.message });
+    if (!this.dataDir) {
+      this.ensureUserState(user);
+      this.loaded.add(user);
+      this.loadPromises.delete(user);
+      return;
     }
+    const filePath = userEventLogPath(user, this.dataDir);
+    if (!import_node_fs6.default.existsSync(filePath)) {
+      this.ensureUserState(user);
+      this.loaded.add(user);
+      this.loadPromises.delete(user);
+      return;
+    }
+    const raw = import_node_fs6.default.readFileSync(filePath, "utf8");
+    const lines = raw.split("\n").filter(Boolean);
+    const { events, totalLines } = parsePersistedEvents(lines);
+    const buf = events.slice(Math.max(0, events.length - this.retention));
+    let maxSeq = 0;
+    for (const ev of buf) {
+      const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
+      if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
+    }
+    this.buffers.set(user, buf);
+    this.counters.set(user, maxSeq);
+    this.loaded.add(user);
+    this.loadPromises.delete(user);
+    if (totalLines > this.retention * 1.5) this.compactFile(user, buf);
   }
   setRetention(n) {
     this.retention = Math.max(100, n);
@@ -1422,46 +2506,26 @@ var EventLog = class {
   retainedCount(user) {
     return this.buffers.get(user)?.length ?? 0;
   }
-  append(user, input) {
-    this.loadUser(user);
-    const seq = (this.counters.get(user) ?? 0) + 1;
-    this.counters.set(user, seq);
-    const event = {
-      id: `evt-${seq}`,
-      ts: (/* @__PURE__ */ new Date()).toISOString(),
-      ...input
-    };
-    const buf = this.buffers.get(user) ?? [];
-    buf.push(event);
-    let rotated = false;
-    while (buf.length > this.retention) {
-      buf.shift();
-      rotated = true;
-    }
-    this.buffers.set(user, buf);
-    this.appendToFile(user, event);
-    if (rotated) this.bumpCompactionDebt(user);
-    for (const cb of this.subscribers.get(user) ?? []) {
-      try {
-        cb(event);
-      } catch {
-      }
-    }
-    return event;
+  async append(user, input) {
+    await this.ensureLoaded(user);
+    return await this.withUserLock(user, async () => this.appendLoaded(user, input));
   }
   async flush() {
     const users = /* @__PURE__ */ new Set([
       ...this.flushTimers.keys(),
       ...this.pendingLines.keys(),
-      ...this.writeChains.keys()
+      ...this.writeChains.keys(),
+      ...this.loadPromises.keys(),
+      ...this.userOps.keys()
     ]);
+    await Promise.all(Array.from(this.loadPromises.values()).map((p) => p.catch(() => void 0)));
     for (const user of users) {
       const timer = this.flushTimers.get(user);
       if (timer) {
         clearTimeout(timer);
         this.flushTimers.delete(user);
       }
-      void this.flushUser(user);
+      await this.flushUser(user);
     }
     await Promise.all(Array.from(this.writeChains.values()).map((p) => p.catch(() => void 0)));
   }
@@ -1471,43 +2535,20 @@ var EventLog = class {
       clearTimeout(timer);
       this.flushTimers.delete(user);
     }
-    this.pendingLines.delete(user);
+    await (this.loadPromises.get(user)?.catch(() => void 0) ?? Promise.resolve());
+    await (this.userOps.get(user)?.catch(() => void 0) ?? Promise.resolve());
     await (this.writeChains.get(user)?.catch(() => void 0) ?? Promise.resolve());
+    this.pendingLines.delete(user);
+    this.pendingBytes.delete(user);
     this.writeChains.delete(user);
+    this.userOps.delete(user);
     this.rotatedSinceCompact.delete(user);
     this.counters.delete(user);
     this.buffers.delete(user);
     this.subscribers.delete(user);
     this.loaded.delete(user);
-  }
-  appendToFile(user, event) {
-    if (!this.dataDir) return;
-    const pending = this.pendingLines.get(user) ?? [];
-    pending.push(JSON.stringify(event) + "\n");
-    this.pendingLines.set(user, pending);
-    this.scheduleFlush(user, 25);
-  }
-  compactFile(user, buf) {
-    if (!this.dataDir) return;
-    const timer = this.flushTimers.get(user);
-    if (timer) {
-      clearTimeout(timer);
-      this.flushTimers.delete(user);
-    }
-    this.pendingLines.delete(user);
-    const filePath = userEventLogPath(user, this.dataDir);
-    void this.enqueueFsOp(user, async () => {
-      try {
-        await import_node_fs6.default.promises.mkdir(import_node_path7.default.dirname(filePath), { recursive: true });
-        await import_node_fs6.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
-        const tmp = filePath + ".tmp";
-        await import_node_fs6.default.promises.writeFile(tmp, buf.map((e) => JSON.stringify(e)).join("\n") + (buf.length ? "\n" : ""));
-        await import_node_fs6.default.promises.rename(tmp, filePath);
-        this.rotatedSinceCompact.set(user, 0);
-      } catch (e) {
-        logger.warn("event log compaction failed", { user, err: e.message });
-      }
-    });
+    this.loadPromises.delete(user);
+    this.overflowWarned.delete(user);
   }
   subscribe(user, cb) {
     let set = this.subscribers.get(user);
@@ -1528,29 +2569,167 @@ var EventLog = class {
   pendingCount(user) {
     return this.buffers.get(user)?.length ?? 0;
   }
-  listSince(user, sinceId, opts = { includeDelta: false }) {
-    this.loadUser(user);
-    const buf = this.buffers.get(user) ?? [];
-    let slice;
-    if (!sinceId) {
-      slice = buf.slice();
-    } else {
-      const idx = buf.findIndex((e) => e.id === sinceId);
-      if (idx < 0) {
-        if (buf.length > 0 && compareSeq(sinceId, buf[0].id) < 0) {
-          return { ok: false, reason: "id_rotated", oldest_available_id: buf[0].id };
-        }
-        slice = [];
+  async listSince(user, sinceId, opts = { includeDelta: false }) {
+    await this.ensureLoaded(user);
+    return await this.withUserLock(user, async () => {
+      const buf = this.buffers.get(user) ?? [];
+      let slice;
+      if (!sinceId) {
+        slice = buf.slice();
       } else {
+        const idx = buf.findIndex((e) => e.id === sinceId);
+        if (idx < 0) {
+          if (buf.length > 0 && compareSeq(sinceId, buf[0].id) < 0) {
+            return { ok: false, reason: "id_rotated", oldest_available_id: buf[0].id };
+          }
+          return { ok: false, reason: "invalid_since" };
+        }
         slice = buf.slice(idx + 1);
       }
-    }
-    if (!opts.includeDelta) slice = slice.filter((e) => !e.type.endsWith(DELTA_SUFFIX));
-    return { ok: true, events: slice };
+      if (!opts.includeDelta) slice = slice.filter((e) => !e.type.endsWith(DELTA_SUFFIX));
+      return { ok: true, events: slice };
+    });
   }
   oldestId(user) {
     const buf = this.buffers.get(user);
     return buf && buf.length > 0 ? buf[0].id : null;
+  }
+  async ensureLoaded(user) {
+    if (this.loaded.has(user)) return;
+    let promise = this.loadPromises.get(user);
+    if (!promise) {
+      promise = new Promise((resolve, reject) => {
+        queueMicrotask(() => {
+          void this.loadUserFromDisk(user).then(resolve, reject);
+        });
+      });
+      this.loadPromises.set(user, promise);
+    }
+    await promise;
+  }
+  async loadUserFromDisk(user) {
+    if (this.loaded.has(user)) return;
+    let shouldMarkLoaded = false;
+    try {
+      if (!this.dataDir) {
+        this.ensureUserState(user);
+        shouldMarkLoaded = true;
+        return;
+      }
+      const filePath = userEventLogPath(user, this.dataDir);
+      const raw = await import_node_fs6.default.promises.readFile(filePath, "utf8");
+      const lines = raw.split("\n").filter(Boolean);
+      const { events, totalLines } = parsePersistedEvents(lines);
+      const buf = events.slice(Math.max(0, events.length - this.retention));
+      let maxSeq = 0;
+      for (const ev of buf) {
+        const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
+        if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
+      }
+      this.buffers.set(user, buf);
+      this.counters.set(user, maxSeq);
+      if (totalLines > this.retention * 1.5) this.compactFile(user, buf);
+      shouldMarkLoaded = true;
+    } catch (e) {
+      if (e.code === "ENOENT") {
+        this.ensureUserState(user);
+        shouldMarkLoaded = true;
+        return;
+      }
+      if (e.message.toLowerCase().includes("schema_version")) {
+        throw e;
+      }
+      logger.warn("failed to load event log", { user, err: e.message });
+      this.ensureUserState(user);
+      shouldMarkLoaded = true;
+    } finally {
+      if (shouldMarkLoaded) this.loaded.add(user);
+      this.loadPromises.delete(user);
+    }
+  }
+  appendLoaded(user, input, opts = {}) {
+    this.ensureUserState(user);
+    const seq = (this.counters.get(user) ?? 0) + 1;
+    this.counters.set(user, seq);
+    const event = {
+      id: `evt-${seq}`,
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      ...input
+    };
+    const buf = this.buffers.get(user);
+    buf.push(event);
+    let rotated = false;
+    while (buf.length > this.retention) {
+      buf.shift();
+      rotated = true;
+    }
+    if (rotated) this.bumpCompactionDebt(user);
+    this.dispatchSubscribers(user, event);
+    if (opts.persist !== false) this.appendToFile(user, event);
+    return event;
+  }
+  dispatchSubscribers(user, event) {
+    const listeners = Array.from(this.subscribers.get(user) ?? []);
+    if (listeners.length === 0) return;
+    queueMicrotask(() => {
+      for (const cb of listeners) {
+        try {
+          cb(event);
+        } catch {
+        }
+      }
+    });
+  }
+  appendToFile(user, event) {
+    if (!this.dataDir) return;
+    const line = JSON.stringify(event) + "\n";
+    const bytes = Buffer.byteLength(line);
+    const pending = this.pendingLines.get(user) ?? [];
+    pending.push(line);
+    this.pendingLines.set(user, pending);
+    const totalBytes = (this.pendingBytes.get(user) ?? 0) + bytes;
+    this.pendingBytes.set(user, totalBytes);
+    if (totalBytes > MAX_PENDING_WRITE_BYTES) {
+      if (!this.overflowWarned.has(user)) {
+        this.overflowWarned.add(user);
+        this.appendLoaded(user, {
+          type: "warning",
+          session: null,
+          thread_id: null,
+          payload: {
+            message: "event log backlog exceeded 1048576 bytes; writes are being retried more slowly",
+            kind: "event_log_backpressure",
+            pending_bytes: totalBytes
+          }
+        }, { persist: false });
+      }
+      this.scheduleFlush(user, OVERFLOW_FLUSH_DELAY_MS, true);
+      return;
+    }
+    this.scheduleFlush(user, DEFAULT_FLUSH_DELAY_MS);
+  }
+  compactFile(user, buf) {
+    if (!this.dataDir) return;
+    const timer = this.flushTimers.get(user);
+    if (timer) {
+      clearTimeout(timer);
+      this.flushTimers.delete(user);
+    }
+    this.pendingLines.delete(user);
+    this.pendingBytes.delete(user);
+    const filePath = userEventLogPath(user, this.dataDir);
+    void this.enqueueFsOp(user, async () => {
+      try {
+        await import_node_fs6.default.promises.mkdir(import_node_path7.default.dirname(filePath), { recursive: true });
+        await import_node_fs6.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+        const tmp = filePath + ".tmp";
+        await import_node_fs6.default.promises.writeFile(tmp, serializeEventFile(buf));
+        await import_node_fs6.default.promises.rename(tmp, filePath);
+        this.rotatedSinceCompact.set(user, 0);
+      } catch (e) {
+        logger.warn("event log compaction failed", { user, err: e.message });
+      }
+    });
   }
   bumpCompactionDebt(user) {
     const debt = (this.rotatedSinceCompact.get(user) ?? 0) + 1;
@@ -1559,9 +2738,12 @@ var EventLog = class {
       this.compactFile(user, this.buffers.get(user) ?? []);
     }
   }
-  scheduleFlush(user, delayMs) {
+  scheduleFlush(user, delayMs, reset = false) {
     if (!this.dataDir) return;
-    if (this.flushTimers.has(user)) return;
+    if (this.flushTimers.has(user)) {
+      if (!reset) return;
+      clearTimeout(this.flushTimers.get(user));
+    }
     const timer = setTimeout(() => {
       this.flushTimers.delete(user);
       void this.flushUser(user);
@@ -1569,28 +2751,73 @@ var EventLog = class {
     timer.unref();
     this.flushTimers.set(user, timer);
   }
-  flushUser(user) {
-    if (!this.dataDir) return Promise.resolve();
-    const lines = this.pendingLines.get(user);
-    if (!lines || lines.length === 0) return Promise.resolve();
-    this.pendingLines.delete(user);
+  async flushUser(user) {
+    if (!this.dataDir) return;
+    const snapshot = await this.withUserLock(user, async () => {
+      const lines = this.pendingLines.get(user);
+      if (!lines || lines.length === 0) return null;
+      const bytes = this.pendingBytes.get(user) ?? 0;
+      this.pendingLines.delete(user);
+      this.pendingBytes.delete(user);
+      return { lines: [...lines], bytes };
+    });
+    if (!snapshot) return;
     const filePath = userEventLogPath(user, this.dataDir);
-    return this.enqueueFsOp(user, async () => {
+    const ok2 = await this.enqueueFsOp(user, async () => {
       try {
         await import_node_fs6.default.promises.mkdir(import_node_path7.default.dirname(filePath), { recursive: true });
         await import_node_fs6.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
-        await import_node_fs6.default.promises.appendFile(filePath, lines.join(""));
+        if (!import_node_fs6.default.existsSync(filePath)) {
+          await import_node_fs6.default.promises.writeFile(filePath, serializeHeaderLine() + snapshot.lines.join(""));
+        } else {
+          await import_node_fs6.default.promises.appendFile(filePath, snapshot.lines.join(""));
+        }
+        return true;
       } catch (e) {
         logger.warn("failed to append event log", { user, err: e.message });
+        return false;
       }
     });
+    if (!ok2) {
+      await this.withUserLock(user, async () => {
+        const pending = this.pendingLines.get(user) ?? [];
+        this.pendingLines.set(user, [...snapshot.lines, ...pending]);
+        this.pendingBytes.set(user, (this.pendingBytes.get(user) ?? 0) + snapshot.bytes);
+        this.scheduleFlush(user, FLUSH_RETRY_DELAY_MS, true);
+      });
+      return;
+    }
+    if ((this.pendingBytes.get(user) ?? 0) <= Math.floor(MAX_PENDING_WRITE_BYTES / 2)) {
+      this.overflowWarned.delete(user);
+    }
+  }
+  ensureUserState(user) {
+    if (!this.buffers.has(user)) this.buffers.set(user, []);
+    if (!this.counters.has(user)) this.counters.set(user, 0);
+  }
+  async withUserLock(user, fn) {
+    const prev = this.userOps.get(user) ?? Promise.resolve();
+    let release;
+    const barrier = new Promise((resolve) => {
+      release = resolve;
+    });
+    const next = prev.catch(() => void 0).then(() => barrier);
+    this.userOps.set(user, next);
+    await prev.catch(() => void 0);
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.userOps.get(user) === next) this.userOps.delete(user);
+    }
   }
   enqueueFsOp(user, op) {
     const prev = this.writeChains.get(user) ?? Promise.resolve();
     const next = prev.catch(() => void 0).then(op);
-    this.writeChains.set(user, next);
+    const chain = next.then(() => void 0, () => void 0);
+    this.writeChains.set(user, chain);
     return next.finally(() => {
-      if (this.writeChains.get(user) === next) this.writeChains.delete(user);
+      if (this.writeChains.get(user) === chain) this.writeChains.delete(user);
     });
   }
 };
@@ -1603,30 +2830,92 @@ function compareSeq(a, b) {
 function isDeltaType(type) {
   return type.endsWith(DELTA_SUFFIX);
 }
+function parsePersistedEvents(lines) {
+  if (lines.length === 0) return { events: [], totalLines: 0 };
+  let eventLines = lines;
+  let totalLines = lines.length;
+  const first = parseLine(lines[0]);
+  if (isHeader(first)) {
+    if (first.schema_version > SCHEMA_VERSION3) {
+      throw new Error(`event log schema_version ${first.schema_version} is newer than supported ${SCHEMA_VERSION3}`);
+    }
+    eventLines = lines.slice(1);
+    totalLines = eventLines.length;
+  }
+  const events = [];
+  for (const line of eventLines) {
+    const parsed = parseLine(line);
+    if (parsed && typeof parsed.id === "string") {
+      events.push(parsed);
+    }
+  }
+  return { events, totalLines };
+}
+function parseLine(line) {
+  try {
+    return JSON.parse(line);
+  } catch (e) {
+    throw new Error(`failed to parse event log line: ${e.message}`);
+  }
+}
+function isHeader(value) {
+  return value !== null && value.kind === "event_log_header" && typeof value.schema_version === "number";
+}
+function serializeHeaderLine() {
+  return JSON.stringify({ schema_version: SCHEMA_VERSION3, kind: "event_log_header" }) + "\n";
+}
+function serializeEventFile(buf) {
+  return serializeHeaderLine() + buf.map((e) => JSON.stringify(e)).join("\n") + (buf.length ? "\n" : "");
+}
 
 // src/daemon/pending.ts
 var import_node_crypto3 = __toESM(require("crypto"));
 var PendingRegistry = class {
-  byRequestId = /* @__PURE__ */ new Map();
+  availableByRequestId = /* @__PURE__ */ new Map();
+  inFlightByRequestId = /* @__PURE__ */ new Map();
   byJsonrpcKey = /* @__PURE__ */ new Map();
   add(entry) {
     const request_id = `req-${import_node_crypto3.default.randomBytes(4).toString("hex")}`;
     const rec = {
       ...entry,
       request_id,
-      created_at: (/* @__PURE__ */ new Date()).toISOString()
+      created_at: (/* @__PURE__ */ new Date()).toISOString(),
+      claimed_at: null
     };
-    this.byRequestId.set(request_id, rec);
+    this.availableByRequestId.set(request_id, rec);
     this.byJsonrpcKey.set(this.jsonrpcKey(entry.client, entry.jsonrpc_id), request_id);
     return rec;
   }
   get(requestId) {
-    return this.byRequestId.get(requestId) ?? null;
+    return this.availableByRequestId.get(requestId) ?? null;
+  }
+  claim(requestId, user) {
+    const rec = this.availableByRequestId.get(requestId);
+    if (!rec || rec.user !== user) return null;
+    this.availableByRequestId.delete(requestId);
+    rec.claimed_at = (/* @__PURE__ */ new Date()).toISOString();
+    this.inFlightByRequestId.set(requestId, rec);
+    return rec;
+  }
+  releaseClaim(requestId) {
+    const rec = this.inFlightByRequestId.get(requestId);
+    if (!rec || rec.responded_at) return null;
+    this.inFlightByRequestId.delete(requestId);
+    rec.claimed_at = null;
+    this.availableByRequestId.set(requestId, rec);
+    return rec;
+  }
+  markResponded(requestId) {
+    const rec = this.inFlightByRequestId.get(requestId) ?? this.availableByRequestId.get(requestId);
+    if (!rec) return null;
+    if (!rec.responded_at) rec.responded_at = (/* @__PURE__ */ new Date()).toISOString();
+    return rec;
   }
   remove(requestId) {
-    const rec = this.byRequestId.get(requestId);
+    const rec = this.availableByRequestId.get(requestId) ?? this.inFlightByRequestId.get(requestId);
     if (!rec) return null;
-    this.byRequestId.delete(requestId);
+    this.availableByRequestId.delete(requestId);
+    this.inFlightByRequestId.delete(requestId);
     this.byJsonrpcKey.delete(this.jsonrpcKey(rec.client, rec.jsonrpc_id));
     return rec;
   }
@@ -1636,27 +2925,28 @@ var PendingRegistry = class {
     return this.remove(reqId);
   }
   listForUser(user) {
-    return Array.from(this.byRequestId.values()).filter((r) => r.user === user);
+    return this.allRequests().filter((r) => r.user === user);
   }
   removeForSession(user, sessionName) {
+    return this.removeMatching((rec) => rec.user === user && rec.session_name === sessionName);
+  }
+  removeForUser(user) {
+    return this.removeMatching((rec) => rec.user === user);
+  }
+  removeMatching(predicate) {
     const removed = [];
-    for (const rec of Array.from(this.byRequestId.values())) {
-      if (rec.user === user && rec.session_name === sessionName) {
-        this.remove(rec.request_id);
-        removed.push(rec);
-      }
+    for (const rec of this.allRequests()) {
+      if (!predicate(rec)) continue;
+      this.remove(rec.request_id);
+      if (!rec.responded_at) removed.push(rec);
     }
     return removed;
   }
-  removeForUser(user) {
-    const removed = [];
-    for (const rec of Array.from(this.byRequestId.values())) {
-      if (rec.user === user) {
-        this.remove(rec.request_id);
-        removed.push(rec);
-      }
-    }
-    return removed;
+  allRequests() {
+    return [
+      ...this.availableByRequestId.values(),
+      ...this.inFlightByRequestId.values()
+    ];
   }
   jsonrpcKey(client, id) {
     const tag = client.__ct_tag;
@@ -1922,20 +3212,26 @@ function asObject(value) {
 }
 
 // src/daemon/queues.ts
+var QueueTeardownError = class extends Error {
+  constructor(message = "session queue is tearing down") {
+    super(message);
+    this.name = "QueueTeardownError";
+  }
+};
 var TurnQueues = class {
   states = /* @__PURE__ */ new Map();
-  /**
-   * Either dispatch immediately or enqueue. Returns `{ started, queued_depth }`.
-   * If no turn is active, starts a new turn and sets currentTurnId.
-   */
   async sendOrQueue(sessionKey, client, threadId, input, retry) {
     return await this.withSessionLock(sessionKey, async (state) => {
+      assertActive(state);
       if (state.currentTurnId || state.draining) {
         const queued = { id: queueId(), input, enqueuedAt: (/* @__PURE__ */ new Date()).toISOString() };
         state.pending.push(queued);
         return { started: false, turn_id: state.currentTurnId, queue_id: queued.id, queued_depth: state.pending.length };
       }
+      const generation = state.generation;
+      assertActive(state);
       const res = await turnStart(client, threadId, input, retry);
+      if (!isStateUsable(state, generation)) throw new QueueTeardownError();
       state.currentTurnId = res.turnId;
       return { started: true, turn_id: res.turnId, queue_id: null, queued_depth: state.pending.length };
     });
@@ -1944,34 +3240,42 @@ var TurnQueues = class {
     return this.states.get(sessionKey)?.currentTurnId ?? null;
   }
   setCurrentTurn(sessionKey, turnId) {
-    const s = this.getOrInit(sessionKey);
-    s.currentTurnId = turnId;
+    const existing = this.states.get(sessionKey);
+    if (!existing && turnId === null) return;
+    const state = existing ?? this.getOrInit(sessionKey);
+    if (state.disposed) return;
+    state.currentTurnId = turnId;
+    this.resolveIdleWaiters(state);
   }
-  async onTurnCompleted(sessionKey, client, threadId, retry) {
-    return await this.withSessionLock(sessionKey, async (state) => {
-      state.draining = true;
-      state.currentTurnId = null;
-      if (state.pending.length === 0 || !client) {
-        state.draining = false;
-        return { turn_id: null, queue_id: null };
-      }
-      const next = state.pending.shift();
-      try {
-        const res = await turnStart(client, threadId, next.input, retry);
-        state.currentTurnId = res.turnId;
-        return { turn_id: res.turnId, queue_id: next.id };
-      } catch (e) {
-        logger.warn("failed to dispatch queued turn", { session: sessionKey, err: e.message });
-        return { turn_id: null, queue_id: next.id };
-      } finally {
-        state.draining = false;
-      }
+  isTeardown(sessionKey) {
+    return this.states.get(sessionKey)?.tearingDown ?? false;
+  }
+  async beginTeardown(sessionKey) {
+    const state = this.getOrInit(sessionKey);
+    state.tearingDown = true;
+    await state.serial;
+    return { currentTurnId: state.currentTurnId };
+  }
+  async waitForIdle(sessionKey) {
+    const state = this.states.get(sessionKey);
+    if (!state) return;
+    if (this.isIdle(state)) return;
+    await new Promise((resolve) => {
+      state.idleWaiters.add(resolve);
     });
   }
-  dispose(sessionKey) {
+  onClientClosed(sessionKey) {
     const state = this.states.get(sessionKey);
-    this.states.delete(sessionKey);
-    return { dropped: state?.pending.length ?? 0 };
+    if (!state) return;
+    state.currentTurnId = null;
+    state.draining = false;
+    this.resolveIdleWaiters(state);
+  }
+  clearTeardown(sessionKey) {
+    const state = this.states.get(sessionKey);
+    if (!state) return;
+    state.tearingDown = false;
+    this.resolveIdleWaiters(state);
   }
   depth(sessionKey) {
     return this.states.get(sessionKey)?.pending.length ?? 0;
@@ -1983,13 +3287,79 @@ var TurnQueues = class {
     this.states.delete(oldKey);
     this.states.set(newKey, state);
   }
+  async onTurnCompleted(sessionKey, client, threadId, retry) {
+    return await this.withSessionLock(sessionKey, async (state) => {
+      state.draining = true;
+      state.currentTurnId = null;
+      this.resolveIdleWaiters(state);
+      if (state.pending.length === 0 || !client || state.disposed || state.tearingDown) {
+        state.draining = false;
+        this.resolveIdleWaiters(state);
+        return { turn_id: null, queue_id: null, failed: false };
+      }
+      const next = state.pending[0];
+      const generation = state.generation;
+      try {
+        if (!isStateUsable(state, generation)) {
+          return { turn_id: null, queue_id: null, failed: false };
+        }
+        const res = await turnStart(client, threadId, next.input, retry);
+        if (!isStateUsable(state, generation)) {
+          return { turn_id: null, queue_id: null, failed: false };
+        }
+        state.pending.shift();
+        state.currentTurnId = res.turnId;
+        return { turn_id: res.turnId, queue_id: next.id, failed: false };
+      } catch (e) {
+        if (!isStateUsable(state, generation)) {
+          return { turn_id: null, queue_id: null, failed: false };
+        }
+        const err2 = e;
+        logger.warn("failed to dispatch queued turn", { session: sessionKey, err: err2.message, queue_id: next.id });
+        return {
+          turn_id: null,
+          queue_id: next.id,
+          failed: true,
+          error_message: err2.message
+        };
+      } finally {
+        if (isSameGeneration(state, generation)) {
+          state.draining = false;
+          this.resolveIdleWaiters(state);
+        }
+      }
+    });
+  }
+  dispose(sessionKey) {
+    const state = this.states.get(sessionKey);
+    if (!state) return { dropped: 0 };
+    state.disposed = true;
+    state.tearingDown = true;
+    state.generation += 1;
+    const dropped = state.pending.length;
+    state.pending = [];
+    state.currentTurnId = null;
+    state.draining = false;
+    this.resolveIdleWaiters(state);
+    this.states.delete(sessionKey);
+    return { dropped };
+  }
   getOrInit(sessionKey) {
-    let s = this.states.get(sessionKey);
-    if (!s) {
-      s = { pending: [], currentTurnId: null, draining: false, serial: Promise.resolve() };
-      this.states.set(sessionKey, s);
+    let state = this.states.get(sessionKey);
+    if (!state) {
+      state = {
+        pending: [],
+        currentTurnId: null,
+        draining: false,
+        serial: Promise.resolve(),
+        tearingDown: false,
+        disposed: false,
+        generation: 0,
+        idleWaiters: /* @__PURE__ */ new Set()
+      };
+      this.states.set(sessionKey, state);
     }
-    return s;
+    return state;
   }
   async withSessionLock(sessionKey, fn) {
     const state = this.getOrInit(sessionKey);
@@ -2000,19 +3370,41 @@ var TurnQueues = class {
     });
     await prev;
     try {
+      if (state.disposed) throw new QueueTeardownError();
       return await fn(state);
     } finally {
       release();
     }
   }
+  isIdle(state) {
+    return state.currentTurnId === null && !state.draining;
+  }
+  resolveIdleWaiters(state) {
+    if (!this.isIdle(state)) return;
+    for (const resolve of state.idleWaiters) resolve();
+    state.idleWaiters.clear();
+  }
 };
 function queueId() {
   return `q-${import_node_crypto4.default.randomBytes(4).toString("hex")}`;
 }
+function assertActive(state) {
+  if (state.disposed || state.tearingDown) {
+    throw new QueueTeardownError();
+  }
+}
+function isSameGeneration(state, generation) {
+  return state.generation === generation;
+}
+function isStateUsable(state, generation) {
+  return !state.disposed && !state.tearingDown && isSameGeneration(state, generation);
+}
 
 // src/daemon/orphans.ts
+var import_node_crypto5 = __toESM(require("crypto"));
 var import_node_fs8 = __toESM(require("fs"));
 var import_node_path8 = __toESM(require("path"));
+var import_promises3 = require("timers/promises");
 
 // src/daemon/processes.ts
 var import_node_fs7 = __toESM(require("fs"));
@@ -2020,7 +3412,20 @@ var import_node_child_process2 = require("child_process");
 function readLinuxCmdline(pid) {
   try {
     const raw = import_node_fs7.default.readFileSync(`/proc/${pid}/cmdline`);
-    return raw.toString("utf8").replace(/\0/g, " ").trim() || null;
+    const commandLine = raw.toString("utf8").replace(/\0/g, " ").trim() || null;
+    return { commandLine, source: "proc", reliable: true };
+  } catch {
+    return { commandLine: null, source: null, reliable: false };
+  }
+}
+function readLinuxStartTime(pid) {
+  try {
+    const raw = import_node_fs7.default.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const lastParen = raw.lastIndexOf(")");
+    if (lastParen < 0) return null;
+    const rest = raw.slice(lastParen + 2).trim().split(/\s+/);
+    const startTime = rest[19];
+    return typeof startTime === "string" && startTime.length > 0 ? startTime : null;
   } catch {
     return null;
   }
@@ -2031,8 +3436,20 @@ function readPsCommand(pid) {
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf8"
     });
-    const cmd = raw.trim();
-    return cmd.length > 0 ? cmd : null;
+    const commandLine = raw.trim();
+    return { commandLine: commandLine.length > 0 ? commandLine : null, source: "ps", reliable: true };
+  } catch {
+    return { commandLine: null, source: null, reliable: false };
+  }
+}
+function readPsStartTime(pid) {
+  try {
+    const raw = (0, import_node_child_process2.execFileSync)("ps", ["-p", String(pid), "-o", "lstart="], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const startTime = raw.trim();
+    return startTime.length > 0 ? startTime : null;
   } catch {
     return null;
   }
@@ -2045,8 +3462,8 @@ function readWindowsCommand(pid) {
         stdio: ["ignore", "pipe", "ignore"],
         encoding: "utf8"
       });
-      const cmd = raw.trim();
-      if (cmd.length > 0) return cmd;
+      const commandLine = raw.trim();
+      if (commandLine.length > 0) return { commandLine, source: "powershell", reliable: true };
     } catch {
     }
   }
@@ -2056,26 +3473,81 @@ function readWindowsCommand(pid) {
       encoding: "utf8"
     });
     const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CommandLine="));
-    const cmd = line?.slice("CommandLine=".length).trim() ?? "";
-    if (cmd.length > 0) return cmd;
+    const commandLine = line?.slice("CommandLine=".length).trim() ?? "";
+    if (commandLine.length > 0) return { commandLine, source: "wmic", reliable: true };
   } catch {
   }
-  return null;
+  try {
+    const raw = (0, import_node_child_process2.execFileSync)("tasklist", ["/FO", "LIST", "/NH", "/FI", `PID eq ${pid}`], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => /^Image Name:/i.test(entry));
+    const commandLine = line?.replace(/^Image Name:\s*/i, "").trim() ?? "";
+    if (commandLine.length > 0) return { commandLine, source: "tasklist", reliable: false };
+  } catch {
+  }
+  return { commandLine: null, source: null, reliable: false };
 }
-function readProcessCommandLine(pid) {
-  if (!Number.isFinite(pid) || pid <= 0) return null;
+function readWindowsStartTime(pid) {
+  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CreationDate) { [Console]::Out.Write($p.CreationDate) }`;
+  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
+    try {
+      const raw = (0, import_node_child_process2.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8"
+      });
+      const startTime = raw.trim();
+      if (startTime.length > 0) return startTime;
+    } catch {
+    }
+  }
+  try {
+    const raw = (0, import_node_child_process2.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CreationDate", "/value"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CreationDate="));
+    const startTime = line?.slice("CreationDate=".length).trim() ?? "";
+    return startTime.length > 0 ? startTime : null;
+  } catch {
+    return null;
+  }
+}
+function inspectProcessCommandLine(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return { commandLine: null, source: null, reliable: false };
   if (process.platform === "linux") return readLinuxCmdline(pid);
   if (process.platform === "darwin" || process.platform === "freebsd") return readPsCommand(pid);
   if (process.platform === "win32") return readWindowsCommand(pid);
+  return { commandLine: null, source: null, reliable: false };
+}
+function readProcessStartTime(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  if (process.platform === "linux") return readLinuxStartTime(pid);
+  if (process.platform === "darwin" || process.platform === "freebsd") return readPsStartTime(pid);
+  if (process.platform === "win32") return readWindowsStartTime(pid);
   return null;
 }
-function isLikelyCodexAppServerProcess(pid) {
-  const cmd = readProcessCommandLine(pid);
-  if (!cmd) return false;
-  return cmd.includes("app-server") && (cmd.includes("codex") || cmd.includes("codex-cli-bin"));
+function inspectCodexAppServerProcess(pid) {
+  const inspection = inspectProcessCommandLine(pid);
+  if (!inspection.commandLine) return "unknown";
+  if (looksLikeCodexAppServerCommand(inspection.commandLine)) return "match";
+  if (!inspection.reliable) return "unknown";
+  return "mismatch";
+}
+function isLikelyCodexTeamDaemonProcess(pid) {
+  const inspection = inspectProcessCommandLine(pid);
+  return inspection.commandLine !== null && inspection.commandLine.includes("--daemon-internal");
+}
+function looksLikeCodexAppServerCommand(commandLine) {
+  return commandLine.includes("app-server") && (commandLine.includes("codex") || commandLine.includes("codex-cli-bin"));
 }
 
 // src/daemon/orphans.ts
+var SCHEMA_VERSION4 = 2;
+var TERM_GRACE_MS = 2e3;
+var KILL_GRACE_MS = 500;
+var POLL_MS = 100;
 function orphanPidsPath(dataDir) {
   return import_node_path8.default.join(dataDir, "codex-pids.json");
 }
@@ -2085,8 +3557,22 @@ function readPidFile(dataDir) {
   try {
     const raw = import_node_fs8.default.readFileSync(p, "utf8");
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((x) => typeof x === "number" && Number.isFinite(x));
+    if (Array.isArray(parsed)) {
+      return parsed.filter((x) => typeof x === "number" && Number.isFinite(x)).map((pid) => ({
+        pid: Math.floor(pid),
+        nonce: `legacy-${pid}`,
+        start_time: null,
+        tracked_at: (/* @__PURE__ */ new Date(0)).toISOString()
+      }));
+    }
+    if (!parsed || typeof parsed !== "object") return [];
+    const obj = parsed;
+    if (typeof obj.schema_version === "number" && obj.schema_version > SCHEMA_VERSION4) {
+      logger.warn("unknown orphan pid schema_version", { schema_version: obj.schema_version });
+      return [];
+    }
+    if (!Array.isArray(obj.processes)) return [];
+    return obj.processes.flatMap((entry) => normalizeTrackedPid(entry));
   } catch {
     return [];
   }
@@ -2096,58 +3582,139 @@ function writePidFile(dataDir, pids) {
   try {
     import_node_fs8.default.mkdirSync(import_node_path8.default.dirname(p), { recursive: true });
     const tmp = p + ".tmp";
-    import_node_fs8.default.writeFileSync(tmp, JSON.stringify(pids));
+    import_node_fs8.default.writeFileSync(tmp, JSON.stringify({
+      schema_version: SCHEMA_VERSION4,
+      processes: pids
+    }));
     import_node_fs8.default.renameSync(tmp, p);
   } catch (e) {
     logger.warn("failed to persist codex pid file", { err: e.message });
   }
 }
-function reapOrphans(dataDir) {
+async function reapOrphans(dataDir) {
   const pids = readPidFile(dataDir);
   let killed = 0;
-  for (const pid of pids) {
-    try {
-      process.kill(pid, 0);
-    } catch {
+  const retryPids = [];
+  for (const tracked of pids) {
+    const liveness = inspectTrackedProcessLiveness(tracked);
+    if (liveness === "dead") continue;
+    if (liveness === "unknown") {
+      retryPids.push(tracked);
+      logger.warn("unable to verify orphan codex pid identity; retaining for retry", {
+        pid: tracked.pid,
+        platform: process.platform
+      });
       continue;
     }
-    if (!isLikelyCodexAppServerProcess(pid)) {
-      logger.warn("skipping stale non-codex pid", { pid });
+    const classification = inspectCodexAppServerProcess(tracked.pid);
+    if (classification === "unknown") {
+      retryPids.push(tracked);
+      logger.warn("unable to verify orphan codex pid; retaining for retry", {
+        pid: tracked.pid,
+        platform: process.platform
+      });
+      continue;
+    }
+    if (classification !== "match") {
+      logger.warn("skipping stale non-codex pid", { pid: tracked.pid });
       continue;
     }
     try {
-      process.kill(pid, "SIGTERM");
+      process.kill(tracked.pid, "SIGTERM");
       killed++;
-    } catch {
+    } catch (e) {
+      if (inspectTrackedProcessLiveness(tracked) !== "dead") {
+        retryPids.push(tracked);
+      }
+      logger.warn("failed to terminate orphan codex pid; retaining for retry", {
+        pid: tracked.pid,
+        err: e.message
+      });
+      continue;
+    }
+    if (await waitForTrackedExit(tracked, TERM_GRACE_MS)) continue;
+    try {
+      process.kill(tracked.pid, "SIGKILL");
+    } catch (e) {
+      if (inspectTrackedProcessLiveness(tracked) !== "dead") {
+        retryPids.push(tracked);
+      }
+      logger.warn("failed to hard-kill orphan codex pid; retaining for retry", {
+        pid: tracked.pid,
+        err: e.message
+      });
+      continue;
+    }
+    if (!await waitForTrackedExit(tracked, KILL_GRACE_MS)) {
+      retryPids.push(tracked);
+      logger.warn("orphan codex pid still alive after SIGKILL; retaining for retry", {
+        pid: tracked.pid
+      });
     }
   }
   if (killed > 0) {
     logger.info("reaped orphan codex processes", { count: killed });
   }
-  writePidFile(dataDir, []);
+  writePidFile(dataDir, retryPids);
   return killed;
 }
 var PidTracker = class {
   dataDir;
-  pids = /* @__PURE__ */ new Set();
+  pids = /* @__PURE__ */ new Map();
   constructor(dataDir) {
     this.dataDir = dataDir;
   }
   track(pid) {
     if (!Number.isFinite(pid) || pid <= 0) return;
-    this.pids.add(pid);
+    this.pids.set(pid, {
+      pid,
+      nonce: import_node_crypto5.default.randomBytes(8).toString("hex"),
+      start_time: readProcessStartTime(pid),
+      tracked_at: (/* @__PURE__ */ new Date()).toISOString()
+    });
     this.persist();
   }
   untrack(pid) {
     if (this.pids.delete(pid)) this.persist();
   }
   snapshot() {
-    return Array.from(this.pids);
+    return Array.from(this.pids.values());
   }
   persist() {
-    writePidFile(this.dataDir, Array.from(this.pids));
+    writePidFile(this.dataDir, this.snapshot());
   }
 };
+function normalizeTrackedPid(entry) {
+  if (!entry || typeof entry !== "object") return [];
+  const obj = entry;
+  const pid = typeof obj.pid === "number" && Number.isFinite(obj.pid) ? Math.floor(obj.pid) : null;
+  if (!pid || pid <= 0) return [];
+  return [{
+    pid,
+    nonce: typeof obj.nonce === "string" && obj.nonce.length > 0 ? obj.nonce : import_node_crypto5.default.randomBytes(8).toString("hex"),
+    start_time: typeof obj.start_time === "string" ? obj.start_time : null,
+    tracked_at: typeof obj.tracked_at === "string" ? obj.tracked_at : (/* @__PURE__ */ new Date(0)).toISOString()
+  }];
+}
+function inspectTrackedProcessLiveness(tracked) {
+  try {
+    process.kill(tracked.pid, 0);
+  } catch {
+    return "dead";
+  }
+  if (!tracked.start_time) return "alive";
+  const startTime = readProcessStartTime(tracked.pid);
+  if (startTime === null) return "unknown";
+  return startTime === tracked.start_time ? "alive" : "dead";
+}
+async function waitForTrackedExit(tracked, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (inspectTrackedProcessLiveness(tracked) === "dead") return true;
+    await (0, import_promises3.setTimeout)(POLL_MS, void 0, { ref: false });
+  }
+  return inspectTrackedProcessLiveness(tracked) === "dead";
+}
 
 // src/codex/pool.ts
 var import_node_events2 = require("events");
@@ -2155,7 +3722,7 @@ var import_node_events2 = require("events");
 // src/codex/appServerClient.ts
 var import_node_child_process3 = require("child_process");
 var import_node_events = require("events");
-var import_node_crypto5 = require("crypto");
+var import_node_crypto6 = require("crypto");
 var import_node_path9 = __toESM(require("path"));
 var STDERR_TAIL_LINES = 400;
 var DEFAULT_REQUEST_TIMEOUT_MS = 12e4;
@@ -2234,21 +3801,9 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     if (!proc) return;
     this.proc = null;
     this.initialized = false;
-    try {
-      proc.stdin.end();
-    } catch {
-    }
     const exited = new Promise((resolve) => proc.once("exit", () => resolve()));
-    try {
-      proc.kill("SIGTERM");
-    } catch {
-    }
-    const timer = setTimeout(() => {
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-      }
-    }, graceMs);
+    requestProcessShutdown(proc);
+    const timer = setTimeout(() => forceKillProcess(proc), graceMs);
     timer.unref();
     try {
       await exited;
@@ -2260,7 +3815,7 @@ var AppServerClient = class extends import_node_events.EventEmitter {
   request(method, params = {}) {
     if (!this.proc) return Promise.reject(new TransportClosedError("app-server is not running"));
     if (this.proc.exitCode !== null) return Promise.reject(new TransportClosedError("app-server already exited"));
-    const id = (0, import_node_crypto5.randomUUID)();
+    const id = (0, import_node_crypto6.randomUUID)();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         const pending = this.pending.get(id);
@@ -2292,11 +3847,21 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     if (!this.proc) return;
     this.writeMessage({ jsonrpc: "2.0", id, result });
   }
+  respondAck(id, result) {
+    if (!this.proc) return Promise.reject(new TransportClosedError("app-server is not running"));
+    return this.writeMessageAck({ jsonrpc: "2.0", id, result });
+  }
   respondError(id, code, message, data) {
     if (!this.proc) return;
     const error = { code, message };
     if (data !== void 0) error.data = data;
     this.writeMessage({ jsonrpc: "2.0", id, error });
+  }
+  respondErrorAck(id, code, message, data) {
+    if (!this.proc) return Promise.reject(new TransportClosedError("app-server is not running"));
+    const error = { code, message };
+    if (data !== void 0) error.data = data;
+    return this.writeMessageAck({ jsonrpc: "2.0", id, error });
   }
   isInitialized() {
     return this.initialized;
@@ -2308,6 +3873,32 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     }
     const line = JSON.stringify(msg) + "\n";
     proc.stdin.write(line);
+  }
+  writeMessageAck(msg) {
+    const proc = this.proc;
+    if (!proc || !proc.stdin.writable) {
+      return Promise.reject(new TransportClosedError("app-server stdin closed"));
+    }
+    const line = JSON.stringify(msg) + "\n";
+    return new Promise((resolve, reject) => {
+      const onExit = () => {
+        reject(new TransportClosedError("app-server exited during stdin write"));
+      };
+      proc.once("exit", onExit);
+      try {
+        const backpressured = !proc.stdin.write(line, (err2) => {
+          proc.off("exit", onExit);
+          if (err2) {
+            reject(new TransportClosedError(`app-server stdin write failed: ${err2.message}`));
+            return;
+          }
+          resolve({ backpressured });
+        });
+      } catch (e) {
+        proc.off("exit", onExit);
+        reject(e);
+      }
+    });
   }
   onStdout(chunk) {
     this.buf += chunk;
@@ -2416,6 +4007,26 @@ function quoteWindowsArg(arg) {
   if (!/[ \t"&()^<>|]/.test(arg)) return arg;
   return `"${arg.replace(/(["])/g, "\\$1")}"`;
 }
+function requestProcessShutdown(proc) {
+  try {
+    proc.stdin.end();
+  } catch {
+  }
+  if (process.platform === "win32") {
+    return;
+  }
+  try {
+    proc.kill("SIGTERM");
+  } catch {
+  }
+}
+function forceKillProcess(proc) {
+  try {
+    if (process.platform === "win32") proc.kill();
+    else proc.kill("SIGKILL");
+  } catch {
+  }
+}
 
 // src/codex/pool.ts
 var AppServerPool = class extends import_node_events2.EventEmitter {
@@ -2515,7 +4126,10 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
   }
   async shutdown() {
     this.shuttingDown = true;
-    const closes = Array.from(this.byClient.values()).map((m) => m.client.close().catch(() => void 0));
+    const closes = Array.from(this.byClient.values()).map((m) => {
+      m.closeReason = "shutdown";
+      return m.client.close().catch(() => void 0);
+    });
     await Promise.all(closes);
     this.inFlightAcquireBySession.clear();
     this.byUser.clear();
@@ -2524,7 +4138,10 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
   }
   async closeUser(user) {
     const managed = [...this.byUser.get(user) ?? []];
-    await Promise.all(managed.map((m) => m.client.close().catch(() => void 0)));
+    await Promise.all(managed.map((m) => {
+      m.closeReason = "user_close";
+      return m.client.close().catch(() => void 0);
+    }));
   }
   findAvailableForUser(user, allowBoundSessions) {
     const list = this.byUser.get(user);
@@ -2540,7 +4157,7 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     const clientOptions = { ...this.options.clientDefaults ?? {}, ...override ?? {} };
     const client = new AppServerClient(clientOptions);
     const id = `as-${this.nextClientId++}`;
-    const managed = { id, user, client, sessions: /* @__PURE__ */ new Set() };
+    const managed = { id, user, client, sessions: /* @__PURE__ */ new Set(), closeReason: null };
     client.on("notification", (n) => {
       this.emit("notification", { user, clientId: id, notification: n });
     });
@@ -2555,6 +4172,8 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     });
     client.on("close", (code) => {
       const sessions = Array.from(managed.sessions);
+      const reason = managed.closeReason ?? (this.shuttingDown ? "shutdown" : "unexpected");
+      managed.closeReason = null;
       for (const s of sessions) this.bySession.delete(s);
       managed.sessions.clear();
       const list2 = this.byUser.get(user);
@@ -2566,7 +4185,7 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
       this.byClient.delete(id);
       const pid2 = client.pid();
       if (pid2 !== null && this.options.onExit) this.options.onExit(pid2);
-      this.emit("client_close", { user, clientId: id, sessions, exitCode: code });
+      this.emit("client_close", { user, clientId: id, sessions, exitCode: code, reason });
     });
     client.on("error", (err2) => {
       logger.error("app-server client error", { user, clientId: id, err: err2.message });
@@ -2706,6 +4325,7 @@ var status = async (ctx, req) => {
 
 // src/daemon/handlers/daemon.ts
 var import_node_fs10 = __toESM(require("fs"));
+var import_node_path10 = __toESM(require("path"));
 var import_node_child_process4 = require("child_process");
 
 // src/daemon/shutdown.ts
@@ -2783,8 +4403,15 @@ var daemonUserCreate = async (ctx, req) => {
 };
 var daemonUserDestroy = async (ctx, req) => {
   const token = reqPositional(req, 0, "token");
+  const force = isTrue(getFlag(req.params, "force"));
   if (!ctx.users.has(token)) {
     throw new CodexTeamError("user_not_found", `user '${token}' not found`);
+  }
+  const liveSessions = ctx.sessions.listLive(token);
+  if (!force && liveSessions.length > 0) {
+    throw invalidParams(
+      `cannot destroy user '${token}' while ${liveSessions.length} live session(s) remain; pass --force to destroy anyway`
+    );
   }
   const pending = ctx.pending.removeForUser(token);
   for (const p of pending) {
@@ -2878,39 +4505,63 @@ var daemonConfigReset = async (ctx, req) => {
 var daemonLogsStream = async (ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "daemonLogs requires a stream");
   const logPath = ctx.logPath;
-  if (!import_node_fs10.default.existsSync(logPath)) {
-    stream.end();
-    return { streamed: true };
-  }
   const follow = isTrue(getFlag(req.params, "follow")) || isTrue(getFlag(req.params, "f"));
   const n = toInt3(getFlag(req.params, "n"), 100);
   const level = asString(getFlag(req.params, "level"));
-  const contents = import_node_fs10.default.readFileSync(logPath, "utf8");
-  const lines = contents.split("\n").filter(Boolean);
-  const tailLines = lines.slice(Math.max(0, lines.length - n));
-  for (const line of tailLines) {
-    if (level && !lineMatchesLevel(line, level)) continue;
+  let offset = 0;
+  let closed = false;
+  let debounceTimer = null;
+  const emitLine = (line) => {
+    if (!line) return;
+    if (level && !lineMatchesLevel(line, level)) return;
     stream.chunk(safeParseOr(line, { raw: line }));
+  };
+  const initial = await readTextIfExists(logPath);
+  if (initial !== null) {
+    const lines = initial.split("\n").filter(Boolean);
+    const tailLines = lines.slice(Math.max(0, lines.length - n));
+    for (const line of tailLines) emitLine(line);
+    offset = Buffer.byteLength(initial);
+  } else if (!follow) {
+    stream.end();
+    return { streamed: true };
   }
   if (!follow) {
     stream.end();
     return { streamed: true };
   }
-  const watcher = import_node_fs10.default.watch(logPath, { persistent: true }, () => {
+  const syncAppended = async () => {
     try {
-      const data = import_node_fs10.default.readFileSync(logPath, "utf8");
-      const newLines = data.split("\n").filter(Boolean);
-      const reset = newLines.length < lines.length || newLines.some((line, idx) => idx < lines.length && lines[idx] !== line);
-      const diff = reset ? newLines : newLines.slice(lines.length);
-      lines.splice(0, lines.length, ...newLines);
-      for (const line of diff) {
-        if (level && !lineMatchesLevel(line, level)) continue;
-        stream.chunk(safeParseOr(line, { raw: line }));
+      const stat = await import_node_fs10.default.promises.stat(logPath);
+      if (stat.size < offset) offset = 0;
+      if (stat.size === offset) return;
+      const chunk = await readBytes(logPath, offset, stat.size - offset);
+      offset = stat.size;
+      for (const line of chunk.split("\n").filter(Boolean)) emitLine(line);
+    } catch (e) {
+      if (e.code === "ENOENT") {
+        offset = 0;
+        return;
       }
-    } catch {
+      logger.warn("daemon log follow read failed", { err: e.message });
     }
+  };
+  const scheduleSync = () => {
+    if (closed || debounceTimer) return;
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      void syncAppended();
+    }, 50);
+    debounceTimer.unref();
+  };
+  const watcher = import_node_fs10.default.watch(import_node_path10.default.dirname(logPath), { persistent: true }, (_event, filename) => {
+    if (!filename || filename.toString() === import_node_path10.default.basename(logPath)) scheduleSync();
   });
-  stream.onClose(() => watcher.close());
+  stream.onClose(() => {
+    closed = true;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    watcher.close();
+  });
   return { streamed: true };
 };
 function reqPositional(req, idx, name) {
@@ -2953,6 +4604,25 @@ function safeParseOr(line, fallback) {
     return JSON.parse(line);
   } catch {
     return fallback;
+  }
+}
+async function readTextIfExists(filePath) {
+  try {
+    return await import_node_fs10.default.promises.readFile(filePath, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
+}
+async function readBytes(filePath, start, length) {
+  if (length <= 0) return "";
+  const handle = await import_node_fs10.default.promises.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    return buffer.toString("utf8", 0, bytesRead);
+  } finally {
+    await handle.close();
   }
 }
 function getPkgVersion() {
@@ -3094,7 +4764,7 @@ function compactJson(obj) {
 }
 
 // src/format/table.ts
-function renderTable(rows, columns) {
+function renderTable2(rows, columns) {
   if (rows.length === 0) return `(no rows)`;
   const matrix = [columns];
   for (const row of rows) {
@@ -3123,6 +4793,7 @@ function stringify(v) {
 }
 
 // src/daemon/handlers/session.ts
+var attachLocks = /* @__PURE__ */ new Map();
 var sessionNew = async (ctx, req) => {
   requireUser(ctx, req);
   const user = req.bearer;
@@ -3177,53 +4848,63 @@ var sessionAttach = async (ctx, req) => {
   const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
   const takeover = isTrue2(flags["takeover"]);
-  const existing = ctx.sessions.get(user, identifier);
-  if (existing) {
-    ctx.sessions.touch(user, existing.name);
-    return { session: existing, noop: true };
-  }
-  const anywhere = looksLikeThreadId(identifier) ? ctx.sessions.findLiveAnywhere(identifier) : ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
-  if (anywhere === "ambiguous") {
-    throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
-  }
-  if (anywhere && anywhere.user !== user) {
-    if (!takeover) {
-      throw new CodexTeamError("session_busy", `session is live under user '${anywhere.user}'. Pass --takeover to seize.`);
+  const lockThreadId = resolveAttachLockThreadId(ctx, identifier);
+  const attach = async () => {
+    const existing = ctx.sessions.get(user, identifier);
+    if (existing) {
+      ctx.sessions.touch(user, existing.name);
+      return { session: existing, noop: true };
     }
-    await seizeFromOtherUser(ctx, anywhere.user, user, anywhere.record);
-  }
-  const threadId = looksLikeThreadId(identifier) ? identifier : anywhere?.record.thread_id ?? null;
-  if (!threadId) {
-    throw new CodexTeamError("session_not_found", `no session matches '${identifier}' in this user`);
-  }
-  const name = anywhere?.record.name ?? deriveNameFromThreadId(threadId, ctx, user);
-  const client = await ctx.pool.acquire(user, keyFor(user, name));
-  try {
-    await threadResume(client, threadId, ctx.retryOptions());
-  } catch (e) {
-    ctx.pool.release(keyFor(user, name));
-    throw e;
-  }
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const record = {
-    name,
-    thread_id: threadId,
-    state: "live",
-    created_at: now,
-    last_active_at: now,
-    turn_count: 0,
-    ...anywhere?.record ? {
-      model: anywhere.record.model,
-      cwd: anywhere.record.cwd,
-      sandbox: anywhere.record.sandbox,
-      approval: anywhere.record.approval,
-      effort: anywhere.record.effort,
-      profile: anywhere.record.profile
-    } : {}
+    const anywhere = looksLikeThreadId(identifier) ? ctx.sessions.findLiveAnywhere(identifier) : ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
+    if (anywhere === "ambiguous") {
+      throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
+    }
+    if (anywhere && anywhere.user !== user) {
+      if (!takeover) {
+        throw new CodexTeamError("session_busy", `session is live under user '${anywhere.user}'. Pass --takeover to seize.`);
+      }
+      await seizeFromOtherUser(ctx, anywhere.user, user, anywhere.record);
+    }
+    const threadId = looksLikeThreadId(identifier) ? identifier : anywhere?.record.thread_id ?? null;
+    if (!threadId) {
+      throw new CodexTeamError("session_not_found", `no session matches '${identifier}' in this user`);
+    }
+    ensureAttachOwnership(ctx, user, threadId);
+    const name = anywhere?.record.name ?? deriveNameFromThreadId(threadId, ctx, user);
+    const sessionKey = keyFor(user, name);
+    const client = await ctx.pool.acquire(user, sessionKey);
+    let added = false;
+    try {
+      ensureAttachOwnership(ctx, user, threadId);
+      await threadResume(client, threadId, ctx.retryOptions());
+      ensureAttachOwnership(ctx, user, threadId);
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const record = {
+        name,
+        thread_id: threadId,
+        state: "live",
+        created_at: now,
+        last_active_at: now,
+        turn_count: 0,
+        ...anywhere?.record ? {
+          model: anywhere.record.model,
+          cwd: anywhere.record.cwd,
+          sandbox: anywhere.record.sandbox,
+          approval: anywhere.record.approval,
+          effort: anywhere.record.effort,
+          profile: anywhere.record.profile
+        } : {}
+      };
+      ctx.sessions.add(user, record);
+      added = true;
+      ctx.users.touch(user);
+      return { session: record };
+    } catch (e) {
+      if (!added) ctx.pool.release(sessionKey);
+      throw e;
+    }
   };
-  ctx.sessions.add(user, record);
-  ctx.users.touch(user);
-  return { session: record };
+  return lockThreadId ? await withAttachLock(lockThreadId, attach) : await attach();
 };
 var sessionDetach = async (ctx, req) => {
   requireUser(ctx, req);
@@ -3236,13 +4917,17 @@ var sessionDetach = async (ctx, req) => {
     return { session: null, noop: true };
   }
   const sessionKey = keyFor(user, rec.name);
+  const teardown = await ctx.queues.beginTeardown(sessionKey);
   const client = ctx.pool.clientForSession(sessionKey);
-  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+  const turnId = teardown.currentTurnId;
   if (client && !graceful && turnId) {
     try {
       await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions());
     } catch {
     }
+  }
+  if (graceful) {
+    await ctx.queues.waitForIdle(sessionKey);
   }
   if (client) {
     try {
@@ -3394,7 +5079,7 @@ var sessionList = async (ctx, req) => {
     const sorted = sortSessions(live, sortField);
     const response2 = { sessions: sorted, all: false, sort: sortField, format };
     if (format === "table") {
-      response2.table = renderTable(
+      response2.table = renderTable2(
         sorted,
         ["name", "thread_id", "state", "model", "turn_count", "last_active_at"]
       );
@@ -3411,7 +5096,7 @@ var sessionList = async (ctx, req) => {
     format
   };
   if (format === "table") {
-    response.table = renderTable(
+    response.table = renderTable2(
       result.data,
       ["id", "status", "preview", "cwd", "updated_at"]
     );
@@ -3494,6 +5179,36 @@ function deriveNameFromThreadId(threadId, ctx, user) {
   while (ctx.sessions.get(user, candidate)) candidate = generateSessionName();
   return candidate;
 }
+function resolveAttachLockThreadId(ctx, identifier) {
+  if (looksLikeThreadId(identifier)) return identifier;
+  const anywhere = ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
+  if (anywhere === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
+  }
+  return anywhere?.record.thread_id ?? null;
+}
+function ensureAttachOwnership(ctx, user, threadId) {
+  const owner = ctx.sessions.findLiveAnywhere(threadId);
+  if (owner && owner.user !== user) {
+    throw new CodexTeamError("session_busy", `thread '${threadId}' is live under user '${owner.user}'`);
+  }
+}
+async function withAttachLock(threadId, fn) {
+  const prev = attachLocks.get(threadId) ?? Promise.resolve();
+  let release;
+  const next = new Promise((resolve) => {
+    release = resolve;
+  });
+  const tail = prev.then(() => next);
+  attachLocks.set(threadId, tail);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (attachLocks.get(threadId) === tail) attachLocks.delete(threadId);
+  }
+}
 async function readInstructionFile(value, flag) {
   const filePath = asString2(value);
   if (!filePath) return null;
@@ -3505,8 +5220,9 @@ async function readInstructionFile(value, flag) {
 }
 async function seizeFromOtherUser(ctx, fromUser, toUser, rec) {
   const sessionKey = keyFor(fromUser, rec.name);
+  const teardown = await ctx.queues.beginTeardown(sessionKey);
   const client = ctx.pool.clientForSession(sessionKey);
-  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+  const turnId = teardown.currentTurnId;
   if (client) {
     if (turnId) {
       try {
@@ -3528,7 +5244,7 @@ async function seizeFromOtherUser(ctx, fromUser, toUser, rec) {
     } catch {
     }
   }
-  ctx.events.append(fromUser, {
+  await ctx.events.append(fromUser, {
     type: "session.seized",
     session: rec.name,
     thread_id: rec.thread_id,
@@ -3601,13 +5317,37 @@ var messageApproval = async (ctx, req) => {
   if (!pending.kind.startsWith("approval.")) {
     throw new CodexTeamError("invalid_decision", `request '${requestId}' is not an approval (kind=${pending.kind})`);
   }
-  const response = await buildResponse(req, pending, shortcut);
-  pending.client.respond(pending.jsonrpc_id, response);
-  ctx.pending.remove(requestId);
+  const claimed = claimPending(ctx, user, requestId);
+  let response;
+  try {
+    response = await buildResponse(req, claimed, shortcut);
+  } catch (e) {
+    ctx.pending.releaseClaim(requestId);
+    throw e;
+  }
+  try {
+    const ack = await claimed.client.respondAck(claimed.jsonrpc_id, response);
+    ctx.pending.markResponded(requestId);
+    if (ack.backpressured) {
+      emitPendingWarning(ctx, user, rec.name, rec.thread_id, {
+        message: "approval reply is delayed by app-server stdin backpressure",
+        kind: "approval_reply_backpressured",
+        request_id: requestId
+      });
+    }
+  } catch (err2) {
+    ctx.pending.remove(requestId);
+    emitPendingWarning(ctx, user, rec.name, rec.thread_id, {
+      message: `approval reply delivery failed: ${err2.message}`,
+      kind: "approval_reply_delivery_failed",
+      request_id: requestId
+    });
+    throw err2;
+  }
   return {
     session: rec.name,
     request_id: requestId,
-    kind: pending.kind,
+    kind: claimed.kind,
     responded: true,
     response
   };
@@ -3620,9 +5360,33 @@ var messageAnswer = async (ctx, req) => {
   if (pending.kind !== "user_input.request") {
     throw new CodexTeamError("invalid_decision", `request '${requestId}' is not a user_input request (kind=${pending.kind})`);
   }
-  const response = await buildAnswerResponse(req, pending, inline);
-  pending.client.respond(pending.jsonrpc_id, response);
-  ctx.pending.remove(requestId);
+  const claimed = claimPending(ctx, user, requestId);
+  let response;
+  try {
+    response = await buildAnswerResponse(req, claimed, inline);
+  } catch (e) {
+    ctx.pending.releaseClaim(requestId);
+    throw e;
+  }
+  try {
+    const ack = await claimed.client.respondAck(claimed.jsonrpc_id, response);
+    ctx.pending.markResponded(requestId);
+    if (ack.backpressured) {
+      emitPendingWarning(ctx, user, rec.name, rec.thread_id, {
+        message: "user_input reply is delayed by app-server stdin backpressure",
+        kind: "user_input_reply_backpressured",
+        request_id: requestId
+      });
+    }
+  } catch (err2) {
+    ctx.pending.remove(requestId);
+    emitPendingWarning(ctx, user, rec.name, rec.thread_id, {
+      message: `user_input reply delivery failed: ${err2.message}`,
+      kind: "user_input_reply_delivery_failed",
+      request_id: requestId
+    });
+    throw err2;
+  }
   return { session: rec.name, request_id: requestId, responded: true, response };
 };
 var messageHistory = async (ctx, req) => {
@@ -3726,6 +5490,19 @@ function requirePending(ctx, user, requestId) {
   if (p.user !== user) throw new CodexTeamError("invalid_params", `pending request '${requestId}' belongs to another user`);
   return p;
 }
+function claimPending(ctx, user, requestId) {
+  const claimed = ctx.pending.claim(requestId, user);
+  if (!claimed) throw new CodexTeamError("invalid_params", `no pending request '${requestId}'`);
+  return claimed;
+}
+function emitPendingWarning(ctx, user, session, threadId, payload) {
+  void ctx.events.append(user, {
+    type: "warning",
+    session,
+    thread_id: threadId,
+    payload
+  }).catch(() => void 0);
+}
 async function readPromptInput(req) {
   const positional = asPositionalOptional2(req, 1);
   const fromFile = asString3(getFlag2(req, "file"));
@@ -3777,9 +5554,9 @@ async function readJsonInput(req) {
 }
 async function buildUserInput(text, attachments) {
   const items = [{ type: "text", text }];
-  for (const path11 of attachments) {
-    await assertAttachable(path11);
-    items.push({ type: "localImage", path: path11 });
+  for (const path12 of attachments) {
+    await assertAttachable(path12);
+    items.push({ type: "localImage", path: path12 });
   }
   return items;
 }
@@ -3934,6 +5711,9 @@ async function listTurnsFromRelativeOffset(client, threadId, relativeSince, limi
 
 // src/daemon/handlers/monitor.ts
 var import_node_child_process5 = require("child_process");
+var MAX_INTERVAL_QUEUE_EVENTS = 512;
+var MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
+var MAX_FLUSH_EVENTS_PER_TICK = 64;
 var monitorEvents = async (ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor events requires streaming");
   const user = req.bearer;
@@ -3963,14 +5743,57 @@ var monitorEvents = async (ctx, req, stream) => {
     }
     return true;
   };
-  const backlog = ctx.events.listSince(user, sinceId, { includeDelta: true });
+  const backlog = await ctx.events.listSince(user, sinceId, { includeDelta: true });
   if (!backlog.ok) {
-    stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
-      oldest_available_id: backlog.oldest_available_id
-    }));
+    if (backlog.reason === "id_rotated") {
+      stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
+        oldest_available_id: backlog.oldest_available_id
+      }));
+    } else {
+      stream.end(invalidParams(`event '${sinceId}' not found`));
+    }
     return { streaming: true };
   }
-  const queue = backlog.events.filter(accept);
+  const initialEvents = backlog.events.filter(accept);
+  const queue = streamMode ? [...initialEvents] : [];
+  let queueBytes = 0;
+  let overflowDropped = 0;
+  let overflowDroppedBytes = 0;
+  let overflowSeq = 0;
+  const enqueueIntervalEvent = (event) => {
+    queue.push(event);
+    queueBytes += eventSize(event);
+    while (queue.length > MAX_INTERVAL_QUEUE_EVENTS || queueBytes > MAX_INTERVAL_QUEUE_BYTES) {
+      const dropped = queue.shift();
+      if (!dropped) break;
+      overflowDropped++;
+      const droppedBytes = eventSize(dropped);
+      overflowDroppedBytes += droppedBytes;
+      queueBytes = Math.max(0, queueBytes - droppedBytes);
+    }
+  };
+  const takeOverflowEvent = () => {
+    if (overflowDropped === 0) return null;
+    const event = {
+      id: `monitor-overflow-${++overflowSeq}`,
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      type: "monitor.overflow",
+      session: sessionFilter ?? null,
+      thread_id: null,
+      payload: {
+        dropped_count: overflowDropped,
+        dropped_bytes: overflowDroppedBytes,
+        limit_events: MAX_INTERVAL_QUEUE_EVENTS,
+        limit_bytes: MAX_INTERVAL_QUEUE_BYTES
+      }
+    };
+    overflowDropped = 0;
+    overflowDroppedBytes = 0;
+    return event;
+  };
+  if (!streamMode) {
+    for (const event of initialEvents) enqueueIntervalEvent(event);
+  }
   if (streamMode) {
     for (const e of queue) stream.chunk(e);
     queue.length = 0;
@@ -3981,19 +5804,43 @@ var monitorEvents = async (ctx, req, stream) => {
     return { streaming: true };
   }
   const sub = ctx.events.subscribe(user, (e) => {
-    if (accept(e)) queue.push(e);
+    if (accept(e)) enqueueIntervalEvent(e);
   });
+  let closed = false;
+  let draining = false;
+  let drainTimer = null;
+  const scheduleDrain = (delayMs) => {
+    if (closed || drainTimer) return;
+    drainTimer = setTimeout(() => {
+      drainTimer = null;
+      drainQueue();
+    }, delayMs);
+    drainTimer.unref();
+  };
+  const drainQueue = () => {
+    if (closed || draining) return;
+    draining = true;
+    const overflowEvent = takeOverflowEvent();
+    if (overflowEvent) stream.chunk(overflowEvent);
+    const batch = queue.splice(0, MAX_FLUSH_EVENTS_PER_TICK);
+    for (const event of batch) {
+      queueBytes = Math.max(0, queueBytes - eventSize(event));
+      stream.chunk(event);
+    }
+    draining = false;
+    if (overflowDropped > 0 || queue.length > 0) scheduleDrain(1);
+  };
   const timer = setInterval(() => {
-    if (queue.length === 0) return;
-    const batch = queue.splice(0, queue.length);
-    for (const e of batch) stream.chunk(e);
+    if (overflowDropped === 0 && queue.length === 0) return;
+    scheduleDrain(0);
   }, intervalS * 1e3);
-  if (queue.length > 0) {
-    const initial = queue.splice(0, queue.length);
-    for (const e of initial) stream.chunk(e);
+  if (overflowDropped > 0 || queue.length > 0) {
+    scheduleDrain(0);
   }
   stream.onClose(() => {
+    closed = true;
     clearInterval(timer);
+    if (drainTimer) clearTimeout(drainTimer);
     sub.dispose();
   });
   return { streaming: true };
@@ -4012,8 +5859,14 @@ var monitorAlarm = async (_ctx, req, stream) => {
   let running = false;
   let timer = null;
   let activeChild = null;
-  let activeKillTimer = null;
+  let activeTimeoutTimer = null;
   let activeKillHardTimer = null;
+  let activeTimedOut = false;
+  stream.onClose(() => {
+    cancelled = true;
+    if (timer) clearInterval(timer);
+    requestActiveChildShutdown();
+  });
   const runOnce = async () => {
     if (cancelled || running) return;
     running = true;
@@ -4021,27 +5874,18 @@ var monitorAlarm = async (_ctx, req, stream) => {
     try {
       await new Promise((resolve) => {
         const { file, args } = shellCommand(command);
-        const child = (0, import_node_child_process5.spawn)(file, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+        const child = (0, import_node_child_process5.spawn)(file, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         activeChild = child;
+        activeTimedOut = false;
         let stdoutBuf = "";
         let stderrBuf = "";
-        let killed = false;
-        const killer = setTimeout(() => {
-          killed = true;
-          activeKillHardTimer = setTimeout(() => {
-            try {
-              child.kill("SIGKILL");
-            } catch {
-            }
-          }, 5e3);
-          activeKillHardTimer.unref();
-          try {
-            child.kill("SIGTERM");
-          } catch {
-          }
+        const timeoutTimer = setTimeout(() => {
+          activeTimedOut = true;
+          clearActiveTimeoutTimer();
+          requestChildShutdown(child);
         }, timeoutS * 1e3);
-        killer.unref();
-        activeKillTimer = killer;
+        timeoutTimer.unref();
+        activeTimeoutTimer = timeoutTimer;
         child.stdout.setEncoding("utf8");
         child.stdout.on("data", (c) => {
           stdoutBuf += c;
@@ -4053,20 +5897,22 @@ var monitorAlarm = async (_ctx, req, stream) => {
         child.on("error", (err2) => {
           clearActiveKillTimers();
           if (activeChild === child) activeChild = null;
-          stream.chunk({ __alarm_event: "spawn_error", error: err2.message });
+          if (!cancelled) stream.chunk({ __alarm_event: "spawn_error", error: err2.message });
           resolve();
         });
         child.on("exit", (code, signal) => {
           clearActiveKillTimers();
           if (activeChild === child) activeChild = null;
-          if (stdoutBuf) stream.chunk({ stdout: stdoutBuf });
-          if (stderrBuf) stream.chunk({ stderr: stderrBuf });
-          stream.chunk({
-            __alarm_event: killed ? "timeout" : "exit",
-            exit_code: code,
-            signal,
-            duration_ms: Date.now() - start
-          });
+          if (!cancelled) {
+            if (stdoutBuf) stream.chunk({ stdout: stdoutBuf });
+            if (stderrBuf) stream.chunk({ stderr: stderrBuf });
+            stream.chunk({
+              __alarm_event: activeTimedOut ? "timeout" : "exit",
+              exit_code: code,
+              signal,
+              duration_ms: Date.now() - start
+            });
+          }
           resolve();
         });
       });
@@ -4076,33 +5922,59 @@ var monitorAlarm = async (_ctx, req, stream) => {
   };
   await runOnce();
   if (once || cancelled) {
-    stream.end();
+    if (!cancelled) stream.end();
     return { streaming: true };
   }
   timer = setInterval(() => {
     void runOnce();
   }, intervalS * 1e3);
-  stream.onClose(() => {
-    cancelled = true;
-    if (timer) clearInterval(timer);
-    if (activeChild && activeChild.exitCode === null && activeChild.signalCode === null) {
-      try {
-        activeChild.kill("SIGTERM");
-      } catch {
-      }
-    }
-    clearActiveKillTimers();
-  });
   return { streaming: true };
   function clearActiveKillTimers() {
-    if (activeKillTimer) {
-      clearTimeout(activeKillTimer);
-      activeKillTimer = null;
+    clearActiveTimeoutTimer();
+    clearActiveHardKillTimer();
+  }
+  function clearActiveTimeoutTimer() {
+    if (activeTimeoutTimer) {
+      clearTimeout(activeTimeoutTimer);
+      activeTimeoutTimer = null;
     }
+  }
+  function clearActiveHardKillTimer() {
     if (activeKillHardTimer) {
       clearTimeout(activeKillHardTimer);
       activeKillHardTimer = null;
     }
+  }
+  function requestActiveChildShutdown() {
+    const child = activeChild;
+    if (!child) return;
+    requestChildShutdown(child);
+  }
+  function requestChildShutdown(child) {
+    if (activeChild !== child) return;
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    try {
+      child.stdin?.end();
+    } catch {
+    }
+    scheduleHardKill(child, 5e3);
+    if (process.platform === "win32") return;
+    try {
+      child.kill("SIGTERM");
+    } catch {
+    }
+  }
+  function scheduleHardKill(child, delayMs) {
+    clearActiveHardKillTimer();
+    activeKillHardTimer = setTimeout(() => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      try {
+        if (process.platform === "win32") child.kill();
+        else child.kill("SIGKILL");
+      } catch {
+      }
+    }, delayMs);
+    activeKillHardTimer.unref();
   }
 };
 function shellCommand(command) {
@@ -4151,6 +6023,9 @@ function parseTypeList(v) {
 function numConfig(ctx, key, fallback) {
   const v = ctx.config.getEffective(key);
   return typeof v === "number" ? v : fallback;
+}
+function eventSize(event) {
+  return Buffer.byteLength(JSON.stringify(event));
 }
 
 // src/daemon/dispatch.ts
@@ -4601,122 +6476,201 @@ function extractThreadId(params) {
 
 // src/daemon/wire.ts
 function wireDaemonEvents(ctx) {
+  const recoveringSessions = /* @__PURE__ */ new Set();
   ctx.pool.on("notification", (e) => {
-    const norm = normalizeNotification(e.notification);
-    const sessionName = resolveSession(ctx, e.user, norm.threadId);
-    const event = ctx.events.append(e.user, {
-      type: norm.type,
-      session: sessionName,
-      thread_id: norm.threadId,
-      payload: norm.payload
+    void handleNotification(ctx, recoveringSessions, e).catch((err2) => {
+      logger.warn("notification handling failed", { err: err2.message });
     });
-    void event;
-    if (norm.type === "turn.started" && sessionName) {
-      ctx.queues.setCurrentTurn(keyFor3(e.user, sessionName), norm.payload.turn_id ?? null);
-    }
-    if (norm.type === "turn.completed" && sessionName && norm.threadId) {
-      const client = ctx.pool.clientForSession(keyFor3(e.user, sessionName));
-      void ctx.queues.onTurnCompleted(keyFor3(e.user, sessionName), client, norm.threadId, ctx.retryOptions()).then((next) => {
-        if (next.turn_id) {
-          logger.debug("drained queued turn", { session: sessionName, turn_id: next.turn_id, queue_id: next.queue_id });
-          ctx.events.append(e.user, {
-            type: "turn.queued_started",
-            session: sessionName,
-            thread_id: norm.threadId,
-            payload: {
-              turn_id: next.turn_id,
-              queue_id: next.queue_id
-            }
-          });
-        }
-      });
-    }
-    if (norm.type === "thread.closed" && sessionName) {
-      try {
-        const key = keyFor3(e.user, sessionName);
-        ctx.pool.release(key);
-        ctx.queues.dispose(key);
-        ctx.sessions.remove(e.user, sessionName);
-        for (const p of ctx.pending.removeForSession(e.user, sessionName)) {
-          try {
-            p.client.respondError(p.jsonrpc_id, -32e3, "session detached");
-          } catch {
-          }
-        }
-      } catch (err2) {
-        logger.warn("thread closed cleanup failed", { session: sessionName, err: err2.message });
-      }
-    }
-    if (norm.type === "server_request_resolved") {
-      const reqId = norm.payload.request_id;
-      if (reqId !== null && reqId !== void 0) {
-        const jsonrpcId = reqId;
-        const client = ctx.pool.clientById(e.clientId);
-        if (client) {
-          ctx.pending.removeByJsonrpcId(client, jsonrpcId);
-        } else {
-          for (const p of ctx.pending.listForUser(e.user)) {
-            if (String(p.jsonrpc_id) === String(jsonrpcId)) {
-              ctx.pending.remove(p.request_id);
-              break;
-            }
-          }
-        }
-      }
-    }
   });
   ctx.pool.on("server_request", (e) => {
-    const norm = normalizeServerRequest(e.request);
-    const sessionName = resolveSession(ctx, e.user, norm.threadId);
-    const effectiveClient = ctx.pool.clientById(e.clientId);
-    if (!effectiveClient) {
-      logger.warn("server_request: no client to track", { user: e.user, kind: norm.kind });
-      e.respondError(-32e3, "no client available");
-      return;
-    }
-    const pending = ctx.pending.add({
-      client: effectiveClient,
-      jsonrpc_id: e.request.id,
-      kind: norm.kind,
-      user: e.user,
-      session_name: sessionName,
-      thread_id: norm.threadId,
-      turn_id: norm.payload.turn_id ?? null,
-      raw: norm.payload.raw
-    });
-    const payload = { ...norm.payload, request_id: pending.request_id };
-    ctx.events.append(e.user, {
-      type: norm.type,
-      session: sessionName,
-      thread_id: norm.threadId,
-      payload
+    void handleServerRequest(ctx, e).catch((err2) => {
+      logger.warn("server request handling failed", { err: err2.message });
     });
   });
   ctx.pool.on("client_close", (e) => {
-    for (const sessionKey of e.sessions) {
-      const [user, sessionName] = parseKey(sessionKey);
-      if (!user || !sessionName) continue;
-      const rec = ctx.sessions.get(user, sessionName);
-      if (!rec) continue;
-      ctx.events.append(user, {
-        type: "turn.error",
+    void handleClientClose(ctx, recoveringSessions, e).catch((err2) => {
+      logger.warn("client close handling failed", { err: err2.message });
+    });
+  });
+}
+async function handleNotification(ctx, recoveringSessions, e) {
+  const norm = normalizeNotification(e.notification);
+  const sessionName = resolveSession(ctx, e.user, norm.threadId);
+  await ctx.events.append(e.user, {
+    type: norm.type,
+    session: sessionName,
+    thread_id: norm.threadId,
+    payload: norm.payload
+  });
+  if (norm.type === "turn.started" && sessionName) {
+    ctx.queues.setCurrentTurn(keyFor3(e.user, sessionName), norm.payload.turn_id ?? null);
+  }
+  if (norm.type === "turn.completed" && sessionName && norm.threadId) {
+    const client = ctx.pool.clientForSession(keyFor3(e.user, sessionName));
+    void ctx.queues.onTurnCompleted(keyFor3(e.user, sessionName), client, norm.threadId, ctx.retryOptions()).then(async (next) => {
+      if (next.turn_id) {
+        logger.debug("drained queued turn", { session: sessionName, turn_id: next.turn_id, queue_id: next.queue_id });
+        await ctx.events.append(e.user, {
+          type: "turn.queued_started",
+          session: sessionName,
+          thread_id: norm.threadId,
+          payload: {
+            turn_id: next.turn_id,
+            queue_id: next.queue_id
+          }
+        });
+        return;
+      }
+      if (next.failed && next.queue_id) {
+        logger.warn("queued turn remains enqueued after dispatch failure", {
+          session: sessionName,
+          queue_id: next.queue_id,
+          err: next.error_message
+        });
+        await ctx.events.append(e.user, {
+          type: "turn.queued_failed",
+          session: sessionName,
+          thread_id: norm.threadId,
+          payload: {
+            queue_id: next.queue_id,
+            error: {
+              message: next.error_message
+            }
+          }
+        });
+      }
+    }).catch((err2) => {
+      logger.warn("turn completion queue drain failed", {
         session: sessionName,
-        thread_id: rec.thread_id,
-        payload: {
-          will_retry: false,
-          error: {
-            message: "app-server process exited unexpectedly",
-            codex_error_info: "internal_server_error",
-            additional_details: `exit_code=${e.exitCode ?? "null"}`
+        err: err2.message
+      });
+    });
+  }
+  if (norm.type === "thread.closed" && sessionName) {
+    try {
+      const sessionKey = keyFor3(e.user, sessionName);
+      ctx.pool.release(sessionKey);
+      ctx.queues.dispose(sessionKey);
+      ctx.sessions.remove(e.user, sessionName);
+      for (const p of ctx.pending.removeForSession(e.user, sessionName)) {
+        try {
+          p.client.respondError(p.jsonrpc_id, -32e3, "session detached");
+        } catch {
+        }
+      }
+    } catch (err2) {
+      logger.warn("thread closed cleanup failed", { session: sessionName, err: err2.message });
+    }
+  }
+  if (norm.type === "server_request_resolved") {
+    const reqId = norm.payload.request_id;
+    if (reqId !== null && reqId !== void 0) {
+      const jsonrpcId = reqId;
+      const client = ctx.pool.clientById(e.clientId);
+      if (client) {
+        ctx.pending.removeByJsonrpcId(client, jsonrpcId);
+      } else {
+        for (const p of ctx.pending.listForUser(e.user)) {
+          if (String(p.jsonrpc_id) === String(jsonrpcId)) {
+            ctx.pending.remove(p.request_id);
+            break;
           }
         }
-      });
-      ctx.queues.dispose(sessionKey);
-      for (const p of ctx.pending.removeForSession(user, sessionName)) {
-        void p;
       }
     }
+  }
+  if (norm.type === "client_close" && sessionName && norm.threadId) {
+    void recoverSession(ctx, recoveringSessions, e.user, sessionName, norm.threadId);
+  }
+}
+async function handleServerRequest(ctx, e) {
+  const norm = normalizeServerRequest(e.request);
+  const sessionName = resolveSession(ctx, e.user, norm.threadId);
+  if (!sessionName) {
+    e.respondError(-32e3, "session detached");
+    return;
+  }
+  if (ctx.queues.isTeardown(keyFor3(e.user, sessionName))) {
+    e.respondError(-32e3, "session detached");
+    return;
+  }
+  const effectiveClient = ctx.pool.clientById(e.clientId);
+  if (!effectiveClient) {
+    logger.warn("server_request: no client to track", { user: e.user, kind: norm.kind });
+    e.respondError(-32e3, "no client available");
+    return;
+  }
+  const pending = ctx.pending.add({
+    client: effectiveClient,
+    jsonrpc_id: e.request.id,
+    kind: norm.kind,
+    user: e.user,
+    session_name: sessionName,
+    thread_id: norm.threadId,
+    turn_id: norm.payload.turn_id ?? null,
+    raw: norm.payload.raw
   });
+  const payload = { ...norm.payload, request_id: pending.request_id };
+  await ctx.events.append(e.user, {
+    type: norm.type,
+    session: sessionName,
+    thread_id: norm.threadId,
+    payload
+  });
+}
+async function handleClientClose(ctx, recoveringSessions, e) {
+  if (e.reason !== "unexpected") return;
+  for (const sessionKey of e.sessions) {
+    const [user, sessionName] = parseKey(sessionKey);
+    if (!user || !sessionName) continue;
+    const rec = ctx.sessions.get(user, sessionName);
+    if (!rec) continue;
+    ctx.sessions.update(user, sessionName, { recovery_state: "degraded" });
+    await ctx.events.append(user, {
+      type: "turn.error",
+      session: sessionName,
+      thread_id: rec.thread_id,
+      payload: {
+        will_retry: false,
+        error: {
+          message: "app-server process exited unexpectedly",
+          codex_error_info: "internal_server_error",
+          additional_details: `exit_code=${e.exitCode ?? "null"}`
+        }
+      }
+    });
+    ctx.queues.onClientClosed(sessionKey);
+    for (const p of ctx.pending.removeForSession(user, sessionName)) {
+      void p;
+    }
+    void recoverSession(ctx, recoveringSessions, user, sessionName, rec.thread_id);
+  }
+}
+async function recoverSession(ctx, recoveringSessions, user, sessionName, threadId) {
+  const recoveryKey = `${user}::${threadId}`;
+  if (recoveringSessions.has(recoveryKey)) return;
+  recoveringSessions.add(recoveryKey);
+  const sessionKey = keyFor3(user, sessionName);
+  try {
+    const client = await ctx.pool.acquire(user, sessionKey);
+    await threadResume(client, threadId, ctx.retryOptions());
+    const live = ctx.sessions.get(user, sessionName);
+    if (live) {
+      ctx.sessions.update(user, sessionName, { recovery_state: null });
+    } else {
+      ctx.pool.release(sessionKey);
+    }
+  } catch (err2) {
+    logger.warn("failed to recover session after client exit", {
+      user,
+      session: sessionName,
+      thread_id: threadId,
+      err: err2.message
+    });
+    ctx.pool.release(sessionKey);
+  } finally {
+    recoveringSessions.delete(recoveryKey);
+  }
 }
 function resolveSession(ctx, user, threadId) {
   if (!threadId) return null;
@@ -4733,28 +6687,15 @@ function parseKey(sessionKey) {
 }
 
 // src/daemon/run.ts
-var PIDFILE_STALE_MS = 5e3;
 async function runDaemon() {
   const ctx = buildContext();
-  const waitStart = Date.now();
-  while (await probeSock(ctx.sockPath, 200)) {
-    if (Date.now() - waitStart > 3e3) {
-      logger.info("another daemon already owns the sock", { sock: ctx.sockPath });
-      return 1;
-    }
-    await new Promise((r) => setTimeout(r, 150));
-  }
   const pidPath = pidFilePath(ctx.dataDir);
-  const acquireStart = Date.now();
-  while (!acquirePid(pidPath)) {
-    if (Date.now() - acquireStart > 3e3) {
-      logger.warn("another daemon pidfile is live; aborting", { pid_path: pidPath });
-      return 1;
-    }
-    await new Promise((r) => setTimeout(r, 150));
+  const acquired = await acquireDaemonOwnership(ctx.sockPath, pidPath);
+  if (!acquired.ok) {
+    logger.info(acquired.message, acquired.details);
+    return 1;
   }
-  unlinkSockIfStale(ctx.sockPath);
-  reapOrphans(ctx.dataDir);
+  await reapOrphans(ctx.dataDir);
   const cleanup = () => {
     unlinkSockIfStale(ctx.sockPath);
     try {
@@ -4789,7 +6730,7 @@ async function runDaemon() {
 }
 function acquirePid(pidPath) {
   try {
-    import_node_fs13.default.mkdirSync(import_node_path10.default.dirname(pidPath), { recursive: true });
+    import_node_fs13.default.mkdirSync(import_node_path11.default.dirname(pidPath), { recursive: true });
     const fd = import_node_fs13.default.openSync(pidPath, "wx");
     try {
       import_node_fs13.default.writeFileSync(fd, JSON.stringify({
@@ -4801,16 +6742,7 @@ function acquirePid(pidPath) {
     }
     return true;
   } catch (e) {
-    if (e?.code === "EEXIST") {
-      try {
-        const ageMs = Date.now() - import_node_fs13.default.statSync(pidPath).mtimeMs;
-        if (ageMs >= PIDFILE_STALE_MS) {
-          import_node_fs13.default.unlinkSync(pidPath);
-        }
-      } catch {
-      }
-      return false;
-    }
+    if (e?.code === "EEXIST") return false;
     return false;
   }
 }
@@ -4837,6 +6769,112 @@ function scheduleIdleShutdown(ctx) {
 }
 function registerShutdownSignal(signal, ctx) {
   process.on(signal, () => void shutdownDaemon(ctx, signal));
+}
+async function acquireDaemonOwnership(sockPath, pidPath) {
+  const waitStart = Date.now();
+  const legacyPidPath = legacyWindowsPidFilePath(pidPath);
+  for (; ; ) {
+    const sockReachable = await probeSock(sockPath, 200);
+    const pidRecord = readPidFile2(pidPath);
+    const pid = pidRecord?.pid ?? null;
+    const pidAlive = pid !== null && isDaemonPidAlive(pid);
+    const legacyPidRecord = legacyPidPath ? readPidFile2(legacyPidPath) : null;
+    const legacyPid = legacyPidRecord?.pid ?? null;
+    const legacyPidAlive = legacyPid !== null && isDaemonPidAlive(legacyPid);
+    if (sockReachable) {
+      if (Date.now() - waitStart > 3e3) {
+        return {
+          ok: false,
+          message: "another daemon already owns the sock",
+          details: {
+            sock: sockPath,
+            pidfile_pid: pid,
+            pidfile_live: pidAlive,
+            legacy_pidfile_pid: legacyPid,
+            legacy_pidfile_live: legacyPidAlive
+          }
+        };
+      }
+      await sleep4(150);
+      continue;
+    }
+    if (pidAlive || legacyPidAlive) {
+      const livePid = pidAlive ? pid : legacyPid;
+      const livePidPath = pidAlive ? pidPath : legacyPidPath;
+      if (Date.now() - waitStart > 3e3) {
+        return {
+          ok: false,
+          message: "another daemon pidfile is live; aborting",
+          details: {
+            pid_path: livePidPath,
+            pid: livePid
+          }
+        };
+      }
+      await sleep4(150);
+      continue;
+    }
+    if (pid !== null && !pidAlive) {
+      try {
+        import_node_fs13.default.unlinkSync(pidPath);
+      } catch {
+      }
+    }
+    if (legacyPidPath && legacyPid !== null && !legacyPidAlive) {
+      try {
+        import_node_fs13.default.unlinkSync(legacyPidPath);
+      } catch {
+      }
+    }
+    unlinkSockIfStale(sockPath);
+    if (acquirePid(pidPath)) {
+      return { ok: true, message: "daemon ownership acquired" };
+    }
+    if (Date.now() - waitStart > 3e3) {
+      return {
+        ok: false,
+        message: "failed to acquire daemon pidfile",
+        details: { pid_path: pidPath }
+      };
+    }
+    await sleep4(150);
+  }
+}
+function readPidFile2(pidPath) {
+  try {
+    const raw = import_node_fs13.default.readFileSync(pidPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
+    return {
+      pid: Math.floor(parsed.pid),
+      created_at: typeof parsed.created_at === "string" ? parsed.created_at : void 0
+    };
+  } catch {
+    return null;
+  }
+}
+function isDaemonPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  return isLikelyCodexTeamDaemonProcess(pid);
+}
+function legacyWindowsPidFilePath(currentPidPath) {
+  if (process.platform !== "win32") return null;
+  const legacyHome = process.env.HOME;
+  if (!legacyHome) return null;
+  const legacyPath = import_node_path11.default.join(legacyHome, `.${APP}`, "daemon.pid");
+  if (legacyPath === currentPidPath) return null;
+  if (legacyHome === homeDir()) return null;
+  return legacyPath;
+}
+function sleep4(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
 }
 
 // src/main.ts
