@@ -41,6 +41,7 @@ export const AUTO_APPROVED_EVENT_TYPE = "auto_approved";
 export const APPROVAL_REQUEST_CANCELLED_EVENT_TYPE = "approval.request_cancelled";
 export const SESSION_CLOSED_EVENT_TYPE = "session.closed";
 export const SESSION_CRASHED_EVENT_TYPE = "session.crashed";
+export const SESSION_PENDING_DROPPED_EVENT_TYPE = "session.pending_dropped";
 export const USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE = "user_input.request_cancelled";
 
 export class EventLog {

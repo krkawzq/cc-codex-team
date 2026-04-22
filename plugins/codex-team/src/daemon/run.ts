@@ -6,10 +6,10 @@ import { buildContext } from "./context";
 import { ConfigStore } from "./config";
 import { CursorStore } from "./cursors";
 import {
-  APPROVAL_REQUEST_CANCELLED_EVENT_TYPE,
   SESSION_CRASHED_EVENT_TYPE,
-  USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE,
+  SESSION_PENDING_DROPPED_EVENT_TYPE,
 } from "./events";
+import { cancelPendingWithEvent, pendingRequestsForSession } from "./pending-cancel";
 import { startServer } from "./server";
 import { probeSock, unlinkSockIfStale } from "../ipc/sock";
 import { logger } from "../logger";
@@ -85,6 +85,12 @@ export async function reconcileLoadedSessionsAfterRestart(ctx: Partial<DaemonCon
       const sessionKey = keyFor(user.token, rec.name);
       if (isClientAlive(ctx.pool.clientForSession(sessionKey))) continue;
 
+      const hadPersistedPending = (rec.pending_approvals ?? 0) > 0 || (rec.pending_user_inputs ?? 0) > 0;
+      const hadPendingMetadata = pendingRequestsForSession(
+        ctx as DaemonContext,
+        user.token,
+        rec.name,
+      ).length > 0;
       const lastTurnId = rec.current_turn_id ?? rec.last_turn_id ?? null;
       ctx.sessions.update(user.token, rec.name, {
         state: "crashed",
@@ -111,18 +117,25 @@ export async function reconcileLoadedSessionsAfterRestart(ctx: Partial<DaemonCon
         },
       });
 
-      for (const pending of cancelRestartPendingRequests(ctx, user.token, rec.name, rec.thread_id)) {
-        const eventType = cancellationEventType(pending.kind);
-        if (!eventType) continue;
+      await cancelPendingWithEvent(
+        ctx as DaemonContext,
+        user.token,
+        rec.name,
+        rec.thread_id,
+        APP_SERVER_CRASHED_ON_RESTART_REASON,
+      );
+
+      if (hadPersistedPending && !hadPendingMetadata) {
+        // 0.5.2 does not persist request-level pending metadata across a full daemon restart, so
+        // reconcile can only emit a session-scoped best-effort marker when those requests are lost.
         await ctx.events.append(user.token, {
-          type: eventType,
+          type: SESSION_PENDING_DROPPED_EVENT_TYPE,
           session: rec.name,
           thread_id: rec.thread_id,
           payload: {
-            request_id: pending.request_id,
-            kind: pending.kind,
-            turn_id: pending.turn_id ?? null,
-            reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+            session: rec.name,
+            thread_id: rec.thread_id,
+            reason: "daemon_restart_pending_lost",
           },
         });
       }
@@ -147,32 +160,6 @@ function acquirePid(pidPath: string): boolean {
     if ((e as NodeJS.ErrnoException)?.code === "EEXIST") return false;
     return false;
   }
-}
-
-function cancelRestartPendingRequests(
-  ctx: Partial<DaemonContext>,
-  user: string,
-  sessionName: string,
-  threadId: string,
-): Array<{ request_id: string; kind: string; turn_id?: string | null }> {
-  if (!ctx.pending) return [];
-  if (typeof ctx.pending.abortForSession === "function") {
-    return ctx.pending.abortForSession(user, sessionName, "session_crashed", {
-      reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
-      session: sessionName,
-      thread_id: threadId,
-    });
-  }
-  if (typeof ctx.pending.removeForSession === "function") {
-    return ctx.pending.removeForSession(user, sessionName);
-  }
-  return [];
-}
-
-function cancellationEventType(kind: string): string | null {
-  if (kind.startsWith("approval.")) return APPROVAL_REQUEST_CANCELLED_EVENT_TYPE;
-  if (kind === "user_input.request") return USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE;
-  return null;
 }
 
 function isClientAlive(client: unknown): boolean {
