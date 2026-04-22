@@ -107,7 +107,8 @@ function scheduleIdleShutdown(ctx: import("./context").DaemonContext): void {
       (n, u) => n + ctx.sessions.listLive(u.token).length,
       0,
     );
-    if (liveSessions > 0) return; // treat any live session as activity
+    // audit-async N1: keep idle semantics simple and conservative: any live session counts as activity.
+    if (liveSessions > 0) return;
     const idleMs = Date.now() - ctx.activity.lastActivityAt.getTime();
     if (idleMs >= ms) {
       logger.info("idle threshold exceeded, shutting down", {

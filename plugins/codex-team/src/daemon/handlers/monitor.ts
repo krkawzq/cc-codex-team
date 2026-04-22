@@ -5,6 +5,10 @@ import { CodexTeamError, invalidParams } from "../../errors";
 import type { TeamEvent } from "../../types";
 import { isDeltaType } from "../events";
 
+const MAX_INTERVAL_QUEUE_EVENTS = 512;
+const MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
+const MAX_FLUSH_EVENTS_PER_TICK = 64;
+
 export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor events requires streaming");
   const user = req.bearer;
@@ -39,7 +43,7 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     return true;
   };
 
-  const backlog = ctx.events.listSince(user, sinceId, { includeDelta: true });
+  const backlog = await ctx.events.listSince(user, sinceId, { includeDelta: true });
   if (!backlog.ok) {
     stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
       oldest_available_id: backlog.oldest_available_id,
@@ -47,7 +51,49 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     return { streaming: true };
   }
 
-  const queue: TeamEvent[] = backlog.events.filter(accept);
+  const initialEvents = backlog.events.filter(accept);
+  const queue: TeamEvent[] = streamMode ? [...initialEvents] : [];
+  let queueBytes = 0;
+  let overflowDropped = 0;
+  let overflowDroppedBytes = 0;
+  let overflowSeq = 0;
+
+  const enqueueIntervalEvent = (event: TeamEvent): void => {
+    queue.push(event);
+    queueBytes += eventSize(event);
+    while (queue.length > MAX_INTERVAL_QUEUE_EVENTS || queueBytes > MAX_INTERVAL_QUEUE_BYTES) {
+      const dropped = queue.shift();
+      if (!dropped) break;
+      overflowDropped++;
+      const droppedBytes = eventSize(dropped);
+      overflowDroppedBytes += droppedBytes;
+      queueBytes = Math.max(0, queueBytes - droppedBytes);
+    }
+  };
+
+  const takeOverflowEvent = (): TeamEvent | null => {
+    if (overflowDropped === 0) return null;
+    const event: TeamEvent = {
+      id: `monitor-overflow-${++overflowSeq}`,
+      ts: new Date().toISOString(),
+      type: "monitor.overflow",
+      session: sessionFilter ?? null,
+      thread_id: null,
+      payload: {
+        dropped_count: overflowDropped,
+        dropped_bytes: overflowDroppedBytes,
+        limit_events: MAX_INTERVAL_QUEUE_EVENTS,
+        limit_bytes: MAX_INTERVAL_QUEUE_BYTES,
+      },
+    };
+    overflowDropped = 0;
+    overflowDroppedBytes = 0;
+    return event;
+  };
+
+  if (!streamMode) {
+    for (const event of initialEvents) enqueueIntervalEvent(event);
+  }
 
   if (streamMode) {
     for (const e of queue) stream.chunk(e);
@@ -60,22 +106,46 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   }
 
   const sub = ctx.events.subscribe(user, (e) => {
-    if (accept(e)) queue.push(e);
+    if (accept(e)) enqueueIntervalEvent(e);
   });
+  let closed = false;
+  let draining = false;
+  let drainTimer: NodeJS.Timeout | null = null;
+  const scheduleDrain = (delayMs: number): void => {
+    if (closed || drainTimer) return;
+    drainTimer = setTimeout(() => {
+      drainTimer = null;
+      drainQueue();
+    }, delayMs);
+    drainTimer.unref();
+  };
+  const drainQueue = (): void => {
+    if (closed || draining) return;
+    draining = true;
+    const overflowEvent = takeOverflowEvent();
+    if (overflowEvent) stream.chunk(overflowEvent);
+    const batch = queue.splice(0, MAX_FLUSH_EVENTS_PER_TICK);
+    for (const event of batch) {
+      queueBytes = Math.max(0, queueBytes - eventSize(event));
+      stream.chunk(event);
+    }
+    draining = false;
+    if (overflowDropped > 0 || queue.length > 0) scheduleDrain(1);
+  };
   const timer = setInterval(() => {
-    if (queue.length === 0) return;
-    const batch = queue.splice(0, queue.length);
-    for (const e of batch) stream.chunk(e);
+    if (overflowDropped === 0 && queue.length === 0) return;
+    scheduleDrain(0);
   }, intervalS * 1000);
 
   // Emit any initial backlog immediately (otherwise user waits up to intervalS for first response).
-  if (queue.length > 0) {
-    const initial = queue.splice(0, queue.length);
-    for (const e of initial) stream.chunk(e);
+  if (overflowDropped > 0 || queue.length > 0) {
+    scheduleDrain(0);
   }
 
   stream.onClose(() => {
+    closed = true;
     clearInterval(timer);
+    if (drainTimer) clearTimeout(drainTimer);
     sub.dispose();
   });
   return { streaming: true };
@@ -237,4 +307,8 @@ function parseTypeList(v: unknown): string[] | null {
 function numConfig(ctx: { config: { getEffective(k: string): unknown } }, key: string, fallback: number): number {
   const v = ctx.config.getEffective(key);
   return typeof v === "number" ? v : fallback;
+}
+
+function eventSize(event: TeamEvent): number {
+  return Buffer.byteLength(JSON.stringify(event));
 }

@@ -34,6 +34,7 @@ function makeLiveContext(overrides: Record<string, unknown> = {}) {
   };
   const client = {
     respond: vi.fn(),
+    respondAck: vi.fn().mockResolvedValue({ backpressured: false }),
   };
   return {
     users: {
@@ -54,7 +55,11 @@ function makeLiveContext(overrides: Record<string, unknown> = {}) {
     },
     pending: {
       get: vi.fn(),
+      markResponded: vi.fn(),
       remove: vi.fn(),
+    },
+    events: {
+      append: vi.fn().mockResolvedValue(undefined),
     },
     retryOptions: vi.fn().mockReturnValue({}),
     ...overrides,
@@ -136,7 +141,7 @@ describe("message handlers", () => {
   });
 
   it("returns wire-shaped approval shortcut payloads", async () => {
-    const pendingClient = { respond: vi.fn() };
+    const pendingClient = { respondAck: vi.fn().mockResolvedValue({ backpressured: false }) };
     const ctx = makeLiveContext({
       pending: {
         get: vi.fn()
@@ -164,7 +169,11 @@ describe("message handlers", () => {
             user: "user-1",
             raw: { mode: "url" },
           }),
+        markResponded: vi.fn(),
         remove: vi.fn(),
+      },
+      events: {
+        append: vi.fn().mockResolvedValue(undefined),
       },
     });
 
@@ -186,6 +195,59 @@ describe("message handlers", () => {
         _meta: null,
       },
     });
+    expect(ctx.pending.remove).not.toHaveBeenCalled();
+    expect(ctx.pending.markResponded).toHaveBeenCalledTimes(3);
+  });
+
+  it("emits a warning when approval replies are backpressured", async () => {
+    const ctx = makeLiveContext({
+      pending: {
+        get: vi.fn().mockReturnValue({
+          request_id: "req-a",
+          kind: "approval.command_execution",
+          client: { respondAck: vi.fn().mockResolvedValue({ backpressured: true }) },
+          jsonrpc_id: 11,
+          user: "user-1",
+          raw: {},
+        }),
+        markResponded: vi.fn(),
+        remove: vi.fn(),
+      },
+      events: {
+        append: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await messageApproval(ctx as never, makeReq(["sess-1", "req-a", "accept"]) as never);
+
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "warning",
+      payload: expect.objectContaining({
+        kind: "approval_reply_backpressured",
+        request_id: "req-a",
+      }),
+    }));
+  });
+
+  it("rejects replies for requests that are already marked responded", async () => {
+    const ctx = makeLiveContext({
+      pending: {
+        get: vi.fn().mockReturnValue({
+          request_id: "req-a",
+          kind: "approval.command_execution",
+          client: { respondAck: vi.fn() },
+          jsonrpc_id: 11,
+          user: "user-1",
+          responded_at: "2025-01-01T00:00:00.000Z",
+          raw: {},
+        }),
+        markResponded: vi.fn(),
+        remove: vi.fn(),
+      },
+    });
+
+    await expect(messageApproval(ctx as never, makeReq(["sess-1", "req-a", "accept"]) as never))
+      .rejects.toMatchObject({ code: "invalid_params" });
   });
 
   it("supports relative --since -N history windows", async () => {

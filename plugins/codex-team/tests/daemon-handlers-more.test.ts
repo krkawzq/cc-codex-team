@@ -161,12 +161,19 @@ describe("daemon handlers", () => {
 
     expect(stream.chunks).toEqual([{ level: "error", a: 2 }]);
 
-    fs.writeFileSync(logPath, JSON.stringify({ level: "error", a: 3 }) + "\n");
+    fs.writeFileSync(logPath, [
+      JSON.stringify({ level: "info", a: 1 }),
+      JSON.stringify({ level: "error", a: 2 }),
+      JSON.stringify({ level: "error", a: 3 }),
+      "",
+    ].join("\n"));
     watchCb?.();
+    await new Promise((resolve) => setTimeout(resolve, 75));
     expect(stream.chunks).toContainEqual({ level: "error", a: 3 });
 
     fs.writeFileSync(logPath, JSON.stringify({ level: "error", a: 4 }) + "\n");
     watchCb?.();
+    await new Promise((resolve) => setTimeout(resolve, 75));
     expect(stream.chunks).toContainEqual({ level: "error", a: 4 });
 
     stream.close();

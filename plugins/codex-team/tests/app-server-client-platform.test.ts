@@ -148,4 +148,41 @@ describe("AppServerClient platform launch", () => {
     await expectation;
     expect(fakeProc.kill).toHaveBeenCalledWith("SIGTERM");
   });
+
+  it("acknowledges response writes and reports stdin backpressure", async () => {
+    const fakeProc = createFakeProc();
+    let pendingWriteCb: ((err?: Error | null) => void) | null = null;
+    fakeProc.stdin.write = vi.fn((chunk: string, cb?: (err?: Error | null) => void) => {
+      fakeProc.stdin.writes.push(chunk);
+      const msg = JSON.parse(chunk.trim()) as { id?: string; method?: string };
+      if (msg.method === "initialize" && msg.id) {
+        queueMicrotask(() => {
+          fakeProc.stdout.emit("data", JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { ready: true } }) + "\n");
+          cb?.(null);
+        });
+        return true;
+      }
+      pendingWriteCb = cb ?? null;
+      return false;
+    }) as never;
+
+    const spawn = vi.fn().mockReturnValue(fakeProc);
+    vi.doMock("node:child_process", () => ({
+      default: {
+        spawn,
+        execFileSync: vi.fn(),
+      },
+      spawn,
+      execFileSync: vi.fn(),
+    }));
+
+    const { AppServerClient } = await import("../src/codex/appServerClient");
+    const client = new AppServerClient();
+
+    await client.start();
+    const pendingAck = client.respondAck("req-1", { ok: true } as never);
+    pendingWriteCb?.(null);
+
+    await expect(pendingAck).resolves.toEqual({ backpressured: true });
+  });
 });

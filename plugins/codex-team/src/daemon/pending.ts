@@ -12,6 +12,7 @@ export interface PendingRequest {
   thread_id: string | null;
   turn_id: string | null;
   created_at: string;
+  responded_at?: string;
   raw: Record<string, unknown>;
 }
 
@@ -33,6 +34,13 @@ export class PendingRegistry {
 
   get(requestId: string): PendingRequest | null {
     return this.byRequestId.get(requestId) ?? null;
+  }
+
+  markResponded(requestId: string): PendingRequest | null {
+    const rec = this.byRequestId.get(requestId);
+    if (!rec) return null;
+    if (!rec.responded_at) rec.responded_at = new Date().toISOString();
+    return rec;
   }
 
   remove(requestId: string): PendingRequest | null {
@@ -58,7 +66,7 @@ export class PendingRegistry {
     for (const rec of Array.from(this.byRequestId.values())) {
       if (rec.user === user && rec.session_name === sessionName) {
         this.remove(rec.request_id);
-        removed.push(rec);
+        if (!rec.responded_at) removed.push(rec);
       }
     }
     return removed;
@@ -69,7 +77,7 @@ export class PendingRegistry {
     for (const rec of Array.from(this.byRequestId.values())) {
       if (rec.user === user) {
         this.remove(rec.request_id);
-        removed.push(rec);
+        if (!rec.responded_at) removed.push(rec);
       }
     }
     return removed;

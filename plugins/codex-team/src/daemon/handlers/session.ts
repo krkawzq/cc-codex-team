@@ -468,7 +468,7 @@ async function seizeFromOtherUser(
     try { p.client.respondError(p.jsonrpc_id, -32000, "session seized by another user"); } catch { /* ignore */ }
   }
 
-  ctx.events.append(fromUser, {
+  await ctx.events.append(fromUser, {
     type: "session.seized",
     session: rec.name,
     thread_id: rec.thread_id,

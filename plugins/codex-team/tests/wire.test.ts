@@ -51,6 +51,9 @@ describe("wireDaemonEvents", () => {
       },
     });
 
+    await Promise.resolve();
+    await Promise.resolve();
+
     expect(ctx.queues.setCurrentTurn).toHaveBeenCalledWith("user-1::sess-1", "turn-1");
   });
 
@@ -96,6 +99,7 @@ describe("wireDaemonEvents", () => {
     });
 
     await Promise.resolve();
+    await Promise.resolve();
 
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
       type: "turn.queued_started",
@@ -108,7 +112,69 @@ describe("wireDaemonEvents", () => {
     }));
   });
 
-  it("removes pending requests by client identity on serverRequest/resolved", () => {
+  it("emits turn.queued_failed when draining a queued turn fails", async () => {
+    const pool = new FakePool();
+    const ctx = {
+      pool,
+      sessions: {
+        get: vi.fn().mockReturnValue({ name: "sess-1", thread_id: "th-1" }),
+        remove: vi.fn(),
+      },
+      events: {
+        append: vi.fn(),
+      },
+      queues: {
+        setCurrentTurn: vi.fn(),
+        onTurnCompleted: vi.fn().mockResolvedValue({
+          turn_id: null,
+          queue_id: "q-1",
+          failed: true,
+          error_message: "overloaded",
+        }),
+        dispose: vi.fn(),
+      },
+      pending: {
+        removeForSession: vi.fn().mockReturnValue([]),
+        removeByJsonrpcId: vi.fn(),
+        listForUser: vi.fn().mockReturnValue([]),
+        remove: vi.fn(),
+        add: vi.fn(),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+    pool.clientForSession.mockReturnValue({});
+
+    wireDaemonEvents(ctx as never);
+
+    pool.emit("notification", {
+      user: "user-1",
+      clientId: "client-1",
+      notification: {
+        method: "turn/completed",
+        params: {
+          threadId: "th-1",
+          turn: { id: "turn-1", status: "completed", items: [] },
+        },
+      },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "turn.queued_failed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: {
+        queue_id: "q-1",
+        error: {
+          message: "overloaded",
+        },
+      },
+    }));
+  });
+
+  it("removes pending requests by client identity on serverRequest/resolved", async () => {
     const pool = new FakePool();
     const clientA = {};
     pool.clientById.mockReturnValue(clientA);
@@ -151,6 +217,9 @@ describe("wireDaemonEvents", () => {
         },
       },
     });
+
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(ctx.pending.removeByJsonrpcId).toHaveBeenCalledWith(clientA, 7);
     expect(ctx.pending.remove).not.toHaveBeenCalled();
@@ -223,7 +292,7 @@ describe("wireDaemonEvents", () => {
     }));
   });
 
-  it("records turn.error and clears session pending state on client_close", () => {
+  it("records turn.error and clears session pending state on client_close", async () => {
     const pool = new FakePool();
     const ctx = {
       pool,
@@ -257,6 +326,9 @@ describe("wireDaemonEvents", () => {
       sessions: ["user-1::sess-1"],
       exitCode: 9,
     });
+
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
       type: "turn.error",

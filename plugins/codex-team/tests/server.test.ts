@@ -1,67 +1,92 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import net from "node:net";
+import { EventEmitter } from "node:events";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { connectSock, onMessages, writeMessage } from "../src/ipc/sock";
+const sockMocks = vi.hoisted(() => ({
+  listenSock: vi.fn(),
+  onMessages: vi.fn(),
+  writeMessage: vi.fn(),
+}));
+
+vi.mock("../src/ipc/sock", () => sockMocks);
+
 import { startServer } from "../src/daemon/server";
 
-function mkSockPath() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-server-"));
+class FakeServer extends EventEmitter {
+  close(cb?: () => void): this {
+    cb?.();
+    return this;
+  }
+}
+
+class FakeSocket extends EventEmitter {
+  frames: string[] = [];
+
+  write(frame: string): boolean {
+    this.frames.push(frame);
+    return true;
+  }
+}
+
+async function bootServer(ctx: Record<string, unknown>) {
+  const server = new FakeServer();
+  const socket = new FakeSocket();
+  const writes: unknown[] = [];
+  let handler: ((msg: Record<string, unknown>) => Promise<void>) | undefined;
+  let closeHandler: (() => void) | undefined;
+
+  sockMocks.listenSock.mockResolvedValue(server);
+  sockMocks.onMessages.mockImplementation((_socket, next, onClose) => {
+    handler = next;
+    closeHandler = onClose;
+  });
+  sockMocks.writeMessage.mockImplementation((_socket, msg) => {
+    writes.push(msg);
+  });
+
+  await startServer(ctx as never);
+  server.emit("connection", socket);
+
   return {
-    dir,
-    sockPath: path.join(dir, "daemon.sock"),
+    socket,
+    writes,
+    request: async (msg: Record<string, unknown>) => {
+      await handler?.(msg);
+    },
+    close: () => closeHandler?.(),
   };
 }
 
-async function closeServer(server: net.Server, sockPath: string, dir: string) {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  try { fs.unlinkSync(sockPath); } catch {}
-  fs.rmSync(dir, { recursive: true, force: true });
+function decodeFrames(socket: FakeSocket): Array<Record<string, unknown>> {
+  return socket.frames.map((frame) => JSON.parse(frame.trim()) as Record<string, unknown>);
 }
 
 describe("daemon server", () => {
-  const cleanups: Array<() => Promise<void>> = [];
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
-  afterEach(async () => {
-    while (cleanups.length > 0) {
-      const fn = cleanups.pop()!;
-      await fn();
-    }
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("serves non-streaming requests and error responses over IPC", async () => {
-    const { dir, sockPath } = mkSockPath();
-    const server = await startServer({
-      sockPath,
+    const harness = await bootServer({
+      sockPath: "/tmp/daemon.sock",
       activity: { touch() {} },
       users: {
         get: () => null,
       },
-    } as never);
-    cleanups.push(() => closeServer(server, sockPath, dir));
-
-    const sock = await connectSock(sockPath, 1000);
-    const responses: unknown[] = [];
-    const responsePromise = new Promise<void>((resolve) => {
-      onMessages(sock, (msg) => {
-        responses.push(msg);
-        if ((msg as { kind?: string }).kind === "response") resolve();
-      });
     });
 
-    writeMessage(sock, {
+    await harness.request({
       kind: "request",
       id: "req-1",
       method: "status",
       params: {},
     });
-    await responsePromise;
-    sock.end();
 
-    expect(responses).toContainEqual(expect.objectContaining({
+    expect(harness.writes).toContainEqual(expect.objectContaining({
       kind: "response",
       id: "req-1",
       error: expect.objectContaining({
@@ -71,16 +96,15 @@ describe("daemon server", () => {
   });
 
   it("keeps long-lived streaming requests open instead of auto-ending", async () => {
-    const { dir, sockPath } = mkSockPath();
     let disposed = false;
-    const server = await startServer({
-      sockPath,
+    const harness = await bootServer({
+      sockPath: "/tmp/daemon.sock",
       activity: { touch() {} },
       users: {
         has: () => true,
       },
       events: {
-        listSince: () => ({
+        listSince: async () => ({
           ok: true,
           events: [
             {
@@ -102,19 +126,9 @@ describe("daemon server", () => {
       config: {
         getEffective: () => 30,
       },
-    } as never);
-    cleanups.push(() => closeServer(server, sockPath, dir));
-
-    const sock = await connectSock(sockPath, 1000);
-    const messages: Array<Record<string, unknown>> = [];
-    const firstChunk = new Promise<void>((resolve) => {
-      onMessages(sock, (msg) => {
-        messages.push(msg as Record<string, unknown>);
-        if ((msg as { kind?: string }).kind === "stream_chunk") resolve();
-      });
     });
 
-    writeMessage(sock, {
+    await harness.request({
       kind: "request",
       id: "stream-1",
       method: "monitor:events",
@@ -125,41 +139,27 @@ describe("daemon server", () => {
       },
     });
 
-    await firstChunk;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    expect(messages).toContainEqual(expect.objectContaining({
+    const streamed = decodeFrames(harness.socket);
+    expect(streamed).toContainEqual(expect.objectContaining({
       kind: "stream_chunk",
       id: "stream-1",
     }));
-    expect(messages.find((m) => m.kind === "stream_end")).toBeUndefined();
+    expect(streamed.find((msg) => msg.kind === "stream_end")).toBeUndefined();
 
-    sock.end();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    harness.close();
     expect(disposed).toBe(true);
   });
 
   it("returns stream_end with an error for invalid streaming requests", async () => {
-    const { dir, sockPath } = mkSockPath();
-    const server = await startServer({
-      sockPath,
+    const harness = await bootServer({
+      sockPath: "/tmp/daemon.sock",
       activity: { touch() {} },
       users: {
         has: () => false,
       },
-    } as never);
-    cleanups.push(() => closeServer(server, sockPath, dir));
-
-    const sock = await connectSock(sockPath, 1000);
-    const endPromise = new Promise<Record<string, unknown>>((resolve) => {
-      onMessages(sock, (msg) => {
-        if ((msg as { kind?: string }).kind === "stream_end") {
-          resolve(msg as Record<string, unknown>);
-        }
-      });
     });
 
-    writeMessage(sock, {
+    await harness.request({
       kind: "request",
       id: "stream-err",
       method: "monitor:events",
@@ -169,15 +169,12 @@ describe("daemon server", () => {
       },
     });
 
-    const end = await endPromise;
-    sock.end();
-
-    expect(end).toMatchObject({
+    expect(harness.writes).toContainEqual(expect.objectContaining({
       kind: "stream_end",
       id: "stream-err",
-      error: {
+      error: expect.objectContaining({
         code: "invalid_params",
-      },
-    });
+      }),
+    }));
   });
 });

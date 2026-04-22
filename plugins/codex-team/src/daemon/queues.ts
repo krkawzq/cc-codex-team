@@ -59,22 +59,33 @@ export class TurnQueues {
     client: AppServerClient | null,
     threadId: string,
     retry?: RetryOptions,
-  ): Promise<{ turn_id: string | null; queue_id: string | null }> {
+  ): Promise<
+    | { turn_id: string; queue_id: string; failed: false }
+    | { turn_id: null; queue_id: string | null; failed: false }
+    | { turn_id: null; queue_id: string; failed: true; error_message: string }
+  > {
     return await this.withSessionLock(sessionKey, async (state) => {
       state.draining = true;
       state.currentTurnId = null;
       if (state.pending.length === 0 || !client) {
         state.draining = false;
-        return { turn_id: null, queue_id: null };
+        return { turn_id: null, queue_id: null, failed: false };
       }
-      const next = state.pending.shift()!;
+      const next = state.pending[0]!;
       try {
         const res = await turnStart(client, threadId, next.input, retry);
+        state.pending.shift();
         state.currentTurnId = res.turnId;
-        return { turn_id: res.turnId, queue_id: next.id };
+        return { turn_id: res.turnId, queue_id: next.id, failed: false };
       } catch (e) {
-        logger.warn("failed to dispatch queued turn", { session: sessionKey, err: (e as Error).message });
-        return { turn_id: null, queue_id: next.id };
+        const err = e as Error;
+        logger.warn("failed to dispatch queued turn", { session: sessionKey, err: err.message, queue_id: next.id });
+        return {
+          turn_id: null,
+          queue_id: next.id,
+          failed: true,
+          error_message: err.message,
+        };
       } finally {
         state.draining = false;
       }

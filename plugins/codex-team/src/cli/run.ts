@@ -144,6 +144,10 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
 async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): Promise<number> {
   return await new Promise<number>((resolve) => {
     let finished = false;
+    const stdoutQueue: Array<{ line: string; afterWrite?: () => void }> = [];
+    const pendingFinalizers: Array<() => void> = [];
+    let stdoutBlocked = false;
+    let socketPaused = false;
     const finish = (code: number) => {
       if (finished) return;
       finished = true;
@@ -151,6 +155,50 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
       process.off("SIGTERM", onInterrupt);
       process.off("SIGBREAK", onInterrupt);
       resolve(code);
+    };
+    const maybeResumeSocket = () => {
+      if (!socketPaused) return;
+      socketPaused = false;
+      if (typeof sock.resume === "function") sock.resume();
+    };
+    const flushFinalizers = () => {
+      if (stdoutBlocked || stdoutQueue.length > 0) return;
+      while (pendingFinalizers.length > 0) pendingFinalizers.shift()?.();
+    };
+    const flushStdout = () => {
+      if (stdoutBlocked) return;
+      while (stdoutQueue.length > 0) {
+        const next = stdoutQueue[0]!;
+        const ok = process.stdout.write(next.line);
+        if (!ok) {
+          stdoutBlocked = true;
+          if (!socketPaused && typeof sock.pause === "function") {
+            socketPaused = true;
+            sock.pause();
+          }
+          process.stdout.once("drain", () => {
+            stdoutBlocked = false;
+            const flushed = stdoutQueue.shift();
+            flushed?.afterWrite?.();
+            maybeResumeSocket();
+            flushStdout();
+            flushFinalizers();
+          });
+          return;
+        }
+        stdoutQueue.shift();
+        next.afterWrite?.();
+      }
+      maybeResumeSocket();
+      flushFinalizers();
+    };
+    const writeStdout = (line: string, afterWrite?: () => void) => {
+      stdoutQueue.push({ line, afterWrite });
+      flushStdout();
+    };
+    const afterStdout = (cb: () => void) => {
+      pendingFinalizers.push(cb);
+      flushFinalizers();
     };
     const reqId = randomId();
     const params: Record<string, unknown> = {
@@ -170,23 +218,31 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
 
     onMessages(sock, (msg) => {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
-        process.stdout.write(JSON.stringify(msg.data) + "\n");
+        writeStdout(JSON.stringify(msg.data) + "\n");
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
-          process.stdout.write(JSON.stringify({ ok: false, error: msg.error }) + "\n");
-          finish(1);
+          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+            finish(1);
+            sock.end();
+          });
         } else {
-          finish(0);
+          afterStdout(() => {
+            finish(0);
+            sock.end();
+          });
         }
-        sock.end();
       } else if (msg.kind === "response" && msg.id === reqId) {
         if (msg.error) {
-          process.stdout.write(JSON.stringify({ ok: false, error: msg.error }) + "\n");
-          finish(1);
+          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+            finish(1);
+            sock.end();
+          });
         } else {
-          finish(0);
+          afterStdout(() => {
+            finish(0);
+            sock.end();
+          });
         }
-        sock.end();
       }
     }, () => {
       finish(finished ? 0 : 1);

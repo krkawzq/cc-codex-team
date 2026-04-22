@@ -73,4 +73,23 @@ describe("PendingRegistry", () => {
     expect(reg.removeForUser("user-1").map((x) => x.request_id)).toEqual([b.request_id]);
     expect(reg.get(c.request_id)?.request_id).toBe(c.request_id);
   });
+
+  it("does not return already-responded entries for cancellation cleanup", () => {
+    const reg = new PendingRegistry();
+    const client = {};
+    const responded = reg.add({
+      client: client as never,
+      jsonrpc_id: 1,
+      kind: "approval.command_execution",
+      user: "user-1",
+      session_name: "sess-1",
+      thread_id: "th-1",
+      turn_id: "turn-1",
+      raw: {},
+    });
+    reg.markResponded(responded.request_id);
+
+    expect(reg.removeForSession("user-1", "sess-1")).toEqual([]);
+    expect(reg.get(responded.request_id)).toBeNull();
+  });
 });

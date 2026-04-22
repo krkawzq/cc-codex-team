@@ -74,8 +74,32 @@ export const messageApproval: HandlerFn = async (ctx, req) => {
   }
 
   const response = await buildResponse(req, pending, shortcut);
-  pending.client.respond(pending.jsonrpc_id, response as JsonValue);
-  ctx.pending.remove(requestId);
+  const ack = await pending.client.respondAck(pending.jsonrpc_id, response as JsonValue).catch(async (err) => {
+    await ctx.events.append(user, {
+      type: "warning",
+      session: rec.name,
+      thread_id: rec.thread_id,
+      payload: {
+        message: `approval reply delivery failed: ${(err as Error).message}`,
+        kind: "approval_reply_delivery_failed",
+        request_id: requestId,
+      },
+    });
+    throw err;
+  });
+  ctx.pending.markResponded(requestId);
+  if (ack.backpressured) {
+    await ctx.events.append(user, {
+      type: "warning",
+      session: rec.name,
+      thread_id: rec.thread_id,
+      payload: {
+        message: "approval reply is delayed by app-server stdin backpressure",
+        kind: "approval_reply_backpressured",
+        request_id: requestId,
+      },
+    });
+  }
   return {
     session: rec.name,
     request_id: requestId,
@@ -96,8 +120,32 @@ export const messageAnswer: HandlerFn = async (ctx, req) => {
   }
 
   const response = await buildAnswerResponse(req, pending, inline);
-  pending.client.respond(pending.jsonrpc_id, response as JsonValue);
-  ctx.pending.remove(requestId);
+  const ack = await pending.client.respondAck(pending.jsonrpc_id, response as JsonValue).catch(async (err) => {
+    await ctx.events.append(user, {
+      type: "warning",
+      session: rec.name,
+      thread_id: rec.thread_id,
+      payload: {
+        message: `user_input reply delivery failed: ${(err as Error).message}`,
+        kind: "user_input_reply_delivery_failed",
+        request_id: requestId,
+      },
+    });
+    throw err;
+  });
+  ctx.pending.markResponded(requestId);
+  if (ack.backpressured) {
+    await ctx.events.append(user, {
+      type: "warning",
+      session: rec.name,
+      thread_id: rec.thread_id,
+      payload: {
+        message: "user_input reply is delayed by app-server stdin backpressure",
+        kind: "user_input_reply_backpressured",
+        request_id: requestId,
+      },
+    });
+  }
   return { session: rec.name, request_id: requestId, responded: true, response };
 };
 
@@ -217,6 +265,7 @@ function requirePending(ctx: DaemonContext, user: string, requestId: string): Pe
   const p = ctx.pending.get(requestId);
   if (!p) throw new CodexTeamError("invalid_params", `no pending request '${requestId}'`);
   if (p.user !== user) throw new CodexTeamError("invalid_params", `pending request '${requestId}' belongs to another user`);
+  if (p.responded_at) throw new CodexTeamError("invalid_params", `pending request '${requestId}' has already been answered`);
   return p;
 }
 

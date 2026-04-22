@@ -149,9 +149,59 @@ describe("monitorEvents", () => {
 
     expect(stream.chunks).toEqual([]);
     await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersToNextTimerAsync();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.runOnlyPendingTimersAsync();
     expect(stream.chunks.map((x) => (x as { id: string }).id)).toEqual(["evt-5", "evt-6"]);
 
     stream.close();
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits monitor.overflow and flushes large interval batches across multiple ticks", async () => {
+    const dispose = vi.fn();
+    const stream = new FakeStream();
+    let subscriber: ((event: Record<string, unknown>) => void) | null = null;
+
+    await monitorEvents({
+      users: { has: () => true },
+      config: { getEffective: () => 1 },
+      events: {
+        listSince: () => ({ ok: true, events: [] }),
+        subscribe: (_user: string, cb: (event: Record<string, unknown>) => void) => {
+          subscriber = cb;
+          return { dispose };
+        },
+      },
+    } as never, makeReq({ interval: "1", "include-delta": true }) as never, stream as never);
+
+    for (let i = 0; i < 600; i++) {
+      subscriber?.({
+        id: `evt-${i}`,
+        ts: "2025-01-01T00:00:00.000Z",
+        type: "turn.completed",
+        session: "sess-1",
+        thread_id: "th-1",
+        payload: { i },
+      });
+    }
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersToNextTimerAsync();
+
+    expect(stream.chunks[0]).toMatchObject({
+      type: "monitor.overflow",
+      payload: expect.objectContaining({
+        dropped_count: expect.any(Number),
+      }),
+    });
+    expect((stream.chunks[0] as { payload: { dropped_count: number } }).payload.dropped_count).toBeGreaterThan(0);
+    expect(stream.chunks.filter((chunk) => (chunk as { type?: string }).type === "turn.completed").length).toBeLessThan(600);
+
+    const chunkCountAfterFirstTick = stream.chunks.length;
+    expect(chunkCountAfterFirstTick).toBeLessThanOrEqual(65);
+
+    await vi.advanceTimersToNextTimerAsync();
+    expect(stream.chunks.length).toBeGreaterThan(chunkCountAfterFirstTick);
   });
 });

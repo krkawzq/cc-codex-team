@@ -46,4 +46,35 @@ describe("TurnQueues", () => {
     expect(queues.depth("user-1::sess-1")).toBe(1);
     expect(vi.mocked(turnStart)).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps the queued item in place when auto-drain dispatch fails", async () => {
+    vi.mocked(turnStart)
+      .mockRejectedValueOnce(new Error("overloaded"))
+      .mockResolvedValueOnce({ turnId: "turn-2" } as never);
+
+    const queues = new TurnQueues();
+    const client = {};
+    queues.setCurrentTurn("user-1::sess-1", "turn-1");
+
+    const queued = await queues.sendOrQueue("user-1::sess-1", client as never, "th-1", [{ type: "text", text: "queued" }] as never);
+    const failed = await queues.onTurnCompleted("user-1::sess-1", client as never, "th-1");
+
+    expect(failed).toMatchObject({
+      turn_id: null,
+      queue_id: queued.queue_id,
+      failed: true,
+      error_message: "overloaded",
+    });
+    expect(queues.depth("user-1::sess-1")).toBe(1);
+    expect(queues.getCurrentTurn("user-1::sess-1")).toBeNull();
+
+    const retried = await queues.onTurnCompleted("user-1::sess-1", client as never, "th-1");
+    expect(retried).toMatchObject({
+      turn_id: "turn-2",
+      queue_id: queued.queue_id,
+      failed: false,
+    });
+    expect(queues.depth("user-1::sess-1")).toBe(0);
+    expect(queues.getCurrentTurn("user-1::sess-1")).toBe("turn-2");
+  });
 });
