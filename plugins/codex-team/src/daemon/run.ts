@@ -10,33 +10,18 @@ import { shutdownDaemon } from "./shutdown";
 import { wireDaemonEvents } from "./wire";
 import { reapOrphans } from "./orphans";
 
-const PIDFILE_STALE_MS = 5000;
-
 export async function runDaemon(): Promise<number> {
   const ctx = buildContext();
-
-  // Wait up to 3s for an incumbent daemon (being restarted) to vacate the sock.
-  const waitStart = Date.now();
-  while (await probeSock(ctx.sockPath, 200)) {
-    if (Date.now() - waitStart > 3000) {
-      logger.info("another daemon already owns the sock", { sock: ctx.sockPath });
-      return 1;
-    }
-    await new Promise<void>((r) => setTimeout(r, 150));
-  }
   const pidPath = pidFilePath(ctx.dataDir);
-  const acquireStart = Date.now();
-  while (!acquirePid(pidPath)) {
-    if (Date.now() - acquireStart > 3000) {
-      logger.warn("another daemon pidfile is live; aborting", { pid_path: pidPath });
-      return 1;
-    }
-    await new Promise<void>((r) => setTimeout(r, 150));
+
+  const acquired = await acquireDaemonOwnership(ctx.sockPath, pidPath);
+  if (!acquired.ok) {
+    logger.info(acquired.message, acquired.details);
+    return 1;
   }
-  unlinkSockIfStale(ctx.sockPath);
 
   // Kill any leftover codex app-server processes spawned by a previous daemon.
-  reapOrphans(ctx.dataDir);
+  await reapOrphans(ctx.dataDir);
 
   const cleanup = (): void => {
     unlinkSockIfStale(ctx.sockPath);
@@ -83,17 +68,7 @@ function acquirePid(pidPath: string): boolean {
     }
     return true;
   } catch (e) {
-    if ((e as NodeJS.ErrnoException)?.code === "EEXIST") {
-      try {
-        const ageMs = Date.now() - fs.statSync(pidPath).mtimeMs;
-        if (ageMs >= PIDFILE_STALE_MS) {
-          fs.unlinkSync(pidPath);
-        }
-      } catch {
-        // ignore and retry later
-      }
-      return false;
-    }
+    if ((e as NodeJS.ErrnoException)?.code === "EEXIST") return false;
     return false;
   }
 }
@@ -122,4 +97,99 @@ function scheduleIdleShutdown(ctx: import("./context").DaemonContext): void {
 
 function registerShutdownSignal(signal: NodeJS.Signals, ctx: import("./context").DaemonContext): void {
   process.on(signal, () => void shutdownDaemon(ctx, signal));
+}
+
+interface AcquireResult {
+  ok: boolean;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+async function acquireDaemonOwnership(sockPath: string, pidPath: string): Promise<AcquireResult> {
+  const waitStart = Date.now();
+  for (;;) {
+    const sockReachable = await probeSock(sockPath, 200);
+    const pidRecord = readPidFile(pidPath);
+    const pid = pidRecord?.pid ?? null;
+    const pidAlive = pid !== null && isPidAlive(pid);
+
+    if (sockReachable) {
+      if (Date.now() - waitStart > 3000) {
+        return {
+          ok: false,
+          message: "another daemon already owns the sock",
+          details: {
+            sock: sockPath,
+            pidfile_pid: pid,
+            pidfile_live: pidAlive,
+          },
+        };
+      }
+      await sleep(150);
+      continue;
+    }
+
+    if (pid !== null && pidAlive) {
+      if (Date.now() - waitStart > 3000) {
+        return {
+          ok: false,
+          message: "another daemon pidfile is live; aborting",
+          details: {
+            pid_path: pidPath,
+            pid,
+          },
+        };
+      }
+      await sleep(150);
+      continue;
+    }
+
+    if (pid !== null && !pidAlive) {
+      try { fs.unlinkSync(pidPath); } catch { /* ignore */ }
+    }
+
+    unlinkSockIfStale(sockPath);
+    if (acquirePid(pidPath)) {
+      return { ok: true, message: "daemon ownership acquired" };
+    }
+
+    if (Date.now() - waitStart > 3000) {
+      return {
+        ok: false,
+        message: "failed to acquire daemon pidfile",
+        details: { pid_path: pidPath },
+      };
+    }
+    await sleep(150);
+  }
+}
+
+function readPidFile(pidPath: string): { pid: number; created_at?: string } | null {
+  try {
+    const raw = fs.readFileSync(pidPath, "utf8");
+    const parsed = JSON.parse(raw) as { pid?: unknown; created_at?: unknown };
+    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
+    return {
+      pid: Math.floor(parsed.pid),
+      created_at: typeof parsed.created_at === "string" ? parsed.created_at : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
 }
