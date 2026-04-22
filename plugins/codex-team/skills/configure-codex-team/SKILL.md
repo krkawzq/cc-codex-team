@@ -35,6 +35,41 @@ codex-team daemon config set codex.default_model gpt-5.4
 
 Hot. `session new` without `--model` now uses this.
 
+### Give new sessions a default auto-approve policy
+
+```bash
+codex-team daemon config set session.auto_approve_command_patterns 'git*,npm test,vitest*'
+```
+
+Hot. New sessions inherit this CSV only when `session new` omits `--auto-approve`.
+
+### Override or opt out per session
+
+```bash
+codex-team -b $TOKEN session new audit --auto-approve 'git*,npm test'
+codex-team -b $TOKEN session new careful --auto-approve ""
+```
+
+- Explicit `--auto-approve` replaces the daemon default for that session.
+- `--auto-approve ""` opts out even when `session.auto_approve_command_patterns` is set.
+- Values accept CSV plus JavaScript-style regex literals such as `/^npm (test|run lint)$/`.
+
+### Enable experimental tools on a session
+
+```bash
+codex-team -b $TOKEN session new askq --experimental-tools ask-user-question
+```
+
+`ask-user-question` is the canonical tool name. Accepted aliases are:
+
+- `ask_user_question`
+- `askuserquestion`
+- `request-user-input`
+- `request_user_input`
+- `requestuserinput`
+
+`request-permissions` also exists for the permission-request tool.
+
 ### Increase retained events per user
 
 ```bash
@@ -63,6 +98,21 @@ codex-team daemon config list
 ```
 
 Returns every key with current value, default, type, whether explicit, and hot/cold.
+
+### Check daemon freshness and session count
+
+```bash
+codex-team daemon status
+```
+
+In 0.5.2 this also reports:
+
+- `session_count`
+- `dist_built_at`
+- `dist_age_seconds`
+- `source_newer_than_dist`
+
+If `source_newer_than_dist` is `true`, the checked-in source is newer than `dist/main.js`.
 
 ### Reset a single key
 
@@ -94,7 +144,7 @@ ls -la ~/.codex-team/ 2>/dev/null || echo "first run will create it"
 
 ## Invariants around config
 
-- **Hot keys** take effect without restart. Changes to `daemon.log_level`, `monitor.event_log_retention`, `codex.default_*`, `retry.*`, `monitor.default_interval_seconds`, `app_server.idle_unload_minutes`, `daemon.idle_shutdown_hours` are live immediately (or on next check cycle).
+- **Hot keys** take effect without restart. Changes to `daemon.log_level`, `monitor.event_log_retention`, `session.auto_approve_command_patterns`, `codex.default_*`, `experimental.default_tools`, `retry.*`, `monitor.default_interval_seconds`, `app_server.idle_unload_minutes`, `daemon.idle_shutdown_hours` are live immediately (or on next check cycle).
 - **Cold keys** require `daemon restart`: `daemon.log_path`, `daemon.data_dir`, `daemon.sock_path`. Response includes `needs_restart: true`.
 - **`app_server.max_sessions_per_process`** is hot but only affects *new* reusable app-server processes; live sessions are isolated by default.
 - **Config is stored at `<data_dir>/config.json`**, written atomically (tmp + rename). Hand-editing works but run `daemon restart` if the daemon was already using the old value.

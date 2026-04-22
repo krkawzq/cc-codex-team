@@ -3458,6 +3458,7 @@ var AUTO_APPROVED_EVENT_TYPE = "auto_approved";
 var APPROVAL_REQUEST_CANCELLED_EVENT_TYPE = "approval.request_cancelled";
 var SESSION_CLOSED_EVENT_TYPE = "session.closed";
 var SESSION_CRASHED_EVENT_TYPE = "session.crashed";
+var SESSION_PENDING_DROPPED_EVENT_TYPE = "session.pending_dropped";
 var USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE = "user_input.request_cancelled";
 var EventLog = class {
   retention;
@@ -3940,12 +3941,14 @@ function serializeEventFile(buf) {
 
 // src/daemon/cursors.ts
 var import_node_fs9 = __toESM(require("fs"));
+var import_node_os2 = __toESM(require("os"));
 var import_node_path10 = __toESM(require("path"));
 var import_promises2 = require("timers/promises");
 var CURSOR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 var SCHEMA_VERSION4 = 1;
 var LOCK_RETRY_MS = 10;
 var LOCK_TIMEOUT_MS = 2e3;
+var LOCK_STALE_MS = 5 * 60 * 1e3;
 var CursorStore = class {
   dataDir;
   users = /* @__PURE__ */ new Map();
@@ -4090,13 +4093,22 @@ async function acquireCursorLock(filePath) {
   while (true) {
     try {
       const handle = await import_node_fs9.default.promises.open(lockPath, "wx");
-      return async () => {
+      try {
+        await handle.writeFile(JSON.stringify(makeCursorLockRecord()));
+      } finally {
         await handle.close();
+      }
+      return async () => {
         await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
       };
     } catch (error) {
       const err2 = error;
       if (err2.code !== "EEXIST") throw error;
+      if (await reclaimStaleCursorLock(lockPath)) {
+        return async () => {
+          await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
+        };
+      }
       if (Date.now() >= deadline) {
         throw new Error(`timed out waiting for cursor lock '${lockPath}'`);
       }
@@ -4104,8 +4116,35 @@ async function acquireCursorLock(filePath) {
     }
   }
 }
+async function reclaimStaleCursorLock(lockPath) {
+  const lock = await readCursorLock(lockPath);
+  if (!lock || !isStaleCursorLock(lock)) return false;
+  const tmpPath = `${lockPath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  await import_node_fs9.default.promises.writeFile(tmpPath, JSON.stringify(makeCursorLockRecord()));
+  try {
+    await import_node_fs9.default.promises.rename(tmpPath, lockPath);
+    return true;
+  } catch (error) {
+    const err2 = error;
+    if (err2.code === "EEXIST" || err2.code === "EPERM") {
+      await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
+      await import_node_fs9.default.promises.rename(tmpPath, lockPath);
+      return true;
+    }
+    return false;
+  } finally {
+    await import_node_fs9.default.promises.unlink(tmpPath).catch(() => void 0);
+  }
+}
 function makeTempPath(filePath) {
   return `${filePath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+}
+function makeCursorLockRecord() {
+  return {
+    pid: process.pid,
+    started_at: (/* @__PURE__ */ new Date()).toISOString(),
+    host: import_node_os2.default.hostname()
+  };
 }
 async function loadEnvelopeFromFile(filePath) {
   try {
@@ -4128,6 +4167,36 @@ function loadEnvelopeFromText(raw) {
     bucket.set(cursor.name, cloneCursor(cursor));
   }
   return { cursors: bucket };
+}
+async function readCursorLock(lockPath) {
+  try {
+    const raw = await import_node_fs9.default.promises.readFile(lockPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || typeof parsed.started_at !== "string" || typeof parsed.host !== "string") {
+      return null;
+    }
+    return {
+      pid: parsed.pid,
+      started_at: parsed.started_at,
+      host: parsed.host
+    };
+  } catch {
+    return null;
+  }
+}
+function isStaleCursorLock(lock) {
+  if (!isPidAlive(lock.pid)) return true;
+  if (lock.pid === process.pid) return false;
+  const startedAt = Date.parse(lock.started_at);
+  return Number.isFinite(startedAt) && Date.now() - startedAt > LOCK_STALE_MS;
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
 }
 function applyPersistOp(bucket, op) {
   if (op.type === "delete") {
@@ -5607,6 +5676,75 @@ function toMs2(v, fallback) {
   return fallback;
 }
 
+// src/daemon/pending-cancel.ts
+var JSONRPC_CANCEL_ERROR_CODE = -32e3;
+async function cancelPendingWithEvent(ctx, user, sessionName, threadId, reason, filter) {
+  if (typeof ctx.pending.listForUser !== "function" || typeof ctx.pending.remove !== "function") return;
+  const matching = pendingRequestsForSession(ctx, user, sessionName, filter);
+  for (const pending of matching) {
+    const removed = ctx.pending.remove(pending.request_id) ?? pending;
+    if (removed.responded_at) continue;
+    try {
+      removed.client.respondError(
+        removed.jsonrpc_id,
+        JSONRPC_CANCEL_ERROR_CODE,
+        cancellationClientMessage(reason)
+      );
+    } catch {
+    }
+    const eventType = cancellationEventType(removed.kind);
+    if (!eventType) continue;
+    await ctx.events.append(user, {
+      type: eventType,
+      session: removed.session_name ?? normalizeSessionName(sessionName),
+      thread_id: removed.thread_id ?? normalizeThreadId(threadId),
+      payload: {
+        request_id: removed.request_id,
+        kind: removed.kind,
+        turn_id: removed.turn_id ?? null,
+        reason
+      }
+    });
+  }
+}
+function pendingRequestsForSession(ctx, user, sessionName, filter) {
+  if (typeof ctx.pending.listForUser !== "function") return [];
+  return ctx.pending.listForUser(user).filter((pending) => matchesSession(pending, sessionName) && (!filter || filter(pending)));
+}
+function matchesSession(pending, sessionName) {
+  if (sessionName === "*") return true;
+  return pending.session_name === sessionName;
+}
+function cancellationClientMessage(reason) {
+  switch (reason) {
+    case "user_detach":
+      return "session detached";
+    case "idle_unload":
+      return "session idle_unloaded";
+    case "user_destroyed":
+      return "user destroyed";
+    case "session_seized":
+      return "session seized by another user";
+    case "session_heal_force_reset":
+    case "session_crashed":
+    case "app_server_crashed_on_restart":
+      return "session_crashed";
+    default:
+      return reason;
+  }
+}
+function cancellationEventType(kind) {
+  if (kind.startsWith("approval.")) return APPROVAL_REQUEST_CANCELLED_EVENT_TYPE;
+  if (kind === "user_input.request") return USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE;
+  return null;
+}
+function normalizeSessionName(sessionName) {
+  return sessionName.length > 0 && sessionName !== "*" ? sessionName : null;
+}
+function normalizeThreadId(threadId) {
+  return threadId.length > 0 ? threadId : null;
+}
+
 // src/daemon/handlers/version.ts
 var version = async (_ctx, _req) => {
   return {
@@ -5761,12 +5899,16 @@ var daemonUserDestroy = async (ctx, req) => {
       `cannot destroy user '${token}' while ${liveSessions.length} live session(s) remain; pass --force to destroy anyway`
     );
   }
-  const pending = ctx.pending.removeForUser(token);
+  const pending = typeof ctx.pending.listForUser === "function" ? ctx.pending.listForUser(token) : [];
   for (const p of pending) {
-    try {
-      p.client.respondError(p.jsonrpc_id, -32e3, "user destroyed");
-    } catch {
-    }
+    await cancelPendingWithEvent(
+      ctx,
+      token,
+      p.session_name ?? "*",
+      p.thread_id ?? "",
+      "user_destroyed",
+      (entry) => entry.request_id === p.request_id
+    );
   }
   await ctx.pool.closeUser(token);
   const sessions = await ctx.sessions.clearUser(token);
@@ -6759,13 +6901,8 @@ var sessionDetach = async (ctx, req) => {
   }
   ctx.pool.release(sessionKey);
   ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
   ctx.sessions.remove(user, rec.name);
-  for (const p of ctx.pending.removeForSession(user, rec.name)) {
-    try {
-      p.client.respondError(p.jsonrpc_id, -32e3, "session detached");
-    } catch {
-    }
-  }
   await appendSessionClosed(ctx, user, rec, "user_detach");
   return { session: rec, noop: false, graceful };
 };
@@ -6987,13 +7124,11 @@ var sessionHeal = async (ctx, req) => {
   }
   if (force) {
     ctx.queues.dispose(sessionKey);
-    if (ctx.pending && typeof ctx.pending.abortForSession === "function") {
-      ctx.pending.abortForSession(user, rec.name, "session_crashed", {
-        reason: "session_heal_force_reset",
-        session: rec.name,
-        thread_id: rec.thread_id
-      });
-    }
+    await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "session_heal_force_reset");
+    ctx.sessions.update(user, rec.name, {
+      pending_approvals: 0,
+      pending_user_inputs: 0
+    });
   }
   const client = await ctx.pool.acquire(
     user,
@@ -7178,13 +7313,8 @@ async function seizeFromOtherUser(ctx, fromUser, toUser, rec) {
   }
   ctx.pool.release(sessionKey);
   ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, fromUser, rec.name, rec.thread_id, "session_seized");
   ctx.sessions.remove(fromUser, rec.name);
-  for (const p of ctx.pending.removeForSession(fromUser, rec.name)) {
-    try {
-      p.client.respondError(p.jsonrpc_id, -32e3, "session seized by another user");
-    } catch {
-    }
-  }
   await ctx.events.append(fromUser, {
     type: "session.seized",
     session: rec.name,
@@ -9028,7 +9158,7 @@ async function handleNotification2(ctx, e) {
   }
   if (norm.type === "thread.closed" && sessionName) {
     try {
-      await closeSession(ctx, e.user, sessionName, "user_detach", "session detached", false);
+      await closeSession(ctx, e.user, sessionName, "user_detach", false);
     } catch (err2) {
       logger.warn("thread closed cleanup failed", { session: sessionName, err: err2.message });
     }
@@ -9055,7 +9185,7 @@ async function handleNotification2(ctx, e) {
   if (norm.type === "client_close" && sessionName && norm.threadId) {
     if (isSessionIdle(ctx, e.user, sessionName)) {
       try {
-        await closeSession(ctx, e.user, sessionName, "idle_unload", "session idle_unloaded", true);
+        await closeSession(ctx, e.user, sessionName, "idle_unload", true);
       } catch (err2) {
         logger.warn("idle unload cleanup failed", { session: sessionName, err: err2.message });
       }
@@ -9135,13 +9265,9 @@ async function handleClientClose(ctx, e) {
         }
       });
     }
+    await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, "session_crashed");
     await appendSessionClosed2(ctx, user, rec.name, rec.thread_id, "app_server_crashed");
     ctx.queues.onClientClosed(sessionKey);
-    ctx.pending.abortForSession(user, sessionName, "session_crashed", {
-      reason: "session_crashed",
-      session: rec.name,
-      thread_id: rec.thread_id
-    });
   }
 }
 function resolveSession(ctx, user, threadId) {
@@ -9228,7 +9354,7 @@ function isSessionIdle(ctx, user, sessionName) {
   const rec = ctx.sessions.get(user, sessionName);
   return Boolean(rec) && (rec?.state ?? "live") === "live" && (rec?.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey)) === null && ctx.queues.depth(sessionKey) === 0 && (rec?.pending_approvals ?? 0) === 0 && (rec?.pending_user_inputs ?? 0) === 0;
 }
-async function closeSession(ctx, user, sessionName, reason, pendingMessage, unsubscribe) {
+async function closeSession(ctx, user, sessionName, reason, unsubscribe) {
   const rec = ctx.sessions.get(user, sessionName);
   if (!rec) return;
   const sessionKey = keyFor3(user, sessionName);
@@ -9241,13 +9367,8 @@ async function closeSession(ctx, user, sessionName, reason, pendingMessage, unsu
   }
   ctx.pool.release(sessionKey);
   ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, reason);
   ctx.sessions.remove(user, sessionName);
-  for (const p of ctx.pending.removeForSession(user, sessionName)) {
-    try {
-      p.client.respondError(p.jsonrpc_id, -32e3, pendingMessage);
-    } catch {
-    }
-  }
   await appendSessionClosed2(ctx, user, rec.name, rec.thread_id, reason);
 }
 async function appendSessionClosed2(ctx, user, session, threadId, reason) {
@@ -9338,6 +9459,12 @@ async function reconcileLoadedSessionsAfterRestart(ctx) {
       if (rec.state !== "live") continue;
       const sessionKey = keyFor4(user.token, rec.name);
       if (isClientAlive3(ctx.pool.clientForSession(sessionKey))) continue;
+      const hadPersistedPending = (rec.pending_approvals ?? 0) > 0 || (rec.pending_user_inputs ?? 0) > 0;
+      const hadPendingMetadata = pendingRequestsForSession(
+        ctx,
+        user.token,
+        rec.name
+      ).length > 0;
       const lastTurnId = rec.current_turn_id ?? rec.last_turn_id ?? null;
       ctx.sessions.update(user.token, rec.name, {
         state: "crashed",
@@ -9362,18 +9489,22 @@ async function reconcileLoadedSessionsAfterRestart(ctx) {
           last_turn_id: lastTurnId
         }
       });
-      for (const pending of cancelRestartPendingRequests(ctx, user.token, rec.name, rec.thread_id)) {
-        const eventType = cancellationEventType(pending.kind);
-        if (!eventType) continue;
+      await cancelPendingWithEvent(
+        ctx,
+        user.token,
+        rec.name,
+        rec.thread_id,
+        APP_SERVER_CRASHED_ON_RESTART_REASON
+      );
+      if (hadPersistedPending && !hadPendingMetadata) {
         await ctx.events.append(user.token, {
-          type: eventType,
+          type: SESSION_PENDING_DROPPED_EVENT_TYPE,
           session: rec.name,
           thread_id: rec.thread_id,
           payload: {
-            request_id: pending.request_id,
-            kind: pending.kind,
-            turn_id: pending.turn_id ?? null,
-            reason: APP_SERVER_CRASHED_ON_RESTART_REASON
+            session: rec.name,
+            thread_id: rec.thread_id,
+            reason: "daemon_restart_pending_lost"
           }
         });
       }
@@ -9397,25 +9528,6 @@ function acquirePid(pidPath) {
     if (e?.code === "EEXIST") return false;
     return false;
   }
-}
-function cancelRestartPendingRequests(ctx, user, sessionName, threadId) {
-  if (!ctx.pending) return [];
-  if (typeof ctx.pending.abortForSession === "function") {
-    return ctx.pending.abortForSession(user, sessionName, "session_crashed", {
-      reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
-      session: sessionName,
-      thread_id: threadId
-    });
-  }
-  if (typeof ctx.pending.removeForSession === "function") {
-    return ctx.pending.removeForSession(user, sessionName);
-  }
-  return [];
-}
-function cancellationEventType(kind) {
-  if (kind.startsWith("approval.")) return APPROVAL_REQUEST_CANCELLED_EVENT_TYPE;
-  if (kind === "user_input.request") return USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE;
-  return null;
 }
 function isClientAlive3(client) {
   if (!client) return false;

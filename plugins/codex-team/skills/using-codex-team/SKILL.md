@@ -1,7 +1,7 @@
 ---
 name: using-codex-team
 description: >-
-  Entry router and mental model for codex-team — a multi-session Codex orchestration layer. Trigger when (a) the user mentions codex-team, Codex workers, or long-lived Codex sessions; (b) the task needs parallel coding, bulk refactor, multi-agent review, or any work that decomposes into multiple mechanically independent Codex runs; (c) you see a `turn.completed` / `turn.error` / `approval.*` / `user_input.request` event in the task panel and need to know what to do; (d) you're picking whether codex-team is the right tool. Not for: one-shot codex invocations — use the `codex:codex-rescue` subagent.
+  Entry router and mental model for codex-team — a multi-session Codex orchestration layer. Trigger when (a) the user mentions codex-team, Codex workers, or long-lived Codex sessions; (b) the task needs parallel coding, bulk refactor, multi-agent review, or any work that decomposes into multiple mechanically independent Codex runs; (c) you see a `turn.completed` / `turn.error` / `approval.*` / `user_input.request` / `session.crashed` / `session.closed` event in the task panel and need to know what to do; (d) you're picking whether codex-team is the right tool. Not for: one-shot codex invocations — use the `codex:codex-rescue` subagent.
 ---
 
 # Using codex-team
@@ -62,15 +62,19 @@ codex-team daemon user create $TOKEN
 # 2. Start a session in the repo you're working in
 codex-team -b $TOKEN session new refactor --cwd /path/to/repo \
   --model gpt-5.4 --sandbox workspace-write --approval on-request
+codex-team -b $TOKEN cursor save refactor-tail
 
 # 3. Arm the events Monitor (convenience slash command)
 #    /codex-team:events -b <TOKEN>
-#    — OR equivalent raw Monitor({ command: "... monitor events --stream" })
+#    — OR equivalent raw Monitor({ command: "... monitor events --stream --summary --cursor refactor-tail" })
 
 # 4. Send work. Non-blocking — the turn runs async in the worker.
 codex-team -b $TOKEN message send refactor "Refactor the auth module..."
 
-# 5. When an event says turn.completed, fetch the full turn
+# 5. If you're blocked on just this turn, wait directly
+codex-team -b $TOKEN message wait refactor --timeout 0
+
+# 6. When an event says turn.completed, fetch the full turn
 codex-team -b $TOKEN message tail refactor -n 1 --format markdown
 ```
 
@@ -79,10 +83,12 @@ The daemon auto-spawned on step 1. No explicit bootstrap. No workspaces. No hook
 ## Core loop
 
 1. **Send or peer** — push a prompt to a live session
-2. **Watch events** — `monitor events` tells you when turns finish, errors fire, approvals are needed
+2. **Watch events** — `monitor events` tells you when turns finish, errors fire, sessions crash/close, or approvals are needed
 3. **Fetch detail on demand** — events are summaries only; use `message tail` for content
 4. **Respond to asks** — `approval.*` and `user_input.request` events need your reply via `message approval` / `message answer`
 5. **Detach when done** — `session detach` releases app-server resources; the thread persists in codex for later resume
+
+If you see `session.crashed`, inspect the live snapshot with `session health` and repair it with `session heal`. `session.closed` means the live binding was torn down intentionally; if the underlying thread still exists, re-attach it.
 
 ## Skill map
 
@@ -102,10 +108,10 @@ Do not violate these, even under duress:
 1. **One bearer token per agent conversation.** Don't rotate mid-session.
 2. **Every `-b` call implicitly spawns the daemon.** You never `daemon start` manually.
 3. **Sessions are not deletable** by codex-team. `detach` removes from the live set; codex keeps the thread file.
-4. **`send` is non-blocking.** It starts a turn and returns. Don't poll for completion — listen on events.
+4. **`send` is non-blocking.** It starts a turn and returns. Don't poll for completion — listen on events or block explicitly with `message wait`.
 5. **`peer` needs an active turn.** Without one, use `send`.
 6. **`interrupt` is hard.** It kills in-flight tool calls. Prefer `peer` if you want to redirect without destroying state.
-7. **Events are summaries.** Always. Never expect full turn content in the event stream.
+7. **Events are summaries.** Always. In 0.5.2, `turn.completed` is compact metadata only. Never expect full turn content in the event stream.
 8. **Approvals block the turn.** A session waiting on `approval.*` or `user_input.request` cannot make progress until you reply.
 9. **Multiple agents can share a session via `--takeover`**, but the original holder gets a `session.seized` event and loses pending requests. Cross-user attach by name must be unique; otherwise use the `thread_id`.
 10. **Daemon auto-shuts down after 6h idle.** Idle is only evaluated when there are 0 live sessions; live sessions and the codex activity associated with them keep the daemon from being idled out. Don't rely on the daemon being there forever if you walk away.

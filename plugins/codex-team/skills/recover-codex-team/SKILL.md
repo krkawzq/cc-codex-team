@@ -13,11 +13,11 @@ description: >-
 | Failure | Daemon response |
 |---|---|
 | `server_overloaded` / transient app-server stream/network failures | Retries with backoff (default 3× / 0.25s–2s). If budget exhausted → `response_too_many_failed_attempts` surfaces as `codex_error` |
-| app-server process crash | Pool detects EOF; fires `turn.error` for the affected live session(s); re-acquires a client, then attempts `thread/resume` automatically. The lost in-flight turn does not recover, but the live session usually does |
-| daemon crash / sudden restart | Persistent state (users, sessions, events, config) reloads. Live sessions keep their `live` flag; no running turn survives, but the session can be used again on next interactive command (lazy re-spawn of app-server) |
+| app-server process crash | Affected live sessions are marked `crashed`, emit `session.crashed`, and pending approval / user-input requests are cancelled. The lost in-flight turn does not recover; inspect with `session health`, then run `session heal` |
+| daemon crash / sudden restart | Persistent state (users, sessions, events, config) reloads. Any session that was persisted as live but has no surviving app-server is reconciled to `state: "crashed"` and emits `session.crashed`; if pending requests existed, a synthetic `session.pending_dropped` event records that they could not be recovered individually |
 | Stale sock file / pidfile | Startup: `connect()` probes; on refusal, pid ownership is checked before aborting. A live pid only blocks startup if it still looks like a `codex-team --daemon-internal` process |
 | Orphan codex processes from previous daemon | Startup: `reapOrphans()` reads `codex-pids.json`, verifies identity via `pid + start_time + nonce`, and SIGTERMs only surviving codex app-server children |
-| `thread.closed` from codex | Auto-detach: session removed from registry, pending requests cancelled |
+| `thread.closed` from codex | Auto-detach: session removed from registry, emits `session.closed`, pending requests cancelled |
 
 ### Daemon ownership on startup
 
@@ -37,13 +37,15 @@ If the pid is alive but has been reused by some unrelated process, startup treat
 | `user_not_found` | Run `codex-team daemon user create <token>` once; treat `user_already_exists` as success |
 | `session_not_found` on a session you created | Was it auto-detached via `thread.closed`? Check events log. Re-create or attach by thread_id |
 | `session_not_live` | Session was detached. Run `codex-team -b $TOK session attach <name>` |
+| `session.crashed` event, or `session health` shows `state=crashed` / `app_server_alive=false` | Run `codex-team -b $TOK session heal <name>`. If runtime state looks half-baked or heal fails repeatedly, retry with `--force` |
+| `session.closed` event | The live binding was intentionally torn down. If the thread still exists, `session attach` it again; otherwise start or fork a fresh session |
 | `session_busy` | Another user has it live. Either pick a different thread, or `--takeover` (emits `session.seized` to the original holder) |
 | `codex_error` with `codex_error_info: context_window_exceeded` | Start a fresh session or fork from an earlier turn. Codex doesn't auto-compact |
 | `codex_error` with `codex_error_info: usage_limit_exceeded` | Stop. Nothing to retry. Check codex account quota |
 | `codex_error` with `codex_error_info: unauthorized` | Codex auth expired. Run `codex login` out-of-band, then resume |
 | `codex_error` with `codex_error_info: active_turn_not_steerable` | Wait for the blocking turn (review or compact). Do not retry `interrupt`/`steer` |
 | `codex_error` with `codex_error_info: sandbox_error` | The `--sandbox` on session new is too restrictive for the command codex wants to run. Recreate the session with a wider sandbox, or decline the approval |
-| `id_rotated` on `monitor events --since` | Use the `data.oldest_available_id` to resume from the earliest still-retained event |
+| `id_rotated` on `monitor events --since` | Use `data.oldest_available_id` for a one-off resume, then switch to a named cursor via `cursor save` + `monitor events --cursor` |
 | `invalid_decision` when approving | You used a shortcut that doesn't fit this approval kind. See `manage-codex-team/approvals.md` |
 | Repeated reply mismatches from codex | Known quirk under long context. See `known-quirks.md`. First mismatch: ignore; second mismatch: `session fork` + give fresh context |
 | Approvals visible in events but cli says "no pending request" | The request was already resolved (by another client, by takeover, or by timeout). Ignore |
@@ -80,7 +82,7 @@ Stops daemon, `rm -rf ~/.codex-team`, rebuilds. Loses all sessions, events, conf
 codex-team -b $TOK message interrupt <session>
 ```
 
-If interrupt is rejected (`active_turn_not_steerable`), the turn is in a review or compact phase — wait it out. If interrupt succeeds but a pending approval hangs anyway, `session detach` tears the session down and pending requests fail with `-32000 session detached`.
+If interrupt is rejected (`active_turn_not_steerable`), the turn is in a review or compact phase — wait it out. If the session is already `crashed`, interrupt will not help; run `session health` and `session heal` instead. If interrupt succeeds but a pending approval hangs anyway, `session detach` tears the session down and pending requests fail with `-32000 session detached`.
 
 ### Recover a session after `thread.closed`
 
@@ -99,10 +101,16 @@ codex-team daemon logs -n 200 --level debug
 # your user state
 codex-team -b $TOK status
 codex-team -b $TOK session list --format table
+codex-team -b $TOK session health <session>
 
 # recent events
-codex-team -b $TOK monitor events --interval 60 --filter turn.error,approval.command_execution
-# (run this as a foreground Bash for a quick drain)
+codex-team -b $TOK cursor save recover-tail
+codex-team -b $TOK monitor events --stream --summary --cursor recover-tail \
+  --filter turn.error,session.crashed,session.closed,approval.command_execution
+
+# heal a crashed live session
+codex-team -b $TOK session heal <session>
+codex-team -b $TOK session heal <session> --force
 
 # stderr from a specific app-server
 # (currently only available via daemon log inspection — grep "app-server")

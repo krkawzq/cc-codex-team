@@ -29,6 +29,7 @@ Claude sits as the **network hub**: manager and workers never talk directly. Eve
 ```bash
 TOK=claude-$(date +%s)
 codex-team daemon user create $TOK >/dev/null
+codex-team -b $TOK cursor save hierarchy-tail
 
 cd /repo
 mkdir -p .codex-team
@@ -55,6 +56,12 @@ at the bottom of your reply.
 Stop after proposing the first 1–3 delegations; I'll act on them and come back."
 ```
 
+In a separate terminal or Monitor tool, keep a resumable summary stream open:
+
+```bash
+codex-team -b $TOK monitor events --stream --summary --cursor hierarchy-tail
+```
+
 ### Main loop
 
 Claude cycles between reading manager output and materialising delegations:
@@ -62,8 +69,8 @@ Claude cycles between reading manager output and materialising delegations:
 ```
 while task not complete:
   # Get the manager's next decision
-  wait for manager turn.completed
-  fetch latest manager reply via `message tail manager -n 1 --format markdown`
+  codex-team -b $TOK message wait manager --timeout 0
+  codex-team -b $TOK message tail manager -n 1 --format markdown
   parse DELEGATE blocks from the reply
 
   for each DELEGATE block:
@@ -82,8 +89,8 @@ while task not complete:
       "$brief\n\nWrite your output to .codex-team/worker-$id.md.\nReport progress and completion in that file."
 
     # Wait for the worker to finish
-    wait for worker-$id turn.completed
-    fetch worker-$id output
+    codex-team -b $TOK message wait worker-$id --timeout 0
+    codex-team -b $TOK message tail worker-$id -n 1 --format markdown
 
     # Detach the worker once done
     codex-team -b $TOK session detach worker-$id
@@ -101,6 +108,8 @@ while task not complete:
 codex-team -b $TOK session detach manager
 ```
 
+`turn.completed` no longer embeds items in 0.5.2. Treat it as the stop signal only; fetch content with `message tail` / `message history` or read the worker's output file.
+
 ## Feeding back bounded state
 
 Don't forward the worker's full output to the manager — it bloats context fast. Rules:
@@ -108,6 +117,11 @@ Don't forward the worker's full output to the manager — it bloats context fast
 - Always summarise worker output to ≤500 words when feeding to manager
 - Put the full output in `.codex-team/worker-<id>.md` so it's available on disk
 - Include a path reference in the summary: "Full log at `.codex-team/worker-refactor-auth.md`"
+
+## Operational notes
+
+- For large worker fleets, `monitor events --summary --cursor hierarchy-tail` is easier to scan than full NDJSON and can be resumed after a restart.
+- If delegated fixer/tester workers are intentionally trusted, prefer `session new ... --auto-approve "<patterns>"` or a daemon-wide `session.auto_approve_command_patterns` default. Do not bolt on shell loops that poll for approvals.
 
 ## Variants
 
