@@ -642,6 +642,16 @@ function terminalWaitResult(
   turnId: string,
   event: { id: string; type: string; payload: Record<string, unknown> },
 ): Record<string, unknown> {
+  const completedFields = event.type === "turn.completed"
+    ? pickDefined(event.payload, [
+        "status",
+        "duration_ms",
+        "items_count",
+        "token_usage",
+        "ended_at",
+        "turn_items_included",
+      ])
+    : {};
   return {
     session,
     thread_id: threadId,
@@ -649,6 +659,7 @@ function terminalWaitResult(
     outcome: event.type === "turn.completed" ? "completed" : "error",
     event_type: event.type,
     event_id: event.id,
+    ...completedFields,
     ...(event.type === "turn.error" ? { error: event.payload.error ?? event.payload } : {}),
   };
 }
@@ -682,6 +693,14 @@ function parseTruncateFlag(value: unknown): number | undefined {
     return parseInt(value, 10);
   }
   throw invalidParams("--truncate must be a non-negative integer");
+}
+
+function pickDefined(source: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  const picked: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (source[key] !== undefined) picked[key] = source[key];
+  }
+  return picked;
 }
 
 async function assertAttachable(filePath: string): Promise<void> {

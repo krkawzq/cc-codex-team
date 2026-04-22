@@ -80,6 +80,12 @@ describe("messageWait", () => {
       thread_id: "th-1",
       payload: {
         turn_id: "turn-1",
+        status: "completed",
+        duration_ms: 850,
+        items_count: 2,
+        token_usage: { prompt: 12, completion: 8, total: 20 },
+        ended_at: "2025-01-01T00:00:01.000Z",
+        turn_items_included: false,
       },
     });
 
@@ -90,6 +96,70 @@ describe("messageWait", () => {
       turn_id: "turn-1",
       outcome: "completed",
       event_type: "turn.completed",
+      status: "completed",
+      duration_ms: 850,
+      items_count: 2,
+      token_usage: { prompt: 12, completion: 8, total: 20 },
+      ended_at: "2025-01-01T00:00:01.000Z",
+      turn_items_included: false,
+    });
+  });
+
+  it("returns the compact terminal payload for a historical completed turn", async () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const sessions = new SessionRegistry(dir);
+    const events = new EventLog(100, null);
+
+    sessions.add("user-1", {
+      name: "sess-1",
+      thread_id: "th-1",
+      state: "live",
+      created_at: "2025-01-01T00:00:00.000Z",
+      last_active_at: "2025-01-01T00:00:00.000Z",
+      turn_count: 1,
+      ...sessionRuntimeDefaults(),
+    });
+    await sessions.flush();
+
+    await events.append("user-1", {
+      type: "turn.completed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: {
+        turn_id: "turn-9",
+        status: "completed",
+        duration_ms: 1337,
+        items_count: 4,
+        token_usage: { prompt: 21, completion: 13, total: 34 },
+        ended_at: "2025-01-01T00:00:09.000Z",
+        turn_items_included: false,
+      },
+    });
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions,
+      events,
+      queues: {
+        getCurrentTurn: vi.fn().mockReturnValue(null),
+      },
+    };
+
+    await expect(messageWait(ctx as never, makeReq({ for: "turn-9" }) as never)).resolves.toMatchObject({
+      session: "sess-1",
+      thread_id: "th-1",
+      turn_id: "turn-9",
+      outcome: "completed",
+      event_type: "turn.completed",
+      status: "completed",
+      duration_ms: 1337,
+      items_count: 4,
+      token_usage: { prompt: 21, completion: 13, total: 34 },
+      ended_at: "2025-01-01T00:00:09.000Z",
+      turn_items_included: false,
     });
   });
 
