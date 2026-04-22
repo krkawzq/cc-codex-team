@@ -5,10 +5,11 @@ import { buildContext } from "./context";
 import { startServer } from "./server";
 import { probeSock, unlinkSockIfStale } from "../ipc/sock";
 import { logger } from "../logger";
-import { pidFilePath } from "../paths";
+import { APP, homeDir, pidFilePath } from "../paths";
 import { shutdownDaemon } from "./shutdown";
 import { wireDaemonEvents } from "./wire";
 import { reapOrphans } from "./orphans";
+import { isLikelyCodexTeamDaemonProcess } from "./processes";
 
 export async function runDaemon(): Promise<number> {
   const ctx = buildContext();
@@ -82,7 +83,8 @@ function scheduleIdleShutdown(ctx: import("./context").DaemonContext): void {
       (n, u) => n + ctx.sessions.listLive(u.token).length,
       0,
     );
-    if (liveSessions > 0) return; // treat any live session as activity
+    // audit-async N1: keep idle semantics simple and conservative: any live session counts as activity.
+    if (liveSessions > 0) return;
     const idleMs = Date.now() - ctx.activity.lastActivityAt.getTime();
     if (idleMs >= ms) {
       logger.info("idle threshold exceeded, shutting down", {
@@ -107,11 +109,15 @@ interface AcquireResult {
 
 async function acquireDaemonOwnership(sockPath: string, pidPath: string): Promise<AcquireResult> {
   const waitStart = Date.now();
+  const legacyPidPath = legacyWindowsPidFilePath(pidPath);
   for (;;) {
     const sockReachable = await probeSock(sockPath, 200);
     const pidRecord = readPidFile(pidPath);
     const pid = pidRecord?.pid ?? null;
-    const pidAlive = pid !== null && isPidAlive(pid);
+    const pidAlive = pid !== null && isDaemonPidAlive(pid);
+    const legacyPidRecord = legacyPidPath ? readPidFile(legacyPidPath) : null;
+    const legacyPid = legacyPidRecord?.pid ?? null;
+    const legacyPidAlive = legacyPid !== null && isDaemonPidAlive(legacyPid);
 
     if (sockReachable) {
       if (Date.now() - waitStart > 3000) {
@@ -122,6 +128,8 @@ async function acquireDaemonOwnership(sockPath: string, pidPath: string): Promis
             sock: sockPath,
             pidfile_pid: pid,
             pidfile_live: pidAlive,
+            legacy_pidfile_pid: legacyPid,
+            legacy_pidfile_live: legacyPidAlive,
           },
         };
       }
@@ -129,14 +137,16 @@ async function acquireDaemonOwnership(sockPath: string, pidPath: string): Promis
       continue;
     }
 
-    if (pid !== null && pidAlive) {
+    if (pidAlive || legacyPidAlive) {
+      const livePid = pidAlive ? pid : legacyPid;
+      const livePidPath = pidAlive ? pidPath : legacyPidPath;
       if (Date.now() - waitStart > 3000) {
         return {
           ok: false,
           message: "another daemon pidfile is live; aborting",
           details: {
-            pid_path: pidPath,
-            pid,
+            pid_path: livePidPath,
+            pid: livePid,
           },
         };
       }
@@ -146,6 +156,9 @@ async function acquireDaemonOwnership(sockPath: string, pidPath: string): Promis
 
     if (pid !== null && !pidAlive) {
       try { fs.unlinkSync(pidPath); } catch { /* ignore */ }
+    }
+    if (legacyPidPath && legacyPid !== null && !legacyPidAlive) {
+      try { fs.unlinkSync(legacyPidPath); } catch { /* ignore */ }
     }
 
     unlinkSockIfStale(sockPath);
@@ -178,13 +191,23 @@ function readPidFile(pidPath: string): { pid: number; created_at?: string } | nu
   }
 }
 
-function isPidAlive(pid: number): boolean {
+function isDaemonPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
   }
+  return isLikelyCodexTeamDaemonProcess(pid);
+}
+
+function legacyWindowsPidFilePath(currentPidPath: string): string | null {
+  if (process.platform !== "win32") return null;
+  const legacyHome = process.env.HOME;
+  if (!legacyHome) return null;
+  const legacyPath = path.join(legacyHome, `.${APP}`, "daemon.pid");
+  if (legacyPath === currentPidPath) return null;
+  if (legacyHome === homeDir()) return null;
+  return legacyPath;
 }
 
 function sleep(ms: number): Promise<void> {

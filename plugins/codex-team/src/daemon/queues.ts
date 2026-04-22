@@ -19,8 +19,14 @@ interface QueueState {
   serial: Promise<void>;
   tearingDown: boolean;
   disposed: boolean;
+  generation: number;
   idleWaiters: Set<() => void>;
 }
+
+type QueueDrainResult =
+  | { turn_id: string; queue_id: string; failed: false }
+  | { turn_id: null; queue_id: string | null; failed: false }
+  | { turn_id: null; queue_id: string; failed: true; error_message: string };
 
 export class QueueTeardownError extends Error {
   constructor(message = "session queue is tearing down") {
@@ -32,10 +38,6 @@ export class QueueTeardownError extends Error {
 export class TurnQueues {
   private states = new Map<string, QueueState>();
 
-  /**
-   * Either dispatch immediately or enqueue. Returns `{ started, queued_depth }`.
-   * If no turn is active, starts a new turn and sets currentTurnId.
-   */
   async sendOrQueue(
     sessionKey: string,
     client: AppServerClient,
@@ -50,12 +52,12 @@ export class TurnQueues {
         state.pending.push(queued);
         return { started: false, turn_id: state.currentTurnId, queue_id: queued.id, queued_depth: state.pending.length };
       }
+
+      const generation = state.generation;
       assertActive(state);
       const res = await turnStart(client, threadId, input, retry);
+      if (!isStateUsable(state, generation)) throw new QueueTeardownError();
       state.currentTurnId = res.turnId;
-      if (state.disposed || state.tearingDown) {
-        throw new QueueTeardownError();
-      }
       return { started: true, turn_id: res.turnId, queue_id: null, queued_depth: state.pending.length };
     });
   }
@@ -65,17 +67,16 @@ export class TurnQueues {
   }
 
   setCurrentTurn(sessionKey: string, turnId: string | null): void {
-    const s = this.states.get(sessionKey);
-    if (!s && turnId === null) return;
-    const state = s ?? this.getOrInit(sessionKey);
+    const existing = this.states.get(sessionKey);
+    if (!existing && turnId === null) return;
+    const state = existing ?? this.getOrInit(sessionKey);
     if (state.disposed) return;
     state.currentTurnId = turnId;
     this.resolveIdleWaiters(state);
   }
 
   isTeardown(sessionKey: string): boolean {
-    const state = this.states.get(sessionKey);
-    return state?.tearingDown ?? false;
+    return this.states.get(sessionKey)?.tearingDown ?? false;
   }
 
   async beginTeardown(sessionKey: string): Promise<{ currentTurnId: string | null }> {
@@ -126,38 +127,48 @@ export class TurnQueues {
     client: AppServerClient | null,
     threadId: string,
     retry?: RetryOptions,
-  ): Promise<{ turn_id: string | null; queue_id: string | null }> {
+  ): Promise<QueueDrainResult> {
     return await this.withSessionLock(sessionKey, async (state) => {
       state.draining = true;
       state.currentTurnId = null;
       this.resolveIdleWaiters(state);
+
       if (state.pending.length === 0 || !client || state.disposed || state.tearingDown) {
         state.draining = false;
         this.resolveIdleWaiters(state);
-        return { turn_id: null, queue_id: null };
+        return { turn_id: null, queue_id: null, failed: false };
       }
-      const next = state.pending.shift()!;
-      if (state.disposed || state.tearingDown) {
-        state.draining = false;
-        this.resolveIdleWaiters(state);
-        return { turn_id: null, queue_id: next.id };
-      }
+
+      const next = state.pending[0]!;
+      const generation = state.generation;
       try {
+        if (!isStateUsable(state, generation)) {
+          return { turn_id: null, queue_id: null, failed: false };
+        }
         const res = await turnStart(client, threadId, next.input, retry);
+        if (!isStateUsable(state, generation)) {
+          return { turn_id: null, queue_id: null, failed: false };
+        }
+        state.pending.shift();
         state.currentTurnId = res.turnId;
-        if (state.disposed) {
-          return { turn_id: null, queue_id: next.id };
-        }
-        if (state.tearingDown) {
-          return { turn_id: null, queue_id: next.id };
-        }
-        return { turn_id: res.turnId, queue_id: next.id };
+        return { turn_id: res.turnId, queue_id: next.id, failed: false };
       } catch (e) {
-        logger.warn("failed to dispatch queued turn", { session: sessionKey, err: (e as Error).message });
-        return { turn_id: null, queue_id: next.id };
+        if (!isStateUsable(state, generation)) {
+          return { turn_id: null, queue_id: null, failed: false };
+        }
+        const err = e as Error;
+        logger.warn("failed to dispatch queued turn", { session: sessionKey, err: err.message, queue_id: next.id });
+        return {
+          turn_id: null,
+          queue_id: next.id,
+          failed: true,
+          error_message: err.message,
+        };
       } finally {
-        state.draining = false;
-        this.resolveIdleWaiters(state);
+        if (isSameGeneration(state, generation)) {
+          state.draining = false;
+          this.resolveIdleWaiters(state);
+        }
       }
     });
   }
@@ -167,6 +178,7 @@ export class TurnQueues {
     if (!state) return { dropped: 0 };
     state.disposed = true;
     state.tearingDown = true;
+    state.generation += 1;
     const dropped = state.pending.length;
     state.pending = [];
     state.currentTurnId = null;
@@ -177,20 +189,21 @@ export class TurnQueues {
   }
 
   private getOrInit(sessionKey: string): QueueState {
-    let s = this.states.get(sessionKey);
-    if (!s) {
-      s = {
+    let state = this.states.get(sessionKey);
+    if (!state) {
+      state = {
         pending: [],
         currentTurnId: null,
         draining: false,
         serial: Promise.resolve(),
         tearingDown: false,
         disposed: false,
+        generation: 0,
         idleWaiters: new Set(),
       };
-      this.states.set(sessionKey, s);
+      this.states.set(sessionKey, state);
     }
-    return s;
+    return state;
   }
 
   private async withSessionLock<T>(sessionKey: string, fn: (state: QueueState) => Promise<T>): Promise<T> {
@@ -228,4 +241,12 @@ function assertActive(state: QueueState): void {
   if (state.disposed || state.tearingDown) {
     throw new QueueTeardownError();
   }
+}
+
+function isSameGeneration(state: QueueState, generation: number): boolean {
+  return state.generation === generation;
+}
+
+function isStateUsable(state: QueueState, generation: number): boolean {
+  return !state.disposed && !state.tearingDown && isSameGeneration(state, generation);
 }

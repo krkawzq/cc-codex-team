@@ -193,4 +193,51 @@ describe("runCli", () => {
     expect(code).toBe(0);
     expect(sockMocks.connectSock).toHaveBeenCalledTimes(2);
   });
+
+  it("pauses the daemon socket until stdout drains during streaming", async () => {
+    let streamHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      streamHandler = handler;
+    });
+
+    let writes = 0;
+    stdoutSpy.mockImplementation(() => {
+      writes += 1;
+      return writes > 1;
+    });
+
+    const pending = runCli(["-b", "token-1", "monitor", "events", "--stream"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const reqId = sockMocks.writeMessage.mock.calls[0]?.[1]?.id;
+
+    streamHandler?.({
+      kind: "stream_chunk",
+      id: reqId,
+      data: { hello: "world" },
+    });
+    expect(socket.pause).toHaveBeenCalledTimes(1);
+
+    streamHandler?.({
+      kind: "stream_end",
+      id: reqId,
+    });
+
+    process.stdout.emit("drain");
+    const code = await pending;
+
+    expect(socket.resume).toHaveBeenCalledTimes(1);
+    expect(socket.end).toHaveBeenCalledTimes(1);
+    expect(code).toBe(0);
+  });
 });

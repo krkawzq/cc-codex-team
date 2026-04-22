@@ -12,15 +12,17 @@ export interface PendingRequest {
   thread_id: string | null;
   turn_id: string | null;
   created_at: string;
+  responded_at?: string;
   raw: Record<string, unknown>;
   claimed_at?: string | null;
 }
 
 export class PendingRegistry {
-  private byRequestId = new Map<string, PendingRequest>();
+  private availableByRequestId = new Map<string, PendingRequest>();
+  private inFlightByRequestId = new Map<string, PendingRequest>();
   private byJsonrpcKey = new Map<string, string>();
 
-  add(entry: Omit<PendingRequest, "request_id" | "created_at">): PendingRequest {
+  add(entry: Omit<PendingRequest, "request_id" | "created_at" | "claimed_at" | "responded_at">): PendingRequest {
     const request_id = `req-${crypto.randomBytes(4).toString("hex")}`;
     const rec: PendingRequest = {
       ...entry,
@@ -28,33 +30,45 @@ export class PendingRegistry {
       created_at: new Date().toISOString(),
       claimed_at: null,
     };
-    this.byRequestId.set(request_id, rec);
+    this.availableByRequestId.set(request_id, rec);
     this.byJsonrpcKey.set(this.jsonrpcKey(entry.client, entry.jsonrpc_id), request_id);
     return rec;
   }
 
   get(requestId: string): PendingRequest | null {
-    return this.byRequestId.get(requestId) ?? null;
+    return this.availableByRequestId.get(requestId) ?? null;
   }
 
   claim(requestId: string, user: string): PendingRequest | null {
-    const rec = this.byRequestId.get(requestId);
-    if (!rec || rec.user !== user || rec.claimed_at) return null;
+    const rec = this.availableByRequestId.get(requestId);
+    if (!rec || rec.user !== user) return null;
+    this.availableByRequestId.delete(requestId);
     rec.claimed_at = new Date().toISOString();
+    this.inFlightByRequestId.set(requestId, rec);
     return rec;
   }
 
   releaseClaim(requestId: string): PendingRequest | null {
-    const rec = this.byRequestId.get(requestId);
-    if (!rec) return null;
+    const rec = this.inFlightByRequestId.get(requestId);
+    if (!rec || rec.responded_at) return null;
+    this.inFlightByRequestId.delete(requestId);
     rec.claimed_at = null;
+    this.availableByRequestId.set(requestId, rec);
+    return rec;
+  }
+
+  markResponded(requestId: string): PendingRequest | null {
+    const rec = this.inFlightByRequestId.get(requestId) ?? this.availableByRequestId.get(requestId);
+    if (!rec) return null;
+    if (!rec.responded_at) rec.responded_at = new Date().toISOString();
     return rec;
   }
 
   remove(requestId: string): PendingRequest | null {
-    const rec = this.byRequestId.get(requestId);
+    const rec = this.availableByRequestId.get(requestId) ?? this.inFlightByRequestId.get(requestId);
     if (!rec) return null;
-    this.byRequestId.delete(requestId);
+    this.availableByRequestId.delete(requestId);
+    this.inFlightByRequestId.delete(requestId);
     this.byJsonrpcKey.delete(this.jsonrpcKey(rec.client, rec.jsonrpc_id));
     return rec;
   }
@@ -66,34 +80,35 @@ export class PendingRegistry {
   }
 
   listForUser(user: string): PendingRequest[] {
-    return Array.from(this.byRequestId.values()).filter((r) => r.user === user);
+    return this.allRequests().filter((r) => r.user === user);
   }
 
   removeForSession(user: string, sessionName: string): PendingRequest[] {
-    const removed: PendingRequest[] = [];
-    for (const rec of Array.from(this.byRequestId.values())) {
-      if (rec.user === user && rec.session_name === sessionName) {
-        this.remove(rec.request_id);
-        removed.push(rec);
-      }
-    }
-    return removed;
+    return this.removeMatching((rec) => rec.user === user && rec.session_name === sessionName);
   }
 
   removeForUser(user: string): PendingRequest[] {
+    return this.removeMatching((rec) => rec.user === user);
+  }
+
+  private removeMatching(predicate: (rec: PendingRequest) => boolean): PendingRequest[] {
     const removed: PendingRequest[] = [];
-    for (const rec of Array.from(this.byRequestId.values())) {
-      if (rec.user === user) {
-        this.remove(rec.request_id);
-        removed.push(rec);
-      }
+    for (const rec of this.allRequests()) {
+      if (!predicate(rec)) continue;
+      this.remove(rec.request_id);
+      if (!rec.responded_at) removed.push(rec);
     }
     return removed;
   }
 
+  private allRequests(): PendingRequest[] {
+    return [
+      ...this.availableByRequestId.values(),
+      ...this.inFlightByRequestId.values(),
+    ];
+  }
+
   private jsonrpcKey(client: AppServerClient, id: string | number): string {
-    // Use WeakRef-style identity via a simple counter? Node doesn't give us a stable
-    // id for EventEmitter instances; use a symbol tag installed on the client.
     const tag = (client as unknown as { __ct_tag?: string }).__ct_tag;
     const ref = tag ?? assignTag(client);
     return `${ref}::${id}`;

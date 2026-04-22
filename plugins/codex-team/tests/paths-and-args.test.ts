@@ -73,6 +73,10 @@ describe("paths", () => {
     expect(expandUserPath("~\\logs\\daemon.log", "win32", "C:\\Users\\tester")).toBe("C:\\Users\\tester\\logs\\daemon.log");
   });
 
+  it("rejects unsupported ~user path forms", () => {
+    expect(() => expandUserPath("~alice/.codex-team", "darwin", "/Users/tester")).toThrow(/only '~' is supported/i);
+  });
+
   it("expands CODEX_TEAM_DATA_DIR before deriving default paths", () => {
     const originalDataDir = process.env.CODEX_TEAM_DATA_DIR;
     const originalHome = process.env.HOME;

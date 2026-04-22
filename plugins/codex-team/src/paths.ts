@@ -7,7 +7,14 @@ const WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\";
 const UNIX_SOCKET_MAX_BYTES = 90;
 
 export function homeDir(): string {
-  if (process.platform === "win32") return os.homedir() || process.env.USERPROFILE || process.env.HOME || "\\";
+  if (process.platform === "win32") {
+    const nativeHome = os.homedir();
+    if (nativeHome) return nativeHome;
+    if (process.env.USERPROFILE) return process.env.USERPROFILE;
+    if (process.env.HOMEDRIVE && process.env.HOMEPATH) return `${process.env.HOMEDRIVE}${process.env.HOMEPATH}`;
+    if (process.env.HOME) return process.env.HOME;
+    return "\\";
+  }
   return process.env.HOME || os.homedir() || "/";
 }
 
@@ -74,6 +81,9 @@ export function isFilesystemSockPath(sockPath: string, platform = process.platfo
 }
 
 export function expandUserPath(input: string, platform = process.platform, home = homeDir()): string {
+  if (/^~[^\\/]/.test(input)) {
+    throw new Error(`unsupported user-home path '${input}'; only '~' is supported`);
+  }
   if (input !== "~" && !input.startsWith("~/") && !input.startsWith("~\\")) return input;
   const pathModule = platform === "win32" ? path.win32 : path.posix;
   const suffix = input === "~" ? "" : input.slice(1).replace(/^[\\/]+/, "");

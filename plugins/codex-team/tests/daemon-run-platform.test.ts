@@ -12,6 +12,7 @@ const runMocks = vi.hoisted(() => ({
   shutdownDaemon: vi.fn().mockResolvedValue(undefined),
   wireDaemonEvents: vi.fn(),
   reapOrphans: vi.fn(),
+  isLikelyCodexTeamDaemonProcess: vi.fn(),
 }));
 
 vi.mock("../src/daemon/context", () => ({
@@ -32,6 +33,9 @@ vi.mock("../src/daemon/wire", () => ({
 }));
 vi.mock("../src/daemon/orphans", () => ({
   reapOrphans: runMocks.reapOrphans,
+}));
+vi.mock("../src/daemon/processes", () => ({
+  isLikelyCodexTeamDaemonProcess: runMocks.isLikelyCodexTeamDaemonProcess,
 }));
 
 function withPlatform<T>(platform: NodeJS.Platform, fn: () => Promise<T> | T): Promise<T> | T {
@@ -59,6 +63,7 @@ describe("daemon/run platform behavior", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    runMocks.isLikelyCodexTeamDaemonProcess.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -132,6 +137,37 @@ describe("daemon/run platform behavior", () => {
     await expect(result).resolves.toBe(1);
     expect(runMocks.startServer).not.toHaveBeenCalled();
     expect(JSON.parse(fs.readFileSync(pidPath, "utf8")).pid).toBe(777);
+  });
+
+  it("ignores live pidfile owners that are not codex-team daemons", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-run-"));
+    dirs.push(dir);
+    const pidPath = path.join(dir, "daemon.pid");
+    fs.mkdirSync(path.dirname(pidPath), { recursive: true });
+    fs.writeFileSync(pidPath, JSON.stringify({ pid: 555, created_at: new Date().toISOString() }));
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (pid === 555 && signal === 0) return true;
+      return true;
+    }) as typeof process.kill);
+    runMocks.isLikelyCodexTeamDaemonProcess.mockReturnValue(false);
+
+    runMocks.buildContext.mockReturnValue({
+      sockPath: path.join(dir, "daemon.sock"),
+      dataDir: dir,
+      config: { getEffective: () => 6 },
+      users: { list: () => [] },
+      sessions: { listLive: () => [] },
+      activity: { lastActivityAt: new Date(), touch() {} },
+    });
+    runMocks.probeSock.mockResolvedValue(false);
+    runMocks.startServer.mockResolvedValue({});
+
+    const { runDaemon } = await import("../src/daemon/run");
+    void runDaemon();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(runMocks.startServer).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fs.readFileSync(pidPath, "utf8")).pid).toBe(process.pid);
   });
 
   it("registers SIGBREAK shutdown handling on Windows", async () => {

@@ -34,7 +34,7 @@ function makeLiveContext(overrides: Record<string, unknown> = {}) {
     thread_id: "th-1",
   };
   const client = {
-    respond: vi.fn(),
+    respondAck: vi.fn().mockResolvedValue({ backpressured: false }),
   };
   return {
     users: {
@@ -53,15 +53,29 @@ function makeLiveContext(overrides: Record<string, unknown> = {}) {
       getCurrentTurn: vi.fn().mockReturnValue("turn-1"),
       setCurrentTurn: vi.fn(),
     },
-      pending: {
-        get: vi.fn(),
-        claim: vi.fn(),
-        releaseClaim: vi.fn(),
-        remove: vi.fn(),
-      },
+    pending: {
+      get: vi.fn(),
+      claim: vi.fn(),
+      releaseClaim: vi.fn(),
+      markResponded: vi.fn(),
+      remove: vi.fn(),
+    },
+    events: {
+      append: vi.fn().mockResolvedValue(undefined),
+    },
     retryOptions: vi.fn().mockReturnValue({}),
     ...overrides,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("message handlers", () => {
@@ -139,60 +153,42 @@ describe("message handlers", () => {
   });
 
   it("returns wire-shaped approval shortcut payloads", async () => {
-    const pendingClient = { respond: vi.fn() };
+    const pendingClient = { respondAck: vi.fn().mockResolvedValue({ backpressured: false }) };
+    const claim = vi.fn()
+      .mockReturnValueOnce({
+        request_id: "req-a",
+        kind: "approval.command_execution",
+        client: pendingClient,
+        jsonrpc_id: 11,
+        user: "user-1",
+        raw: {},
+      })
+      .mockReturnValueOnce({
+        request_id: "req-b",
+        kind: "approval.permissions",
+        client: pendingClient,
+        jsonrpc_id: 12,
+        user: "user-1",
+        raw: { permissions: { fileSystem: { write: ["/tmp"] } } },
+      })
+      .mockReturnValueOnce({
+        request_id: "req-c",
+        kind: "approval.mcp_elicitation",
+        client: pendingClient,
+        jsonrpc_id: 13,
+        user: "user-1",
+        raw: { mode: "url" },
+      });
+    const get = vi.fn()
+      .mockReturnValueOnce({ kind: "approval.command_execution", user: "user-1" })
+      .mockReturnValueOnce({ kind: "approval.permissions", user: "user-1" })
+      .mockReturnValueOnce({ kind: "approval.mcp_elicitation", user: "user-1" });
     const ctx = makeLiveContext({
       pending: {
-        get: vi.fn()
-          .mockReturnValueOnce({
-            request_id: "req-a",
-            kind: "approval.command_execution",
-            client: pendingClient,
-            jsonrpc_id: 11,
-            user: "user-1",
-            raw: {},
-          })
-          .mockReturnValueOnce({
-            request_id: "req-b",
-            kind: "approval.permissions",
-            client: pendingClient,
-            jsonrpc_id: 12,
-            user: "user-1",
-            raw: { permissions: { fileSystem: { write: ["/tmp"] } } },
-          })
-          .mockReturnValueOnce({
-            request_id: "req-c",
-            kind: "approval.mcp_elicitation",
-            client: pendingClient,
-            jsonrpc_id: 13,
-            user: "user-1",
-              raw: { mode: "url" },
-            }),
-        claim: vi.fn()
-          .mockReturnValueOnce({
-            request_id: "req-a",
-            kind: "approval.command_execution",
-            client: pendingClient,
-            jsonrpc_id: 11,
-            user: "user-1",
-            raw: {},
-          })
-          .mockReturnValueOnce({
-            request_id: "req-b",
-            kind: "approval.permissions",
-            client: pendingClient,
-            jsonrpc_id: 12,
-            user: "user-1",
-            raw: { permissions: { fileSystem: { write: ["/tmp"] } } },
-          })
-          .mockReturnValueOnce({
-            request_id: "req-c",
-            kind: "approval.mcp_elicitation",
-            client: pendingClient,
-            jsonrpc_id: 13,
-            user: "user-1",
-            raw: { mode: "url" },
-          }),
+        get,
+        claim,
         releaseClaim: vi.fn(),
+        markResponded: vi.fn(),
         remove: vi.fn(),
       },
     });
@@ -215,11 +211,47 @@ describe("message handlers", () => {
         _meta: null,
       },
     });
+    expect(ctx.pending.remove).not.toHaveBeenCalled();
+    expect(ctx.pending.markResponded).toHaveBeenCalledTimes(3);
+  });
+
+  it("emits a warning when approval replies are backpressured", async () => {
+    const pendingClient = { respondAck: vi.fn().mockResolvedValue({ backpressured: true }) };
+    const ctx = makeLiveContext({
+      pending: {
+        get: vi.fn().mockReturnValue({ kind: "approval.command_execution", user: "user-1" }),
+        claim: vi.fn().mockReturnValue({
+          request_id: "req-a",
+          kind: "approval.command_execution",
+          client: pendingClient,
+          jsonrpc_id: 11,
+          user: "user-1",
+          raw: {},
+        }),
+        releaseClaim: vi.fn(),
+        markResponded: vi.fn(),
+        remove: vi.fn(),
+      },
+      events: {
+        append: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await messageApproval(ctx as never, makeReq(["sess-1", "req-a", "accept"]) as never);
+
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "warning",
+      payload: expect.objectContaining({
+        kind: "approval_reply_backpressured",
+        request_id: "req-a",
+      }),
+    }));
   });
 
   it("rejects a second approval writer once the first caller has claimed the pending request", async () => {
     const pending = new PendingRegistry();
-    const responder = { respond: vi.fn() };
+    const ack = deferred<{ backpressured: boolean }>();
+    const responder = { respondAck: vi.fn(() => ack.promise) };
     const claimed = pending.add({
       client: responder as never,
       jsonrpc_id: 77,
@@ -230,19 +262,20 @@ describe("message handlers", () => {
       turn_id: "turn-1",
       raw: {},
     });
-    const payloadPath = path.join(tmpRoot, "approval.json");
-    fs.writeFileSync(payloadPath, JSON.stringify({ decision: "accept" }));
-
     const ctx = makeLiveContext({
       pending,
+      events: {
+        append: vi.fn().mockResolvedValue(undefined),
+      },
     });
 
-    const first = messageApproval(ctx as never, makeReq(["sess-1", claimed.request_id], { file: payloadPath }) as never);
+    const first = messageApproval(ctx as never, makeReq(["sess-1", claimed.request_id, "accept"]) as never);
     const second = messageApproval(ctx as never, makeReq(["sess-1", claimed.request_id, "accept"]) as never);
 
     await expect(second).rejects.toMatchObject({ code: "invalid_params" });
+    ack.resolve({ backpressured: false });
     await expect(first).resolves.toMatchObject({ request_id: claimed.request_id, responded: true });
-    expect(responder.respond).toHaveBeenCalledTimes(1);
+    expect(responder.respondAck).toHaveBeenCalledTimes(1);
   });
 
   it("supports relative --since -N history windows", async () => {

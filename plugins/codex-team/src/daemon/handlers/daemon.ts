@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import { spawn } from "node:child_process";
 
 import { CONFIG_KEYS } from "../config";
@@ -163,20 +164,28 @@ export const daemonConfigReset: HandlerFn = async (ctx, req) => {
 export const daemonLogsStream: HandlerFn = async (ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "daemonLogs requires a stream");
   const logPath = ctx.logPath;
-  if (!fs.existsSync(logPath)) {
-    stream.end();
-    return { streamed: true };
-  }
   const follow = isTrue(getFlag(req.params, "follow")) || isTrue(getFlag(req.params, "f"));
   const n = toInt(getFlag(req.params, "n"), 100);
   const level = asString(getFlag(req.params, "level"));
+  let offset = 0;
+  let closed = false;
+  let debounceTimer: NodeJS.Timeout | null = null;
 
-  const contents = fs.readFileSync(logPath, "utf8");
-  const lines = contents.split("\n").filter(Boolean);
-  const tailLines = lines.slice(Math.max(0, lines.length - n));
-  for (const line of tailLines) {
-    if (level && !lineMatchesLevel(line, level)) continue;
+  const emitLine = (line: string) => {
+    if (!line) return;
+    if (level && !lineMatchesLevel(line, level)) return;
     stream.chunk(safeParseOr(line, { raw: line }));
+  };
+
+  const initial = await readTextIfExists(logPath);
+  if (initial !== null) {
+    const lines = initial.split("\n").filter(Boolean);
+    const tailLines = lines.slice(Math.max(0, lines.length - n));
+    for (const line of tailLines) emitLine(line);
+    offset = Buffer.byteLength(initial);
+  } else if (!follow) {
+    stream.end();
+    return { streamed: true };
   }
 
   if (!follow) {
@@ -184,23 +193,38 @@ export const daemonLogsStream: HandlerFn = async (ctx, req, stream) => {
     return { streamed: true };
   }
 
-  const watcher = fs.watch(logPath, { persistent: true }, () => {
-    // cheap tail: re-read trailing file on change. Production version would maintain an offset.
+  const syncAppended = async () => {
     try {
-      const data = fs.readFileSync(logPath, "utf8");
-      const newLines = data.split("\n").filter(Boolean);
-      const reset = newLines.length < lines.length || newLines.some((line, idx) => idx < lines.length && lines[idx] !== line);
-      const diff = reset ? newLines : newLines.slice(lines.length);
-      lines.splice(0, lines.length, ...newLines);
-      for (const line of diff) {
-        if (level && !lineMatchesLevel(line, level)) continue;
-        stream.chunk(safeParseOr(line, { raw: line }));
+      const stat = await fs.promises.stat(logPath);
+      if (stat.size < offset) offset = 0;
+      if (stat.size === offset) return;
+      const chunk = await readBytes(logPath, offset, stat.size - offset);
+      offset = stat.size;
+      for (const line of chunk.split("\n").filter(Boolean)) emitLine(line);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        offset = 0;
+        return;
       }
-    } catch {
-      // ignore
+      logger.warn("daemon log follow read failed", { err: (e as Error).message });
     }
+  };
+  const scheduleSync = () => {
+    if (closed || debounceTimer) return;
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      void syncAppended();
+    }, 50);
+    debounceTimer.unref();
+  };
+  const watcher = fs.watch(path.dirname(logPath), { persistent: true }, (_event, filename) => {
+    if (!filename || filename.toString() === path.basename(logPath)) scheduleSync();
   });
-  stream.onClose(() => watcher.close());
+  stream.onClose(() => {
+    closed = true;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    watcher.close();
+  });
   return { streamed: true };
 };
 
@@ -250,6 +274,27 @@ function safeParseOr<T>(line: string, fallback: T): unknown {
     return JSON.parse(line);
   } catch {
     return fallback;
+  }
+}
+
+async function readTextIfExists(filePath: string): Promise<string | null> {
+  try {
+    return await fs.promises.readFile(filePath, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+}
+
+async function readBytes(filePath: string, start: number, length: number): Promise<string> {
+  if (length <= 0) return "";
+  const handle = await fs.promises.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    return buffer.toString("utf8", 0, bytesRead);
+  } finally {
+    await handle.close();
   }
 }
 

@@ -202,11 +202,23 @@ export class AppServerClient extends EventEmitter {
     this.writeMessage({ jsonrpc: "2.0", id, result });
   }
 
+  respondAck(id: string | number, result: JsonValue): Promise<{ backpressured: boolean }> {
+    if (!this.proc) return Promise.reject(new TransportClosedError("app-server is not running"));
+    return this.writeMessageAck({ jsonrpc: "2.0", id, result });
+  }
+
   respondError(id: string | number, code: number, message: string, data?: JsonValue): void {
     if (!this.proc) return;
     const error: { code: number; message: string; data?: JsonValue } = { code, message };
     if (data !== undefined) error.data = data;
     this.writeMessage({ jsonrpc: "2.0", id, error });
+  }
+
+  respondErrorAck(id: string | number, code: number, message: string, data?: JsonValue): Promise<{ backpressured: boolean }> {
+    if (!this.proc) return Promise.reject(new TransportClosedError("app-server is not running"));
+    const error: { code: number; message: string; data?: JsonValue } = { code, message };
+    if (data !== undefined) error.data = data;
+    return this.writeMessageAck({ jsonrpc: "2.0", id, error });
   }
 
   isInitialized(): boolean {
@@ -220,6 +232,33 @@ export class AppServerClient extends EventEmitter {
     }
     const line = JSON.stringify(msg) + "\n";
     proc.stdin.write(line);
+  }
+
+  private writeMessageAck(msg: Record<string, unknown>): Promise<{ backpressured: boolean }> {
+    const proc = this.proc;
+    if (!proc || !proc.stdin.writable) {
+      return Promise.reject(new TransportClosedError("app-server stdin closed"));
+    }
+    const line = JSON.stringify(msg) + "\n";
+    return new Promise((resolve, reject) => {
+      const onExit = () => {
+        reject(new TransportClosedError("app-server exited during stdin write"));
+      };
+      proc.once("exit", onExit);
+      try {
+        const backpressured = !proc.stdin.write(line, (err?: Error | null) => {
+          proc.off("exit", onExit);
+          if (err) {
+            reject(new TransportClosedError(`app-server stdin write failed: ${err.message}`));
+            return;
+          }
+          resolve({ backpressured });
+        });
+      } catch (e) {
+        proc.off("exit", onExit);
+        reject(e as Error);
+      }
+    });
   }
 
   private onStdout(chunk: string): void {

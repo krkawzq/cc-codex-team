@@ -67,7 +67,7 @@ export const messageApproval: HandlerFn = async (ctx, req) => {
   const { user, rec } = await resolveLive(ctx, req);
   const requestId = asPositional(req, 1, "request_id");
   const shortcut = asPositionalOptional(req, 2);
-  const pending = peekPending(ctx, user, requestId);
+  const pending = requirePending(ctx, user, requestId);
 
   if (!pending.kind.startsWith("approval.")) {
     throw new CodexTeamError("invalid_decision", `request '${requestId}' is not an approval (kind=${pending.kind})`);
@@ -81,8 +81,25 @@ export const messageApproval: HandlerFn = async (ctx, req) => {
     ctx.pending.releaseClaim(requestId);
     throw e;
   }
-  claimed.client.respond(claimed.jsonrpc_id, response as JsonValue);
-  ctx.pending.remove(requestId);
+  try {
+    const ack = await claimed.client.respondAck(claimed.jsonrpc_id, response as JsonValue);
+    ctx.pending.markResponded(requestId);
+    if (ack.backpressured) {
+      emitPendingWarning(ctx, user, rec.name, rec.thread_id, {
+        message: "approval reply is delayed by app-server stdin backpressure",
+        kind: "approval_reply_backpressured",
+        request_id: requestId,
+      });
+    }
+  } catch (err) {
+    ctx.pending.remove(requestId);
+    emitPendingWarning(ctx, user, rec.name, rec.thread_id, {
+      message: `approval reply delivery failed: ${(err as Error).message}`,
+      kind: "approval_reply_delivery_failed",
+      request_id: requestId,
+    });
+    throw err;
+  }
   return {
     session: rec.name,
     request_id: requestId,
@@ -96,7 +113,7 @@ export const messageAnswer: HandlerFn = async (ctx, req) => {
   const { user, rec } = await resolveLive(ctx, req);
   const requestId = asPositional(req, 1, "request_id");
   const inline = asPositionalOptional(req, 2);
-  const pending = peekPending(ctx, user, requestId);
+  const pending = requirePending(ctx, user, requestId);
 
   if (pending.kind !== "user_input.request") {
     throw new CodexTeamError("invalid_decision", `request '${requestId}' is not a user_input request (kind=${pending.kind})`);
@@ -110,8 +127,25 @@ export const messageAnswer: HandlerFn = async (ctx, req) => {
     ctx.pending.releaseClaim(requestId);
     throw e;
   }
-  claimed.client.respond(claimed.jsonrpc_id, response as JsonValue);
-  ctx.pending.remove(requestId);
+  try {
+    const ack = await claimed.client.respondAck(claimed.jsonrpc_id, response as JsonValue);
+    ctx.pending.markResponded(requestId);
+    if (ack.backpressured) {
+      emitPendingWarning(ctx, user, rec.name, rec.thread_id, {
+        message: "user_input reply is delayed by app-server stdin backpressure",
+        kind: "user_input_reply_backpressured",
+        request_id: requestId,
+      });
+    }
+  } catch (err) {
+    ctx.pending.remove(requestId);
+    emitPendingWarning(ctx, user, rec.name, rec.thread_id, {
+      message: `user_input reply delivery failed: ${(err as Error).message}`,
+      kind: "user_input_reply_delivery_failed",
+      request_id: requestId,
+    });
+    throw err;
+  }
   return { session: rec.name, request_id: requestId, responded: true, response };
 };
 
@@ -227,7 +261,7 @@ async function resolveLive(
   return { user, rec, client };
 }
 
-function peekPending(ctx: DaemonContext, user: string, requestId: string): PendingRequest {
+function requirePending(ctx: DaemonContext, user: string, requestId: string): PendingRequest {
   const p = ctx.pending.get(requestId);
   if (!p) throw new CodexTeamError("invalid_params", `no pending request '${requestId}'`);
   if (p.user !== user) throw new CodexTeamError("invalid_params", `pending request '${requestId}' belongs to another user`);
@@ -238,6 +272,21 @@ function claimPending(ctx: DaemonContext, user: string, requestId: string): Pend
   const claimed = ctx.pending.claim(requestId, user);
   if (!claimed) throw new CodexTeamError("invalid_params", `no pending request '${requestId}'`);
   return claimed;
+}
+
+function emitPendingWarning(
+  ctx: DaemonContext,
+  user: string,
+  session: string | null,
+  threadId: string | null,
+  payload: Record<string, unknown>,
+): void {
+  void ctx.events.append(user, {
+    type: "warning",
+    session,
+    thread_id: threadId,
+    payload,
+  }).catch(() => undefined);
 }
 
 async function readPromptInput(req: IpcRequest): Promise<string> {
