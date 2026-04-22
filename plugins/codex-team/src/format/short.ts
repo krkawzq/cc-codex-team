@@ -64,6 +64,9 @@ function formatSessionInfo(data: unknown): string {
   const session = asObject(value.session);
   const thread = asObject(value.thread);
   const turn = resolveCurrentTurn(value, session, thread);
+  const turnId = resolveCurrentTurnId(value, session, thread, turn);
+  const turnIdKnown = hasCurrentTurnIdField(value, session, thread);
+  const itemsInTurn = resolveItemsInTurn(value, session, thread, turn);
   const threadId = asString(session.thread_id) ?? asString(thread.id) ?? "unknown";
 
   return [
@@ -71,9 +74,9 @@ function formatSessionInfo(data: unknown): string {
     `state=${sessionState(value, session, thread)}`,
     `thread=${shortId(threadId)}`,
     `model=${formatScalar(session.model ?? value.model ?? thread.model ?? thread.model_provider)}`,
-    `busy=${busyFlag(value.busy ?? session.busy ?? thread.busy, turn)}`,
-    `turn=${currentTurnId(turn)}`,
-    `items=${itemCount(turn)}`,
+    `busy=${busyFlag(value.busy ?? session.busy ?? thread.busy, turnId, turn, turnIdKnown)}`,
+    `turn=${formatNullableScalar(turnId)}`,
+    `items=${formatNullableCount(itemsInTurn)}`,
   ].join(" ");
 }
 
@@ -86,11 +89,13 @@ function formatSessionList(data: unknown): string {
     .map((entry) => {
       const session = asObject(entry);
       const turn = resolveCurrentTurn(session, session, session);
+      const turnId = resolveCurrentTurnId(session, session, session, turn);
+      const turnIdKnown = hasCurrentTurnIdField(session, session, session);
       return [
         sessionLabel(session, session),
         sessionState(session, session, session),
         formatScalar(session.model ?? session.model_provider),
-        `busy=${busyFlag(session.busy, turn)}`,
+        `busy=${busyFlag(session.busy, turnId, turn, turnIdKnown)}`,
       ].join("  ");
     })
     .join("\n");
@@ -200,22 +205,58 @@ function resolveCurrentTurn(
   return null;
 }
 
-function busyFlag(value: unknown, turn: Record<string, unknown> | null): string {
+function busyFlag(
+  value: unknown,
+  turnId: string | null,
+  turn: Record<string, unknown> | null,
+  turnIdKnown: boolean,
+): string {
   if (value === true) return "y";
   if (value === false) return "n";
+  if (turnId) return "y";
+  if (turnIdKnown) return "n";
   if (turn) return "y";
   return "unknown";
 }
 
-function currentTurnId(turn: Record<string, unknown> | null): string {
-  if (!turn) return "unknown";
-  return formatScalar(turn.id ?? turn.turn_id ?? turn.turnId);
+function resolveCurrentTurnId(
+  root: Record<string, unknown>,
+  session: Record<string, unknown>,
+  thread: Record<string, unknown>,
+  turn: Record<string, unknown> | null,
+): string | null {
+  const direct = asString(
+    root.current_turn_id
+      ?? root.currentTurnId
+      ?? session.current_turn_id
+      ?? session.currentTurnId
+      ?? thread.current_turn_id
+      ?? thread.currentTurnId,
+  );
+  if (direct) return direct;
+  if (!turn) return null;
+  return asString(turn.id ?? turn.turn_id ?? turn.turnId);
 }
 
-function itemCount(turn: Record<string, unknown> | null): string {
-  if (!turn) return "unknown";
-  if (Array.isArray(turn.items)) return String(turn.items.length);
-  return formatScalar(turn.item_count ?? turn.itemCount ?? turn.items_count);
+function resolveItemsInTurn(
+  root: Record<string, unknown>,
+  session: Record<string, unknown>,
+  thread: Record<string, unknown>,
+  turn: Record<string, unknown> | null,
+): number | string | null {
+  const direct = asFiniteNumber(
+    root.items_in_turn
+      ?? root.itemsInTurn
+      ?? session.items_in_turn
+      ?? session.itemsInTurn
+      ?? thread.items_in_turn
+      ?? thread.itemsInTurn,
+  );
+  if (direct !== null) return direct;
+  if (!turn) return null;
+  if (Array.isArray(turn.items)) return turn.items.length;
+  const count = asFiniteNumber(turn.item_count ?? turn.itemCount ?? turn.items_count);
+  return count ?? null;
 }
 
 function formatTurnDuration(turn: Record<string, unknown>): string {
@@ -233,6 +274,16 @@ function formatTurnDuration(turn: Record<string, unknown>): string {
 function formatCount(value: unknown): string {
   if (Array.isArray(value)) return String(value.length);
   return formatScalar(value);
+}
+
+function formatNullableCount(value: number | string | null): string {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value.length > 0) return value;
+  return "unknown";
+}
+
+function formatNullableScalar(value: string | null): string {
+  return value ?? "unknown";
 }
 
 function parseDate(value: unknown): Date | null {
@@ -253,6 +304,20 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function hasCurrentTurnIdField(...records: Record<string, unknown>[]): boolean {
+  return records.some((record) =>
+    hasOwn(record, "current_turn_id") || hasOwn(record, "currentTurnId")
+  );
+}
+
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
 function formatScalar(value: unknown): string {
   if (typeof value === "string" && value.length > 0) return value;
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
@@ -268,7 +333,3 @@ export function shortTokenPrefix(token: unknown): string {
 export const __private__ = {
   humanizeMs,
 };
-
-function asFiniteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}

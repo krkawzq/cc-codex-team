@@ -43,12 +43,10 @@ describe("formatShort", () => {
           state: "live",
           thread_id: "th-1234567890abcdef",
           model: "gpt-5.4",
+          current_turn_id: "turn-42",
+          items_in_turn: 2,
         },
         busy: true,
-        current_turn: {
-          id: "turn-42",
-          items: [{ id: "item-1" }, { id: "item-2" }],
-        },
       },
       "audit state=live thread=th-12345...cdef model=gpt-5.4 busy=y turn=turn-42 items=2",
     ],
@@ -56,8 +54,8 @@ describe("formatShort", () => {
       "session:list",
       {
         sessions: [
-          { name: "audit", state: "live", model: "gpt-5.4", busy: true },
-          { name: "notes", state: "live", model: "gpt-5.4-mini", busy: false },
+          { name: "audit", state: "live", model: "gpt-5.4", current_turn_id: "turn-42" },
+          { name: "notes", state: "live", model: "gpt-5.4-mini", current_turn_id: null },
         ],
       },
       "audit  live  gpt-5.4  busy=y\nnotes  live  gpt-5.4-mini  busy=n",

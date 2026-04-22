@@ -32,6 +32,12 @@ describe("status handler", () => {
       pending: {
         listForUser: () => [{ request_id: "req-a" }, { request_id: "req-b" }],
       },
+      config: {
+        getEffective: () => 10000,
+      },
+      pool: {
+        processCount: () => 4,
+      },
       startedAt: new Date("2025-01-03T00:00:00.000Z"),
       dataDir: "/tmp/data",
     };
@@ -41,7 +47,9 @@ describe("status handler", () => {
       token: "user-1",
       live_sessions: 1,
       retained_events: 3,
+      retained_limit: 10000,
       pending_requests: 2,
+      app_server_count: 4,
       daemon: {
         data_dir: "/tmp/data",
       },
