@@ -16,9 +16,22 @@ describe("shutdownDaemon", () => {
     const { shutdownDaemon } = await import("../src/daemon/shutdown");
 
     const ctx = {
+      users: {
+        list: vi.fn().mockReturnValue([
+          { token: "user-1" },
+        ]),
+      },
       pool: { shutdown: vi.fn().mockResolvedValue(undefined) },
-      sessions: { flush: vi.fn().mockResolvedValue(undefined) },
-      events: { flush: vi.fn().mockResolvedValue(undefined) },
+      sessions: {
+        listLive: vi.fn().mockReturnValue([
+          { name: "sess-1", thread_id: "th-1" },
+        ]),
+        flush: vi.fn().mockResolvedValue(undefined),
+      },
+      events: {
+        append: vi.fn().mockResolvedValue(undefined),
+        flush: vi.fn().mockResolvedValue(undefined),
+      },
       sockPath: "/tmp/daemon.sock",
       dataDir: "/tmp/data",
     };
@@ -28,6 +41,14 @@ describe("shutdownDaemon", () => {
 
     expect(ctx.pool.shutdown).toHaveBeenCalledTimes(1);
     expect(ctx.sessions.flush).toHaveBeenCalledTimes(1);
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "session.closed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: expect.objectContaining({
+        reason: "daemon_shutdown",
+      }),
+    }));
     expect(ctx.events.flush).toHaveBeenCalledTimes(1);
     expect(unlinkSync).toHaveBeenCalled();
     expect(exitSpy).toHaveBeenCalledWith(7);
