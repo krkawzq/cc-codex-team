@@ -643,6 +643,7 @@ function terminalWaitResult(
   turnId: string,
   event: { id: string; type: string; payload: Record<string, unknown> },
 ): Record<string, unknown> {
+  const completedStatus = event.type === "turn.completed" ? event.payload.status : null;
   const completedFields = event.type === "turn.completed"
     ? pickDefined(event.payload, [
         "status",
@@ -657,7 +658,7 @@ function terminalWaitResult(
     session,
     thread_id: threadId,
     turn_id: turnId,
-    outcome: event.type === "turn.completed" ? "completed" : "error",
+    outcome: event.type === "turn.completed" && completedStatus === "completed" ? "completed" : "error",
     event_type: event.type,
     event_id: event.id,
     ...completedFields,

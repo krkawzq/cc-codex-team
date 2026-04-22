@@ -18,6 +18,7 @@ import { sessionNew } from "../src/daemon/handlers/session";
 import { threadSetName, threadStart } from "../src/codex/rpc";
 import { PendingRegistry } from "../src/daemon/pending";
 import { wireDaemonEvents } from "../src/daemon/wire";
+import { logger } from "../src/logger";
 
 function makeReq(positionals: string[], flags: Record<string, unknown> = {}) {
   return {
@@ -222,5 +223,48 @@ describe("daemon auto-approve flow", () => {
       thread_id: "th-1",
     }));
     expect(events.entries.some((entry) => entry.type === "auto_approved")).toBe(false);
+  });
+
+  it("logs and keeps requests pending when a stored pattern throws during matching", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    const { pool, client, events, pending, ctx } = makeWireContext(["/unterminated"]);
+
+    wireDaemonEvents(ctx as never);
+
+    pool.emit("server_request", {
+      user: "user-1",
+      clientId: "client-1",
+      request: {
+        id: 8,
+        method: "item/permissions/requestApproval",
+        params: {
+          threadId: "th-1",
+          turnId: "turn-2",
+          itemId: "item-2",
+          command: "git status",
+          permissions: { fileSystem: { write: ["/tmp"] } },
+        },
+      },
+      respond: vi.fn(),
+      respondError: vi.fn(),
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(client.respondAck).not.toHaveBeenCalled();
+    expect(pending.listForUser("user-1")).toHaveLength(1);
+    expect(events.entries).toContainEqual(expect.objectContaining({
+      user: "user-1",
+      type: "approval.permissions",
+      session: "sess-1",
+      thread_id: "th-1",
+    }));
+    expect(warn).toHaveBeenCalledWith(
+      "auto-approve pattern match failed; ignoring pattern",
+      expect.objectContaining({
+        pattern: "/unterminated",
+      }),
+    );
   });
 });

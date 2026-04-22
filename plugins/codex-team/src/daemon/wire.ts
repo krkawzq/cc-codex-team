@@ -172,15 +172,11 @@ async function handleNotification(
           adjustPendingCounts(ctx, removed.user, removed.session_name, removed.kind, -1);
         }
       } else {
-        for (const p of ctx.pending.listForUser(e.user)) {
-          if (String(p.jsonrpc_id) === String(jsonrpcId)) {
-            const removed = ctx.pending.remove(p.request_id);
-            if (removed?.session_name) {
-              adjustPendingCounts(ctx, removed.user, removed.session_name, removed.kind, -1);
-            }
-            break;
-          }
-        }
+        logger.warn("ignoring server_request_resolved for unknown client", {
+          user: e.user,
+          client_id: e.clientId,
+          jsonrpc_id: jsonrpcId,
+        });
       }
     }
   }

@@ -5,6 +5,7 @@ import path from "node:path";
 import { CodexTeamError, invalidParams } from "../errors";
 import { userDir, userSessionsPath } from "../paths";
 import { logger } from "../logger";
+import { validateParsedAutoApprovePatterns } from "./auto-approve";
 
 const NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -43,7 +44,6 @@ export interface SessionRecord {
   pending_user_inputs?: number;
   token_usage_last_turn?: TokenUsageSummary | null;
   crash_reason?: string | null;
-  app_server_client_id?: string;
 }
 
 interface UserBucket {
@@ -81,9 +81,9 @@ export class SessionRegistry {
       if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION) {
         throw new Error(`sessions.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION}`);
       }
-      for (const rec of parsed.sessions ?? []) {
-        if (!rec || typeof rec.name !== "string" || typeof rec.thread_id !== "string" || rec.thread_id.length === 0) continue;
-        rec.autoApprovePatterns = normalizeAutoApprovePatterns(rec.autoApprovePatterns);
+      for (const rawRec of parsed.sessions ?? []) {
+        const rec = normalizeLoadedRecord(rawRec);
+        if (!rec) continue;
         bucket.byName.set(rec.name, rec);
         bucket.byThreadId.set(rec.thread_id, rec);
         this.globalByThreadId.set(rec.thread_id, user);
@@ -190,7 +190,6 @@ export class SessionRegistry {
     if (patch.token_usage_last_turn !== undefined) rec.token_usage_last_turn = patch.token_usage_last_turn;
     if (patch.crash_reason !== undefined) rec.crash_reason = patch.crash_reason;
     if (patch.autoApprovePatterns !== undefined) rec.autoApprovePatterns = normalizeAutoApprovePatterns(patch.autoApprovePatterns);
-    if (patch.app_server_client_id !== undefined) rec.app_server_client_id = patch.app_server_client_id;
 
     this.schedulePersist(user, 0);
     return rec;
@@ -379,6 +378,84 @@ function asNumber(value: unknown): number | null {
 function normalizeAutoApprovePatterns(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((pattern): pattern is string => typeof pattern === "string");
+}
+
+function normalizeLoadedRecord(value: unknown): SessionRecord | null {
+  const rec = asObject(value);
+  const name = typeof rec.name === "string" ? rec.name : null;
+  const threadId = typeof rec.thread_id === "string" && rec.thread_id.length > 0 ? rec.thread_id : null;
+  if (!name || !threadId) return null;
+
+  const now = new Date().toISOString();
+  const createdAt = normalizeOptionalString(rec.created_at) ?? normalizeOptionalString(rec.last_active_at) ?? now;
+  const lastActiveAt = normalizeOptionalString(rec.last_active_at) ?? createdAt;
+  const runtimeDefaults = sessionRuntimeDefaults();
+
+  return {
+    name,
+    thread_id: threadId,
+    state: rec.state === "crashed" ? "crashed" : "live",
+    ...(rec.recovery_state === "degraded" ? { recovery_state: "degraded" as const } : {}),
+    ...(normalizeOptionalString(rec.model) ? { model: normalizeOptionalString(rec.model)! } : {}),
+    ...(normalizeOptionalString(rec.cwd) ? { cwd: normalizeOptionalString(rec.cwd)! } : {}),
+    ...(normalizeOptionalString(rec.sandbox) ? { sandbox: normalizeOptionalString(rec.sandbox)! } : {}),
+    ...(normalizeOptionalString(rec.approval) ? { approval: normalizeOptionalString(rec.approval)! } : {}),
+    ...(normalizeOptionalString(rec.effort) ? { effort: normalizeOptionalString(rec.effort)! } : {}),
+    ...(normalizeOptionalString(rec.profile) ? { profile: normalizeOptionalString(rec.profile)! } : {}),
+    ...(normalizeOptionalString(rec.base_instructions)
+      ? { base_instructions: normalizeOptionalString(rec.base_instructions)! }
+      : {}),
+    ...(normalizeOptionalString(rec.developer_instructions)
+      ? { developer_instructions: normalizeOptionalString(rec.developer_instructions)! }
+      : {}),
+    ...(normalizeStringArray(rec.experimental_tools).length > 0
+      ? { experimental_tools: normalizeStringArray(rec.experimental_tools) }
+      : {}),
+    autoApprovePatterns: normalizeLoadedAutoApprovePatterns(name, rec.autoApprovePatterns),
+    created_at: createdAt,
+    last_active_at: lastActiveAt,
+    turn_count: normalizeOptionalNumber(rec.turn_count) ?? 0,
+    last_turn_id: normalizeOptionalString(rec.last_turn_id) ?? runtimeDefaults.last_turn_id,
+    current_turn_id: normalizeOptionalString(rec.current_turn_id) ?? runtimeDefaults.current_turn_id,
+    current_turn_started_at:
+      normalizeOptionalString(rec.current_turn_started_at) ?? runtimeDefaults.current_turn_started_at,
+    current_item_type: normalizeOptionalString(rec.current_item_type) ?? runtimeDefaults.current_item_type,
+    items_in_turn: normalizeOptionalNumber(rec.items_in_turn) ?? runtimeDefaults.items_in_turn,
+    pending_approvals: normalizeOptionalNumber(rec.pending_approvals) ?? runtimeDefaults.pending_approvals,
+    pending_user_inputs: normalizeOptionalNumber(rec.pending_user_inputs) ?? runtimeDefaults.pending_user_inputs,
+    token_usage_last_turn: normalizeTokenUsage(rec.token_usage_last_turn) ?? runtimeDefaults.token_usage_last_turn,
+    crash_reason: normalizeOptionalString(rec.crash_reason) ?? runtimeDefaults.crash_reason,
+  };
+}
+
+function normalizeLoadedAutoApprovePatterns(sessionName: string, value: unknown): string[] {
+  const patterns = normalizeAutoApprovePatterns(value);
+  const validPatterns: string[] = [];
+  for (const pattern of patterns) {
+    const validationError = validateParsedAutoApprovePatterns([pattern]);
+    if (validationError) {
+      logger.warn("dropping invalid persisted auto-approve pattern", {
+        session: sessionName,
+        pattern,
+        err: validationError,
+      });
+      continue;
+    }
+    validPatterns.push(pattern);
+  }
+  return validPatterns;
+}
+
+function normalizeOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function normalizeOptionalNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 void path;

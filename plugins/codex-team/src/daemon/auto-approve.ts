@@ -1,3 +1,5 @@
+import { logger } from "../logger";
+
 export function parseAutoApprovePatterns(raw: string): string[] {
   if (raw.length === 0) return [];
   return raw
@@ -16,8 +18,12 @@ export interface AutoApproveMatch {
 }
 
 export function validateAutoApprovePatterns(raw: string): string | null {
+  return validateParsedAutoApprovePatterns(parseAutoApprovePatterns(raw));
+}
+
+export function validateParsedAutoApprovePatterns(patterns: string[]): string | null {
   try {
-    for (const pattern of parseAutoApprovePatterns(raw)) {
+    for (const pattern of patterns) {
       validateAutoApprovePattern(pattern);
     }
     return null;
@@ -29,7 +35,18 @@ export function validateAutoApprovePatterns(raw: string): string | null {
 export function matchAutoApprovePattern(patterns: string[], target: unknown): AutoApproveMatch | null {
   if (typeof target !== "string" || target.length === 0) return null;
   for (const pattern of patterns) {
-    if (matchesPattern(pattern, target)) {
+    let matched = false;
+    try {
+      matched = matchesPattern(pattern, target);
+    } catch (error) {
+      logger.warn("auto-approve pattern match failed; ignoring pattern", {
+        pattern,
+        err: (error as Error).message,
+        target: previewAutoApproveTarget(target),
+      });
+      continue;
+    }
+    if (matched) {
       return {
         matchedPattern: pattern,
         commandPreview: previewAutoApproveTarget(target),

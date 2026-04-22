@@ -38,8 +38,10 @@ const MAX_PENDING_WRITE_BYTES = 1024 * 1024;
 const EVENT_ID_SOFT_LIMIT = 2 ** 52;
 
 export const AUTO_APPROVED_EVENT_TYPE = "auto_approved";
+export const APPROVAL_REQUEST_CANCELLED_EVENT_TYPE = "approval.request_cancelled";
 export const SESSION_CLOSED_EVENT_TYPE = "session.closed";
 export const SESSION_CRASHED_EVENT_TYPE = "session.crashed";
+export const USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE = "user_input.request_cancelled";
 
 export class EventLog {
   private retention: number;
