@@ -56,8 +56,15 @@ export const daemonUserCreate: HandlerFn = async (ctx, req) => {
 
 export const daemonUserDestroy: HandlerFn = async (ctx, req) => {
   const token = reqPositional(req, 0, "token");
+  const force = isTrue(getFlag(req.params, "force"));
   if (!ctx.users.has(token)) {
     throw new CodexTeamError("user_not_found", `user '${token}' not found`);
+  }
+  const liveSessions = ctx.sessions.listLive(token);
+  if (!force && liveSessions.length > 0) {
+    throw invalidParams(
+      `cannot destroy user '${token}' while ${liveSessions.length} live session(s) remain; pass --force to destroy anyway`,
+    );
   }
   const pending = ctx.pending.removeForUser(token);
   for (const p of pending) {
