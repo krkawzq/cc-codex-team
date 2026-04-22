@@ -53,20 +53,26 @@ export class SessionRegistry {
   loadForUser(user: string): void {
     if (this.users.has(user)) return;
     const bucket = this.emptyBucket();
-    this.users.set(user, bucket);
     const p = userSessionsPath(user, this.dataDir);
-    if (!fs.existsSync(p)) return;
+    if (!fs.existsSync(p)) {
+      this.users.set(user, bucket);
+      return;
+    }
     try {
       const raw = fs.readFileSync(p, "utf8");
       const parsed = JSON.parse(raw) as { schema_version?: number; sessions?: SessionRecord[] };
+      if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION) {
+        throw new Error(`sessions.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION}`);
+      }
       for (const rec of parsed.sessions ?? []) {
         if (!rec || typeof rec.name !== "string" || typeof rec.thread_id !== "string" || rec.thread_id.length === 0) continue;
         bucket.byName.set(rec.name, rec);
         bucket.byThreadId.set(rec.thread_id, rec);
         this.globalByThreadId.set(rec.thread_id, user);
       }
+      this.users.set(user, bucket);
     } catch (e) {
-      logger.warn("failed to load sessions.json", { user, err: (e as Error).message });
+      throw new Error(`failed to load sessions.json for '${user}': ${(e as Error).message}`);
     }
   }
 
