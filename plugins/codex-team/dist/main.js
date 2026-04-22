@@ -27,8 +27,8 @@ var import_node_fs17 = __toESM(require("fs"));
 var import_node_path15 = __toESM(require("path"));
 
 // src/cli/run.ts
-var import_node_fs4 = __toESM(require("fs"));
-var import_node_path5 = __toESM(require("path"));
+var import_node_fs5 = __toESM(require("fs"));
+var import_node_path6 = __toESM(require("path"));
 var import_node_child_process = require("child_process");
 var import_promises = require("timers/promises");
 
@@ -338,15 +338,16 @@ function parseArgs(argv) {
   const nonGlobal = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    const spec = GLOBAL_FLAGS[a];
+    const [globalToken, inlineValue] = splitLongFlagAssignment(a);
+    const spec = GLOBAL_FLAGS[globalToken];
     if (!spec) {
       nonGlobal.push(a);
       continue;
     }
     if (spec.takesValue) {
-      const v = argv[++i];
+      const v = inlineValue ?? argv[++i];
       if (v === void 0) {
-        result.unknown = `flag ${a} requires a value`;
+        result.unknown = `flag ${globalToken} requires a value`;
         return result;
       }
       if (spec.name === "bearer") result.bearer = v;
@@ -413,6 +414,12 @@ function isFlagLike(s) {
 }
 function isNegativeNumber(s) {
   return /^-\d+(\.\d+)?$/.test(s);
+}
+function splitLongFlagAssignment(token) {
+  if (!token.startsWith("--")) return [token, null];
+  const eqIdx = token.indexOf("=");
+  if (eqIdx < 0) return [token, null];
+  return [token.slice(0, eqIdx), token.slice(eqIdx + 1)];
 }
 function setFlag(flags, key, value) {
   if (value === null) {
@@ -784,7 +791,7 @@ var daemonGroup = {
           description: "Stream new log lines as they arrive."
         },
         {
-          long: "-n",
+          short: "-n",
           type: "int",
           default: "100",
           required: false,
@@ -1312,7 +1319,7 @@ var messageGroup = {
           description: "Keep printing turns until the CLI exits."
         },
         {
-          long: "-n",
+          short: "-n",
           type: "int",
           default: "3",
           required: false,
@@ -1669,7 +1676,8 @@ function formatPositional(positional) {
   return positional.required ? `<${positional.name}>` : `[${positional.name}]`;
 }
 function formatFlag(flag) {
-  return flag.short ? `${flag.short}, ${flag.long}` : flag.long;
+  if (flag.short && flag.long) return `${flag.short}, ${flag.long}`;
+  return flag.short ?? flag.long ?? "-";
 }
 function renderTable(headers, rows) {
   const widths = headers.map(
@@ -1777,8 +1785,66 @@ function err(code, message, data) {
 }
 
 // src/daemon/config.ts
+var import_node_fs4 = __toESM(require("fs"));
+var import_node_path4 = __toESM(require("path"));
+
+// src/logger.ts
 var import_node_fs3 = __toESM(require("fs"));
 var import_node_path3 = __toESM(require("path"));
+var LEVELS = {
+  error: 0,
+  warn: 1,
+  info: 2,
+  debug: 3,
+  trace: 4
+};
+var Logger = class {
+  level = "info";
+  stream = null;
+  logPath = null;
+  configure(opts) {
+    if (opts.level) this.level = opts.level;
+    if (opts.logPath && opts.logPath !== this.logPath) {
+      if (this.stream) this.stream.end();
+      import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(opts.logPath), { recursive: true });
+      this.stream = import_node_fs3.default.createWriteStream(opts.logPath, { flags: "a" });
+      this.logPath = opts.logPath;
+    }
+  }
+  setLevel(level) {
+    this.level = level;
+  }
+  emit(level, msg, meta) {
+    if (LEVELS[level] > LEVELS[this.level]) return;
+    const line = JSON.stringify({
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      level,
+      msg,
+      ...meta ?? {}
+    });
+    if (this.stream) {
+      this.stream.write(line + "\n");
+    } else {
+      process.stderr.write(line + "\n");
+    }
+  }
+  error(msg, meta) {
+    this.emit("error", msg, meta);
+  }
+  warn(msg, meta) {
+    this.emit("warn", msg, meta);
+  }
+  info(msg, meta) {
+    this.emit("info", msg, meta);
+  }
+  debug(msg, meta) {
+    this.emit("debug", msg, meta);
+  }
+  trace(msg, meta) {
+    this.emit("trace", msg, meta);
+  }
+};
+var logger = new Logger();
 
 // src/daemon/auto-approve.ts
 function parseAutoApprovePatterns(raw) {
@@ -1789,8 +1855,11 @@ function parseConfiguredAutoApprovePatterns(value) {
   return typeof value === "string" ? parseAutoApprovePatterns(value) : [];
 }
 function validateAutoApprovePatterns(raw) {
+  return validateParsedAutoApprovePatterns(parseAutoApprovePatterns(raw));
+}
+function validateParsedAutoApprovePatterns(patterns) {
   try {
-    for (const pattern of parseAutoApprovePatterns(raw)) {
+    for (const pattern of patterns) {
       validateAutoApprovePattern(pattern);
     }
     return null;
@@ -1801,7 +1870,18 @@ function validateAutoApprovePatterns(raw) {
 function matchAutoApprovePattern(patterns, target) {
   if (typeof target !== "string" || target.length === 0) return null;
   for (const pattern of patterns) {
-    if (matchesPattern(pattern, target)) {
+    let matched = false;
+    try {
+      matched = matchesPattern(pattern, target);
+    } catch (error) {
+      logger.warn("auto-approve pattern match failed; ignoring pattern", {
+        pattern,
+        err: error.message,
+        target: previewAutoApproveTarget(target)
+      });
+      continue;
+    }
+    if (matched) {
       return {
         matchedPattern: pattern,
         commandPreview: previewAutoApproveTarget(target)
@@ -1883,7 +1963,7 @@ var ConfigStore = class {
   }
   load() {
     try {
-      const raw = import_node_fs3.default.readFileSync(this.filePath, "utf8");
+      const raw = import_node_fs4.default.readFileSync(this.filePath, "utf8");
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object") {
         for (const [k, v] of Object.entries(parsed)) {
@@ -1897,10 +1977,10 @@ var ConfigStore = class {
     }
   }
   persist() {
-    import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(this.filePath), { recursive: true });
+    import_node_fs4.default.mkdirSync(import_node_path4.default.dirname(this.filePath), { recursive: true });
     const tmp = this.filePath + ".tmp";
-    import_node_fs3.default.writeFileSync(tmp, JSON.stringify(this.explicit, null, 2));
-    import_node_fs3.default.renameSync(tmp, this.filePath);
+    import_node_fs4.default.writeFileSync(tmp, JSON.stringify(this.explicit, null, 2));
+    import_node_fs4.default.renameSync(tmp, this.filePath);
   }
   listKeys() {
     return Object.keys(CONFIG_KEYS);
@@ -2048,30 +2128,41 @@ function validateApprovalAction(kind, action) {
 }
 
 // src/version.ts
-var import_node_path4 = __toESM(require("path"));
+var import_node_path5 = __toESM(require("path"));
 var PACKAGE_JSON_PATH = require.resolve("../package.json");
 var pkg = require(PACKAGE_JSON_PATH);
-var PACKAGE_ROOT = import_node_path4.default.dirname(PACKAGE_JSON_PATH);
+var PACKAGE_ROOT = import_node_path5.default.dirname(PACKAGE_JSON_PATH);
 var VERSION = pkg.version ?? "unknown";
 
 // src/format/short.ts
 function formatShort(method, data) {
+  const value = asObject(data);
+  let body;
   switch (method) {
     case "status":
-      return formatStatus(data);
+      body = formatStatus(data);
+      break;
     case "daemon:status":
-      return formatDaemonStatus(data);
+      body = formatDaemonStatus(data);
+      break;
     case "daemon:user:list":
-      return formatDaemonUserList(data);
+      body = formatDaemonUserList(data);
+      break;
     case "session:info":
-      return formatSessionInfo(data);
+      body = formatSessionInfo(data);
+      break;
     case "session:list":
-      return formatSessionList(data);
+      body = formatSessionList(data);
+      break;
     case "message:history":
-      return formatMessageHistory(data);
+      body = formatMessageHistory(data);
+      break;
     default:
       throw new Error(`--short is not supported for '${method}'`);
   }
+  const footerLines = extractFooterLines(method, value);
+  return footerLines.length > 0 ? `${body}
+${footerLines.join("\n")}` : body;
 }
 function formatStatus(data) {
   const value = asObject(data);
@@ -2304,6 +2395,57 @@ function shortTokenPrefix(token) {
   const encoded = typeof token === "string" && token.length > 0 ? encodeToken(token) : "unknown";
   return `${encoded.slice(0, 10)}...`;
 }
+function extractFooterLines(method, value) {
+  switch (method) {
+    case "session:list":
+      return extractSessionListFooters(value);
+    case "message:history":
+      return extractMessageHistoryFooters(value);
+    default:
+      return [];
+  }
+}
+function extractSessionListFooters(value) {
+  const nextCursor = asString(value.next_cursor);
+  const includeContract = value.all === true || nextCursor !== null;
+  if (!includeContract) return [];
+  const fields = [
+    ["next_cursor", nextCursor],
+    ["all", value.all],
+    ["sort", asString(value.sort)],
+    ["format", asString(value.format)]
+  ];
+  const footer = formatFooterLine(fields);
+  return footer ? [footer] : [];
+}
+function extractMessageHistoryFooters(value) {
+  const lines = [];
+  const meta = formatFooterLine([
+    ["next_cursor", asString(value.next_cursor)],
+    ["relative_since", asFiniteNumber(value.relative_since)],
+    ["format", asString(value.format)]
+  ]);
+  if (meta) lines.push(meta);
+  const note = asString(value.note);
+  if (note) {
+    const noteLine = formatFooterLine([["note", note]]);
+    if (noteLine) lines.push(noteLine);
+  }
+  return lines;
+}
+function formatFooterLine(entries) {
+  const parts = entries.flatMap(([key, value]) => {
+    const encoded = encodeFooterValue(value);
+    return encoded === null ? [] : [`${key}=${encoded}`];
+  });
+  return parts.length > 0 ? `# ${parts.join(" ")}` : null;
+}
+function encodeFooterValue(value) {
+  if (value === null || value === void 0) return null;
+  if (typeof value === "string" && value.length === 0) return null;
+  const encoded = JSON.stringify(value);
+  return typeof encoded === "string" ? encoded : null;
+}
 
 // src/cli/run.ts
 var DAEMON_POLL_INTERVAL_MS = 100;
@@ -2437,7 +2579,7 @@ async function dispatchCommand(sockPath, parsed, method) {
       params
     }, cliConfig, isReadOnlyMethod(method));
     if ("error" in resp && resp.error) {
-      process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
+      process.stdout.write(forwardDaemonError(resp.error));
       return 1;
     }
     if (truthy(parsed.flags.short)) {
@@ -2545,15 +2687,16 @@ async function runStream(sock, parsed, method) {
     };
     onMessages(sock, (msg) => {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
+        const ackAfterWrite = createStreamAckCallback(method, sock, reqId, msg.data);
         const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
         if (markdown !== null) {
-          writeStdout(markdown + "\n");
+          writeStdout(markdown + "\n", ackAfterWrite);
         } else {
-          writeStdout(JSON.stringify(msg.data) + "\n");
+          writeStdout(JSON.stringify(msg.data) + "\n", ackAfterWrite);
         }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
-          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+          writeStdout(forwardDaemonError(msg.error), () => {
             finish(1);
             sock.end();
           });
@@ -2565,7 +2708,7 @@ async function runStream(sock, parsed, method) {
         }
       } else if (msg.kind === "response" && msg.id === reqId) {
         if (msg.error) {
-          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+          writeStdout(forwardDaemonError(msg.error), () => {
             finish(1);
             sock.end();
           });
@@ -2699,8 +2842,8 @@ function spawnDaemon(stderrPath) {
   let stderrFd = null;
   try {
     if (stderrPath) {
-      import_node_fs4.default.mkdirSync(import_node_path5.default.dirname(stderrPath), { recursive: true });
-      stderrFd = import_node_fs4.default.openSync(stderrPath, "w");
+      import_node_fs5.default.mkdirSync(import_node_path6.default.dirname(stderrPath), { recursive: true });
+      stderrFd = import_node_fs5.default.openSync(stderrPath, "w");
       args.push(DAEMON_STDERR_FLAG, stderrPath);
     }
     const child = (0, import_node_child_process.spawn)(process.execPath, args, {
@@ -2711,7 +2854,7 @@ function spawnDaemon(stderrPath) {
     });
     child.unref();
   } finally {
-    if (stderrFd !== null) import_node_fs4.default.closeSync(stderrFd);
+    if (stderrFd !== null) import_node_fs5.default.closeSync(stderrFd);
   }
 }
 function getCliVersion() {
@@ -2721,7 +2864,7 @@ function randomId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 function daemonSpawnStderrPath() {
-  return import_node_path5.default.join(defaultDataDir(), "daemon-spawn.stderr");
+  return import_node_path6.default.join(defaultDataDir(), "daemon-spawn.stderr");
 }
 function truthy(v) {
   return v === true || v === "true" || v === "1";
@@ -2741,6 +2884,31 @@ function extractCursorEventId(result) {
   if (!result || typeof result !== "object" || Array.isArray(result)) return "";
   const eventId = result.event_id;
   return typeof eventId === "string" ? eventId : "";
+}
+function createStreamAckCallback(method, sock, reqId, data) {
+  if (method !== "monitor:events") return void 0;
+  const eventId = extractStreamEventId(data);
+  if (!eventId) return void 0;
+  return () => sendStreamAck(sock, reqId, eventId);
+}
+function extractStreamEventId(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const id = data.id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+function sendStreamAck(sock, reqId, eventId) {
+  if (sock.destroyed) return;
+  writeMessage(sock, {
+    kind: "notification",
+    method: "stream_ack",
+    params: {
+      id: reqId,
+      event_id: eventId
+    }
+  });
+}
+function forwardDaemonError(error) {
+  return JSON.stringify(err(error.code, error.message, error.data)) + "\n";
 }
 function validateCliFlags(parsed, method) {
   if (method !== "monitor:events") return null;
@@ -2791,8 +2959,8 @@ var import_node_fs16 = __toESM(require("fs"));
 var import_node_path14 = __toESM(require("path"));
 
 // src/daemon/users.ts
-var import_node_fs5 = __toESM(require("fs"));
-var import_node_path6 = __toESM(require("path"));
+var import_node_fs6 = __toESM(require("fs"));
+var import_node_path7 = __toESM(require("path"));
 
 // src/errors.ts
 var CodexTeamError = class extends Error {
@@ -2823,12 +2991,12 @@ var UserRegistry = class {
   }
   loadFromDisk() {
     const root = usersDir(this.dataDir);
-    if (!import_node_fs5.default.existsSync(root)) return;
-    for (const dirname of import_node_fs5.default.readdirSync(root)) {
-      const metaPath = import_node_path6.default.join(root, dirname, "metadata.json");
-      if (import_node_fs5.default.existsSync(metaPath)) {
+    if (!import_node_fs6.default.existsSync(root)) return;
+    for (const dirname of import_node_fs6.default.readdirSync(root)) {
+      const metaPath = import_node_path7.default.join(root, dirname, "metadata.json");
+      if (import_node_fs6.default.existsSync(metaPath)) {
         try {
-          const raw = import_node_fs5.default.readFileSync(metaPath, "utf8");
+          const raw = import_node_fs6.default.readFileSync(metaPath, "utf8");
           const parsed = JSON.parse(raw);
           const user = normalizePersistedUser(parsed);
           if (user && typeof user.token === "string") {
@@ -2883,7 +3051,7 @@ var UserRegistry = class {
     this.users.delete(token);
     const dir = userDir(token, this.dataDir);
     try {
-      import_node_fs5.default.rmSync(dir, { recursive: true, force: true });
+      import_node_fs6.default.rmSync(dir, { recursive: true, force: true });
     } catch {
     }
   }
@@ -2895,14 +3063,14 @@ var UserRegistry = class {
   }
   persist(user) {
     const dir = userDir(user.token, this.dataDir);
-    import_node_fs5.default.mkdirSync(dir, { recursive: true });
+    import_node_fs6.default.mkdirSync(dir, { recursive: true });
     const metaPath = userMetadataPath(user.token, this.dataDir);
     const tmp = metaPath + ".tmp";
-    import_node_fs5.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs6.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION,
       user
     }, null, 2));
-    import_node_fs5.default.renameSync(tmp, metaPath);
+    import_node_fs6.default.renameSync(tmp, metaPath);
   }
 };
 function validateToken(token) {
@@ -2936,66 +3104,6 @@ function isCanonicalUserDir(dirname) {
 var import_node_crypto2 = __toESM(require("crypto"));
 var import_node_fs7 = __toESM(require("fs"));
 var import_node_path8 = __toESM(require("path"));
-
-// src/logger.ts
-var import_node_fs6 = __toESM(require("fs"));
-var import_node_path7 = __toESM(require("path"));
-var LEVELS = {
-  error: 0,
-  warn: 1,
-  info: 2,
-  debug: 3,
-  trace: 4
-};
-var Logger = class {
-  level = "info";
-  stream = null;
-  logPath = null;
-  configure(opts) {
-    if (opts.level) this.level = opts.level;
-    if (opts.logPath && opts.logPath !== this.logPath) {
-      if (this.stream) this.stream.end();
-      import_node_fs6.default.mkdirSync(import_node_path7.default.dirname(opts.logPath), { recursive: true });
-      this.stream = import_node_fs6.default.createWriteStream(opts.logPath, { flags: "a" });
-      this.logPath = opts.logPath;
-    }
-  }
-  setLevel(level) {
-    this.level = level;
-  }
-  emit(level, msg, meta) {
-    if (LEVELS[level] > LEVELS[this.level]) return;
-    const line = JSON.stringify({
-      ts: (/* @__PURE__ */ new Date()).toISOString(),
-      level,
-      msg,
-      ...meta ?? {}
-    });
-    if (this.stream) {
-      this.stream.write(line + "\n");
-    } else {
-      process.stderr.write(line + "\n");
-    }
-  }
-  error(msg, meta) {
-    this.emit("error", msg, meta);
-  }
-  warn(msg, meta) {
-    this.emit("warn", msg, meta);
-  }
-  info(msg, meta) {
-    this.emit("info", msg, meta);
-  }
-  debug(msg, meta) {
-    this.emit("debug", msg, meta);
-  }
-  trace(msg, meta) {
-    this.emit("trace", msg, meta);
-  }
-};
-var logger = new Logger();
-
-// src/daemon/sessions.ts
 var NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var SCHEMA_VERSION2 = 1;
@@ -3022,9 +3130,9 @@ var SessionRegistry = class {
       if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION2) {
         throw new Error(`sessions.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION2}`);
       }
-      for (const rec of parsed.sessions ?? []) {
-        if (!rec || typeof rec.name !== "string" || typeof rec.thread_id !== "string" || rec.thread_id.length === 0) continue;
-        rec.autoApprovePatterns = normalizeAutoApprovePatterns(rec.autoApprovePatterns);
+      for (const rawRec of parsed.sessions ?? []) {
+        const rec = normalizeLoadedRecord(rawRec);
+        if (!rec) continue;
         bucket.byName.set(rec.name, rec);
         bucket.byThreadId.set(rec.thread_id, rec);
         this.globalByThreadId.set(rec.thread_id, user);
@@ -3123,7 +3231,6 @@ var SessionRegistry = class {
     if (patch.token_usage_last_turn !== void 0) rec.token_usage_last_turn = patch.token_usage_last_turn;
     if (patch.crash_reason !== void 0) rec.crash_reason = patch.crash_reason;
     if (patch.autoApprovePatterns !== void 0) rec.autoApprovePatterns = normalizeAutoApprovePatterns(patch.autoApprovePatterns);
-    if (patch.app_server_client_id !== void 0) rec.app_server_client_id = patch.app_server_client_id;
     this.schedulePersist(user, 0);
     return rec;
   }
@@ -3272,6 +3379,70 @@ function normalizeAutoApprovePatterns(value) {
   if (!Array.isArray(value)) return [];
   return value.filter((pattern) => typeof pattern === "string");
 }
+function normalizeLoadedRecord(value) {
+  const rec = asObject2(value);
+  const name = typeof rec.name === "string" ? rec.name : null;
+  const threadId = typeof rec.thread_id === "string" && rec.thread_id.length > 0 ? rec.thread_id : null;
+  if (!name || !threadId) return null;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const createdAt = normalizeOptionalString(rec.created_at) ?? normalizeOptionalString(rec.last_active_at) ?? now;
+  const lastActiveAt = normalizeOptionalString(rec.last_active_at) ?? createdAt;
+  const runtimeDefaults = sessionRuntimeDefaults();
+  return {
+    name,
+    thread_id: threadId,
+    state: rec.state === "crashed" ? "crashed" : "live",
+    ...rec.recovery_state === "degraded" ? { recovery_state: "degraded" } : {},
+    ...normalizeOptionalString(rec.model) ? { model: normalizeOptionalString(rec.model) } : {},
+    ...normalizeOptionalString(rec.cwd) ? { cwd: normalizeOptionalString(rec.cwd) } : {},
+    ...normalizeOptionalString(rec.sandbox) ? { sandbox: normalizeOptionalString(rec.sandbox) } : {},
+    ...normalizeOptionalString(rec.approval) ? { approval: normalizeOptionalString(rec.approval) } : {},
+    ...normalizeOptionalString(rec.effort) ? { effort: normalizeOptionalString(rec.effort) } : {},
+    ...normalizeOptionalString(rec.profile) ? { profile: normalizeOptionalString(rec.profile) } : {},
+    ...normalizeOptionalString(rec.base_instructions) ? { base_instructions: normalizeOptionalString(rec.base_instructions) } : {},
+    ...normalizeOptionalString(rec.developer_instructions) ? { developer_instructions: normalizeOptionalString(rec.developer_instructions) } : {},
+    ...normalizeStringArray(rec.experimental_tools).length > 0 ? { experimental_tools: normalizeStringArray(rec.experimental_tools) } : {},
+    autoApprovePatterns: normalizeLoadedAutoApprovePatterns(name, rec.autoApprovePatterns),
+    created_at: createdAt,
+    last_active_at: lastActiveAt,
+    turn_count: normalizeOptionalNumber(rec.turn_count) ?? 0,
+    last_turn_id: normalizeOptionalString(rec.last_turn_id) ?? runtimeDefaults.last_turn_id,
+    current_turn_id: normalizeOptionalString(rec.current_turn_id) ?? runtimeDefaults.current_turn_id,
+    current_turn_started_at: normalizeOptionalString(rec.current_turn_started_at) ?? runtimeDefaults.current_turn_started_at,
+    current_item_type: normalizeOptionalString(rec.current_item_type) ?? runtimeDefaults.current_item_type,
+    items_in_turn: normalizeOptionalNumber(rec.items_in_turn) ?? runtimeDefaults.items_in_turn,
+    pending_approvals: normalizeOptionalNumber(rec.pending_approvals) ?? runtimeDefaults.pending_approvals,
+    pending_user_inputs: normalizeOptionalNumber(rec.pending_user_inputs) ?? runtimeDefaults.pending_user_inputs,
+    token_usage_last_turn: normalizeTokenUsage(rec.token_usage_last_turn) ?? runtimeDefaults.token_usage_last_turn,
+    crash_reason: normalizeOptionalString(rec.crash_reason) ?? runtimeDefaults.crash_reason
+  };
+}
+function normalizeLoadedAutoApprovePatterns(sessionName, value) {
+  const patterns = normalizeAutoApprovePatterns(value);
+  const validPatterns = [];
+  for (const pattern of patterns) {
+    const validationError = validateParsedAutoApprovePatterns([pattern]);
+    if (validationError) {
+      logger.warn("dropping invalid persisted auto-approve pattern", {
+        session: sessionName,
+        pattern,
+        err: validationError
+      });
+      continue;
+    }
+    validPatterns.push(pattern);
+  }
+  return validPatterns;
+}
+function normalizeOptionalString(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+function normalizeStringArray(value) {
+  return Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : [];
+}
+function normalizeOptionalNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
 
 // src/daemon/events.ts
 var import_node_fs8 = __toESM(require("fs"));
@@ -3284,8 +3455,10 @@ var FLUSH_RETRY_DELAY_MS = 250;
 var MAX_PENDING_WRITE_BYTES = 1024 * 1024;
 var EVENT_ID_SOFT_LIMIT = 2 ** 52;
 var AUTO_APPROVED_EVENT_TYPE = "auto_approved";
+var APPROVAL_REQUEST_CANCELLED_EVENT_TYPE = "approval.request_cancelled";
 var SESSION_CLOSED_EVENT_TYPE = "session.closed";
 var SESSION_CRASHED_EVENT_TYPE = "session.crashed";
+var USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE = "user_input.request_cancelled";
 var EventLog = class {
   retention;
   dataDir;
@@ -3768,8 +3941,11 @@ function serializeEventFile(buf) {
 // src/daemon/cursors.ts
 var import_node_fs9 = __toESM(require("fs"));
 var import_node_path10 = __toESM(require("path"));
+var import_promises2 = require("timers/promises");
 var CURSOR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 var SCHEMA_VERSION4 = 1;
+var LOCK_RETRY_MS = 10;
+var LOCK_TIMEOUT_MS = 2e3;
 var CursorStore = class {
   dataDir;
   users = /* @__PURE__ */ new Map();
@@ -3803,15 +3979,48 @@ var CursorStore = class {
       auto_update: input.auto_update ?? existing?.auto_update ?? true
     };
     bucket.set(cursor.name, cursor);
-    await this.enqueuePersist(user);
+    try {
+      await this.enqueuePersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) });
+    } catch (error) {
+      if (existing) {
+        bucket.set(existing.name, existing);
+      } else {
+        bucket.delete(cursor.name);
+      }
+      throw error;
+    }
+    return cloneCursor(cursor);
+  }
+  async saveBestEffort(user, input) {
+    validateCursorName(input.name);
+    const bucket = this.bucket(user);
+    const existing = bucket.get(input.name);
+    const cursor = {
+      name: input.name,
+      event_id: input.event_id ?? null,
+      updated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      auto_update: input.auto_update ?? existing?.auto_update ?? true
+    };
+    bucket.set(cursor.name, cursor);
+    try {
+      await this.enqueuePersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) });
+    } catch (error) {
+      logger.warn("failed to persist cursors.json", { user, err: error.message });
+    }
     return cloneCursor(cursor);
   }
   async delete(user, name) {
     validateCursorName(name);
     const bucket = this.bucket(user);
+    const existing = bucket.get(name);
     const deleted = bucket.delete(name);
     if (!deleted) return false;
-    await this.enqueuePersist(user);
+    try {
+      await this.enqueuePersist(user, { type: "delete", name });
+    } catch (error) {
+      if (existing) bucket.set(name, existing);
+      throw error;
+    }
     return true;
   }
   async clearUser(user) {
@@ -3835,13 +4044,7 @@ var CursorStore = class {
     const filePath = cursorFilePath(user, this.dataDir);
     if (import_node_fs9.default.existsSync(filePath)) {
       try {
-        const raw = import_node_fs9.default.readFileSync(filePath, "utf8");
-        const parsed = JSON.parse(raw);
-        if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION4) {
-          throw new Error(`cursors.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION4}`);
-        }
-        for (const cursor of parsed.cursors ?? []) {
-          if (!isPersistedCursor(cursor)) continue;
+        for (const cursor of loadEnvelopeFromText(import_node_fs9.default.readFileSync(filePath, "utf8")).cursors.values()) {
           bucket.set(cursor.name, cloneCursor(cursor));
         }
       } catch (error) {
@@ -3851,29 +4054,87 @@ var CursorStore = class {
     this.users.set(user, bucket);
     this.loaded.add(user);
   }
-  async enqueuePersist(user) {
+  enqueuePersist(user, op) {
     const previous = this.writeChains.get(user) ?? Promise.resolve();
-    const next = previous.catch(() => void 0).then(() => this.persistAsync(user)).catch((error) => {
-      logger.warn("failed to persist cursors.json", { user, err: error.message });
-    });
+    const next = previous.catch(() => void 0).then(() => this.persistAsync(user, op));
     this.writeChains.set(user, next);
-    await next;
+    return next;
   }
-  async persistAsync(user) {
+  async persistAsync(user, op) {
     const dir = userDir(user, this.dataDir);
     await import_node_fs9.default.promises.mkdir(dir, { recursive: true });
     const filePath = cursorFilePath(user, this.dataDir);
-    const payload = {
-      schema_version: SCHEMA_VERSION4,
-      cursors: sorted(this.bucket(user))
-    };
-    const tmpPath = `${filePath}.tmp`;
-    await import_node_fs9.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
-    await import_node_fs9.default.promises.rename(tmpPath, filePath);
+    const releaseLock = await acquireCursorLock(filePath);
+    const tmpPath = makeTempPath(filePath);
+    try {
+      const persisted = await loadEnvelopeFromFile(filePath);
+      applyPersistOp(persisted, op);
+      const payload = {
+        schema_version: SCHEMA_VERSION4,
+        cursors: sorted(persisted)
+      };
+      await import_node_fs9.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
+      await import_node_fs9.default.promises.rename(tmpPath, filePath);
+    } finally {
+      await import_node_fs9.default.promises.unlink(tmpPath).catch(() => void 0);
+      await releaseLock();
+    }
   }
 };
 function cursorFilePath(user, dataDir) {
   return import_node_path10.default.join(userDir(user, dataDir), "cursors.json");
+}
+async function acquireCursorLock(filePath) {
+  const lockPath = `${filePath}.lock`;
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      const handle = await import_node_fs9.default.promises.open(lockPath, "wx");
+      return async () => {
+        await handle.close();
+        await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
+      };
+    } catch (error) {
+      const err2 = error;
+      if (err2.code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for cursor lock '${lockPath}'`);
+      }
+      await (0, import_promises2.setTimeout)(LOCK_RETRY_MS);
+    }
+  }
+}
+function makeTempPath(filePath) {
+  return `${filePath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+}
+async function loadEnvelopeFromFile(filePath) {
+  try {
+    const raw = await import_node_fs9.default.promises.readFile(filePath, "utf8");
+    return loadEnvelopeFromText(raw).cursors;
+  } catch (error) {
+    const err2 = error;
+    if (err2.code === "ENOENT") return /* @__PURE__ */ new Map();
+    throw error;
+  }
+}
+function loadEnvelopeFromText(raw) {
+  const parsed = JSON.parse(raw);
+  if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION4) {
+    throw new Error(`cursors.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION4}`);
+  }
+  const bucket = /* @__PURE__ */ new Map();
+  for (const cursor of parsed.cursors ?? []) {
+    if (!isPersistedCursor(cursor)) continue;
+    bucket.set(cursor.name, cloneCursor(cursor));
+  }
+  return { cursors: bucket };
+}
+function applyPersistOp(bucket, op) {
+  if (op.type === "delete") {
+    bucket.delete(op.name);
+    return;
+  }
+  bucket.set(op.cursor.name, cloneCursorRecord(op.cursor));
 }
 function validateCursorName(name) {
   if (!CURSOR_NAME_RE.test(name)) {
@@ -4024,7 +4285,7 @@ function pendingAbortClient(message, data) {
 var import_node_crypto4 = __toESM(require("crypto"));
 
 // src/codex/retry.ts
-var import_promises2 = require("timers/promises");
+var import_promises3 = require("timers/promises");
 
 // src/codex/errors.ts
 var AppServerError = class extends Error {
@@ -4179,7 +4440,7 @@ async function retryOnOverload(op, options = DEFAULT_RETRY) {
       const cap = Math.min(maxDelayMs, delay);
       const jitter = cap * jitterRatio;
       const sleepMs = Math.max(0, cap + (Math.random() * 2 - 1) * jitter);
-      if (sleepMs > 0) await (0, import_promises2.setTimeout)(sleepMs);
+      if (sleepMs > 0) await (0, import_promises3.setTimeout)(sleepMs);
       delay = Math.min(maxDelayMs, delay * 2);
     }
   }
@@ -4464,7 +4725,7 @@ function isStateUsable(state, generation) {
 var import_node_crypto5 = __toESM(require("crypto"));
 var import_node_fs11 = __toESM(require("fs"));
 var import_node_path11 = __toESM(require("path"));
-var import_promises3 = require("timers/promises");
+var import_promises4 = require("timers/promises");
 
 // src/daemon/processes.ts
 var import_node_fs10 = __toESM(require("fs"));
@@ -4771,7 +5032,7 @@ async function waitForTrackedExit(tracked, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (inspectTrackedProcessLiveness(tracked) === "dead") return true;
-    await (0, import_promises3.setTimeout)(POLL_MS, void 0, { ref: false });
+    await (0, import_promises4.setTimeout)(POLL_MS, void 0, { ref: false });
   }
   return inspectTrackedProcessLiveness(tracked) === "dead";
 }
@@ -5982,7 +6243,7 @@ function renderItemWithContext(item, ctx) {
 function createRenderContext(options = {}) {
   const normalized = normalizeTruncateOption(options.truncate);
   return {
-    inlineMaxBytes: normalized === 0 ? INLINE_MAX_BYTES : normalized ?? INLINE_MAX_BYTES,
+    inlineMaxBytes: normalized === 0 ? INLINE_MAX_BYTES : Math.min(normalized ?? INLINE_MAX_BYTES, INLINE_MAX_BYTES),
     truncateBytes: normalized === 0 ? null : normalized ?? INLINE_MAX_BYTES
   };
 }
@@ -6406,6 +6667,7 @@ var sessionAttach = async (ctx, req) => {
   const attach = async () => {
     const existing = ctx.sessions.get(user, identifier);
     if (existing) {
+      validateSessionAutoApprovePatterns(existing.autoApprovePatterns ?? []);
       ctx.sessions.touch(user, existing.name);
       return { session: existing, noop: true };
     }
@@ -6413,6 +6675,7 @@ var sessionAttach = async (ctx, req) => {
     if (anywhere === "ambiguous") {
       throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
     }
+    const autoApprovePatterns = validateSessionAutoApprovePatterns(anywhere?.record.autoApprovePatterns ?? []);
     if (anywhere && anywhere.user !== user) {
       if (!takeover) {
         throw new CodexTeamError("session_busy", `session is live under user '${anywhere.user}'. Pass --takeover to seize.`);
@@ -6438,7 +6701,7 @@ var sessionAttach = async (ctx, req) => {
         name,
         thread_id: threadId,
         state: "live",
-        autoApprovePatterns: anywhere?.record?.autoApprovePatterns ?? [],
+        autoApprovePatterns,
         created_at: now,
         last_active_at: now,
         turn_count: 0,
@@ -6538,6 +6801,7 @@ var sessionFork = async (ctx, req) => {
   let newName = newNameRaw ?? generateSessionName();
   if (newNameRaw) validateSessionName(newNameRaw);
   while (ctx.sessions.get(user, newName)) newName = generateSessionName();
+  const autoApprovePatterns = validateSessionAutoApprovePatterns(source.autoApprovePatterns ?? []);
   const client = await ctx.pool.acquire(
     user,
     keyFor(user, newName),
@@ -6567,7 +6831,7 @@ var sessionFork = async (ctx, req) => {
     effort: source.effort,
     profile: source.profile,
     experimental_tools: source.experimental_tools,
-    autoApprovePatterns: source.autoApprovePatterns ?? [],
+    autoApprovePatterns,
     created_at: now,
     last_active_at: now,
     turn_count: 0,
@@ -6822,6 +7086,8 @@ function resolveAutoApprovePatternsForCreate(ctx, flags) {
   }
   const raw = asString4(flags["auto-approve"]);
   if (raw === null) throw invalidParams("--auto-approve requires a comma-separated value");
+  const validationError = validateAutoApprovePatterns(raw);
+  if (validationError) throw invalidParams(validationError);
   return parseAutoApprovePatterns(raw);
 }
 function resolveExperimentalToolsForAttach(ctx, flags, inherited) {
@@ -6840,6 +7106,11 @@ function isClientAlive(client) {
 }
 function hasFlag(flags, key) {
   return Object.prototype.hasOwnProperty.call(flags, key);
+}
+function validateSessionAutoApprovePatterns(patterns) {
+  const validationError = validateParsedAutoApprovePatterns(patterns);
+  if (validationError) throw invalidParams(validationError);
+  return [...patterns];
 }
 function deriveNameFromThreadId(threadId, ctx, user) {
   const existing = ctx.sessions.get(user, threadId);
@@ -7503,6 +7774,7 @@ function eventCrashTurnId(event) {
   return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
 }
 function terminalWaitResult(session, threadId, turnId, event) {
+  const completedStatus = event.type === "turn.completed" ? event.payload.status : null;
   const completedFields = event.type === "turn.completed" ? pickDefined(event.payload, [
     "status",
     "duration_ms",
@@ -7515,7 +7787,7 @@ function terminalWaitResult(session, threadId, turnId, event) {
     session,
     thread_id: threadId,
     turn_id: turnId,
-    outcome: event.type === "turn.completed" ? "completed" : "error",
+    outcome: event.type === "turn.completed" && completedStatus === "completed" ? "completed" : "error",
     event_type: event.type,
     event_id: event.id,
     ...completedFields,
@@ -7705,6 +7977,7 @@ var monitorEvents = async (ctx, req, stream) => {
   let effectiveSinceId = sinceId;
   let persistedCursorEventId = null;
   let lastObservedEventId = null;
+  let lastAckedEventId = null;
   let cursorWriteChain = Promise.resolve();
   if (cursorName) {
     const cursor = await ctx.cursors.ensure(user, {
@@ -7715,24 +7988,30 @@ var monitorEvents = async (ctx, req, stream) => {
     effectiveSinceId = cursor.event_id;
     persistedCursorEventId = cursor.event_id;
     lastObservedEventId = cursor.event_id;
+    lastAckedEventId = cursor.event_id;
   }
   const emit = (event) => {
     stream.chunk(summaryMode ? summarizeEvent(event) : event);
   };
-  const scheduleCursorUpdate = () => {
+  const scheduleCursorPersist = () => {
     if (!cursorName) return;
-    const nextEventId = lastObservedEventId;
+    const nextEventId = lastAckedEventId;
     if (!nextEventId || nextEventId === persistedCursorEventId) return;
     cursorWriteChain = cursorWriteChain.catch(() => void 0).then(async () => {
       if (!nextEventId || nextEventId === persistedCursorEventId) return;
-      await ctx.cursors.save(user, {
+      await ctx.cursors.saveBestEffort(user, {
         name: cursorName,
         event_id: nextEventId,
         auto_update: true
       });
       persistedCursorEventId = nextEventId;
-    }).catch(() => void 0);
+    });
   };
+  stream.onAck((ack) => {
+    if (!ack.event_id) return;
+    lastAckedEventId = ack.event_id;
+    scheduleCursorPersist();
+  });
   const accept = (e) => {
     if (!includeDelta && isDeltaType(e.type)) return false;
     if (filterTypes && filterTypes.length > 0 && !filterTypes.includes(e.type)) return false;
@@ -7805,7 +8084,6 @@ var monitorEvents = async (ctx, req, stream) => {
       if (accept(e)) emit(e);
     });
     stream.onClose(() => {
-      scheduleCursorUpdate();
       sub2.dispose();
     });
     return { streaming: true };
@@ -7836,9 +8114,6 @@ var monitorEvents = async (ctx, req, stream) => {
       emit(event);
     }
     draining = false;
-    if (batch.length > 0 || overflowEvent || lastObservedEventId !== persistedCursorEventId) {
-      scheduleCursorUpdate();
-    }
     if (overflowDropped > 0 || queue.length > 0) scheduleDrain(1);
   };
   const timer = setInterval(() => {
@@ -7847,14 +8122,11 @@ var monitorEvents = async (ctx, req, stream) => {
   }, intervalS * 1e3);
   if (overflowDropped > 0 || queue.length > 0) {
     scheduleDrain(0);
-  } else if (backlog.events.length > 0) {
-    scheduleCursorUpdate();
   }
   stream.onClose(() => {
     closed = true;
     clearInterval(timer);
     if (drainTimer) clearTimeout(drainTimer);
-    scheduleCursorUpdate();
     sub.dispose();
   });
   return { streaming: true };
@@ -8141,12 +8413,17 @@ async function startServer(ctx) {
 }
 function handleConnection(ctx, socket) {
   const closeCallbacks = /* @__PURE__ */ new Set();
+  const activeStreams = /* @__PURE__ */ new Map();
   onMessages(
     socket,
     async (msg) => {
+      if (msg.kind === "notification") {
+        handleNotification(msg, activeStreams);
+        return;
+      }
       if (msg.kind !== "request") return;
       try {
-        await handleRequest(ctx, socket, msg, closeCallbacks);
+        await handleRequest(ctx, socket, msg, closeCallbacks, activeStreams);
       } catch (e) {
         sendError(socket, msg.id, e);
       }
@@ -8158,6 +8435,7 @@ function handleConnection(ctx, socket) {
         } catch {
         }
       }
+      activeStreams.clear();
       closeCallbacks.clear();
     }
   );
@@ -8165,16 +8443,17 @@ function handleConnection(ctx, socket) {
     logger.debug("socket error", { err: e.message });
   });
 }
-async function handleRequest(ctx, socket, req, closeCallbacks) {
+async function handleRequest(ctx, socket, req, closeCallbacks, activeStreams) {
   ctx.activity.touch();
   const handler = getHandler(req.method);
   const streaming = req.params?.streaming === true;
   if (streaming) {
-    const stream = createStreamHandle(socket, req.id, closeCallbacks);
+    const stream = createStreamHandle(socket, req.id, closeCallbacks, () => activeStreams.delete(req.id));
+    activeStreams.set(req.id, stream);
     try {
-      await handler(ctx, req, stream);
+      await handler(ctx, req, stream.handle);
     } catch (e) {
-      stream.end(toCodexTeamError(e));
+      stream.handle.end(toCodexTeamError(e));
     }
     return;
   }
@@ -8186,11 +8465,19 @@ async function handleRequest(ctx, socket, req, closeCallbacks) {
   };
   writeMessage(socket, resp);
 }
-function createStreamHandle(socket, id, closeCallbacks) {
+function createStreamHandle(socket, id, closeCallbacks, onRetire) {
   let ended = false;
+  let retired = false;
   let blocked = false;
   let queuedBytes = 0;
   const queuedFrames = [];
+  const ackCallbacks = /* @__PURE__ */ new Set();
+  const retire = () => {
+    if (retired) return;
+    retired = true;
+    ackCallbacks.clear();
+    onRetire();
+  };
   const flushQueued = () => {
     while (queuedFrames.length > 0) {
       const frame = queuedFrames[0];
@@ -8205,7 +8492,10 @@ function createStreamHandle(socket, id, closeCallbacks) {
   };
   const onDrain = () => flushQueued();
   socket.on("drain", onDrain);
-  closeCallbacks.add(() => socket.off("drain", onDrain));
+  closeCallbacks.add(() => {
+    retire();
+    socket.off("drain", onDrain);
+  });
   const enqueueFrame = (frame) => {
     if (ended) return;
     if (!blocked && queuedFrames.length === 0) {
@@ -8220,6 +8510,7 @@ function createStreamHandle(socket, id, closeCallbacks) {
       queuedFrames.length = 0;
       queuedBytes = 0;
       ended = true;
+      retire();
       const msg = {
         kind: "stream_end",
         id,
@@ -8238,31 +8529,58 @@ function createStreamHandle(socket, id, closeCallbacks) {
     flushQueued();
   };
   return {
-    chunk(data) {
-      if (ended) return;
-      const msg = { kind: "stream_chunk", id, data };
-      enqueueFrame(JSON.stringify(msg) + "\n");
-    },
-    end(error) {
-      if (ended) return;
-      ended = true;
-      const msg = { kind: "stream_end", id };
-      if (error) {
-        msg.error = { code: error.code, message: error.message, ...error.data !== void 0 ? { data: error.data } : {} };
+    handle: {
+      chunk(data) {
+        if (ended) return;
+        const msg = { kind: "stream_chunk", id, data };
+        enqueueFrame(JSON.stringify(msg) + "\n");
+      },
+      end(error) {
+        if (ended) return;
+        ended = true;
+        retire();
+        const msg = { kind: "stream_end", id };
+        if (error) {
+          msg.error = { code: error.code, message: error.message, ...error.data !== void 0 ? { data: error.data } : {} };
+        }
+        if (queuedFrames.length > 0) {
+          const frame = JSON.stringify(msg) + "\n";
+          queuedFrames.push(frame);
+          queuedBytes += Buffer.byteLength(frame);
+          flushQueued();
+          return;
+        }
+        writeMessage(socket, msg);
+      },
+      onClose(cb) {
+        closeCallbacks.add(cb);
+      },
+      onAck(cb) {
+        ackCallbacks.add(cb);
       }
-      if (queuedFrames.length > 0) {
-        const frame = JSON.stringify(msg) + "\n";
-        queuedFrames.push(frame);
-        queuedBytes += Buffer.byteLength(frame);
-        flushQueued();
-        return;
-      }
-      writeMessage(socket, msg);
     },
-    onClose(cb) {
-      closeCallbacks.add(cb);
+    ack(params) {
+      if (ended || retired) return;
+      const ack = normalizeStreamAck(params);
+      if (!ack) return;
+      for (const cb of ackCallbacks) cb(ack);
     }
   };
+}
+function handleNotification(msg, activeStreams) {
+  if (msg.method !== "stream_ack") return;
+  const streamId = asString8(msg.params?.id);
+  if (!streamId) return;
+  const params = msg.params && typeof msg.params === "object" && !Array.isArray(msg.params) ? msg.params : {};
+  activeStreams.get(streamId)?.ack(params);
+}
+function normalizeStreamAck(params) {
+  const eventId = asString8(params.event_id);
+  if (!eventId) return null;
+  return { event_id: eventId };
+}
+function asString8(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 function sendError(socket, id, e) {
   const err2 = toCodexTeamError(e);
@@ -8558,18 +8876,18 @@ function fallbackType(method) {
 function extractAutoApproveTarget(kind, payload) {
   switch (kind) {
     case "approval.command_execution":
-      return asString8(payload.command);
+      return asString9(payload.command);
     case "approval.permissions":
-      return asString8(payload.command) ?? asString8(payload.reason);
+      return asString9(payload.command) ?? asString9(payload.reason);
     case "approval.file_change":
-      return asString8(payload.reason) ?? asString8(payload.grant_root);
+      return asString9(payload.reason) ?? asString9(payload.grant_root);
     case "approval.mcp_elicitation":
-      return asString8(payload.url) ?? asString8(payload.message) ?? asString8(payload.server_name);
+      return asString9(payload.url) ?? asString9(payload.message) ?? asString9(payload.server_name);
     default:
       return null;
   }
 }
-function asString8(value) {
+function asString9(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 function asObject5(value) {
@@ -8588,7 +8906,7 @@ function extractThreadId(params) {
 // src/daemon/wire.ts
 function wireDaemonEvents(ctx) {
   ctx.pool.on("notification", (e) => {
-    void handleNotification(ctx, e).catch((err2) => {
+    void handleNotification2(ctx, e).catch((err2) => {
       logger.warn("notification handling failed", { err: err2.message });
     });
   });
@@ -8603,7 +8921,7 @@ function wireDaemonEvents(ctx) {
     });
   });
 }
-async function handleNotification(ctx, e) {
+async function handleNotification2(ctx, e) {
   const norm = normalizeNotification(e.notification);
   const sessionName = resolveSession(ctx, e.user, norm.threadId);
   const rec = sessionName ? ctx.sessions.get(e.user, sessionName) : null;
@@ -8726,15 +9044,11 @@ async function handleNotification(ctx, e) {
           adjustPendingCounts(ctx, removed.user, removed.session_name, removed.kind, -1);
         }
       } else {
-        for (const p of ctx.pending.listForUser(e.user)) {
-          if (String(p.jsonrpc_id) === String(jsonrpcId)) {
-            const removed = ctx.pending.remove(p.request_id);
-            if (removed?.session_name) {
-              adjustPendingCounts(ctx, removed.user, removed.session_name, removed.kind, -1);
-            }
-            break;
-          }
-        }
+        logger.warn("ignoring server_request_resolved for unknown client", {
+          user: e.user,
+          client_id: e.clientId,
+          jsonrpc_id: jsonrpcId
+        });
       }
     }
   }
@@ -8964,6 +9278,7 @@ async function appendSessionCrashed(ctx, user, session, threadId, reason, lastTu
 }
 
 // src/daemon/run.ts
+var APP_SERVER_CRASHED_ON_RESTART_REASON = "app_server_crashed_on_restart";
 async function runDaemon() {
   const config = new ConfigStore();
   const ctx = buildContext({
@@ -8980,6 +9295,7 @@ async function runDaemon() {
     return 1;
   }
   await reapOrphans(ctx.dataDir);
+  await reconcileLoadedSessionsAfterRestart(ctx);
   const cleanup = () => {
     unlinkSockIfStale(ctx.sockPath);
     try {
@@ -9012,6 +9328,58 @@ async function runDaemon() {
   return await new Promise(() => {
   });
 }
+async function reconcileLoadedSessionsAfterRestart(ctx) {
+  if (!ctx.users || typeof ctx.users.list !== "function") return;
+  if (!ctx.sessions || typeof ctx.sessions.listLive !== "function" || typeof ctx.sessions.update !== "function") return;
+  if (!ctx.pool || typeof ctx.pool.clientForSession !== "function") return;
+  if (!ctx.events || typeof ctx.events.append !== "function") return;
+  for (const user of ctx.users.list()) {
+    for (const rec of ctx.sessions.listLive(user.token)) {
+      if (rec.state !== "live") continue;
+      const sessionKey = keyFor4(user.token, rec.name);
+      if (isClientAlive3(ctx.pool.clientForSession(sessionKey))) continue;
+      const lastTurnId = rec.current_turn_id ?? rec.last_turn_id ?? null;
+      ctx.sessions.update(user.token, rec.name, {
+        state: "crashed",
+        recovery_state: "degraded",
+        crash_reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+        last_turn_id: lastTurnId,
+        current_turn_id: null,
+        current_turn_started_at: null,
+        current_item_type: null,
+        items_in_turn: 0,
+        pending_approvals: 0,
+        pending_user_inputs: 0
+      });
+      await ctx.events.append(user.token, {
+        type: SESSION_CRASHED_EVENT_TYPE,
+        session: rec.name,
+        thread_id: rec.thread_id,
+        payload: {
+          session: rec.name,
+          thread_id: rec.thread_id,
+          reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+          last_turn_id: lastTurnId
+        }
+      });
+      for (const pending of cancelRestartPendingRequests(ctx, user.token, rec.name, rec.thread_id)) {
+        const eventType = cancellationEventType(pending.kind);
+        if (!eventType) continue;
+        await ctx.events.append(user.token, {
+          type: eventType,
+          session: rec.name,
+          thread_id: rec.thread_id,
+          payload: {
+            request_id: pending.request_id,
+            kind: pending.kind,
+            turn_id: pending.turn_id ?? null,
+            reason: APP_SERVER_CRASHED_ON_RESTART_REASON
+          }
+        });
+      }
+    }
+  }
+}
 function acquirePid(pidPath) {
   try {
     import_node_fs16.default.mkdirSync(import_node_path14.default.dirname(pidPath), { recursive: true });
@@ -9029,6 +9397,34 @@ function acquirePid(pidPath) {
     if (e?.code === "EEXIST") return false;
     return false;
   }
+}
+function cancelRestartPendingRequests(ctx, user, sessionName, threadId) {
+  if (!ctx.pending) return [];
+  if (typeof ctx.pending.abortForSession === "function") {
+    return ctx.pending.abortForSession(user, sessionName, "session_crashed", {
+      reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+      session: sessionName,
+      thread_id: threadId
+    });
+  }
+  if (typeof ctx.pending.removeForSession === "function") {
+    return ctx.pending.removeForSession(user, sessionName);
+  }
+  return [];
+}
+function cancellationEventType(kind) {
+  if (kind.startsWith("approval.")) return APPROVAL_REQUEST_CANCELLED_EVENT_TYPE;
+  if (kind === "user_input.request") return USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE;
+  return null;
+}
+function isClientAlive3(client) {
+  if (!client) return false;
+  const maybe = client;
+  if (typeof maybe.isAlive === "function") return maybe.isAlive();
+  return true;
+}
+function keyFor4(user, sessionName) {
+  return `${user}::${sessionName}`;
 }
 function scheduleIdleShutdown(ctx) {
   const check = () => {
@@ -9079,7 +9475,7 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
           }
         };
       }
-      await sleep4(150);
+      await sleep5(150);
       continue;
     }
     if (pidAlive || legacyPidAlive) {
@@ -9095,7 +9491,7 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
           }
         };
       }
-      await sleep4(150);
+      await sleep5(150);
       continue;
     }
     if (pid !== null && !pidAlive) {
@@ -9121,7 +9517,7 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
         details: { pid_path: pidPath }
       };
     }
-    await sleep4(150);
+    await sleep5(150);
   }
 }
 function readPidFile2(pidPath) {
@@ -9154,7 +9550,7 @@ function legacyWindowsPidFilePath(currentPidPath) {
   if (legacyHome === homeDir()) return null;
   return legacyPath;
 }
-function sleep4(ms) {
+function sleep5(ms) {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
     timer.unref();
