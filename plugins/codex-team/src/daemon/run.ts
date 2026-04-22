@@ -5,7 +5,7 @@ import { buildContext } from "./context";
 import { startServer } from "./server";
 import { probeSock, unlinkSockIfStale } from "../ipc/sock";
 import { logger } from "../logger";
-import { APP, homeDir, pidFilePath } from "../paths";
+import { APP, homeDir, pidFilePath, warnLegacyWindowsDataDir } from "../paths";
 import { shutdownDaemon } from "./shutdown";
 import { wireDaemonEvents } from "./wire";
 import { reapOrphans } from "./orphans";
@@ -13,6 +13,9 @@ import { isLikelyCodexTeamDaemonProcess } from "./processes";
 
 export async function runDaemon(): Promise<number> {
   const ctx = buildContext();
+  warnLegacyWindowsDataDir((warning) => {
+    logger.warn(warning.message);
+  });
   const pidPath = pidFilePath(ctx.dataDir);
 
   const acquired = await acquireDaemonOwnership(ctx.sockPath, pidPath);

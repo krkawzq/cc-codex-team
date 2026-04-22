@@ -4,7 +4,7 @@ import type net from "node:net";
 
 import { connectSock, probeSock, writeMessage, onMessages } from "../ipc/sock";
 import type { IpcMessage, IpcRequest } from "../ipc/protocol";
-import { defaultSockPath } from "../paths";
+import { defaultSockPath, warnLegacyWindowsDataDir } from "../paths";
 import { parseArgs, commandKey, supportsShort, type ParsedArgs } from "./args";
 import { renderHelp } from "./help";
 import { err, ok } from "../result";
@@ -39,6 +39,10 @@ export async function runCli(argv: string[]): Promise<number> {
     process.stdout.write(renderHelp(parsed.commandPath));
     return 0;
   }
+
+  warnLegacyWindowsDataDir((warning) => {
+    process.stderr.write(warning.message + "\n");
+  });
 
   const method = commandKey(parsed.commandPath);
   const short = truthy(parsed.flags.short);
