@@ -40,14 +40,16 @@ var require_package = __commonJS({
       scripts: {
         build: "tsup src/main.ts --format cjs --platform node --target node18 --out-dir dist --clean",
         dev: "tsup src/main.ts --format cjs --platform node --target node18 --out-dir dist --watch",
+        test: "vitest run",
+        "test:watch": "vitest",
         typecheck: "tsc --noEmit",
         clean: "rm -rf dist"
       },
-      dependencies: {},
       devDependencies: {
         "@types/node": "^24.0.0",
         tsup: "^8.5.0",
-        typescript: "^5.9.2"
+        typescript: "^5.9.2",
+        vitest: "^4.1.5"
       }
     };
   }
@@ -60,7 +62,80 @@ var import_promises = require("timers/promises");
 // src/ipc/sock.ts
 var import_node_fs = __toESM(require("fs"));
 var import_node_net = __toESM(require("net"));
+var import_node_path2 = __toESM(require("path"));
+
+// src/paths.ts
+var import_node_crypto = __toESM(require("crypto"));
+var import_node_os = __toESM(require("os"));
 var import_node_path = __toESM(require("path"));
+var APP = "codex-team";
+var WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\";
+var UNIX_SOCKET_MAX_BYTES = 90;
+function homeDir() {
+  return process.env.HOME || import_node_os.default.homedir() || "/";
+}
+function defaultDataDir() {
+  return process.env.CODEX_TEAM_DATA_DIR || import_node_path.default.join(homeDir(), `.${APP}`);
+}
+function defaultSockPath(dataDir = defaultDataDir(), platform = process.platform) {
+  const configured = process.env.CODEX_TEAM_SOCK;
+  if (configured) return normalizeSockPath(configured, platform);
+  if (platform === "win32") return namedPipePath(dataDir);
+  const candidate = import_node_path.default.join(dataDir, "daemon.sock");
+  if (Buffer.byteLength(candidate, "utf8") <= UNIX_SOCKET_MAX_BYTES) return candidate;
+  return import_node_path.default.join(import_node_os.default.tmpdir(), `${APP}-${pathHash(dataDir)}.sock`);
+}
+function defaultLogPath(dataDir = defaultDataDir()) {
+  return import_node_path.default.join(dataDir, "daemon.log");
+}
+function configFilePath(dataDir = defaultDataDir()) {
+  return import_node_path.default.join(dataDir, "config.json");
+}
+function pidFilePath(dataDir = defaultDataDir()) {
+  return import_node_path.default.join(dataDir, "daemon.pid");
+}
+function usersDir(dataDir = defaultDataDir()) {
+  return import_node_path.default.join(dataDir, "users");
+}
+function userDir(token, dataDir = defaultDataDir()) {
+  return import_node_path.default.join(usersDir(dataDir), encodeToken(token));
+}
+function userMetadataPath(token, dataDir = defaultDataDir()) {
+  return import_node_path.default.join(userDir(token, dataDir), "metadata.json");
+}
+function userEventLogPath(token, dataDir = defaultDataDir()) {
+  return import_node_path.default.join(userDir(token, dataDir), "events.log");
+}
+function userSessionsPath(token, dataDir = defaultDataDir()) {
+  return import_node_path.default.join(userDir(token, dataDir), "sessions.json");
+}
+function normalizeSockPath(sockPath, platform = process.platform) {
+  if (platform !== "win32") return sockPath;
+  if (isNamedPipePath(sockPath)) return sockPath.replace(/\//g, "\\");
+  return namedPipePath(sockPath);
+}
+function isNamedPipePath(sockPath) {
+  return /^\\\\\.\\pipe[\\/]/i.test(sockPath);
+}
+function isFilesystemSockPath(sockPath, platform = process.platform) {
+  return !isNamedPipePath(normalizeSockPath(sockPath, platform));
+}
+function encodeToken(token) {
+  return Buffer.from(token, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function decodeToken(encoded) {
+  const pad = encoded.length % 4 === 0 ? "" : "=".repeat(4 - encoded.length % 4);
+  const b64 = encoded.replace(/-/g, "+").replace(/_/g, "/") + pad;
+  return Buffer.from(b64, "base64").toString("utf8");
+}
+function namedPipePath(seed) {
+  return `${WINDOWS_PIPE_PREFIX}${APP}-${pathHash(seed)}`;
+}
+function pathHash(input) {
+  return import_node_crypto.default.createHash("sha256").update(input).digest("hex").slice(0, 16);
+}
+
+// src/ipc/sock.ts
 function writeMessage(socket, msg) {
   socket.write(JSON.stringify(msg) + "\n");
 }
@@ -81,12 +156,21 @@ function onMessages(socket, handler, onClose) {
     }
   });
   if (onClose) {
-    socket.on("close", onClose);
-    socket.on("end", onClose);
+    let closed = false;
+    const onceClose = () => {
+      if (closed) return;
+      closed = true;
+      onClose();
+    };
+    socket.on("close", onceClose);
+    socket.on("end", onceClose);
   }
 }
 async function listenSock(sockPath) {
-  import_node_fs.default.mkdirSync(import_node_path.default.dirname(sockPath), { recursive: true });
+  const endpoint = normalizeSockPath(sockPath);
+  if (isFilesystemSockPath(sockPath)) {
+    import_node_fs.default.mkdirSync(import_node_path2.default.dirname(endpoint), { recursive: true });
+  }
   const server = import_node_net.default.createServer();
   await new Promise((resolve, reject) => {
     const onError = (e) => {
@@ -99,17 +183,18 @@ async function listenSock(sockPath) {
     };
     server.once("error", onError);
     server.once("listening", onListening);
-    server.listen(sockPath);
+    server.listen(endpoint);
   });
   return server;
 }
 function connectSock(sockPath, timeoutMs = 2e3) {
   return new Promise((resolve, reject) => {
-    const sock = import_node_net.default.createConnection(sockPath);
+    const sock = import_node_net.default.createConnection(normalizeSockPath(sockPath));
     const timer = setTimeout(() => {
       sock.destroy();
       reject(new Error("connect timeout"));
     }, timeoutMs);
+    timer.unref();
     sock.once("connect", () => {
       clearTimeout(timer);
       resolve(sock);
@@ -122,15 +207,17 @@ function connectSock(sockPath, timeoutMs = 2e3) {
 }
 function probeSock(sockPath, timeoutMs = 200) {
   return new Promise((resolve) => {
-    if (!import_node_fs.default.existsSync(sockPath)) {
+    const endpoint = normalizeSockPath(sockPath);
+    if (isFilesystemSockPath(sockPath) && !import_node_fs.default.existsSync(endpoint)) {
       resolve(false);
       return;
     }
-    const sock = import_node_net.default.createConnection(sockPath);
+    const sock = import_node_net.default.createConnection(endpoint);
     const timer = setTimeout(() => {
       sock.destroy();
       resolve(false);
     }, timeoutMs);
+    timer.unref();
     sock.once("connect", () => {
       clearTimeout(timer);
       sock.destroy();
@@ -143,56 +230,12 @@ function probeSock(sockPath, timeoutMs = 200) {
   });
 }
 function unlinkSockIfStale(sockPath) {
+  if (!isFilesystemSockPath(sockPath)) return;
+  const endpoint = normalizeSockPath(sockPath);
   try {
-    import_node_fs.default.unlinkSync(sockPath);
+    import_node_fs.default.unlinkSync(endpoint);
   } catch {
   }
-}
-
-// src/paths.ts
-var import_node_os = __toESM(require("os"));
-var import_node_path2 = __toESM(require("path"));
-var APP = "codex-team";
-function homeDir() {
-  return process.env.HOME || import_node_os.default.homedir() || "/";
-}
-function defaultDataDir() {
-  return process.env.CODEX_TEAM_DATA_DIR || import_node_path2.default.join(homeDir(), `.${APP}`);
-}
-function defaultSockPath(dataDir = defaultDataDir()) {
-  return process.env.CODEX_TEAM_SOCK || import_node_path2.default.join(dataDir, "daemon.sock");
-}
-function defaultLogPath(dataDir = defaultDataDir()) {
-  return import_node_path2.default.join(dataDir, "daemon.log");
-}
-function configFilePath(dataDir = defaultDataDir()) {
-  return import_node_path2.default.join(dataDir, "config.json");
-}
-function pidFilePath(dataDir = defaultDataDir()) {
-  return import_node_path2.default.join(dataDir, "daemon.pid");
-}
-function usersDir(dataDir = defaultDataDir()) {
-  return import_node_path2.default.join(dataDir, "users");
-}
-function userDir(token, dataDir = defaultDataDir()) {
-  return import_node_path2.default.join(usersDir(dataDir), encodeToken(token));
-}
-function userMetadataPath(token, dataDir = defaultDataDir()) {
-  return import_node_path2.default.join(userDir(token, dataDir), "metadata.json");
-}
-function userEventLogPath(token, dataDir = defaultDataDir()) {
-  return import_node_path2.default.join(userDir(token, dataDir), "events.log");
-}
-function userSessionsPath(token, dataDir = defaultDataDir()) {
-  return import_node_path2.default.join(userDir(token, dataDir), "sessions.json");
-}
-function encodeToken(token) {
-  return Buffer.from(token, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-function decodeToken(encoded) {
-  const pad = encoded.length % 4 === 0 ? "" : "=".repeat(4 - encoded.length % 4);
-  const b64 = encoded.replace(/-/g, "+").replace(/_/g, "/") + pad;
-  return Buffer.from(b64, "base64").toString("utf8");
 }
 
 // src/cli/args.ts
@@ -230,6 +273,7 @@ var COMMANDS = /* @__PURE__ */ new Set([
   "monitor:events",
   "monitor:alarm"
 ]);
+var COMMAND_GROUPS = /* @__PURE__ */ new Set(["daemon", "session", "message", "monitor"]);
 var GLOBAL_FLAGS = {
   "-b": { name: "bearer", takesValue: true },
   "--bearer": { name: "bearer", takesValue: true },
@@ -275,6 +319,10 @@ function parseArgs(argv) {
   if (!matched) {
     if (nonGlobal.length === 0) {
       result.help = true;
+      return result;
+    }
+    if (result.help && nonGlobal.length === 1 && COMMAND_GROUPS.has(nonGlobal[0])) {
+      result.commandPath = [nonGlobal[0]];
       return result;
     }
     result.unknown = `unknown command: ${nonGlobal.join(" ")}`;
@@ -352,8 +400,8 @@ function matchCommand(tokens) {
   }
   return null;
 }
-function commandKey(path10) {
-  return path10.join(":");
+function commandKey(path11) {
+  return path11.join(":");
 }
 
 // src/cli/help.ts
@@ -381,6 +429,72 @@ COMMAND GROUPS
 Run 'codex-team <group> --help' for details on each group.
 Full specification: plugins/codex-team/docs/\u8BBE\u8BA1\u6587\u6863.md
 `;
+var GROUP_HELP = {
+  daemon: `codex-team daemon \u2014 daemon management
+
+USAGE
+  codex-team daemon <subcmd> [flags]
+
+SUBCOMMANDS
+  status
+  start
+  stop [--force]
+  restart
+  logs [--n <N>] [--level <level>] [--follow]
+  user create <token>
+  user destroy <token>
+  user list
+  config get <key>
+  config set <key> <value>
+  config unset <key>
+  config list [--explicit-only]
+  config reset --yes
+`,
+  session: `codex-team session \u2014 live session management
+
+USAGE
+  codex-team -b <token> session <subcmd> [args] [flags]
+
+SUBCOMMANDS
+  new [name]
+  attach <name|thread_id> [--takeover]
+  detach <name|thread_id> [--graceful]
+  fork <name|thread_id> [new_name] [--at-turn <turn_id>]
+  rename <name|thread_id> <new_name>
+  info <name|thread_id>
+  context <name|thread_id> [--format json|markdown]
+  list [--all] [--sort <field>] [--format json|table]
+`,
+  message: `codex-team message \u2014 turn operations on a live session
+
+USAGE
+  codex-team -b <token> message <subcmd> [args] [flags]
+
+SUBCOMMANDS
+  send <session> <text>|--file <path>|--stdin [--attach <image>...]
+  peer <session> <text>|--file <path>|--stdin [--attach <image>...]
+  interrupt <session>
+  approval <session> <request_id> <shortcut>|--json <payload>|--file <path>|--stdin
+  answer <session> <request_id> <text>|--json <payload>|--file <path>|--stdin
+  history <session> [--since <cursor|-N>] [--limit <N>] [--format json|markdown]
+  tail <session> [--n <N>] [--follow] [--format json|markdown]
+`,
+  monitor: `codex-team monitor \u2014 event streams and alarms
+
+USAGE
+  codex-team -b <token> monitor <subcmd> [args] [flags]
+
+SUBCOMMANDS
+  events [--stream|--follow] [--since <event_id>] [--interval <seconds>]
+  alarm <session> <command> [--interval <seconds>] [--timeout <seconds>]
+`
+};
+function helpTextFor(commandPath) {
+  if (commandPath.length === 1) {
+    return GROUP_HELP[commandPath[0]] ?? HELP_TEXT;
+  }
+  return HELP_TEXT;
+}
 
 // src/result.ts
 function ok(data) {
@@ -394,237 +508,6 @@ function err(code, message, data) {
   return { ok: false, error };
 }
 
-// src/cli/run.ts
-var DAEMON_READY_TIMEOUT_MS = 5e3;
-var DAEMON_POLL_INTERVAL_MS = 100;
-async function readStdinAll() {
-  return await new Promise((resolve, reject) => {
-    let buf = "";
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => {
-      buf += chunk;
-    });
-    process.stdin.once("end", () => resolve(buf));
-    process.stdin.once("error", reject);
-  });
-}
-async function runCli(argv) {
-  const parsed = parseArgs(argv);
-  if (parsed.unknown) {
-    process.stdout.write(JSON.stringify(err("invalid_params", parsed.unknown)) + "\n");
-    return 1;
-  }
-  if (parsed.help || parsed.commandPath.length === 0) {
-    process.stdout.write(HELP_TEXT);
-    return 0;
-  }
-  const method = commandKey(parsed.commandPath);
-  const sockPath = parsed.daemonSock || defaultSockPath();
-  if (method === "version") {
-    return await runVersion(sockPath);
-  }
-  const needsBearer = !isDaemonLevel(method);
-  if (needsBearer && !parsed.bearer) {
-    process.stdout.write(
-      JSON.stringify(err("invalid_params", `bearer token required for '${method}'; pass -b <token>`)) + "\n"
-    );
-    return 1;
-  }
-  const ready = await ensureDaemon(sockPath);
-  if (!ready) {
-    process.stdout.write(JSON.stringify(err("daemon_unreachable", "daemon did not become ready in time")) + "\n");
-    return 1;
-  }
-  return await dispatchCommand(sockPath, parsed, method);
-}
-function isDaemonLevel(method) {
-  return method === "version" || method === "daemon:status" || method.startsWith("daemon:");
-}
-async function runVersion(sockPath) {
-  const cliVersion = getCliVersion();
-  const alive = await probeSock(sockPath, 200);
-  let daemonVersion = null;
-  if (alive) {
-    try {
-      const sock = await connectSock(sockPath, 500);
-      const resp = await requestOnce(sock, { method: "version", bearer: null, params: {} });
-      sock.end();
-      if ("result" in resp && resp.result && typeof resp.result === "object") {
-        const d = resp.result;
-        daemonVersion = d.daemon_version || null;
-      }
-    } catch {
-    }
-  }
-  process.stdout.write(
-    JSON.stringify(ok({ cli_version: cliVersion, daemon_version: daemonVersion })) + "\n"
-  );
-  return 0;
-}
-async function dispatchCommand(sockPath, parsed, method) {
-  const needsStreaming = method === "monitor:events" || method === "monitor:alarm" || method === "daemon:logs" || method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]);
-  if (truthy(parsed.flags["stdin"]) && !("stdin_content" in parsed.flags)) {
-    try {
-      const content = await readStdinAll();
-      parsed.flags["stdin_content"] = content;
-    } catch (e) {
-      process.stdout.write(
-        JSON.stringify(err("invalid_params", `failed to read stdin: ${e.message}`)) + "\n"
-      );
-      return 1;
-    }
-  }
-  const sock = await connectSock(sockPath, 2e3);
-  if (needsStreaming) {
-    return await runStream(sock, parsed, method);
-  }
-  try {
-    const params = {
-      positionals: parsed.positionals,
-      flags: parsed.flags
-    };
-    const stdinContent = parsed.flags["stdin_content"];
-    if (typeof stdinContent === "string") params.stdin_content = stdinContent;
-    const resp = await requestOnce(sock, {
-      method,
-      bearer: parsed.bearer,
-      params
-    });
-    sock.end();
-    if ("error" in resp && resp.error) {
-      process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
-      return 1;
-    }
-    process.stdout.write(JSON.stringify({ ok: true, data: resp.result }) + "\n");
-    return 0;
-  } catch (e) {
-    sock.destroy();
-    process.stdout.write(
-      JSON.stringify(err("internal", e.message ?? "rpc failed")) + "\n"
-    );
-    return 1;
-  }
-}
-async function runStream(sock, parsed, method) {
-  return await new Promise((resolve) => {
-    let finished = false;
-    const finish = (code) => {
-      if (finished) return;
-      finished = true;
-      process.off("SIGINT", onInterrupt);
-      process.off("SIGTERM", onInterrupt);
-      resolve(code);
-    };
-    const reqId = randomId();
-    const params = {
-      positionals: parsed.positionals,
-      flags: parsed.flags,
-      streaming: true
-    };
-    const stdinContent = parsed.flags["stdin_content"];
-    if (typeof stdinContent === "string") params.stdin_content = stdinContent;
-    const req = {
-      kind: "request",
-      id: reqId,
-      method,
-      bearer: parsed.bearer ?? void 0,
-      params
-    };
-    onMessages(sock, (msg) => {
-      if (msg.kind === "stream_chunk" && msg.id === reqId) {
-        process.stdout.write(JSON.stringify(msg.data) + "\n");
-      } else if (msg.kind === "stream_end" && msg.id === reqId) {
-        if (msg.error) {
-          process.stdout.write(JSON.stringify({ ok: false, error: msg.error }) + "\n");
-          finish(1);
-        } else {
-          finish(0);
-        }
-        sock.end();
-      } else if (msg.kind === "response" && msg.id === reqId) {
-        if (msg.error) {
-          process.stdout.write(JSON.stringify({ ok: false, error: msg.error }) + "\n");
-          finish(1);
-        } else {
-          finish(0);
-        }
-        sock.end();
-      }
-    }, () => {
-      finish(finished ? 0 : 1);
-    });
-    const onInterrupt = () => {
-      sock.end();
-      finish(130);
-    };
-    process.once("SIGINT", onInterrupt);
-    process.once("SIGTERM", onInterrupt);
-    writeMessage(sock, req);
-  });
-}
-function requestOnce(sock, opts) {
-  return new Promise((resolve, reject) => {
-    const id = randomId();
-    const req = {
-      kind: "request",
-      id,
-      method: opts.method,
-      bearer: opts.bearer ?? void 0,
-      params: opts.params
-    };
-    let resolved = false;
-    onMessages(sock, (msg) => {
-      if (resolved) return;
-      if (msg.kind === "response" && msg.id === id) {
-        resolved = true;
-        resolve({ id: msg.id, result: msg.result, error: msg.error });
-      }
-    }, () => {
-      if (!resolved) reject(new Error("daemon closed connection"));
-    });
-    sock.once("error", (e) => {
-      if (!resolved) reject(e);
-    });
-    writeMessage(sock, req);
-  });
-}
-async function ensureDaemon(sockPath) {
-  if (await probeSock(sockPath, 200)) return true;
-  spawnDaemon();
-  const deadline = Date.now() + DAEMON_READY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    await (0, import_promises.setTimeout)(DAEMON_POLL_INTERVAL_MS);
-    if (await probeSock(sockPath, 200)) return true;
-  }
-  return false;
-}
-function spawnDaemon() {
-  const child = (0, import_node_child_process.spawn)(process.execPath, [process.argv[1], "--daemon-internal"], {
-    detached: true,
-    stdio: "ignore",
-    env: process.env
-  });
-  child.unref();
-}
-function getCliVersion() {
-  try {
-    const pkg = require_package();
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-function randomId() {
-  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-}
-function truthy(v) {
-  return v === true || v === "true" || v === "1";
-}
-
-// src/daemon/run.ts
-var import_node_fs12 = __toESM(require("fs"));
-var import_node_path9 = __toESM(require("path"));
-
 // src/daemon/config.ts
 var import_node_fs2 = __toESM(require("fs"));
 var import_node_path3 = __toESM(require("path"));
@@ -637,11 +520,16 @@ var CONFIG_KEYS = {
   "daemon.log_path": { type: "path", default: "", needsRestart: true, description: "log file path (empty = default)" },
   "daemon.data_dir": { type: "path", default: "", needsRestart: true, description: "persistent state root (empty = default)" },
   "daemon.sock_path": { type: "path", default: "", needsRestart: true, description: "sock path (empty = default)" },
+  "daemon.ready_timeout_seconds": { type: "int", default: 15, needsRestart: false, description: "how long the CLI waits for the daemon to become ready" },
+  "daemon.connect_timeout_seconds": { type: "int", default: 5, needsRestart: false, description: "per-attempt CLI connect timeout to the daemon" },
+  "daemon.connect_retry_attempts": { type: "int", default: 3, needsRestart: false, description: "CLI retries for transient daemon connect errors" },
+  "daemon.connect_retry_delay_seconds": { type: "float", default: 0.25, needsRestart: false, description: "delay between transient daemon connect retries" },
   "monitor.default_interval_seconds": { type: "int", default: 30, needsRestart: false, description: "default --interval for `monitor events`" },
   "monitor.event_log_retention": { type: "int", default: 1e4, needsRestart: false, description: "per-user ring-buffer event retention" },
-  "app_server.max_sessions_per_process": { type: "int", default: 16, needsRestart: false, description: "max sessions multiplexed per app-server process (new processes only)" },
+  "app_server.max_sessions_per_process": { type: "int", default: 16, needsRestart: false, description: "max session bindings per reusable app-server process (primarily adhoc clients)" },
   "app_server.idle_unload_minutes": { type: "int", default: 60, needsRestart: false, description: "idle duration before unloading live session from app-server" },
-  "retry.max_attempts": { type: "int", default: 3, needsRestart: false, description: "server_overloaded retry count" },
+  "app_server.request_timeout_seconds": { type: "int", default: 120, needsRestart: false, description: "per-request timeout for app-server JSON-RPC calls" },
+  "retry.max_attempts": { type: "int", default: 3, needsRestart: false, description: "retry count for transient app-server transport / stream errors" },
   "retry.initial_delay_seconds": { type: "float", default: 0.25, needsRestart: false, description: "initial backoff" },
   "retry.max_delay_seconds": { type: "float", default: 2, needsRestart: false, description: "max backoff" },
   "codex.default_model": { type: "string", default: "", needsRestart: false, description: "default --model for session new" },
@@ -662,7 +550,10 @@ var ConfigStore = class {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object") {
         for (const [k, v] of Object.entries(parsed)) {
-          if (k in CONFIG_KEYS) this.explicit[k] = v;
+          const spec = CONFIG_KEYS[k];
+          if (spec && isValidPersistedValue(v, spec)) {
+            this.explicit[k] = v;
+          }
         }
       }
     } catch {
@@ -730,7 +621,7 @@ var ConfigStore = class {
   }
   resolvedSockPath() {
     const explicit = this.explicit["daemon.sock_path"];
-    if (typeof explicit === "string" && explicit.trim().length > 0) return explicit;
+    if (typeof explicit === "string" && explicit.trim().length > 0) return normalizeSockPath(explicit);
     return defaultSockPath(this.resolvedDataDir());
   }
   resolvedDataDir() {
@@ -768,6 +659,320 @@ function parseValue(raw, spec) {
       return { ok: true, value: raw };
   }
 }
+function isValidPersistedValue(value, spec) {
+  switch (spec.type) {
+    case "int":
+      return typeof value === "number" && Number.isInteger(value) && Number.isFinite(value);
+    case "float":
+      return typeof value === "number" && Number.isFinite(value);
+    case "bool":
+      return typeof value === "boolean";
+    case "enum":
+      return typeof value === "string" && !!spec.enumValues?.includes(value);
+    case "path":
+    case "string":
+    default:
+      return typeof value === "string";
+  }
+}
+
+// src/cli/run.ts
+var DAEMON_POLL_INTERVAL_MS = 100;
+var DEFAULT_DAEMON_READY_TIMEOUT_MS = 15e3;
+var DEFAULT_DAEMON_CONNECT_TIMEOUT_MS = 5e3;
+var DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS = 3;
+var DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS = 250;
+async function readStdinAll() {
+  return await new Promise((resolve, reject) => {
+    let buf = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      buf += chunk;
+    });
+    process.stdin.once("end", () => resolve(buf));
+    process.stdin.once("error", reject);
+  });
+}
+async function runCli(argv) {
+  const parsed = parseArgs(argv);
+  if (parsed.unknown) {
+    process.stdout.write(JSON.stringify(err("invalid_params", parsed.unknown)) + "\n");
+    return 1;
+  }
+  if (parsed.help || parsed.commandPath.length === 0) {
+    process.stdout.write(helpTextFor(parsed.commandPath));
+    return 0;
+  }
+  const method = commandKey(parsed.commandPath);
+  const sockPath = parsed.daemonSock || defaultSockPath();
+  if (method === "version") {
+    return await runVersion(sockPath);
+  }
+  const needsBearer = !isDaemonLevel(method);
+  if (needsBearer && !parsed.bearer) {
+    process.stdout.write(
+      JSON.stringify(err("invalid_params", `bearer token required for '${method}'; pass -b <token>`)) + "\n"
+    );
+    return 1;
+  }
+  const ready = await ensureDaemon(sockPath);
+  if (!ready) {
+    process.stdout.write(JSON.stringify(err("daemon_unreachable", "daemon did not become ready in time")) + "\n");
+    return 1;
+  }
+  return await dispatchCommand(sockPath, parsed, method);
+}
+function isDaemonLevel(method) {
+  return method === "version" || method === "daemon:status" || method.startsWith("daemon:");
+}
+async function runVersion(sockPath) {
+  const cliVersion = getCliVersion();
+  const alive = await probeSock(sockPath, 200);
+  const cliConfig = readCliConfig();
+  let daemonVersion = null;
+  if (alive) {
+    try {
+      const resp = await requestOnceWithRetry(sockPath, { method: "version", bearer: null, params: {} }, cliConfig, true);
+      if ("result" in resp && resp.result && typeof resp.result === "object") {
+        const d = resp.result;
+        daemonVersion = d.daemon_version || null;
+      }
+    } catch {
+    }
+  }
+  process.stdout.write(
+    JSON.stringify(ok({ cli_version: cliVersion, daemon_version: daemonVersion })) + "\n"
+  );
+  return 0;
+}
+async function dispatchCommand(sockPath, parsed, method) {
+  const cliConfig = readCliConfig();
+  const needsStreaming = method === "monitor:events" || method === "monitor:alarm" || method === "daemon:logs" || method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]);
+  if (truthy(parsed.flags["stdin"]) && !("stdin_content" in parsed.flags)) {
+    try {
+      const content = await readStdinAll();
+      parsed.flags["stdin_content"] = content;
+    } catch (e) {
+      process.stdout.write(
+        JSON.stringify(err("invalid_params", `failed to read stdin: ${e.message}`)) + "\n"
+      );
+      return 1;
+    }
+  }
+  if (needsStreaming) {
+    const sock = await connectSockWithRetry(sockPath, cliConfig.connectTimeoutMs, cliConfig.connectRetryAttempts, cliConfig.connectRetryDelayMs);
+    return await runStream(sock, parsed, method);
+  }
+  try {
+    const params = {
+      positionals: parsed.positionals,
+      flags: parsed.flags
+    };
+    const stdinContent = parsed.flags["stdin_content"];
+    if (typeof stdinContent === "string") params.stdin_content = stdinContent;
+    const resp = await requestOnceWithRetry(sockPath, {
+      method,
+      bearer: parsed.bearer,
+      params
+    }, cliConfig, isReadOnlyMethod(method));
+    if ("error" in resp && resp.error) {
+      process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
+      return 1;
+    }
+    process.stdout.write(JSON.stringify({ ok: true, data: resp.result }) + "\n");
+    return 0;
+  } catch (e) {
+    process.stdout.write(
+      JSON.stringify(err("internal", e.message ?? "rpc failed")) + "\n"
+    );
+    return 1;
+  }
+}
+async function runStream(sock, parsed, method) {
+  return await new Promise((resolve) => {
+    let finished = false;
+    const finish = (code) => {
+      if (finished) return;
+      finished = true;
+      process.off("SIGINT", onInterrupt);
+      process.off("SIGTERM", onInterrupt);
+      process.off("SIGBREAK", onInterrupt);
+      resolve(code);
+    };
+    const reqId = randomId();
+    const params = {
+      positionals: parsed.positionals,
+      flags: parsed.flags,
+      streaming: true
+    };
+    const stdinContent = parsed.flags["stdin_content"];
+    if (typeof stdinContent === "string") params.stdin_content = stdinContent;
+    const req = {
+      kind: "request",
+      id: reqId,
+      method,
+      bearer: parsed.bearer ?? void 0,
+      params
+    };
+    onMessages(sock, (msg) => {
+      if (msg.kind === "stream_chunk" && msg.id === reqId) {
+        process.stdout.write(JSON.stringify(msg.data) + "\n");
+      } else if (msg.kind === "stream_end" && msg.id === reqId) {
+        if (msg.error) {
+          process.stdout.write(JSON.stringify({ ok: false, error: msg.error }) + "\n");
+          finish(1);
+        } else {
+          finish(0);
+        }
+        sock.end();
+      } else if (msg.kind === "response" && msg.id === reqId) {
+        if (msg.error) {
+          process.stdout.write(JSON.stringify({ ok: false, error: msg.error }) + "\n");
+          finish(1);
+        } else {
+          finish(0);
+        }
+        sock.end();
+      }
+    }, () => {
+      finish(finished ? 0 : 1);
+    });
+    const onInterrupt = () => {
+      sock.end();
+      finish(130);
+    };
+    process.once("SIGINT", onInterrupt);
+    process.once("SIGTERM", onInterrupt);
+    if (process.platform === "win32") process.once("SIGBREAK", onInterrupt);
+    writeMessage(sock, req);
+  });
+}
+function requestOnce(sock, opts) {
+  return new Promise((resolve, reject) => {
+    const id = randomId();
+    const req = {
+      kind: "request",
+      id,
+      method: opts.method,
+      bearer: opts.bearer ?? void 0,
+      params: opts.params
+    };
+    let resolved = false;
+    onMessages(sock, (msg) => {
+      if (resolved) return;
+      if (msg.kind === "response" && msg.id === id) {
+        resolved = true;
+        resolve({ id: msg.id, result: msg.result, error: msg.error });
+      }
+    }, () => {
+      if (!resolved) reject(new Error("daemon closed connection"));
+    });
+    sock.once("error", (e) => {
+      if (!resolved) reject(e);
+    });
+    writeMessage(sock, req);
+  });
+}
+async function requestOnceWithRetry(sockPath, opts, cliConfig, allowRetry) {
+  let attempt = 0;
+  let lastError = null;
+  while (attempt < cliConfig.connectRetryAttempts) {
+    attempt++;
+    let sock = null;
+    try {
+      sock = await connectSock(sockPath, cliConfig.connectTimeoutMs);
+      const resp = await requestOnce(sock, opts);
+      sock.end();
+      return resp;
+    } catch (e) {
+      lastError = e;
+      if (sock) sock.destroy();
+      if (!allowRetry || !isTransientRequestError(lastError) || attempt >= cliConfig.connectRetryAttempts) {
+        throw lastError;
+      }
+      await (0, import_promises.setTimeout)(cliConfig.connectRetryDelayMs);
+    }
+  }
+  throw lastError ?? new Error("request failed");
+}
+async function ensureDaemon(sockPath) {
+  const cliConfig = readCliConfig();
+  if (await probeSock(sockPath, 200)) return true;
+  spawnDaemon();
+  const deadline = Date.now() + cliConfig.readyTimeoutMs;
+  while (Date.now() < deadline) {
+    await (0, import_promises.setTimeout)(DAEMON_POLL_INTERVAL_MS);
+    if (await probeSock(sockPath, 200)) return true;
+  }
+  return false;
+}
+async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDelayMs) {
+  let attempt = 0;
+  let lastError = null;
+  while (attempt < retryAttempts) {
+    attempt++;
+    try {
+      return await connectSock(sockPath, timeoutMs);
+    } catch (e) {
+      const err2 = e;
+      lastError = err2;
+      if (!isTransientConnectError(err2) || attempt >= retryAttempts) break;
+      await (0, import_promises.setTimeout)(retryDelayMs);
+    }
+  }
+  throw lastError ?? new Error("connect failed");
+}
+function spawnDaemon() {
+  const child = (0, import_node_child_process.spawn)(process.execPath, [process.argv[1], "--daemon-internal"], {
+    detached: true,
+    stdio: "ignore",
+    env: process.env,
+    windowsHide: true
+  });
+  child.unref();
+}
+function getCliVersion() {
+  try {
+    const pkg = require_package();
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+function randomId() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+function truthy(v) {
+  return v === true || v === "true" || v === "1";
+}
+function isTransientConnectError(err2) {
+  return err2.message === "connect timeout" || err2.code === "ECONNREFUSED" || err2.code === "ENOENT" || err2.code === "EPIPE" || err2.code === "ECONNRESET";
+}
+function isTransientRequestError(err2) {
+  return isTransientConnectError(err2) || err2.message === "daemon closed connection";
+}
+function isReadOnlyMethod(method) {
+  return method === "version" || method === "status" || method === "daemon:status" || method === "daemon:user:list" || method === "daemon:config:get" || method === "daemon:config:list" || method === "session:info" || method === "session:context" || method === "session:list" || method === "message:history";
+}
+function readCliConfig() {
+  const config = new ConfigStore();
+  return {
+    readyTimeoutMs: toMs(config.getEffective("daemon.ready_timeout_seconds"), DEFAULT_DAEMON_READY_TIMEOUT_MS),
+    connectTimeoutMs: toMs(config.getEffective("daemon.connect_timeout_seconds"), DEFAULT_DAEMON_CONNECT_TIMEOUT_MS),
+    connectRetryAttempts: toInt(config.getEffective("daemon.connect_retry_attempts"), DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS),
+    connectRetryDelayMs: toMs(config.getEffective("daemon.connect_retry_delay_seconds"), DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS)
+  };
+}
+function toInt(v, fallback) {
+  return typeof v === "number" && Number.isFinite(v) ? Math.max(1, Math.floor(v)) : fallback;
+}
+function toMs(v, fallback) {
+  return typeof v === "number" && Number.isFinite(v) ? Math.max(1, Math.floor(v * 1e3)) : fallback;
+}
+
+// src/daemon/run.ts
+var import_node_fs13 = __toESM(require("fs"));
+var import_node_path10 = __toESM(require("path"));
 
 // src/daemon/users.ts
 var import_node_fs3 = __toESM(require("fs"));
@@ -804,18 +1009,24 @@ var UserRegistry = class {
     if (!import_node_fs3.default.existsSync(root)) return;
     for (const dirname of import_node_fs3.default.readdirSync(root)) {
       const metaPath = import_node_path4.default.join(root, dirname, "metadata.json");
-      try {
-        const raw = import_node_fs3.default.readFileSync(metaPath, "utf8");
-        const user = JSON.parse(raw);
-        if (user && typeof user.token === "string") {
-          this.users.set(user.token, user);
-        }
-      } catch {
+      if (import_node_fs3.default.existsSync(metaPath)) {
         try {
-          const token = decodeToken(dirname);
-          this.users.set(token, { token, created_at: (/* @__PURE__ */ new Date()).toISOString() });
+          const raw = import_node_fs3.default.readFileSync(metaPath, "utf8");
+          const user = JSON.parse(raw);
+          if (user && typeof user.token === "string") {
+            validateToken(user.token);
+            this.users.set(user.token, user);
+          }
         } catch {
         }
+        continue;
+      }
+      try {
+        const token = decodeToken(dirname);
+        validateToken(token);
+        if (encodeToken(token) !== dirname) continue;
+        this.users.set(token, { token, created_at: (/* @__PURE__ */ new Date()).toISOString() });
+      } catch {
       }
     }
   }
@@ -877,7 +1088,7 @@ function validateToken(token) {
 }
 
 // src/daemon/sessions.ts
-var import_node_crypto = __toESM(require("crypto"));
+var import_node_crypto2 = __toESM(require("crypto"));
 var import_node_fs5 = __toESM(require("fs"));
 var import_node_path6 = __toESM(require("path"));
 
@@ -947,6 +1158,8 @@ var SessionRegistry = class {
   dataDir;
   users = /* @__PURE__ */ new Map();
   globalByThreadId = /* @__PURE__ */ new Map();
+  touchTimers = /* @__PURE__ */ new Map();
+  writeChains = /* @__PURE__ */ new Map();
   constructor(dataDir) {
     this.dataDir = dataDir;
   }
@@ -960,7 +1173,7 @@ var SessionRegistry = class {
       const raw = import_node_fs5.default.readFileSync(p, "utf8");
       const parsed = JSON.parse(raw);
       for (const rec of parsed.sessions ?? []) {
-        if (!rec || typeof rec.name !== "string") continue;
+        if (!rec || typeof rec.name !== "string" || typeof rec.thread_id !== "string" || rec.thread_id.length === 0) continue;
         bucket.byName.set(rec.name, rec);
         bucket.byThreadId.set(rec.thread_id, rec);
         this.globalByThreadId.set(rec.thread_id, user);
@@ -991,11 +1204,17 @@ var SessionRegistry = class {
       const rec = this.users.get(ownerByThread)?.byThreadId.get(identifier);
       if (rec) return { user: ownerByThread, record: rec };
     }
-    for (const [user, bucket] of this.users) {
-      const rec = bucket.byName.get(identifier);
-      if (rec) return { user, record: rec };
-    }
     return null;
+  }
+  findUniqueLiveByNameAnywhere(name) {
+    let match = null;
+    for (const [user, bucket] of this.users) {
+      const rec = bucket.byName.get(name);
+      if (!rec) continue;
+      if (match) return "ambiguous";
+      match = { user, record: rec };
+    }
+    return match;
   }
   add(user, record) {
     validateRecord(record);
@@ -1014,7 +1233,7 @@ var SessionRegistry = class {
     b.byName.set(record.name, record);
     b.byThreadId.set(record.thread_id, record);
     this.globalByThreadId.set(record.thread_id, user);
-    this.persist(user);
+    this.schedulePersist(user, 0);
   }
   update(user, name, patch) {
     this.loadForUser(user);
@@ -1038,7 +1257,7 @@ var SessionRegistry = class {
     if (patch.effort !== void 0) rec.effort = patch.effort;
     if (patch.profile !== void 0) rec.profile = patch.profile;
     if (patch.app_server_client_id !== void 0) rec.app_server_client_id = patch.app_server_client_id;
-    this.persist(user);
+    this.schedulePersist(user, 0);
     return rec;
   }
   remove(user, name) {
@@ -1049,7 +1268,7 @@ var SessionRegistry = class {
     b.byName.delete(rec.name);
     b.byThreadId.delete(rec.thread_id);
     this.globalByThreadId.delete(rec.thread_id);
-    this.persist(user);
+    this.schedulePersist(user, 0);
     return rec;
   }
   removeAllForUser(user) {
@@ -1063,17 +1282,35 @@ var SessionRegistry = class {
     this.users.delete(user);
     return removed;
   }
+  async clearUser(user) {
+    const timer = this.touchTimers.get(user);
+    if (timer) {
+      clearTimeout(timer);
+      this.touchTimers.delete(user);
+    }
+    await (this.writeChains.get(user)?.catch(() => void 0) ?? Promise.resolve());
+    this.writeChains.delete(user);
+    return this.removeAllForUser(user);
+  }
   touch(user, name) {
     this.loadForUser(user);
     const b = this.users.get(user);
     const rec = b.byName.get(name);
     if (!rec) return;
     rec.last_active_at = (/* @__PURE__ */ new Date()).toISOString();
-    this.persist(user);
+    this.schedulePersist(user, 250);
   }
-  persist(user) {
+  async flush() {
+    for (const [user, timer] of this.touchTimers) {
+      clearTimeout(timer);
+      this.touchTimers.delete(user);
+      this.enqueuePersist(user);
+    }
+    await Promise.all(Array.from(this.writeChains.values()).map((p) => p.catch(() => void 0)));
+  }
+  async persistAsync(user) {
     const dir = userDir(user, this.dataDir);
-    import_node_fs5.default.mkdirSync(dir, { recursive: true });
+    await import_node_fs5.default.promises.mkdir(dir, { recursive: true });
     const p = userSessionsPath(user, this.dataDir);
     const bucket = this.users.get(user);
     const payload = {
@@ -1081,8 +1318,25 @@ var SessionRegistry = class {
       sessions: bucket ? Array.from(bucket.byName.values()) : []
     };
     const tmp = p + ".tmp";
-    import_node_fs5.default.writeFileSync(tmp, JSON.stringify(payload, null, 2));
-    import_node_fs5.default.renameSync(tmp, p);
+    await import_node_fs5.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
+    await import_node_fs5.default.promises.rename(tmp, p);
+  }
+  schedulePersist(user, delayMs) {
+    const existing = this.touchTimers.get(user);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.touchTimers.delete(user);
+      this.enqueuePersist(user);
+    }, delayMs);
+    timer.unref();
+    this.touchTimers.set(user, timer);
+  }
+  enqueuePersist(user) {
+    const prev = this.writeChains.get(user) ?? Promise.resolve();
+    const next = prev.catch(() => void 0).then(() => this.persistAsync(user)).catch((e) => {
+      logger.warn("failed to persist sessions.json", { user, err: e.message });
+    });
+    this.writeChains.set(user, next);
   }
   emptyBucket() {
     return { byName: /* @__PURE__ */ new Map(), byThreadId: /* @__PURE__ */ new Map() };
@@ -1098,7 +1352,7 @@ function validateRecord(record) {
   if (!record.thread_id) throw invalidParams("thread_id is required");
 }
 function generateSessionName() {
-  return "s-" + import_node_crypto.default.randomBytes(4).toString("hex");
+  return "s-" + import_node_crypto2.default.randomBytes(4).toString("hex");
 }
 function looksLikeThreadId(s) {
   return UUID_RE.test(s) || s.startsWith("th-");
@@ -1114,9 +1368,11 @@ var EventLog = class {
   counters = /* @__PURE__ */ new Map();
   buffers = /* @__PURE__ */ new Map();
   subscribers = /* @__PURE__ */ new Map();
-  streams = /* @__PURE__ */ new Map();
   loaded = /* @__PURE__ */ new Set();
   rotatedSinceCompact = /* @__PURE__ */ new Map();
+  pendingLines = /* @__PURE__ */ new Map();
+  flushTimers = /* @__PURE__ */ new Map();
+  writeChains = /* @__PURE__ */ new Map();
   constructor(retention = 1e4, dataDir = null) {
     this.retention = Math.max(100, retention);
     this.dataDir = dataDir;
@@ -1156,8 +1412,10 @@ var EventLog = class {
     this.retention = Math.max(100, n);
     for (const [user, buf] of this.buffers) {
       let rotated = false;
-      while (buf.length > this.retention) buf.shift();
-      if (buf.length > this.retention) rotated = true;
+      while (buf.length > this.retention) {
+        buf.shift();
+        rotated = true;
+      }
       if (rotated) this.bumpCompactionDebt(user);
     }
   }
@@ -1192,19 +1450,30 @@ var EventLog = class {
     return event;
   }
   async flush() {
-    const promises = [];
-    for (const [, stream] of this.streams) {
-      promises.push(new Promise((resolve) => stream.end(() => resolve())));
+    const users = /* @__PURE__ */ new Set([
+      ...this.flushTimers.keys(),
+      ...this.pendingLines.keys(),
+      ...this.writeChains.keys()
+    ]);
+    for (const user of users) {
+      const timer = this.flushTimers.get(user);
+      if (timer) {
+        clearTimeout(timer);
+        this.flushTimers.delete(user);
+      }
+      void this.flushUser(user);
     }
-    this.streams.clear();
-    await Promise.all(promises);
+    await Promise.all(Array.from(this.writeChains.values()).map((p) => p.catch(() => void 0)));
   }
   async clearUser(user) {
-    const stream = this.streams.get(user);
-    this.streams.delete(user);
-    if (stream) {
-      await new Promise((resolve) => stream.end(() => resolve()));
+    const timer = this.flushTimers.get(user);
+    if (timer) {
+      clearTimeout(timer);
+      this.flushTimers.delete(user);
     }
+    this.pendingLines.delete(user);
+    await (this.writeChains.get(user)?.catch(() => void 0) ?? Promise.resolve());
+    this.writeChains.delete(user);
     this.rotatedSinceCompact.delete(user);
     this.counters.delete(user);
     this.buffers.delete(user);
@@ -1213,35 +1482,32 @@ var EventLog = class {
   }
   appendToFile(user, event) {
     if (!this.dataDir) return;
-    let stream = this.streams.get(user);
-    if (!stream) {
-      const filePath = userEventLogPath(user, this.dataDir);
-      try {
-        import_node_fs6.default.mkdirSync(import_node_path7.default.dirname(filePath), { recursive: true });
-        import_node_fs6.default.mkdirSync(userDir(user, this.dataDir), { recursive: true });
-      } catch {
-      }
-      stream = import_node_fs6.default.createWriteStream(filePath, { flags: "a" });
-      this.streams.set(user, stream);
-    }
-    stream.write(JSON.stringify(event) + "\n");
+    const pending = this.pendingLines.get(user) ?? [];
+    pending.push(JSON.stringify(event) + "\n");
+    this.pendingLines.set(user, pending);
+    this.scheduleFlush(user, 25);
   }
   compactFile(user, buf) {
     if (!this.dataDir) return;
-    const filePath = userEventLogPath(user, this.dataDir);
-    try {
-      const tmp = filePath + ".tmp";
-      import_node_fs6.default.writeFileSync(tmp, buf.map((e) => JSON.stringify(e)).join("\n") + (buf.length ? "\n" : ""));
-      const prev = this.streams.get(user);
-      if (prev) {
-        prev.end();
-        this.streams.delete(user);
-      }
-      import_node_fs6.default.renameSync(tmp, filePath);
-      this.rotatedSinceCompact.set(user, 0);
-    } catch (e) {
-      logger.warn("event log compaction failed", { user, err: e.message });
+    const timer = this.flushTimers.get(user);
+    if (timer) {
+      clearTimeout(timer);
+      this.flushTimers.delete(user);
     }
+    this.pendingLines.delete(user);
+    const filePath = userEventLogPath(user, this.dataDir);
+    void this.enqueueFsOp(user, async () => {
+      try {
+        await import_node_fs6.default.promises.mkdir(import_node_path7.default.dirname(filePath), { recursive: true });
+        await import_node_fs6.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+        const tmp = filePath + ".tmp";
+        await import_node_fs6.default.promises.writeFile(tmp, buf.map((e) => JSON.stringify(e)).join("\n") + (buf.length ? "\n" : ""));
+        await import_node_fs6.default.promises.rename(tmp, filePath);
+        this.rotatedSinceCompact.set(user, 0);
+      } catch (e) {
+        logger.warn("event log compaction failed", { user, err: e.message });
+      }
+    });
   }
   subscribe(user, cb) {
     let set = this.subscribers.get(user);
@@ -1293,6 +1559,40 @@ var EventLog = class {
       this.compactFile(user, this.buffers.get(user) ?? []);
     }
   }
+  scheduleFlush(user, delayMs) {
+    if (!this.dataDir) return;
+    if (this.flushTimers.has(user)) return;
+    const timer = setTimeout(() => {
+      this.flushTimers.delete(user);
+      void this.flushUser(user);
+    }, delayMs);
+    timer.unref();
+    this.flushTimers.set(user, timer);
+  }
+  flushUser(user) {
+    if (!this.dataDir) return Promise.resolve();
+    const lines = this.pendingLines.get(user);
+    if (!lines || lines.length === 0) return Promise.resolve();
+    this.pendingLines.delete(user);
+    const filePath = userEventLogPath(user, this.dataDir);
+    return this.enqueueFsOp(user, async () => {
+      try {
+        await import_node_fs6.default.promises.mkdir(import_node_path7.default.dirname(filePath), { recursive: true });
+        await import_node_fs6.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+        await import_node_fs6.default.promises.appendFile(filePath, lines.join(""));
+      } catch (e) {
+        logger.warn("failed to append event log", { user, err: e.message });
+      }
+    });
+  }
+  enqueueFsOp(user, op) {
+    const prev = this.writeChains.get(user) ?? Promise.resolve();
+    const next = prev.catch(() => void 0).then(op);
+    this.writeChains.set(user, next);
+    return next.finally(() => {
+      if (this.writeChains.get(user) === next) this.writeChains.delete(user);
+    });
+  }
 };
 function compareSeq(a, b) {
   const na = parseInt(a.replace(/^evt-/, ""), 10);
@@ -1305,12 +1605,12 @@ function isDeltaType(type) {
 }
 
 // src/daemon/pending.ts
-var import_node_crypto2 = __toESM(require("crypto"));
+var import_node_crypto3 = __toESM(require("crypto"));
 var PendingRegistry = class {
   byRequestId = /* @__PURE__ */ new Map();
   byJsonrpcKey = /* @__PURE__ */ new Map();
   add(entry) {
-    const request_id = `req-${import_node_crypto2.default.randomBytes(4).toString("hex")}`;
+    const request_id = `req-${import_node_crypto3.default.randomBytes(4).toString("hex")}`;
     const rec = {
       ...entry,
       request_id,
@@ -1365,10 +1665,13 @@ var PendingRegistry = class {
   }
 };
 function assignTag(client) {
-  const tag = import_node_crypto2.default.randomBytes(4).toString("hex");
+  const tag = import_node_crypto3.default.randomBytes(4).toString("hex");
   client.__ct_tag = tag;
   return tag;
 }
+
+// src/daemon/queues.ts
+var import_node_crypto4 = __toESM(require("crypto"));
 
 // src/codex/retry.ts
 var import_promises2 = require("timers/promises");
@@ -1402,6 +1705,11 @@ var TransportClosedError = class extends AppServerError {
     super(message, "transport_closed");
   }
 };
+var RequestTimeoutError = class extends AppServerError {
+  constructor(message) {
+    super(message, "request_timeout");
+  }
+};
 var ParseError = class extends JsonRpcError {
 };
 var InvalidRequestError = class extends JsonRpcError {
@@ -1416,6 +1724,12 @@ var ServerBusyError = class extends JsonRpcError {
 };
 var RetryLimitExceededError = class extends ServerBusyError {
 };
+var TRANSIENT_CODEX_ERROR_INFOS = /* @__PURE__ */ new Set([
+  "server_overloaded",
+  "http_connection_failed",
+  "response_stream_connection_failed",
+  "response_stream_disconnected"
+]);
 function mapJsonRpcError(code, message, data) {
   if (code === -32700) return new ParseError(code, message, data);
   if (code === -32600) return new InvalidRequestError(code, message, data);
@@ -1434,7 +1748,10 @@ function mapJsonRpcError(code, message, data) {
 function isRetryable(err2) {
   if (err2 instanceof RetryLimitExceededError) return false;
   if (err2 instanceof ServerBusyError) return true;
-  if (err2 instanceof JsonRpcError) return isServerOverloaded(err2.data);
+  if (err2 instanceof RequestTimeoutError) return false;
+  if (err2 instanceof JsonRpcError) {
+    return isServerOverloaded(err2.data) || isTransientCodexErrorInfo(err2.codexErrorInfo);
+  }
   return false;
 }
 function containsRetryLimitText(message) {
@@ -1470,6 +1787,8 @@ function extractCodexErrorInfo(data) {
     const innerObj = direct;
     const type = innerObj["type"];
     if (typeof type === "string") return snakeCaseVariant(type);
+    const variantKeys = Object.keys(innerObj);
+    if (variantKeys.length === 1) return snakeCaseVariant(variantKeys[0]);
   }
   return null;
 }
@@ -1482,6 +1801,9 @@ function extractAdditionalDetails(data) {
 }
 function snakeCaseVariant(name) {
   return name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/-/g, "_").toLowerCase();
+}
+function isTransientCodexErrorInfo(info) {
+  return info !== null && TRANSIENT_CODEX_ERROR_INFOS.has(info);
 }
 
 // src/codex/retry.ts
@@ -1528,11 +1850,11 @@ async function threadFork(client, threadId, atTurnId, retry = DEFAULT_RETRY) {
   const result = await retryOnOverload(() => client.request("thread/fork", params), retry);
   return coerceLifecycle(result, "thread/fork");
 }
-async function threadSetName(client, threadId, name) {
-  await client.request("thread/name/set", { threadId, name });
+async function threadSetName(client, threadId, name, retry = DEFAULT_RETRY) {
+  await retryOnOverload(() => client.request("thread/name/set", { threadId, name }), retry);
 }
-async function threadList(client, params = {}) {
-  const result = await client.request("thread/list", params);
+async function threadList(client, params = {}, retry = DEFAULT_RETRY) {
+  const result = await retryOnOverload(() => client.request("thread/list", params), retry);
   const obj = asObject(result);
   const data = Array.isArray(obj.data) ? obj.data : [];
   return {
@@ -1541,25 +1863,25 @@ async function threadList(client, params = {}) {
     backwardsCursor: obj.backwardsCursor ?? null
   };
 }
-async function threadRead(client, threadId) {
-  const result = await client.request("thread/read", { threadId });
+async function threadRead(client, threadId, retry = DEFAULT_RETRY) {
+  const result = await retryOnOverload(() => client.request("thread/read", { threadId }), retry);
   const obj = asObject(result);
   const thread = asObject(obj.thread);
   if (!thread.id) throw new Error(`thread/read: response missing thread.id`);
   return { thread };
 }
-async function threadUnsubscribe(client, threadId) {
+async function threadUnsubscribe(client, threadId, retry = DEFAULT_RETRY) {
   try {
-    await client.request("thread/unsubscribe", { threadId });
+    await retryOnOverload(() => client.request("thread/unsubscribe", { threadId }), retry);
   } catch {
   }
 }
-async function threadTurnsList(client, threadId, opts = {}) {
+async function threadTurnsList(client, threadId, opts = {}, retry = DEFAULT_RETRY) {
   const params = { threadId };
   if (opts.limit !== void 0) params.limit = opts.limit;
   if (opts.cursor !== void 0) params.cursor = opts.cursor;
   if (opts.sortDirection !== void 0) params.sortDirection = opts.sortDirection;
-  const result = await client.request("thread/turns/list", params);
+  const result = await retryOnOverload(() => client.request("thread/turns/list", params), retry);
   const obj = asObject(result);
   return {
     data: Array.isArray(obj.data) ? obj.data : [],
@@ -1578,8 +1900,8 @@ async function turnStart(client, threadId, input, retry = DEFAULT_RETRY) {
 async function turnSteer(client, threadId, turnId, input, retry = DEFAULT_RETRY) {
   await retryOnOverload(() => client.request("turn/steer", { threadId, expectedTurnId: turnId, input }), retry);
 }
-async function turnInterrupt(client, threadId, turnId) {
-  await client.request("turn/interrupt", { threadId, turnId });
+async function turnInterrupt(client, threadId, turnId, retry = DEFAULT_RETRY) {
+  await retryOnOverload(() => client.request("turn/interrupt", { threadId, turnId }), retry);
 }
 function threadIdOf(resp) {
   return resp.thread.id;
@@ -1609,12 +1931,13 @@ var TurnQueues = class {
   async sendOrQueue(sessionKey, client, threadId, input, retry) {
     return await this.withSessionLock(sessionKey, async (state) => {
       if (state.currentTurnId || state.draining) {
-        state.pending.push({ input, enqueuedAt: (/* @__PURE__ */ new Date()).toISOString() });
-        return { started: false, turn_id: state.currentTurnId, queued_depth: state.pending.length };
+        const queued = { id: queueId(), input, enqueuedAt: (/* @__PURE__ */ new Date()).toISOString() };
+        state.pending.push(queued);
+        return { started: false, turn_id: state.currentTurnId, queue_id: queued.id, queued_depth: state.pending.length };
       }
       const res = await turnStart(client, threadId, input, retry);
       state.currentTurnId = res.turnId;
-      return { started: true, turn_id: res.turnId, queued_depth: state.pending.length };
+      return { started: true, turn_id: res.turnId, queue_id: null, queued_depth: state.pending.length };
     });
   }
   getCurrentTurn(sessionKey) {
@@ -1630,16 +1953,16 @@ var TurnQueues = class {
       state.currentTurnId = null;
       if (state.pending.length === 0 || !client) {
         state.draining = false;
-        return null;
+        return { turn_id: null, queue_id: null };
       }
       const next = state.pending.shift();
       try {
         const res = await turnStart(client, threadId, next.input, retry);
         state.currentTurnId = res.turnId;
-        return res.turnId;
+        return { turn_id: res.turnId, queue_id: next.id };
       } catch (e) {
         logger.warn("failed to dispatch queued turn", { session: sessionKey, err: e.message });
-        return null;
+        return { turn_id: null, queue_id: next.id };
       } finally {
         state.draining = false;
       }
@@ -1683,6 +2006,9 @@ var TurnQueues = class {
     }
   }
 };
+function queueId() {
+  return `q-${import_node_crypto4.default.randomBytes(4).toString("hex")}`;
+}
 
 // src/daemon/orphans.ts
 var import_node_fs8 = __toESM(require("fs"));
@@ -1711,20 +2037,42 @@ function readPsCommand(pid) {
     return null;
   }
 }
+function readWindowsCommand(pid) {
+  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CommandLine) { [Console]::Out.Write($p.CommandLine) }`;
+  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
+    try {
+      const raw = (0, import_node_child_process2.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8"
+      });
+      const cmd = raw.trim();
+      if (cmd.length > 0) return cmd;
+    } catch {
+    }
+  }
+  try {
+    const raw = (0, import_node_child_process2.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CommandLine", "/value"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CommandLine="));
+    const cmd = line?.slice("CommandLine=".length).trim() ?? "";
+    if (cmd.length > 0) return cmd;
+  } catch {
+  }
+  return null;
+}
 function readProcessCommandLine(pid) {
   if (!Number.isFinite(pid) || pid <= 0) return null;
   if (process.platform === "linux") return readLinuxCmdline(pid);
   if (process.platform === "darwin" || process.platform === "freebsd") return readPsCommand(pid);
+  if (process.platform === "win32") return readWindowsCommand(pid);
   return null;
 }
 function isLikelyCodexAppServerProcess(pid) {
   const cmd = readProcessCommandLine(pid);
   if (!cmd) return false;
   return cmd.includes("app-server") && (cmd.includes("codex") || cmd.includes("codex-cli-bin"));
-}
-function isLikelyCodexTeamDaemonProcess(pid) {
-  const cmd = readProcessCommandLine(pid);
-  return cmd !== null && cmd.includes("--daemon-internal");
 }
 
 // src/daemon/orphans.ts
@@ -1807,8 +2155,10 @@ var import_node_events2 = require("events");
 // src/codex/appServerClient.ts
 var import_node_child_process3 = require("child_process");
 var import_node_events = require("events");
-var import_node_crypto3 = require("crypto");
+var import_node_crypto5 = require("crypto");
+var import_node_path9 = __toESM(require("path"));
 var STDERR_TAIL_LINES = 400;
+var DEFAULT_REQUEST_TIMEOUT_MS = 12e4;
 var AppServerClient = class extends import_node_events.EventEmitter {
   proc = null;
   buf = "";
@@ -1827,7 +2177,8 @@ var AppServerClient = class extends import_node_events.EventEmitter {
       configOverrides: options.configOverrides ?? [],
       clientInfo: options.clientInfo,
       experimentalApi: options.experimentalApi ?? true,
-      stderrTailLines: options.stderrTailLines ?? STDERR_TAIL_LINES
+      stderrTailLines: options.stderrTailLines ?? STDERR_TAIL_LINES,
+      requestTimeoutMs: Math.max(1, options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS)
     };
   }
   isAlive() {
@@ -1844,12 +2195,14 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     const args = [...this.options.args];
     for (const kv of this.options.configOverrides) args.push("--config", kv);
     args.push("app-server", "--listen", "stdio://");
+    const launch = resolveLaunch(this.options.bin, args);
     const env = { ...process.env, ...this.options.env ?? {} };
-    logger.debug("spawning app-server", { bin: this.options.bin, args });
-    this.proc = (0, import_node_child_process3.spawn)(this.options.bin, args, {
+    logger.debug("spawning app-server", { bin: launch.command, args: launch.args });
+    this.proc = (0, import_node_child_process3.spawn)(launch.command, launch.args, {
       cwd: this.options.cwd,
       env,
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
     });
     this.lastPid = this.proc.pid ?? null;
     this.proc.on("error", (err2) => {
@@ -1896,6 +2249,7 @@ var AppServerClient = class extends import_node_events.EventEmitter {
       } catch {
       }
     }, graceMs);
+    timer.unref();
     try {
       await exited;
     } finally {
@@ -1906,12 +2260,25 @@ var AppServerClient = class extends import_node_events.EventEmitter {
   request(method, params = {}) {
     if (!this.proc) return Promise.reject(new TransportClosedError("app-server is not running"));
     if (this.proc.exitCode !== null) return Promise.reject(new TransportClosedError("app-server already exited"));
-    const id = (0, import_node_crypto3.randomUUID)();
+    const id = (0, import_node_crypto5.randomUUID)();
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
+        void this.close().catch(() => void 0);
+        pending.reject(new RequestTimeoutError(`${method} timed out after ${this.options.requestTimeoutMs}ms`));
+      }, this.options.requestTimeoutMs);
+      timer.unref();
+      this.pending.set(id, {
+        resolve,
+        reject,
+        timer
+      });
       try {
         this.writeMessage({ jsonrpc: "2.0", id, method, params });
       } catch (e) {
+        clearTimeout(timer);
         this.pending.delete(id);
         reject(e);
       }
@@ -1991,6 +2358,7 @@ var AppServerClient = class extends import_node_events.EventEmitter {
         return;
       }
       this.pending.delete(id);
+      clearTimeout(pending.timer);
       if ("error" in msg && msg.error && typeof msg.error === "object") {
         const errObj = msg.error;
         const code = typeof errObj.code === "number" ? errObj.code : -32e3;
@@ -2002,10 +2370,52 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     }
   }
   failAllPending(err2) {
-    for (const [, p] of this.pending) p.reject(err2);
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(err2);
+    }
     this.pending.clear();
   }
 };
+function resolveLaunch(bin, args) {
+  if (isNodeScript(bin)) {
+    return { command: process.execPath, args: [bin, ...args] };
+  }
+  if (process.platform !== "win32") {
+    return { command: bin, args };
+  }
+  const resolved = resolveWindowsCommand(bin) ?? bin;
+  if (/\.(cmd|bat)$/i.test(resolved)) {
+    return {
+      command: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", quoteWindowsCommand(resolved, args)]
+    };
+  }
+  return { command: resolved, args };
+}
+function resolveWindowsCommand(bin) {
+  if (bin.includes("\\") || bin.includes("/") || import_node_path9.default.extname(bin).length > 0) return bin;
+  try {
+    const raw = (0, import_node_child_process3.execFileSync)("where", [bin], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    return raw.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
+  } catch {
+    return null;
+  }
+}
+function isNodeScript(bin) {
+  return /\.(cjs|mjs|js)$/i.test(bin);
+}
+function quoteWindowsCommand(bin, args) {
+  return [bin, ...args].map(quoteWindowsArg).join(" ");
+}
+function quoteWindowsArg(arg) {
+  if (arg.length === 0) return '""';
+  if (!/[ \t"&()^<>|]/.test(arg)) return arg;
+  return `"${arg.replace(/(["])/g, "\\$1")}"`;
+}
 
 // src/codex/pool.ts
 var AppServerPool = class extends import_node_events2.EventEmitter {
@@ -2049,7 +2459,7 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
       }
       return existing.client;
     }
-    const managed = this.findAvailableForUser(user);
+    const managed = this.findAvailableForUser(user, false);
     if (managed) {
       managed.sessions.add(sessionKey);
       this.bySession.set(sessionKey, managed);
@@ -2077,7 +2487,7 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
   }
   async acquireForAdhoc(user, clientOptions) {
     if (this.shuttingDown) throw new Error("pool is shutting down");
-    const existing = this.findAvailableForUser(user);
+    const existing = this.findAvailableForUser(user, true);
     if (existing) return existing.client;
     const fresh = await this.spawn(user, clientOptions);
     return fresh.client;
@@ -2116,11 +2526,13 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     const managed = [...this.byUser.get(user) ?? []];
     await Promise.all(managed.map((m) => m.client.close().catch(() => void 0)));
   }
-  findAvailableForUser(user) {
+  findAvailableForUser(user, allowBoundSessions) {
     const list = this.byUser.get(user);
     if (!list) return null;
     for (const m of list) {
-      if (m.client.isAlive() && m.sessions.size < this.options.maxSessionsPerProcess) return m;
+      if (!m.client.isAlive()) continue;
+      if (!allowBoundSessions && m.sessions.size > 0) continue;
+      if (m.sessions.size < this.options.maxSessionsPerProcess) return m;
     }
     return null;
   }
@@ -2196,6 +2608,9 @@ function buildContext() {
   const maxPerProcess = config.getEffective("app_server.max_sessions_per_process");
   const pool = new AppServerPool({
     maxSessionsPerProcess: typeof maxPerProcess === "number" ? maxPerProcess : 16,
+    clientDefaults: {
+      requestTimeoutMs: toMs2(config.getEffective("app_server.request_timeout_seconds"), 12e4)
+    },
     onSpawn: (pid) => pidTracker.track(pid),
     onExit: (pid) => pidTracker.untrack(pid)
   });
@@ -2219,9 +2634,9 @@ function buildContext() {
   };
   const retryOptions = () => {
     return {
-      maxAttempts: toInt(config.getEffective("retry.max_attempts"), 3),
-      initialDelayMs: toMs(config.getEffective("retry.initial_delay_seconds"), 250),
-      maxDelayMs: toMs(config.getEffective("retry.max_delay_seconds"), 2e3),
+      maxAttempts: toInt2(config.getEffective("retry.max_attempts"), 3),
+      initialDelayMs: toMs2(config.getEffective("retry.initial_delay_seconds"), 250),
+      maxDelayMs: toMs2(config.getEffective("retry.max_delay_seconds"), 2e3),
       jitterRatio: 0.2
     };
   };
@@ -2241,11 +2656,11 @@ function buildContext() {
     logPath
   };
 }
-function toInt(v, fallback) {
+function toInt2(v, fallback) {
   if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v);
   return fallback;
 }
-function toMs(v, fallback) {
+function toMs2(v, fallback) {
   if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v * 1e3);
   return fallback;
 }
@@ -2279,7 +2694,7 @@ var status = async (ctx, req) => {
     created_at: user.created_at,
     last_active_at: user.last_active_at,
     live_sessions: ctx.sessions.listLive(token).length,
-    pending_events: ctx.events.pendingCount(token),
+    retained_events: ctx.events.retainedCount(token),
     pending_requests: ctx.pending.listForUser(token).length,
     daemon: {
       pid: process.pid,
@@ -2306,14 +2721,16 @@ async function shutdownDaemon(ctx, reason, exitCode = 0) {
     logger.error("pool shutdown error", { err: e.message });
   }
   try {
+    await ctx.sessions.flush();
+  } catch (e) {
+    logger.error("session registry flush error", { err: e.message });
+  }
+  try {
     await ctx.events.flush();
   } catch (e) {
     logger.error("event log flush error", { err: e.message });
   }
-  try {
-    import_node_fs9.default.unlinkSync(ctx.sockPath);
-  } catch {
-  }
+  unlinkSockIfStale(ctx.sockPath);
   try {
     import_node_fs9.default.unlinkSync(pidFilePath(ctx.dataDir));
   } catch {
@@ -2353,7 +2770,8 @@ var daemonRestart = async (ctx) => {
   (0, import_node_child_process4.spawn)(process.execPath, [entry, "--daemon-internal"], {
     detached: true,
     stdio: "ignore",
-    env: process.env
+    env: process.env,
+    windowsHide: true
   }).unref();
   setTimeout(() => void shutdownDaemon(ctx, "daemon restart"), 100);
   return { restarting: true };
@@ -2376,7 +2794,7 @@ var daemonUserDestroy = async (ctx, req) => {
     }
   }
   await ctx.pool.closeUser(token);
-  const sessions = ctx.sessions.removeAllForUser(token);
+  const sessions = await ctx.sessions.clearUser(token);
   for (const rec of sessions) {
     ctx.queues.dispose(`${token}::${rec.name}`);
   }
@@ -2425,6 +2843,7 @@ var daemonConfigUnset = async (ctx, req) => {
   const key = reqPositional(req, 0, "key");
   const result = ctx.config.unset(key);
   if (!result.ok) throw invalidParams(result.error);
+  applyHotConfigChange(ctx, key, ctx.config.getEffective(key));
   return { key, needs_restart: result.needs_restart };
 };
 var daemonConfigList = async (ctx, req) => {
@@ -2452,6 +2871,8 @@ var daemonConfigReset = async (ctx, req) => {
     throw invalidParams("pass --yes to confirm reset");
   }
   ctx.config.reset();
+  applyHotConfigChange(ctx, "daemon.log_level", ctx.config.getEffective("daemon.log_level"));
+  applyHotConfigChange(ctx, "monitor.event_log_retention", ctx.config.getEffective("monitor.event_log_retention"));
   return { reset: true };
 };
 var daemonLogsStream = async (ctx, req, stream) => {
@@ -2462,7 +2883,7 @@ var daemonLogsStream = async (ctx, req, stream) => {
     return { streamed: true };
   }
   const follow = isTrue(getFlag(req.params, "follow")) || isTrue(getFlag(req.params, "f"));
-  const n = toInt2(getFlag(req.params, "n"), 100);
+  const n = toInt3(getFlag(req.params, "n"), 100);
   const level = asString(getFlag(req.params, "level"));
   const contents = import_node_fs10.default.readFileSync(logPath, "utf8");
   const lines = contents.split("\n").filter(Boolean);
@@ -2479,8 +2900,9 @@ var daemonLogsStream = async (ctx, req, stream) => {
     try {
       const data = import_node_fs10.default.readFileSync(logPath, "utf8");
       const newLines = data.split("\n").filter(Boolean);
-      const diff = newLines.slice(lines.length);
-      lines.push(...diff);
+      const reset = newLines.length < lines.length || newLines.some((line, idx) => idx < lines.length && lines[idx] !== line);
+      const diff = reset ? newLines : newLines.slice(lines.length);
+      lines.splice(0, lines.length, ...newLines);
       for (const line of diff) {
         if (level && !lineMatchesLevel(line, level)) continue;
         stream.chunk(safeParseOr(line, { raw: line }));
@@ -2507,7 +2929,7 @@ function getFlag(params, key) {
 function isTrue(v) {
   return v === true || v === "true" || v === "1";
 }
-function toInt2(v, fallback) {
+function toInt3(v, fallback) {
   if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v);
   if (typeof v === "string") {
     const n = Number(v);
@@ -2541,6 +2963,9 @@ function getPkgVersion() {
     return "unknown";
   }
 }
+
+// src/daemon/handlers/session.ts
+var import_node_fs11 = __toESM(require("fs"));
 
 // src/format/markdown.ts
 function renderTag(name, attrs, body) {
@@ -2711,7 +3136,7 @@ var sessionNew = async (ctx, req) => {
   } else if (ctx.sessions.get(user, name)) {
     throw invalidParams(`session '${name}' already exists`);
   }
-  const startParams = buildThreadStartParams(ctx, flags);
+  const startParams = await buildThreadStartParams(ctx, flags);
   const client = await ctx.pool.acquire(user, keyFor(user, name));
   let result;
   try {
@@ -2722,7 +3147,7 @@ var sessionNew = async (ctx, req) => {
   }
   const threadId = threadIdOf(result);
   try {
-    await threadSetName(client, threadId, name);
+    await threadSetName(client, threadId, name, ctx.retryOptions());
   } catch {
   }
   const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -2757,7 +3182,10 @@ var sessionAttach = async (ctx, req) => {
     ctx.sessions.touch(user, existing.name);
     return { session: existing, noop: true };
   }
-  const anywhere = ctx.sessions.findLiveAnywhere(identifier);
+  const anywhere = looksLikeThreadId(identifier) ? ctx.sessions.findLiveAnywhere(identifier) : ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
+  if (anywhere === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
+  }
   if (anywhere && anywhere.user !== user) {
     if (!takeover) {
       throw new CodexTeamError("session_busy", `session is live under user '${anywhere.user}'. Pass --takeover to seize.`);
@@ -2812,13 +3240,13 @@ var sessionDetach = async (ctx, req) => {
   const turnId = ctx.queues.getCurrentTurn(sessionKey);
   if (client && !graceful && turnId) {
     try {
-      await turnInterrupt(client, rec.thread_id, turnId);
+      await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions());
     } catch {
     }
   }
   if (client) {
     try {
-      await threadUnsubscribe(client, rec.thread_id);
+      await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions());
     } catch {
     }
   }
@@ -2845,7 +3273,7 @@ var sessionRename = async (ctx, req) => {
   const client = ctx.pool.clientForSession(keyFor(user, oldName));
   if (client) {
     try {
-      await threadSetName(client, rec.thread_id, newName);
+      await threadSetName(client, rec.thread_id, newName, ctx.retryOptions());
     } catch {
     }
   }
@@ -2875,7 +3303,7 @@ var sessionFork = async (ctx, req) => {
   }
   const newThreadId = threadIdOf(forkResult);
   try {
-    await threadSetName(client, newThreadId, newName);
+    await threadSetName(client, newThreadId, newName, ctx.retryOptions());
   } catch {
   }
   const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -2906,7 +3334,7 @@ var sessionInfo = async (ctx, req) => {
   }
   try {
     const client = await ctx.pool.acquireForAdhoc(user);
-    const result = await threadRead(client, identifier);
+    const result = await threadRead(client, identifier, ctx.retryOptions());
     return { session: null, thread: result.thread, live: false };
   } catch (e) {
     throw new CodexTeamError("session_not_found", `session '${identifier}' not found: ${e.message}`);
@@ -2935,7 +3363,7 @@ var sessionContext = async (ctx, req) => {
     threadId = identifier;
     client = await ctx.pool.acquireForAdhoc(user);
   }
-  const result = await threadRead(client, threadId);
+  const result = await threadRead(client, threadId, ctx.retryOptions());
   if (format === "json") {
     return { thread_id: threadId, thread: result.thread };
   }
@@ -2974,7 +3402,7 @@ var sessionList = async (ctx, req) => {
     return response2;
   }
   const client = await ctx.pool.acquireForAdhoc(user);
-  const result = await threadList(client, {});
+  const result = await threadList(client, {}, ctx.retryOptions());
   const response = {
     sessions: result.data,
     next_cursor: result.nextCursor,
@@ -3026,7 +3454,7 @@ function asString2(v) {
 function isTrue2(v) {
   return v === true || v === "true" || v === "1";
 }
-function buildThreadStartParams(ctx, flags) {
+async function buildThreadStartParams(ctx, flags) {
   const p = {};
   const config = {};
   const model = asString2(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
@@ -3041,9 +3469,9 @@ function buildThreadStartParams(ctx, flags) {
   if (effort) config.model_reasoning_effort = effort;
   const profile = asString2(flags["profile"]);
   if (profile) config.profile = profile;
-  const baseInstr = asString2(flags["base-instructions"]);
+  const baseInstr = await readInstructionFile(flags["base-instructions"], "--base-instructions");
   if (baseInstr) p.baseInstructions = baseInstr;
-  const devInstr = asString2(flags["developer-instructions"]);
+  const devInstr = await readInstructionFile(flags["developer-instructions"], "--developer-instructions");
   if (devInstr) p.developerInstructions = devInstr;
   const personality = asString2(flags["personality"]);
   if (personality) p.personality = personality;
@@ -3066,6 +3494,15 @@ function deriveNameFromThreadId(threadId, ctx, user) {
   while (ctx.sessions.get(user, candidate)) candidate = generateSessionName();
   return candidate;
 }
+async function readInstructionFile(value, flag) {
+  const filePath = asString2(value);
+  if (!filePath) return null;
+  try {
+    return await import_node_fs11.default.promises.readFile(filePath, "utf8");
+  } catch (e) {
+    throw invalidParams(`${flag} not readable: ${e.message}`);
+  }
+}
 async function seizeFromOtherUser(ctx, fromUser, toUser, rec) {
   const sessionKey = keyFor(fromUser, rec.name);
   const client = ctx.pool.clientForSession(sessionKey);
@@ -3073,12 +3510,12 @@ async function seizeFromOtherUser(ctx, fromUser, toUser, rec) {
   if (client) {
     if (turnId) {
       try {
-        await turnInterrupt(client, rec.thread_id, turnId);
+        await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions());
       } catch {
       }
     }
     try {
-      await threadUnsubscribe(client, rec.thread_id);
+      await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions());
     } catch {
     }
   }
@@ -3112,12 +3549,12 @@ function sortSessions(rows, field) {
 }
 
 // src/daemon/handlers/message.ts
-var import_node_fs11 = __toESM(require("fs"));
+var import_node_fs12 = __toESM(require("fs"));
 var messageSend = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const prompt = await readPromptInput(req);
   const attachments = asStringArray(getFlag2(req, "attach"));
-  const input = buildUserInput(prompt, attachments);
+  const input = await buildUserInput(prompt, attachments);
   const sessionKey = keyFor2(user, rec.name);
   const result = await ctx.queues.sendOrQueue(sessionKey, client, rec.thread_id, input, ctx.retryOptions());
   ctx.sessions.touch(user, rec.name);
@@ -3126,6 +3563,7 @@ var messageSend = async (ctx, req) => {
     thread_id: rec.thread_id,
     turn_id: result.turn_id,
     started: result.started,
+    queue_id: result.queue_id,
     queued_depth: result.queued_depth
   };
 };
@@ -3133,7 +3571,7 @@ var messagePeer = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const prompt = await readPromptInput(req);
   const attachments = asStringArray(getFlag2(req, "attach"));
-  const input = buildUserInput(prompt, attachments);
+  const input = await buildUserInput(prompt, attachments);
   const sessionKey = keyFor2(user, rec.name);
   const turnId = ctx.queues.getCurrentTurn(sessionKey);
   if (!turnId) {
@@ -3150,7 +3588,7 @@ var messageInterrupt = async (ctx, req) => {
   if (!turnId) {
     return { session: rec.name, turn_id: null, interrupted: false, noop: true };
   }
-  await turnInterrupt(client, rec.thread_id, turnId);
+  await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions());
   ctx.queues.setCurrentTurn(sessionKey, null);
   ctx.sessions.touch(user, rec.name);
   return { session: rec.name, turn_id: turnId, interrupted: true };
@@ -3194,19 +3632,13 @@ var messageHistory = async (ctx, req) => {
   const sinceRaw = asString3(getFlag2(req, "since"));
   const format = asString3(getFlag2(req, "format")) ?? "json";
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
-  let cursor;
-  if (sinceRaw) {
-    if (/^-\d+$/.test(sinceRaw)) {
-      cursor = void 0;
-    } else {
-      cursor = sinceRaw;
-    }
-  }
-  const result = await threadTurnsList(client, rec.thread_id, {
-    limit: Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 50,
-    cursor,
+  const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 50;
+  const relativeSince = sinceRaw && /^-\d+$/.test(sinceRaw) ? Math.max(1, Math.floor(Math.abs(Number(sinceRaw)))) : null;
+  const result = relativeSince ? await listTurnsFromRelativeOffset(client, rec.thread_id, relativeSince, safeLimit, ctx.retryOptions()) : await threadTurnsList(client, rec.thread_id, {
+    limit: safeLimit,
+    cursor: sinceRaw ?? void 0,
     sortDirection: "desc"
-  });
+  }, ctx.retryOptions());
   const response = {
     session: rec.name,
     thread_id: rec.thread_id,
@@ -3215,6 +3647,7 @@ var messageHistory = async (ctx, req) => {
     format,
     note: "Turn items are not included in turnsList responses (protocol limitation). Use 'session context' for per-thread metadata."
   };
+  if (relativeSince) response.relative_since = relativeSince;
   if (format === "markdown") {
     response.markdown = renderHistory({
       session: rec.name,
@@ -3236,8 +3669,8 @@ var messageTail = async (ctx, req, stream) => {
     const result = await threadTurnsList(client, rec.thread_id, {
       limit: Number.isFinite(n) ? Math.max(1, Math.floor(n)) : 3,
       sortDirection: "desc"
-    });
-    const thread = await threadRead(client, rec.thread_id).catch(() => null);
+    }, ctx.retryOptions());
+    const thread = await threadRead(client, rec.thread_id, ctx.retryOptions()).catch(() => null);
     const response = {
       session: rec.name,
       turns: result.data,
@@ -3307,7 +3740,7 @@ async function readPromptInput(req) {
   if (positional) return positional;
   if (fromFile) {
     try {
-      return import_node_fs11.default.readFileSync(fromFile, "utf8");
+      return await import_node_fs12.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -3327,7 +3760,7 @@ async function readJsonInput(req) {
   if (jsonRaw) raw = jsonRaw;
   else if (fromFile) {
     try {
-      raw = import_node_fs11.default.readFileSync(fromFile, "utf8");
+      raw = await import_node_fs12.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -3342,11 +3775,11 @@ async function readJsonInput(req) {
     throw invalidParams(`invalid JSON payload: ${e.message}`);
   }
 }
-function buildUserInput(text, attachments) {
+async function buildUserInput(text, attachments) {
   const items = [{ type: "text", text }];
-  for (const path10 of attachments) {
-    assertAttachable(path10);
-    items.push({ type: "localImage", path: path10 });
+  for (const path11 of attachments) {
+    await assertAttachable(path11);
+    items.push({ type: "localImage", path: path11 });
   }
   return items;
 }
@@ -3446,10 +3879,10 @@ function asStringArray(v) {
 function isTrue3(v) {
   return v === true || v === "true" || v === "1";
 }
-function assertAttachable(filePath) {
+async function assertAttachable(filePath) {
   let stat;
   try {
-    stat = import_node_fs11.default.statSync(filePath);
+    stat = await import_node_fs12.default.promises.stat(filePath);
   } catch (e) {
     throw invalidParams(`--attach not readable: ${filePath}: ${e.message}`);
   }
@@ -3459,6 +3892,44 @@ function assertAttachable(filePath) {
   if (!/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(filePath)) {
     throw invalidParams(`--attach currently supports image files only: ${filePath}`);
   }
+}
+async function listTurnsFromRelativeOffset(client, threadId, relativeSince, limit, retry) {
+  const skip = Math.max(0, relativeSince - 1);
+  let remainingSkip = skip;
+  let cursor;
+  const data = [];
+  let nextCursor = null;
+  while (data.length < limit) {
+    const pageSize = Math.max(limit - data.length, Math.min(100, remainingSkip + limit - data.length));
+    const page = await threadTurnsList(client, threadId, {
+      limit: Math.max(1, pageSize),
+      cursor,
+      sortDirection: "desc"
+    }, retry);
+    if (page.data.length === 0) {
+      nextCursor = null;
+      break;
+    }
+    if (remainingSkip >= page.data.length) {
+      remainingSkip -= page.data.length;
+      cursor = page.nextCursor ?? void 0;
+      nextCursor = page.nextCursor ?? null;
+      if (!cursor) break;
+      continue;
+    }
+    const visible = page.data.slice(remainingSkip);
+    remainingSkip = 0;
+    const take = visible.slice(0, limit - data.length);
+    data.push(...take);
+    if (take.length < visible.length) {
+      nextCursor = null;
+      break;
+    }
+    nextCursor = page.nextCursor ?? null;
+    cursor = page.nextCursor ?? void 0;
+    if (!cursor) break;
+  }
+  return { data, nextCursor };
 }
 
 // src/daemon/handlers/monitor.ts
@@ -3475,7 +3946,7 @@ var monitorEvents = async (ctx, req, stream) => {
   const intervalGiven = flags["interval"] !== void 0;
   if (streamMode && intervalGiven) throw invalidParams("--stream and --interval are mutually exclusive");
   const intervalDefault = numConfig(ctx, "monitor.default_interval_seconds", 30);
-  const intervalS = intervalGiven ? toInt3(flags["interval"], intervalDefault) : intervalDefault;
+  const intervalS = intervalGiven ? toInt4(flags["interval"], intervalDefault) : intervalDefault;
   if (intervalS <= 0 && !streamMode) throw invalidParams("--interval must be > 0");
   const includeDelta = isTrue4(flags["include-delta"]);
   const filterTypes = parseTypeList(flags["filter"]);
@@ -3530,62 +4001,78 @@ var monitorEvents = async (ctx, req, stream) => {
 var monitorAlarm = async (_ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor alarm requires streaming");
   const positionals = asPositionals2(req);
-  const intervalS = toInt3(positionals[0], 0);
+  const intervalS = toInt4(positionals[0], 0);
   if (intervalS <= 0) throw invalidParams("first positional must be interval seconds (positive integer)");
   const command = positionals[1];
   if (!command) throw invalidParams("missing command string");
   const flags = asFlags2(req);
   const once = isTrue4(flags["once"]);
-  const timeoutS = toInt3(flags["timeout"], 60);
+  const timeoutS = toInt4(flags["timeout"], 60);
   let cancelled = false;
+  let running = false;
   let timer = null;
+  let activeChild = null;
+  let activeKillTimer = null;
+  let activeKillHardTimer = null;
   const runOnce = async () => {
-    if (cancelled) return;
+    if (cancelled || running) return;
+    running = true;
     const start = Date.now();
-    await new Promise((resolve) => {
-      const child = (0, import_node_child_process5.spawn)("sh", ["-c", command], { stdio: ["ignore", "pipe", "pipe"] });
-      let stdoutBuf = "";
-      let stderrBuf = "";
-      let killed = false;
-      const killer = setTimeout(() => {
-        killed = true;
-        try {
-          child.kill("SIGTERM");
-        } catch {
-        }
-        setTimeout(() => {
+    try {
+      await new Promise((resolve) => {
+        const { file, args } = shellCommand(command);
+        const child = (0, import_node_child_process5.spawn)(file, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+        activeChild = child;
+        let stdoutBuf = "";
+        let stderrBuf = "";
+        let killed = false;
+        const killer = setTimeout(() => {
+          killed = true;
+          activeKillHardTimer = setTimeout(() => {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+            }
+          }, 5e3);
+          activeKillHardTimer.unref();
           try {
-            child.kill("SIGKILL");
+            child.kill("SIGTERM");
           } catch {
           }
-        }, 5e3);
-      }, timeoutS * 1e3);
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (c) => {
-        stdoutBuf += c;
-      });
-      child.stderr.setEncoding("utf8");
-      child.stderr.on("data", (c) => {
-        stderrBuf += c;
-      });
-      child.on("error", (err2) => {
-        clearTimeout(killer);
-        stream.chunk({ __alarm_event: "spawn_error", error: err2.message });
-        resolve();
-      });
-      child.on("exit", (code, signal) => {
-        clearTimeout(killer);
-        if (stdoutBuf) stream.chunk({ stdout: stdoutBuf });
-        if (stderrBuf) stream.chunk({ stderr: stderrBuf });
-        stream.chunk({
-          __alarm_event: killed ? "timeout" : "exit",
-          exit_code: code,
-          signal,
-          duration_ms: Date.now() - start
+        }, timeoutS * 1e3);
+        killer.unref();
+        activeKillTimer = killer;
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (c) => {
+          stdoutBuf += c;
         });
-        resolve();
+        child.stderr.setEncoding("utf8");
+        child.stderr.on("data", (c) => {
+          stderrBuf += c;
+        });
+        child.on("error", (err2) => {
+          clearActiveKillTimers();
+          if (activeChild === child) activeChild = null;
+          stream.chunk({ __alarm_event: "spawn_error", error: err2.message });
+          resolve();
+        });
+        child.on("exit", (code, signal) => {
+          clearActiveKillTimers();
+          if (activeChild === child) activeChild = null;
+          if (stdoutBuf) stream.chunk({ stdout: stdoutBuf });
+          if (stderrBuf) stream.chunk({ stderr: stderrBuf });
+          stream.chunk({
+            __alarm_event: killed ? "timeout" : "exit",
+            exit_code: code,
+            signal,
+            duration_ms: Date.now() - start
+          });
+          resolve();
+        });
       });
-    });
+    } finally {
+      running = false;
+    }
   };
   await runOnce();
   if (once || cancelled) {
@@ -3598,9 +4085,38 @@ var monitorAlarm = async (_ctx, req, stream) => {
   stream.onClose(() => {
     cancelled = true;
     if (timer) clearInterval(timer);
+    if (activeChild && activeChild.exitCode === null && activeChild.signalCode === null) {
+      try {
+        activeChild.kill("SIGTERM");
+      } catch {
+      }
+    }
+    clearActiveKillTimers();
   });
   return { streaming: true };
+  function clearActiveKillTimers() {
+    if (activeKillTimer) {
+      clearTimeout(activeKillTimer);
+      activeKillTimer = null;
+    }
+    if (activeKillHardTimer) {
+      clearTimeout(activeKillHardTimer);
+      activeKillHardTimer = null;
+    }
+  }
 };
+function shellCommand(command) {
+  if (process.platform === "win32") {
+    return {
+      file: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", command]
+    };
+  }
+  return {
+    file: process.env.SHELL || "sh",
+    args: ["-c", command]
+  };
+}
 function asFlags2(req) {
   const f = req.params.flags;
   return f && typeof f === "object" ? f : {};
@@ -3619,7 +4135,7 @@ function asString4(v) {
   }
   return typeof v === "string" ? v : null;
 }
-function toInt3(v, fallback) {
+function toInt4(v, fallback) {
   if (typeof v === "number" && Number.isFinite(v)) return Math.floor(v);
   if (typeof v === "string") {
     const n = Number(v);
@@ -3679,6 +4195,8 @@ function getHandler(method) {
 }
 
 // src/daemon/server.ts
+var MAX_STREAM_QUEUE_BYTES = 1024 * 1024;
+var MAX_STREAM_QUEUE_MESSAGES = 1024;
 async function startServer(ctx) {
   const server = await listenSock(ctx.sockPath);
   server.on("connection", (socket) => handleConnection(ctx, socket));
@@ -3719,7 +4237,6 @@ async function handleRequest(ctx, socket, req, closeCallbacks) {
     const stream = createStreamHandle(socket, req.id, closeCallbacks);
     try {
       await handler(ctx, req, stream);
-      stream.end();
     } catch (e) {
       stream.end(toCodexTeamError(e));
     }
@@ -3735,11 +4252,60 @@ async function handleRequest(ctx, socket, req, closeCallbacks) {
 }
 function createStreamHandle(socket, id, closeCallbacks) {
   let ended = false;
+  let blocked = false;
+  let queuedBytes = 0;
+  const queuedFrames = [];
+  const flushQueued = () => {
+    while (queuedFrames.length > 0) {
+      const frame = queuedFrames[0];
+      if (!socket.write(frame)) {
+        blocked = true;
+        return;
+      }
+      queuedFrames.shift();
+      queuedBytes = Math.max(0, queuedBytes - Buffer.byteLength(frame));
+    }
+    blocked = false;
+  };
+  const onDrain = () => flushQueued();
+  socket.on("drain", onDrain);
+  closeCallbacks.add(() => socket.off("drain", onDrain));
+  const enqueueFrame = (frame) => {
+    if (ended) return;
+    if (!blocked && queuedFrames.length === 0) {
+      if (!socket.write(frame)) {
+        blocked = true;
+      }
+      return;
+    }
+    queuedFrames.push(frame);
+    queuedBytes += Buffer.byteLength(frame);
+    if (queuedFrames.length > MAX_STREAM_QUEUE_MESSAGES || queuedBytes > MAX_STREAM_QUEUE_BYTES) {
+      queuedFrames.length = 0;
+      queuedBytes = 0;
+      ended = true;
+      const msg = {
+        kind: "stream_end",
+        id,
+        error: {
+          code: "internal",
+          message: "stream consumer too slow"
+        }
+      };
+      writeMessage(socket, msg);
+      try {
+        socket.end();
+      } catch {
+      }
+      return;
+    }
+    flushQueued();
+  };
   return {
     chunk(data) {
       if (ended) return;
       const msg = { kind: "stream_chunk", id, data };
-      writeMessage(socket, msg);
+      enqueueFrame(JSON.stringify(msg) + "\n");
     },
     end(error) {
       if (ended) return;
@@ -3747,6 +4313,13 @@ function createStreamHandle(socket, id, closeCallbacks) {
       const msg = { kind: "stream_end", id };
       if (error) {
         msg.error = { code: error.code, message: error.message, ...error.data !== void 0 ? { data: error.data } : {} };
+      }
+      if (queuedFrames.length > 0) {
+        const frame = JSON.stringify(msg) + "\n";
+        queuedFrames.push(frame);
+        queuedBytes += Buffer.byteLength(frame);
+        flushQueued();
+        return;
       }
       writeMessage(socket, msg);
     },
@@ -4043,8 +4616,19 @@ function wireDaemonEvents(ctx) {
     }
     if (norm.type === "turn.completed" && sessionName && norm.threadId) {
       const client = ctx.pool.clientForSession(keyFor3(e.user, sessionName));
-      void ctx.queues.onTurnCompleted(keyFor3(e.user, sessionName), client, norm.threadId, ctx.retryOptions()).then((nextId) => {
-        if (nextId) logger.debug("drained queued turn", { session: sessionName, turn_id: nextId });
+      void ctx.queues.onTurnCompleted(keyFor3(e.user, sessionName), client, norm.threadId, ctx.retryOptions()).then((next) => {
+        if (next.turn_id) {
+          logger.debug("drained queued turn", { session: sessionName, turn_id: next.turn_id, queue_id: next.queue_id });
+          ctx.events.append(e.user, {
+            type: "turn.queued_started",
+            session: sessionName,
+            thread_id: norm.threadId,
+            payload: {
+              turn_id: next.turn_id,
+              queue_id: next.queue_id
+            }
+          });
+        }
       });
     }
     if (norm.type === "thread.closed" && sessionName) {
@@ -4149,6 +4733,7 @@ function parseKey(sessionKey) {
 }
 
 // src/daemon/run.ts
+var PIDFILE_STALE_MS = 5e3;
 async function runDaemon() {
   const ctx = buildContext();
   const waitStart = Date.now();
@@ -4161,7 +4746,7 @@ async function runDaemon() {
   }
   const pidPath = pidFilePath(ctx.dataDir);
   const acquireStart = Date.now();
-  while (!acquirePid(pidPath, ctx.sockPath)) {
+  while (!acquirePid(pidPath)) {
     if (Date.now() - acquireStart > 3e3) {
       logger.warn("another daemon pidfile is live; aborting", { pid_path: pidPath });
       return 1;
@@ -4171,18 +4756,17 @@ async function runDaemon() {
   unlinkSockIfStale(ctx.sockPath);
   reapOrphans(ctx.dataDir);
   const cleanup = () => {
+    unlinkSockIfStale(ctx.sockPath);
     try {
-      import_node_fs12.default.unlinkSync(ctx.sockPath);
-    } catch {
-    }
-    try {
-      import_node_fs12.default.unlinkSync(pidPath);
+      import_node_fs13.default.unlinkSync(pidPath);
     } catch {
     }
   };
   process.on("exit", cleanup);
-  process.on("SIGINT", () => void shutdownDaemon(ctx, "SIGINT"));
-  process.on("SIGTERM", () => void shutdownDaemon(ctx, "SIGTERM"));
+  registerShutdownSignal("SIGINT", ctx);
+  registerShutdownSignal("SIGTERM", ctx);
+  if (process.platform === "win32") registerShutdownSignal("SIGBREAK", ctx);
+  else registerShutdownSignal("SIGHUP", ctx);
   wireDaemonEvents(ctx);
   try {
     await startServer(ctx);
@@ -4194,7 +4778,7 @@ async function runDaemon() {
   } catch (e) {
     logger.error("failed to start server", { err: e.message });
     try {
-      import_node_fs12.default.unlinkSync(pidPath);
+      import_node_fs13.default.unlinkSync(pidPath);
     } catch {
     }
     return 1;
@@ -4203,45 +4787,31 @@ async function runDaemon() {
   return await new Promise(() => {
   });
 }
-function acquirePid(pidPath, sockPath) {
+function acquirePid(pidPath) {
   try {
-    import_node_fs12.default.mkdirSync(import_node_path9.default.dirname(pidPath), { recursive: true });
-    if (import_node_fs12.default.existsSync(pidPath)) {
-      const existing = readPidValue(pidPath);
-      const ageMs = Date.now() - import_node_fs12.default.statSync(pidPath).mtimeMs;
-      if (Number.isFinite(existing) && existing > 0 && isPidAlive(existing) && existing !== process.pid) {
-        if (isLikelyCodexTeamDaemonProcess(existing) || import_node_fs12.default.existsSync(sockPath) && ageMs < 5e3) {
-          return false;
-        }
-      }
+    import_node_fs13.default.mkdirSync(import_node_path10.default.dirname(pidPath), { recursive: true });
+    const fd = import_node_fs13.default.openSync(pidPath, "wx");
+    try {
+      import_node_fs13.default.writeFileSync(fd, JSON.stringify({
+        pid: process.pid,
+        created_at: (/* @__PURE__ */ new Date()).toISOString()
+      }));
+    } finally {
+      import_node_fs13.default.closeSync(fd);
+    }
+    return true;
+  } catch (e) {
+    if (e?.code === "EEXIST") {
       try {
-        import_node_fs12.default.unlinkSync(pidPath);
+        const ageMs = Date.now() - import_node_fs13.default.statSync(pidPath).mtimeMs;
+        if (ageMs >= PIDFILE_STALE_MS) {
+          import_node_fs13.default.unlinkSync(pidPath);
+        }
       } catch {
       }
+      return false;
     }
-    import_node_fs12.default.writeFileSync(pidPath, String(process.pid));
-    return true;
-  } catch {
     return false;
-  }
-}
-function isPidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function readPidValue(pidPath) {
-  const raw = import_node_fs12.default.readFileSync(pidPath, "utf8").trim();
-  const direct = Number(raw);
-  if (Number.isFinite(direct)) return direct;
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed.pid === "number" && Number.isFinite(parsed.pid) ? parsed.pid : NaN;
-  } catch {
-    return NaN;
   }
 }
 function scheduleIdleShutdown(ctx) {
@@ -4264,6 +4834,9 @@ function scheduleIdleShutdown(ctx) {
     }
   };
   setInterval(check, 60 * 1e3).unref();
+}
+function registerShutdownSignal(signal, ctx) {
+  process.on(signal, () => void shutdownDaemon(ctx, signal));
 }
 
 // src/main.ts

@@ -1,6 +1,13 @@
+import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { monitorEvents } from "../src/daemon/handlers/monitor";
+import { startServer } from "../src/daemon/server";
+import { connectSock, onMessages, writeMessage } from "../src/ipc/sock";
 
 class FakeStream {
   chunks: unknown[] = [];
@@ -36,7 +43,23 @@ function makeReq(flags: Record<string, unknown> = {}, bearer = "user-1") {
   };
 }
 
+function mkSockPath() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-monitor-"));
+  return {
+    dir,
+    sockPath: path.join(dir, "daemon.sock"),
+  };
+}
+
+async function closeServer(server: net.Server, sockPath: string, dir: string) {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  try { fs.unlinkSync(sockPath); } catch {}
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 describe("monitorEvents", () => {
+  const cleanups: Array<() => Promise<void>> = [];
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
@@ -44,6 +67,13 @@ describe("monitorEvents", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  afterEach(async () => {
+    while (cleanups.length > 0) {
+      const fn = cleanups.pop()!;
+      await fn();
+    }
   });
 
   it("returns id_rotated as a stream error", async () => {
@@ -126,6 +156,97 @@ describe("monitorEvents", () => {
     expect(stream.chunks).toContainEqual(expect.objectContaining({ id: "evt-4" }));
 
     stream.close();
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an empty filtered stream open for future matching events", async () => {
+    vi.useRealTimers();
+
+    const { dir, sockPath } = mkSockPath();
+    const dispose = vi.fn();
+    let subscriber: ((event: Record<string, unknown>) => void) | null = null;
+    const server = await startServer({
+      sockPath,
+      activity: { touch() {} },
+      users: {
+        has: () => true,
+      },
+      events: {
+        listSince: () => ({
+          ok: true,
+          events: [
+            {
+              id: "evt-1",
+              ts: "2025-01-01T00:00:00.000Z",
+              type: "turn.started",
+              session: "sess-1",
+              thread_id: "th-1",
+              payload: {},
+            },
+          ],
+        }),
+        subscribe: (_user: string, cb: (event: Record<string, unknown>) => void) => {
+          subscriber = cb;
+          return { dispose };
+        },
+      },
+      config: {
+        getEffective: () => 30,
+      },
+    } as never);
+    cleanups.push(() => closeServer(server, sockPath, dir));
+
+    const sock = await connectSock(sockPath, 1000);
+    cleanups.push(async () => {
+      if (!sock.destroyed) sock.destroy();
+    });
+    const messages: Array<Record<string, unknown>> = [];
+    let firstChunkResolve: (() => void) | null = null;
+    const firstChunk = new Promise<void>((resolve) => {
+      firstChunkResolve = resolve;
+    });
+
+    onMessages(sock, (msg) => {
+      messages.push(msg as Record<string, unknown>);
+      if ((msg as { kind?: string }).kind === "stream_chunk") firstChunkResolve?.();
+    });
+
+    writeMessage(sock, {
+      kind: "request",
+      id: "stream-filtered",
+      method: "monitor:events",
+      bearer: "user-1",
+      params: {
+        streaming: true,
+        flags: { stream: true, filter: "turn.completed" },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(messages.find((m) => m.kind === "stream_end" || m.kind === "response")).toBeUndefined();
+
+    subscriber?.({
+      id: "evt-2",
+      ts: "2025-01-01T00:00:01.000Z",
+      type: "turn.completed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: {},
+    });
+    await Promise.race([
+      firstChunk,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("stream chunk timeout")), 200)),
+    ]);
+
+    expect(messages).toContainEqual(expect.objectContaining({
+      kind: "stream_chunk",
+      id: "stream-filtered",
+      data: expect.objectContaining({ id: "evt-2", type: "turn.completed" }),
+    }));
+    expect(messages.find((m) => m.kind === "stream_end" || m.kind === "response")).toBeUndefined();
+
+    sock.end();
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
