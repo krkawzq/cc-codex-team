@@ -19,6 +19,7 @@ export interface HelpNode {
   usage: string;
   positionals: HelpPositional[];
   flags: HelpFlag[];
+  notes?: string[];
   examples: string[];
   subcommands: HelpNode[];
   needs_bearer: boolean;
@@ -682,10 +683,15 @@ const messageGroup: HelpNode = {
         {
           name: "shortcut",
           required: false,
-          description: "Use accept, accept-session, decline, or cancel.",
+          description: "Use a shortcut that matches the approval kind.",
         },
       ],
       flags: JSON_RESPONSE_FLAGS,
+      notes: [
+        "command_execution and file_change: all shortcuts are valid.",
+        "permissions: cancel is invalid.",
+        "mcp_elicitation: accept-session is invalid; form mode needs --json.",
+      ],
       examples: [
         "codex-team -b $TOKEN message approval audit req-17 accept-session",
         "codex-team -b $TOKEN message approval audit req-17 --file approval.json",
@@ -1043,6 +1049,13 @@ function renderFlags(node: HelpNode, title = "FLAGS"): string[] {
   return lines;
 }
 
+function renderNotes(node: HelpNode): string[] {
+  return [
+    "NOTES",
+    ...((node.notes ?? []).map((note) => `  ${note}`)),
+  ];
+}
+
 function renderSubcommands(node: HelpNode): string[] {
   return [
     "SUBCOMMANDS",
@@ -1076,6 +1089,7 @@ export function renderHelp(path: string[]): string {
   } else {
     sections.push(renderPositionals(node));
     sections.push(renderFlags(node));
+    if (node.notes && node.notes.length > 0) sections.push(renderNotes(node));
   }
 
   sections.push(renderExamples(node));
