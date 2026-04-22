@@ -7,9 +7,11 @@ import { CodexTeamError, invalidParams } from "../../errors";
 import type { HandlerFn } from "../dispatch";
 import { shutdownDaemon } from "../shutdown";
 import { logger } from "../../logger";
+import { PACKAGE_ROOT, VERSION } from "../../version";
 
 export const daemonStatus: HandlerFn = async (ctx) => {
   const uptimeMs = Date.now() - ctx.startedAt.getTime();
+  const distFreshness = await getDistFreshness();
   return {
     pid: process.pid,
     version: getPkgVersion(),
@@ -20,6 +22,7 @@ export const daemonStatus: HandlerFn = async (ctx) => {
     user_count: ctx.users.list().length,
     app_server_count: ctx.pool.processCount(),
     started_at: ctx.startedAt.toISOString(),
+    ...distFreshness,
   };
 };
 
@@ -312,11 +315,65 @@ async function readBytes(filePath: string, start: number, length: number): Promi
 }
 
 function getPkgVersion(): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const pkg = require("../../../package.json");
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
+  return VERSION;
+}
+
+interface DistFreshness {
+  dist_built_at: string | null;
+  dist_age_seconds: number | null;
+  source_newer_than_dist: boolean | null;
+}
+
+async function getDistFreshness(packageRoot = PACKAGE_ROOT): Promise<DistFreshness> {
+  const distPath = path.join(packageRoot, "dist", "main.js");
+  const distStat = await statIfExists(distPath);
+  if (!distStat) {
+    return {
+      dist_built_at: null,
+      dist_age_seconds: null,
+      source_newer_than_dist: null,
+    };
   }
+
+  const builtAt = new Date(distStat.mtimeMs).toISOString();
+  const sourceNewestMtime = await getNewestMtime(path.join(packageRoot, "src"));
+
+  return {
+    dist_built_at: builtAt,
+    dist_age_seconds: Math.max(0, Math.floor((Date.now() - distStat.mtimeMs) / 1000)),
+    source_newer_than_dist: sourceNewestMtime === null ? null : sourceNewestMtime > distStat.mtimeMs,
+  };
+}
+
+async function statIfExists(filePath: string): Promise<fs.Stats | null> {
+  try {
+    return await fs.promises.stat(filePath);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return null;
+  }
+}
+
+async function getNewestMtime(dirPath: string): Promise<number | null> {
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return null;
+  }
+
+  let newest: number | null = null;
+  for (const entry of entries) {
+    const entryPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      const childNewest = await getNewestMtime(entryPath);
+      if (childNewest !== null && (newest === null || childNewest > newest)) newest = childNewest;
+      continue;
+    }
+
+    const stat = await statIfExists(entryPath);
+    if (stat && (newest === null || stat.mtimeMs > newest)) newest = stat.mtimeMs;
+  }
+  return newest;
 }

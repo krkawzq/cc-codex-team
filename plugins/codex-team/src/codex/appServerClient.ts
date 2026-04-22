@@ -11,6 +11,7 @@ import {
   TransportClosedError,
   mapJsonRpcError,
 } from "./errors";
+import { VERSION } from "../version";
 
 const STDERR_TAIL_LINES = 400;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
@@ -136,7 +137,7 @@ export class AppServerClient extends EventEmitter {
     this.proc.stderr.on("data", (chunk: string) => this.onStderr(chunk));
 
     const init = await this.request("initialize", {
-      clientInfo: this.options.clientInfo ?? { name: "codex-team", title: "codex-team", version: "0.5.1" },
+      clientInfo: this.options.clientInfo ?? { name: "codex-team", title: "codex-team", version: VERSION },
       capabilities: { experimentalApi: this.options.experimentalApi },
     });
     this.notify("initialized", {});
