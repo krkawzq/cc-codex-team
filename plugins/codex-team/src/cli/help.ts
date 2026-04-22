@@ -146,9 +146,17 @@ const daemonUserGroup: HelpNode = {
     leaf({
       name: "list",
       summary: "List all daemon users and their activity.",
-      usage: "codex-team daemon user list",
+      usage: "codex-team daemon user list [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per user to stdout.",
+        },
+      ],
       examples: [
         "codex-team daemon user list",
       ],
@@ -280,9 +288,17 @@ const daemonGroup: HelpNode = {
     leaf({
       name: "status",
       summary: "Show daemon process, socket, and resource status.",
-      usage: "codex-team daemon status",
+      usage: "codex-team daemon status [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout.",
+        },
+      ],
       examples: [
         "codex-team daemon status",
       ],
@@ -568,11 +584,19 @@ const sessionGroup: HelpNode = {
     leaf({
       name: "info",
       summary: "Show metadata for one session.",
-      usage: "codex-team -b <token> session info <name|thread_id>",
+      usage: "codex-team -b <token> session info <name|thread_id> [flags]",
       positionals: [
         { ...SESSION_TARGET },
       ],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout.",
+        },
+      ],
       examples: [
         "codex-team -b $TOKEN session info audit",
       ],
@@ -625,6 +649,13 @@ const sessionGroup: HelpNode = {
           default: "json",
           required: false,
           description: "Render output as json or table.",
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per session to stdout.",
         },
       ],
       examples: [
@@ -821,6 +852,13 @@ const messageGroup: HelpNode = {
           default: "2048",
           required: false,
           description: "Clip long markdown bodies to this many bytes; use 0 to disable clipping.",
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per turn to stdout.",
         },
       ],
       examples: [
@@ -1167,9 +1205,17 @@ const HELP_TREE: HelpNode = {
     leaf({
       name: "status",
       summary: "Show live sessions, pending events, and recent activity.",
-      usage: "codex-team -b <token> status",
+      usage: "codex-team -b <token> status [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout.",
+        },
+      ],
       examples: [
         "codex-team -b $TOKEN status",
       ],

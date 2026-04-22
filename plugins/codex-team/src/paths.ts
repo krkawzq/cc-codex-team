@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -104,6 +105,32 @@ export function decodeToken(encoded: string): string {
   return Buffer.from(b64, "base64").toString("utf8");
 }
 
+interface LegacyWindowsDataDirWarning {
+  legacyPath: string;
+  newPath: string;
+  message: string;
+}
+
+let legacyWindowsDataDirWarned = false;
+
+export function warnLegacyWindowsDataDir(
+  emit: (warning: LegacyWindowsDataDirWarning) => void,
+  opts: {
+    platform?: NodeJS.Platform;
+    legacyHome?: string | null;
+    nativeHome?: string;
+    dataDirOverride?: string | undefined;
+    exists?: (target: string) => boolean;
+  } = {},
+): LegacyWindowsDataDirWarning | null {
+  if (legacyWindowsDataDirWarned) return null;
+  const warning = getLegacyWindowsDataDirWarning(opts);
+  if (!warning) return null;
+  legacyWindowsDataDirWarned = true;
+  emit(warning);
+  return warning;
+}
+
 function namedPipePath(seed: string): string {
   return `${WINDOWS_PIPE_PREFIX}${APP}-${pathHash(seed)}`;
 }
@@ -111,3 +138,39 @@ function namedPipePath(seed: string): string {
 function pathHash(input: string): string {
   return crypto.createHash("sha256").update(input).digest("hex").slice(0, 16);
 }
+
+function getLegacyWindowsDataDirWarning(opts: {
+  platform?: NodeJS.Platform;
+  legacyHome?: string | null;
+  nativeHome?: string;
+  dataDirOverride?: string | undefined;
+  exists?: (target: string) => boolean;
+}): LegacyWindowsDataDirWarning | null {
+  const platform = opts.platform ?? process.platform;
+  if (platform !== "win32") return null;
+  if ((opts.dataDirOverride ?? process.env.CODEX_TEAM_DATA_DIR)?.trim()) return null;
+
+  const legacyHome = (opts.legacyHome ?? process.env.HOME ?? "").trim();
+  if (!legacyHome) return null;
+
+  const nativeHome = opts.nativeHome ?? homeDir();
+  if (!nativeHome || nativeHome === legacyHome) return null;
+
+  const exists = opts.exists ?? fs.existsSync;
+  const legacyPath = path.join(legacyHome, `.${APP}`);
+  const newPath = path.join(nativeHome, `.${APP}`);
+  if (!exists(legacyPath) || exists(newPath)) return null;
+
+  return {
+    legacyPath,
+    newPath,
+    message: `warning: Windows legacy HOME data dir '${legacyPath}' exists but new default '${newPath}' does not; move it manually to keep codex-team state.`,
+  };
+}
+
+export const __private__ = {
+  getLegacyWindowsDataDirWarning,
+  resetLegacyWindowsDataDirWarning(): void {
+    legacyWindowsDataDirWarned = false;
+  },
+};

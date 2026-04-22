@@ -7,7 +7,7 @@ import { CursorStore } from "./cursors";
 import { startServer } from "./server";
 import { probeSock, unlinkSockIfStale } from "../ipc/sock";
 import { logger } from "../logger";
-import { APP, homeDir, pidFilePath } from "../paths";
+import { APP, homeDir, pidFilePath, warnLegacyWindowsDataDir } from "../paths";
 import { shutdownDaemon } from "./shutdown";
 import { wireDaemonEvents } from "./wire";
 import { reapOrphans } from "./orphans";
@@ -18,6 +18,9 @@ export async function runDaemon(): Promise<number> {
   const ctx = buildContext({
     config,
     cursors: new CursorStore(config.resolvedDataDir()),
+  });
+  warnLegacyWindowsDataDir((warning) => {
+    logger.warn(warning.message);
   });
   const pidPath = pidFilePath(ctx.dataDir);
 
