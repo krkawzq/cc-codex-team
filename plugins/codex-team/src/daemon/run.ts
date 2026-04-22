@@ -1,9 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import type { DaemonContext } from "./context";
 import { buildContext } from "./context";
 import { ConfigStore } from "./config";
 import { CursorStore } from "./cursors";
+import {
+  APPROVAL_REQUEST_CANCELLED_EVENT_TYPE,
+  SESSION_CRASHED_EVENT_TYPE,
+  USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE,
+} from "./events";
 import { startServer } from "./server";
 import { probeSock, unlinkSockIfStale } from "../ipc/sock";
 import { logger } from "../logger";
@@ -12,6 +18,8 @@ import { shutdownDaemon } from "./shutdown";
 import { wireDaemonEvents } from "./wire";
 import { reapOrphans } from "./orphans";
 import { isLikelyCodexTeamDaemonProcess } from "./processes";
+
+const APP_SERVER_CRASHED_ON_RESTART_REASON = "app_server_crashed_on_restart";
 
 export async function runDaemon(): Promise<number> {
   const config = new ConfigStore();
@@ -32,6 +40,7 @@ export async function runDaemon(): Promise<number> {
 
   // Kill any leftover codex app-server processes spawned by a previous daemon.
   await reapOrphans(ctx.dataDir);
+  await reconcileLoadedSessionsAfterRestart(ctx);
 
   const cleanup = (): void => {
     unlinkSockIfStale(ctx.sockPath);
@@ -64,6 +73,63 @@ export async function runDaemon(): Promise<number> {
   return await new Promise<number>(() => { /* run forever */ });
 }
 
+export async function reconcileLoadedSessionsAfterRestart(ctx: Partial<DaemonContext>): Promise<void> {
+  if (!ctx.users || typeof ctx.users.list !== "function") return;
+  if (!ctx.sessions || typeof ctx.sessions.listLive !== "function" || typeof ctx.sessions.update !== "function") return;
+  if (!ctx.pool || typeof ctx.pool.clientForSession !== "function") return;
+  if (!ctx.events || typeof ctx.events.append !== "function") return;
+
+  for (const user of ctx.users.list()) {
+    for (const rec of ctx.sessions.listLive(user.token)) {
+      if (rec.state !== "live") continue;
+      const sessionKey = keyFor(user.token, rec.name);
+      if (isClientAlive(ctx.pool.clientForSession(sessionKey))) continue;
+
+      const lastTurnId = rec.current_turn_id ?? rec.last_turn_id ?? null;
+      ctx.sessions.update(user.token, rec.name, {
+        state: "crashed",
+        recovery_state: "degraded",
+        crash_reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+        last_turn_id: lastTurnId,
+        current_turn_id: null,
+        current_turn_started_at: null,
+        current_item_type: null,
+        items_in_turn: 0,
+        pending_approvals: 0,
+        pending_user_inputs: 0,
+      });
+
+      await ctx.events.append(user.token, {
+        type: SESSION_CRASHED_EVENT_TYPE,
+        session: rec.name,
+        thread_id: rec.thread_id,
+        payload: {
+          session: rec.name,
+          thread_id: rec.thread_id,
+          reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+          last_turn_id: lastTurnId,
+        },
+      });
+
+      for (const pending of cancelRestartPendingRequests(ctx, user.token, rec.name, rec.thread_id)) {
+        const eventType = cancellationEventType(pending.kind);
+        if (!eventType) continue;
+        await ctx.events.append(user.token, {
+          type: eventType,
+          session: rec.name,
+          thread_id: rec.thread_id,
+          payload: {
+            request_id: pending.request_id,
+            kind: pending.kind,
+            turn_id: pending.turn_id ?? null,
+            reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+          },
+        });
+      }
+    }
+  }
+}
+
 function acquirePid(pidPath: string): boolean {
   try {
     fs.mkdirSync(path.dirname(pidPath), { recursive: true });
@@ -81,6 +147,43 @@ function acquirePid(pidPath: string): boolean {
     if ((e as NodeJS.ErrnoException)?.code === "EEXIST") return false;
     return false;
   }
+}
+
+function cancelRestartPendingRequests(
+  ctx: Partial<DaemonContext>,
+  user: string,
+  sessionName: string,
+  threadId: string,
+): Array<{ request_id: string; kind: string; turn_id?: string | null }> {
+  if (!ctx.pending) return [];
+  if (typeof ctx.pending.abortForSession === "function") {
+    return ctx.pending.abortForSession(user, sessionName, "session_crashed", {
+      reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+      session: sessionName,
+      thread_id: threadId,
+    });
+  }
+  if (typeof ctx.pending.removeForSession === "function") {
+    return ctx.pending.removeForSession(user, sessionName);
+  }
+  return [];
+}
+
+function cancellationEventType(kind: string): string | null {
+  if (kind.startsWith("approval.")) return APPROVAL_REQUEST_CANCELLED_EVENT_TYPE;
+  if (kind === "user_input.request") return USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE;
+  return null;
+}
+
+function isClientAlive(client: unknown): boolean {
+  if (!client) return false;
+  const maybe = client as { isAlive?: () => boolean };
+  if (typeof maybe.isAlive === "function") return maybe.isAlive();
+  return true;
+}
+
+function keyFor(user: string, sessionName: string): string {
+  return `${user}::${sessionName}`;
 }
 
 function scheduleIdleShutdown(ctx: import("./context").DaemonContext): void {

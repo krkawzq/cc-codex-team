@@ -5,10 +5,12 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  APPROVAL_REQUEST_CANCELLED_EVENT_TYPE,
   AUTO_APPROVED_EVENT_TYPE,
   EventLog,
   SESSION_CLOSED_EVENT_TYPE,
   SESSION_CRASHED_EVENT_TYPE,
+  USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE,
   isDeltaType,
 } from "../src/daemon/events";
 import { encodeToken } from "../src/paths";
@@ -233,8 +235,10 @@ describe("isDeltaType", () => {
 
 describe("event type constants", () => {
   it("exports integration event names centrally", () => {
+    expect(APPROVAL_REQUEST_CANCELLED_EVENT_TYPE).toBe("approval.request_cancelled");
     expect(AUTO_APPROVED_EVENT_TYPE).toBe("auto_approved");
     expect(SESSION_CLOSED_EVENT_TYPE).toBe("session.closed");
     expect(SESSION_CRASHED_EVENT_TYPE).toBe("session.crashed");
+    expect(USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE).toBe("user_input.request_cancelled");
   });
 });
