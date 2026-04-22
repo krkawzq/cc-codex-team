@@ -12,6 +12,7 @@ class FakeStream {
   chunks: unknown[] = [];
   endedWith: unknown = null;
   private closeCb: (() => void) | null = null;
+  private ackCb: ((ack: { event_id: string | null }) => void) | null = null;
 
   chunk(data: unknown): void {
     this.chunks.push(data);
@@ -25,8 +26,16 @@ class FakeStream {
     this.closeCb = cb;
   }
 
+  onAck(cb: (ack: { event_id: string | null }) => void): void {
+    this.ackCb = cb;
+  }
+
   close(): void {
     this.closeCb?.();
+  }
+
+  ack(eventId: string): void {
+    this.ackCb?.({ event_id: eventId });
   }
 }
 
@@ -53,7 +62,7 @@ describe("monitor events --cursor", () => {
     }
   });
 
-  it("auto-creates a named cursor and persists the last seen event on stream close", async () => {
+  it("auto-creates a named cursor and persists the last acked event", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-monitor-cursor-"));
     dirs.push(dir);
     const events = new EventLog(100, dir);
@@ -94,8 +103,10 @@ describe("monitor events --cursor", () => {
     });
     await Promise.resolve();
 
-    stream.close();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    stream.ack("evt-3");
+    await Promise.resolve();
+    await Promise.resolve();
+    await cursors.clearUser("user-1");
 
     const reloaded = new CursorStore(dir);
     expect(reloaded.get("user-1", "audit-tail")).toEqual(expect.objectContaining({
@@ -103,11 +114,9 @@ describe("monitor events --cursor", () => {
       event_id: "evt-3",
       auto_update: true,
     }));
-
-    await cursors.clearUser("user-1");
   });
 
-  it("updates the cursor after each emitted interval batch", async () => {
+  it("updates the cursor after each acked interval batch", async () => {
     vi.useFakeTimers();
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-monitor-cursor-"));
@@ -144,15 +153,59 @@ describe("monitor events --cursor", () => {
     await vi.advanceTimersByTimeAsync(0);
     await vi.runOnlyPendingTimersAsync();
     await Promise.resolve();
+    stream.ack("evt-2");
+    await Promise.resolve();
+    await Promise.resolve();
+    await cursors.clearUser("user-1");
 
-    expect(cursors.get("user-1", "audit-tail")).toEqual(expect.objectContaining({
+    expect(new CursorStore(dir).get("user-1", "audit-tail")).toEqual(expect.objectContaining({
       name: "audit-tail",
       event_id: "evt-2",
       auto_update: true,
     }));
+  });
+
+  it("does not persist observed events when the stream closes before ack", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-monitor-cursor-"));
+    dirs.push(dir);
+    const events = new EventLog(100, dir);
+    const cursors = new CursorStore(dir);
+    const stream = new FakeStream();
+
+    await events.append("user-1", {
+      type: "turn.started",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: { turn_id: "turn-1" },
+    });
+    await cursors.save("user-1", {
+      name: "audit-tail",
+      event_id: "evt-1",
+      auto_update: true,
+    });
+
+    await monitorEvents({
+      users: { has: () => true },
+      config: { getEffective: () => 30 },
+      events,
+      cursors,
+    } as never, makeReq({ stream: true, cursor: "audit-tail" }) as never, stream as never);
+
+    await events.append("user-1", {
+      type: "turn.completed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: { turn_id: "turn-2" },
+    });
+    await Promise.resolve();
 
     stream.close();
-    await Promise.resolve();
     await cursors.clearUser("user-1");
+
+    expect(new CursorStore(dir).get("user-1", "audit-tail")).toEqual(expect.objectContaining({
+      name: "audit-tail",
+      event_id: "evt-1",
+      auto_update: true,
+    }));
   });
 });

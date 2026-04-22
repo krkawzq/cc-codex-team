@@ -136,6 +136,18 @@ describe("parseArgs", () => {
     expect(parsed.flags["event-id"]).toBe("evt-9");
   });
 
+  it("parses global value flags in --flag=value form", () => {
+    const parsed = parseArgs([
+      "--bearer=token-1",
+      "--daemon-sock=/tmp/codex-team.sock",
+      "status",
+    ]);
+
+    expect(parsed.bearer).toBe("token-1");
+    expect(parsed.daemonSock).toBe("/tmp/codex-team.sock");
+    expect(parsed.commandPath).toEqual(["status"]);
+  });
+
   it("parses monitor cursor flags alongside other monitor options", () => {
     const parsed = parseArgs([
       "-b", "token-1",

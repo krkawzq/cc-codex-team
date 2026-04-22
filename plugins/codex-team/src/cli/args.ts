@@ -92,15 +92,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const nonGlobal: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    const spec = GLOBAL_FLAGS[a];
+    const [globalToken, inlineValue] = splitLongFlagAssignment(a);
+    const spec = GLOBAL_FLAGS[globalToken];
     if (!spec) {
       nonGlobal.push(a);
       continue;
     }
     if (spec.takesValue) {
-      const v = argv[++i];
+      const v = inlineValue ?? argv[++i];
       if (v === undefined) {
-        result.unknown = `flag ${a} requires a value`;
+        result.unknown = `flag ${globalToken} requires a value`;
         return result;
       }
       if (spec.name === "bearer") result.bearer = v;
@@ -173,6 +174,13 @@ function isFlagLike(s: string): boolean {
 
 function isNegativeNumber(s: string): boolean {
   return /^-\d+(\.\d+)?$/.test(s);
+}
+
+function splitLongFlagAssignment(token: string): [string, string | null] {
+  if (!token.startsWith("--")) return [token, null];
+  const eqIdx = token.indexOf("=");
+  if (eqIdx < 0) return [token, null];
+  return [token.slice(0, eqIdx), token.slice(eqIdx + 1)];
 }
 
 function setFlag(flags: Record<string, string | boolean | string[]>, key: string, value: string | null): void {

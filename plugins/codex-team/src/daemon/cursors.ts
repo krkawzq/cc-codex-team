@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { invalidParams } from "../errors";
 import { logger } from "../logger";
@@ -7,6 +8,8 @@ import { userDir } from "../paths";
 
 const CURSOR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SCHEMA_VERSION = 1;
+const LOCK_RETRY_MS = 10;
+const LOCK_TIMEOUT_MS = 2000;
 
 export interface CursorRecord {
   name: string;
@@ -19,6 +22,10 @@ interface CursorEnvelope {
   schema_version?: number;
   cursors?: CursorRecord[];
 }
+
+type PersistOp =
+  | { type: "upsert"; cursor: CursorRecord }
+  | { type: "delete"; name: string };
 
 export class CursorStore {
   private readonly dataDir: string;
@@ -58,16 +65,50 @@ export class CursorStore {
       auto_update: input.auto_update ?? existing?.auto_update ?? true,
     };
     bucket.set(cursor.name, cursor);
-    await this.enqueuePersist(user);
+    try {
+      await this.enqueuePersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) });
+    } catch (error) {
+      if (existing) {
+        bucket.set(existing.name, existing);
+      } else {
+        bucket.delete(cursor.name);
+      }
+      throw error;
+    }
+    return cloneCursor(cursor)!;
+  }
+
+  async saveBestEffort(user: string, input: { name: string; event_id?: string | null; auto_update?: boolean }): Promise<CursorRecord> {
+    validateCursorName(input.name);
+    const bucket = this.bucket(user);
+    const existing = bucket.get(input.name);
+    const cursor: CursorRecord = {
+      name: input.name,
+      event_id: input.event_id ?? null,
+      updated_at: new Date().toISOString(),
+      auto_update: input.auto_update ?? existing?.auto_update ?? true,
+    };
+    bucket.set(cursor.name, cursor);
+    try {
+      await this.enqueuePersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) });
+    } catch (error) {
+      logger.warn("failed to persist cursors.json", { user, err: (error as Error).message });
+    }
     return cloneCursor(cursor)!;
   }
 
   async delete(user: string, name: string): Promise<boolean> {
     validateCursorName(name);
     const bucket = this.bucket(user);
+    const existing = bucket.get(name);
     const deleted = bucket.delete(name);
     if (!deleted) return false;
-    await this.enqueuePersist(user);
+    try {
+      await this.enqueuePersist(user, { type: "delete", name });
+    } catch (error) {
+      if (existing) bucket.set(name, existing);
+      throw error;
+    }
     return true;
   }
 
@@ -94,13 +135,7 @@ export class CursorStore {
     const filePath = cursorFilePath(user, this.dataDir);
     if (fs.existsSync(filePath)) {
       try {
-        const raw = fs.readFileSync(filePath, "utf8");
-        const parsed = JSON.parse(raw) as CursorEnvelope;
-        if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION) {
-          throw new Error(`cursors.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION}`);
-        }
-        for (const cursor of parsed.cursors ?? []) {
-          if (!isPersistedCursor(cursor)) continue;
+        for (const cursor of loadEnvelopeFromText(fs.readFileSync(filePath, "utf8")).cursors.values()) {
           bucket.set(cursor.name, cloneCursor(cursor)!);
         }
       } catch (error) {
@@ -111,34 +146,98 @@ export class CursorStore {
     this.loaded.add(user);
   }
 
-  private async enqueuePersist(user: string): Promise<void> {
+  private enqueuePersist(user: string, op: PersistOp): Promise<void> {
     const previous = this.writeChains.get(user) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(() => this.persistAsync(user))
-      .catch((error) => {
-        logger.warn("failed to persist cursors.json", { user, err: (error as Error).message });
-      });
+      .then(() => this.persistAsync(user, op));
     this.writeChains.set(user, next);
-    await next;
+    return next;
   }
 
-  private async persistAsync(user: string): Promise<void> {
+  private async persistAsync(user: string, op: PersistOp): Promise<void> {
     const dir = userDir(user, this.dataDir);
     await fs.promises.mkdir(dir, { recursive: true });
     const filePath = cursorFilePath(user, this.dataDir);
-    const payload = {
-      schema_version: SCHEMA_VERSION,
-      cursors: sorted(this.bucket(user)),
-    };
-    const tmpPath = `${filePath}.tmp`;
-    await fs.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
-    await fs.promises.rename(tmpPath, filePath);
+    const releaseLock = await acquireCursorLock(filePath);
+    const tmpPath = makeTempPath(filePath);
+    try {
+      const persisted = await loadEnvelopeFromFile(filePath);
+      applyPersistOp(persisted, op);
+      const payload = {
+        schema_version: SCHEMA_VERSION,
+        cursors: sorted(persisted),
+      };
+      await fs.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
+      await fs.promises.rename(tmpPath, filePath);
+    } finally {
+      await fs.promises.unlink(tmpPath).catch(() => undefined);
+      await releaseLock();
+    }
   }
 }
 
 function cursorFilePath(user: string, dataDir: string): string {
   return path.join(userDir(user, dataDir), "cursors.json");
+}
+
+async function acquireCursorLock(filePath: string): Promise<() => Promise<void>> {
+  const lockPath = `${filePath}.lock`;
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+
+  while (true) {
+    try {
+      const handle = await fs.promises.open(lockPath, "wx");
+      return async () => {
+        await handle.close();
+        await fs.promises.unlink(lockPath).catch(() => undefined);
+      };
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err.code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for cursor lock '${lockPath}'`);
+      }
+      await sleep(LOCK_RETRY_MS);
+    }
+  }
+}
+
+function makeTempPath(filePath: string): string {
+  return `${filePath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+}
+
+async function loadEnvelopeFromFile(filePath: string): Promise<Map<string, CursorRecord>> {
+  try {
+    const raw = await fs.promises.readFile(filePath, "utf8");
+    return loadEnvelopeFromText(raw).cursors;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") return new Map<string, CursorRecord>();
+    throw error;
+  }
+}
+
+function loadEnvelopeFromText(raw: string): { cursors: Map<string, CursorRecord> } {
+  const parsed = JSON.parse(raw) as CursorEnvelope;
+  if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION) {
+    throw new Error(`cursors.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION}`);
+  }
+
+  const bucket = new Map<string, CursorRecord>();
+  for (const cursor of parsed.cursors ?? []) {
+    if (!isPersistedCursor(cursor)) continue;
+    bucket.set(cursor.name, cloneCursor(cursor)!);
+  }
+  return { cursors: bucket };
+}
+
+function applyPersistOp(bucket: Map<string, CursorRecord>, op: PersistOp): void {
+  if (op.type === "delete") {
+    bucket.delete(op.name);
+    return;
+  }
+  bucket.set(op.cursor.name, cloneCursorRecord(op.cursor));
 }
 
 function validateCursorName(name: string): void {

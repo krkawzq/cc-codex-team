@@ -104,4 +104,41 @@ describe("CursorStore and cursor handlers", () => {
     expect(deleted).toEqual({ deleted: true, name: "audit-tail" });
     expect(new CursorStore(dir).list("user-1")).toEqual([]);
   });
+
+  it("serializes concurrent saves from different store instances without corrupting the file", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-cursors-"));
+    dirs.push(dir);
+
+    const first = new CursorStore(dir);
+    const second = new CursorStore(dir);
+
+    await Promise.all([
+      first.save("user-1", { name: "audit-a", event_id: "evt-1", auto_update: true }),
+      second.save("user-1", { name: "audit-b", event_id: "evt-2", auto_update: true }),
+    ]);
+
+    const reloaded = new CursorStore(dir);
+    expect(reloaded.list("user-1")).toEqual([
+      expect.objectContaining({ name: "audit-a", event_id: "evt-1" }),
+      expect.objectContaining({ name: "audit-b", event_id: "evt-2" }),
+    ]);
+
+    const raw = fs.readFileSync(path.join(dir, "users", "dXNlci0x", "cursors.json"), "utf8");
+    expect(() => JSON.parse(raw)).not.toThrow();
+  });
+
+  it("rejects save when the final rename fails", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-cursors-"));
+    dirs.push(dir);
+    const store = new CursorStore(dir);
+
+    vi.spyOn(fs.promises, "rename").mockRejectedValueOnce(Object.assign(new Error("disk full"), { code: "ENOSPC" }));
+
+    await expect(store.save("user-1", {
+      name: "audit-tail",
+      event_id: "evt-9",
+      auto_update: true,
+    })).rejects.toMatchObject({ code: "ENOSPC" });
+    expect(store.get("user-1", "audit-tail")).toBeNull();
+  });
 });

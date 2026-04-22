@@ -5,7 +5,7 @@ export interface HelpPositional {
 }
 
 export interface HelpFlag {
-  long: string;
+  long?: string;
   short?: string;
   type: string;
   default?: string;
@@ -361,7 +361,7 @@ const daemonGroup: HelpNode = {
           description: "Stream new log lines as they arrive.",
         },
         {
-          long: "-n",
+          short: "-n",
           type: "int",
           default: "100",
           required: false,
@@ -891,7 +891,7 @@ const messageGroup: HelpNode = {
           description: "Keep printing turns until the CLI exits.",
         },
         {
-          long: "-n",
+          short: "-n",
           type: "int",
           default: "3",
           required: false,
@@ -1255,7 +1255,8 @@ function formatPositional(positional: HelpPositional): string {
 }
 
 function formatFlag(flag: HelpFlag): string {
-  return flag.short ? `${flag.short}, ${flag.long}` : flag.long;
+  if (flag.short && flag.long) return `${flag.short}, ${flag.long}`;
+  return flag.short ?? flag.long ?? "-";
 }
 
 function renderTable(headers: string[], rows: string[][]): string[] {

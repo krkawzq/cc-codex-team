@@ -169,7 +169,7 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
       params,
     }, cliConfig, isReadOnlyMethod(method));
     if ("error" in resp && resp.error) {
-      process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
+      process.stdout.write(forwardDaemonError(resp.error));
       return 1;
     }
     if (truthy(parsed.flags.short)) {
@@ -280,15 +280,16 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
 
     onMessages(sock, (msg) => {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
+        const ackAfterWrite = createStreamAckCallback(method, sock, reqId, msg.data);
         const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
         if (markdown !== null) {
-          writeStdout(markdown + "\n");
+          writeStdout(markdown + "\n", ackAfterWrite);
         } else {
-          writeStdout(JSON.stringify(msg.data) + "\n");
+          writeStdout(JSON.stringify(msg.data) + "\n", ackAfterWrite);
         }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
-          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+          writeStdout(forwardDaemonError(msg.error), () => {
             finish(1);
             sock.end();
           });
@@ -300,7 +301,7 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
         }
       } else if (msg.kind === "response" && msg.id === reqId) {
         if (msg.error) {
-          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+          writeStdout(forwardDaemonError(msg.error), () => {
             finish(1);
             sock.end();
           });
@@ -518,6 +519,40 @@ function extractCursorEventId(result: unknown): string {
   if (!result || typeof result !== "object" || Array.isArray(result)) return "";
   const eventId = (result as { event_id?: unknown }).event_id;
   return typeof eventId === "string" ? eventId : "";
+}
+
+function createStreamAckCallback(
+  method: string,
+  sock: net.Socket,
+  reqId: string,
+  data: unknown,
+): (() => void) | undefined {
+  if (method !== "monitor:events") return undefined;
+  const eventId = extractStreamEventId(data);
+  if (!eventId) return undefined;
+  return () => sendStreamAck(sock, reqId, eventId);
+}
+
+function extractStreamEventId(data: unknown): string | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const id = (data as { id?: unknown }).id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+function sendStreamAck(sock: net.Socket, reqId: string, eventId: string): void {
+  if (sock.destroyed) return;
+  writeMessage(sock, {
+    kind: "notification",
+    method: "stream_ack",
+    params: {
+      id: reqId,
+      event_id: eventId,
+    },
+  });
+}
+
+function forwardDaemonError(error: { code: string; message: string; data?: unknown }): string {
+  return JSON.stringify(err(error.code, error.message, error.data)) + "\n";
 }
 
 function validateCliFlags(parsed: ParsedArgs, method: string): string | null {

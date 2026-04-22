@@ -105,4 +105,14 @@ describe("renderHelp", () => {
     expect(help).toContain("--truncate");
     expect(help).toContain("use 0 to disable clipping");
   });
+
+  it("renders short-only count flags as short flags", () => {
+    const daemonLogs = renderHelp(["daemon", "logs"]);
+    expect(daemonLogs).toContain("\n  -n");
+    expect(daemonLogs).not.toContain("-n,");
+
+    const messageTail = renderHelp(["message", "tail"]);
+    expect(messageTail).toContain("\n  -n");
+    expect(messageTail).not.toContain("-n,");
+  });
 });

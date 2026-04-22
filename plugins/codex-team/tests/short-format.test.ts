@@ -151,4 +151,30 @@ describe("formatShort", () => {
       "turn-1 completed unknown items=unknown",
     );
   });
+
+  it("preserves session list pagination metadata in a compact footer", () => {
+    expect(formatShort("session:list", {
+      sessions: [
+        { name: "audit", state: "live", model: "gpt-5.4", current_turn_id: "turn-42" },
+      ],
+      next_cursor: "cursor-2",
+      all: true,
+      sort: "last_active",
+      format: "json",
+    })).toBe(
+      "audit  live  gpt-5.4  busy=y\n# next_cursor=\"cursor-2\" all=true sort=\"last_active\" format=\"json\"",
+    );
+  });
+
+  it("preserves message history notes in a compact footer", () => {
+    expect(formatShort("message:history", {
+      turns: [
+        { id: "turn-1", status: "completed", item_count: 1 },
+      ],
+      format: "json",
+      note: "Turn items are not included in turnsList responses.",
+    })).toBe(
+      "turn-1 completed unknown items=1\n# format=\"json\"\n# note=\"Turn items are not included in turnsList responses.\"",
+    );
+  });
 });
