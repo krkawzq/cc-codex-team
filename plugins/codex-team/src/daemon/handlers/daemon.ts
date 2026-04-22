@@ -6,6 +6,7 @@ import { CONFIG_KEYS } from "../config";
 import { CodexTeamError, invalidParams } from "../../errors";
 import type { HandlerFn } from "../dispatch";
 import { SESSION_CLOSED_EVENT_TYPE } from "../events";
+import { cancelPendingWithEvent } from "../pending-cancel";
 import { shutdownDaemon } from "../shutdown";
 import { logger } from "../../logger";
 import { PACKAGE_ROOT, VERSION } from "../../version";
@@ -77,9 +78,18 @@ export const daemonUserDestroy: HandlerFn = async (ctx, req) => {
       `cannot destroy user '${token}' while ${liveSessions.length} live session(s) remain; pass --force to destroy anyway`,
     );
   }
-  const pending = ctx.pending.removeForUser(token);
+  const pending = typeof ctx.pending.listForUser === "function"
+    ? ctx.pending.listForUser(token)
+    : [];
   for (const p of pending) {
-    try { p.client.respondError(p.jsonrpc_id, -32000, "user destroyed"); } catch { /* ignore */ }
+    await cancelPendingWithEvent(
+      ctx,
+      token,
+      p.session_name ?? "*",
+      p.thread_id ?? "",
+      "user_destroyed",
+      (entry) => entry.request_id === p.request_id,
+    );
   }
   await ctx.pool.closeUser(token);
   const sessions = await ctx.sessions.clearUser(token);

@@ -10,12 +10,14 @@ import { VERSION } from "../src/version";
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_JSON_PATH = path.join(THIS_DIR, "..", "package.json");
+const PLUGIN_JSON_PATH = path.join(THIS_DIR, "..", ".claude-plugin", "plugin.json");
 const DIST_MAIN_PATH = path.join(THIS_DIR, "..", "dist", "main.js");
 
 describe("VERSION", () => {
   it("matches package.json", () => {
     const pkg = require(PACKAGE_JSON_PATH) as { version?: string };
     expect(VERSION).toBe(pkg.version);
+    expect((require(PLUGIN_JSON_PATH) as { version?: string }).version).toBe(pkg.version);
   });
 
   it("matches package.json when the built dist CLI runs", () => {

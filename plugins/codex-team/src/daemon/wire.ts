@@ -7,6 +7,7 @@ import {
   SESSION_CLOSED_EVENT_TYPE,
   SESSION_CRASHED_EVENT_TYPE,
 } from "./events";
+import { cancelPendingWithEvent } from "./pending-cancel";
 import type { PoolClientClose, PoolNotification, PoolServerRequest } from "../codex/pool";
 import type { JsonValue } from "../codex/errors";
 import { threadResume, threadUnsubscribe } from "../codex/rpc";
@@ -155,7 +156,7 @@ async function handleNotification(
 
   if (norm.type === "thread.closed" && sessionName) {
     try {
-      await closeSession(ctx, e.user, sessionName, "user_detach", "session detached", false);
+      await closeSession(ctx, e.user, sessionName, "user_detach", false);
     } catch (err) {
       logger.warn("thread closed cleanup failed", { session: sessionName, err: (err as Error).message });
     }
@@ -184,7 +185,7 @@ async function handleNotification(
   if (norm.type === "client_close" && sessionName && norm.threadId) {
     if (isSessionIdle(ctx, e.user, sessionName)) {
       try {
-        await closeSession(ctx, e.user, sessionName, "idle_unload", "session idle_unloaded", true);
+        await closeSession(ctx, e.user, sessionName, "idle_unload", true);
       } catch (err) {
         logger.warn("idle unload cleanup failed", { session: sessionName, err: (err as Error).message });
       }
@@ -279,13 +280,9 @@ async function handleClientClose(
         },
       });
     }
+    await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, "session_crashed");
     await appendSessionClosed(ctx, user, rec.name, rec.thread_id, "app_server_crashed");
     ctx.queues.onClientClosed(sessionKey);
-    ctx.pending.abortForSession(user, sessionName, "session_crashed", {
-      reason: "session_crashed",
-      session: rec.name,
-      thread_id: rec.thread_id,
-    });
   }
 }
 
@@ -416,7 +413,6 @@ async function closeSession(
   user: string,
   sessionName: string,
   reason: "user_detach" | "daemon_shutdown" | "app_server_crashed" | "idle_unload" | "user_destroyed",
-  pendingMessage: string,
   unsubscribe: boolean,
 ): Promise<void> {
   const rec = ctx.sessions.get(user, sessionName);
@@ -428,10 +424,8 @@ async function closeSession(
   }
   ctx.pool.release(sessionKey);
   ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, reason);
   ctx.sessions.remove(user, sessionName);
-  for (const p of ctx.pending.removeForSession(user, sessionName)) {
-    try { p.client.respondError(p.jsonrpc_id, -32000, pendingMessage); } catch { /* ignore */ }
-  }
   await appendSessionClosed(ctx, user, rec.name, rec.thread_id, reason);
 }
 

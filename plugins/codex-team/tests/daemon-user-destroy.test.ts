@@ -17,16 +17,40 @@ function makeReq(token: string, flags: Record<string, unknown> = {}) {
 describe("daemon:user:destroy", () => {
   it("destroys a user when no live sessions remain", async () => {
     const pendingClient = { respondError: vi.fn() };
+    const pendingEntries = [
+      {
+        request_id: "req-1",
+        kind: "approval.permissions",
+        user: "user-1",
+        session_name: "sess-1",
+        thread_id: "th-1",
+        turn_id: "turn-1",
+        jsonrpc_id: 7,
+        client: pendingClient,
+        raw: {},
+        created_at: "2025-01-01T00:00:00.000Z",
+      },
+      {
+        request_id: "req-2",
+        kind: "user_input.request",
+        user: "user-1",
+        session_name: "sess-2",
+        thread_id: "th-2",
+        turn_id: "turn-2",
+        jsonrpc_id: 8,
+        client: pendingClient,
+        raw: {},
+        created_at: "2025-01-01T00:00:00.000Z",
+      },
+    ];
     const ctx = {
       users: {
         has: vi.fn().mockReturnValue(true),
         destroy: vi.fn(),
       },
       pending: {
-        removeForUser: vi.fn().mockReturnValue([
-          { client: pendingClient, jsonrpc_id: 7 },
-          { client: pendingClient, jsonrpc_id: 8 },
-        ]),
+        listForUser: vi.fn().mockReturnValue(pendingEntries),
+        remove: vi.fn((requestId: string) => pendingEntries.find((entry) => entry.request_id === requestId) ?? null),
       },
       pool: {
         closeUser: vi.fn().mockResolvedValue(undefined),
@@ -50,15 +74,39 @@ describe("daemon:user:destroy", () => {
     const result = await daemonUserDestroy(ctx as never, makeReq("user-1") as never);
 
     expect(ctx.sessions.listLive).toHaveBeenCalledWith("user-1");
-    expect(ctx.pending.removeForUser).toHaveBeenCalledWith("user-1");
+    expect(ctx.pending.listForUser).toHaveBeenCalledWith("user-1");
     expect(ctx.pool.closeUser).toHaveBeenCalledWith("user-1");
     expect(ctx.sessions.clearUser).toHaveBeenCalledWith("user-1");
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "approval.request_cancelled",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: expect.objectContaining({
+        request_id: "req-1",
+        reason: "user_destroyed",
+      }),
+    }));
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "user_input.request_cancelled",
+      session: "sess-2",
+      thread_id: "th-2",
+      payload: expect.objectContaining({
+        request_id: "req-2",
+        reason: "user_destroyed",
+      }),
+    }));
     expect(ctx.events.append).toHaveBeenNthCalledWith(1, "user-1", expect.objectContaining({
+      type: "approval.request_cancelled",
+    }));
+    expect(ctx.events.append).toHaveBeenNthCalledWith(2, "user-1", expect.objectContaining({
+      type: "user_input.request_cancelled",
+    }));
+    expect(ctx.events.append).toHaveBeenNthCalledWith(3, "user-1", expect.objectContaining({
       type: "session.closed",
       session: "sess-1",
       payload: expect.objectContaining({ reason: "user_destroyed" }),
     }));
-    expect(ctx.events.append).toHaveBeenNthCalledWith(2, "user-1", expect.objectContaining({
+    expect(ctx.events.append).toHaveBeenNthCalledWith(4, "user-1", expect.objectContaining({
       type: "session.closed",
       session: "sess-2",
       payload: expect.objectContaining({ reason: "user_destroyed" }),
@@ -83,7 +131,8 @@ describe("daemon:user:destroy", () => {
         destroy: vi.fn(),
       },
       pending: {
-        removeForUser: vi.fn(),
+        listForUser: vi.fn(),
+        remove: vi.fn(),
       },
       pool: {
         closeUser: vi.fn(),
@@ -104,7 +153,7 @@ describe("daemon:user:destroy", () => {
     await expect(daemonUserDestroy(ctx as never, makeReq("user-1") as never))
       .rejects.toMatchObject({ code: "invalid_params" });
 
-    expect(ctx.pending.removeForUser).not.toHaveBeenCalled();
+    expect(ctx.pending.listForUser).not.toHaveBeenCalled();
     expect(ctx.pool.closeUser).not.toHaveBeenCalled();
     expect(ctx.sessions.clearUser).not.toHaveBeenCalled();
     expect(ctx.users.destroy).not.toHaveBeenCalled();
@@ -117,7 +166,8 @@ describe("daemon:user:destroy", () => {
         destroy: vi.fn(),
       },
       pending: {
-        removeForUser: vi.fn().mockReturnValue([]),
+        listForUser: vi.fn().mockReturnValue([]),
+        remove: vi.fn(),
       },
       pool: {
         closeUser: vi.fn().mockResolvedValue(undefined),

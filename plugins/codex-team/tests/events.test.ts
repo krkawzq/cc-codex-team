@@ -10,6 +10,7 @@ import {
   EventLog,
   SESSION_CLOSED_EVENT_TYPE,
   SESSION_CRASHED_EVENT_TYPE,
+  SESSION_PENDING_DROPPED_EVENT_TYPE,
   USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE,
   isDeltaType,
 } from "../src/daemon/events";
@@ -282,6 +283,7 @@ describe("event type constants", () => {
     expect(AUTO_APPROVED_EVENT_TYPE).toBe("auto_approved");
     expect(SESSION_CLOSED_EVENT_TYPE).toBe("session.closed");
     expect(SESSION_CRASHED_EVENT_TYPE).toBe("session.crashed");
+    expect(SESSION_PENDING_DROPPED_EVENT_TYPE).toBe("session.pending_dropped");
     expect(USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE).toBe("user_input.request_cancelled");
   });
 });

@@ -171,7 +171,19 @@ describe("sessionHeal", () => {
 
     const client = { tag: "replacement" };
     vi.mocked(threadResume).mockResolvedValue(undefined as never);
-    const abortForSession = vi.fn();
+    const pendingClient = { respondError: vi.fn() };
+    const pendingEntry = {
+      request_id: "req-1",
+      kind: "approval.permissions",
+      user: "user-1",
+      session_name: "sess-1",
+      thread_id: "th-1",
+      turn_id: "turn-9",
+      jsonrpc_id: 41,
+      client: pendingClient,
+      raw: {},
+      created_at: "2025-01-01T00:00:00.000Z",
+    };
 
     const ctx = {
       users: {
@@ -190,7 +202,11 @@ describe("sessionHeal", () => {
         dispose: vi.fn(),
       },
       pending: {
-        abortForSession,
+        listForUser: vi.fn().mockReturnValue([pendingEntry]),
+        remove: vi.fn().mockReturnValue(pendingEntry),
+      },
+      events: {
+        append: vi.fn().mockResolvedValue(undefined),
       },
       retryOptions: vi.fn().mockReturnValue({}),
     };
@@ -206,10 +222,17 @@ describe("sessionHeal", () => {
     });
     expect(ctx.pool.release).toHaveBeenCalledWith("user-1::sess-1");
     expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
-    expect(abortForSession).toHaveBeenCalledWith("user-1", "sess-1", "session_crashed", {
-      reason: "session_heal_force_reset",
-      session: "sess-1",
-      thread_id: "th-1",
+    expect(pendingClient.respondError).toHaveBeenCalledWith(41, -32000, "session_crashed");
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "approval.request_cancelled",
+      payload: expect.objectContaining({
+        request_id: "req-1",
+        reason: "session_heal_force_reset",
+      }),
+    }));
+    expect(sessions.get("user-1", "sess-1")).toMatchObject({
+      pending_approvals: 0,
+      pending_user_inputs: 0,
     });
   });
 
