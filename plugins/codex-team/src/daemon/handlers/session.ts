@@ -28,7 +28,12 @@ import {
   buildExperimentalToolThreadConfig,
   parseExperimentalTools,
 } from "../experimentalTools";
-import { parseAutoApprovePatterns, parseConfiguredAutoApprovePatterns } from "../auto-approve";
+import {
+  parseAutoApprovePatterns,
+  parseConfiguredAutoApprovePatterns,
+  validateAutoApprovePatterns,
+  validateParsedAutoApprovePatterns,
+} from "../auto-approve";
 import { SESSION_CLOSED_EVENT_TYPE } from "../events";
 import { renderContext } from "../../format/markdown";
 import { renderTable } from "../../format/table";
@@ -104,6 +109,7 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
   const attach = async () => {
     const existing = ctx.sessions.get(user, identifier);
     if (existing) {
+      validateSessionAutoApprovePatterns(existing.autoApprovePatterns ?? []);
       ctx.sessions.touch(user, existing.name);
       return { session: existing, noop: true };
     }
@@ -114,6 +120,7 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
     if (anywhere === "ambiguous") {
       throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
     }
+    const autoApprovePatterns = validateSessionAutoApprovePatterns(anywhere?.record.autoApprovePatterns ?? []);
     if (anywhere && anywhere.user !== user) {
       if (!takeover) {
         throw new CodexTeamError("session_busy", `session is live under user '${anywhere.user}'. Pass --takeover to seize.`);
@@ -142,7 +149,7 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
         name,
         thread_id: threadId,
         state: "live",
-        autoApprovePatterns: anywhere?.record?.autoApprovePatterns ?? [],
+        autoApprovePatterns,
         created_at: now,
         last_active_at: now,
         turn_count: 0,
@@ -246,6 +253,7 @@ export const sessionFork: HandlerFn = async (ctx, req) => {
   let newName = newNameRaw ?? generateSessionName();
   if (newNameRaw) validateSessionName(newNameRaw);
   while (ctx.sessions.get(user, newName)) newName = generateSessionName();
+  const autoApprovePatterns = validateSessionAutoApprovePatterns(source.autoApprovePatterns ?? []);
 
   const client = await ctx.pool.acquire(
     user,
@@ -275,7 +283,7 @@ export const sessionFork: HandlerFn = async (ctx, req) => {
     effort: source.effort,
     profile: source.profile,
     experimental_tools: source.experimental_tools,
-    autoApprovePatterns: source.autoApprovePatterns ?? [],
+    autoApprovePatterns,
     created_at: now,
     last_active_at: now,
     turn_count: 0,
@@ -571,6 +579,8 @@ function resolveAutoApprovePatternsForCreate(ctx: DaemonContext, flags: Record<s
   }
   const raw = asString(flags["auto-approve"]);
   if (raw === null) throw invalidParams("--auto-approve requires a comma-separated value");
+  const validationError = validateAutoApprovePatterns(raw);
+  if (validationError) throw invalidParams(validationError);
   return parseAutoApprovePatterns(raw);
 }
 
@@ -597,6 +607,12 @@ function isClientAlive(client: unknown): boolean {
 
 function hasFlag(flags: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(flags, key);
+}
+
+function validateSessionAutoApprovePatterns(patterns: string[]): string[] {
+  const validationError = validateParsedAutoApprovePatterns(patterns);
+  if (validationError) throw invalidParams(validationError);
+  return [...patterns];
 }
 
 

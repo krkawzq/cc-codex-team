@@ -16,8 +16,15 @@ vi.mock("../src/codex/rpc", () => ({
   turnInterrupt: vi.fn(),
 }));
 
-import { sessionAttach, sessionDetach, sessionNew } from "../src/daemon/handlers/session";
-import { threadResume, threadStart, threadSetName, threadUnsubscribe, turnInterrupt } from "../src/codex/rpc";
+import { sessionAttach, sessionDetach, sessionFork, sessionNew } from "../src/daemon/handlers/session";
+import {
+  threadFork,
+  threadResume,
+  threadStart,
+  threadSetName,
+  threadUnsubscribe,
+  turnInterrupt,
+} from "../src/codex/rpc";
 
 function makeReq(method: string, positionals: string[], flags: Record<string, unknown> = {}) {
   return {
@@ -193,6 +200,35 @@ describe("session handlers", () => {
     expect(ctx.sessions.add).toHaveBeenCalledWith("user-1", expect.objectContaining({
       autoApprovePatterns: ["git*", "node *", "/sh -c cat.*/i"],
     }));
+  });
+
+  it("rejects invalid auto-approve regex on session:new", async () => {
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+        touch: vi.fn(),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue(null),
+        add: vi.fn(),
+      },
+      pool: {
+        acquire: vi.fn(),
+        release: vi.fn(),
+      },
+      config: {
+        getEffective: vi.fn().mockReturnValue(null),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    await expect(sessionNew(ctx as never, makeReq("session:new", ["sess-1"], {
+      "auto-approve": "/unterminated",
+    }) as never)).rejects.toMatchObject({
+      code: "invalid_params",
+    });
+    expect(ctx.pool.acquire).not.toHaveBeenCalled();
+    expect(ctx.sessions.add).not.toHaveBeenCalled();
   });
 
   it("interrupts and cleans pending state on detach", async () => {
@@ -386,6 +422,43 @@ describe("session handlers", () => {
     expect(ctx.pool.acquire).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects attach when inherited auto-approve patterns are invalid", async () => {
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+        touch: vi.fn(),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue(null),
+        findLiveAnywhere: vi.fn().mockReturnValue({
+          user: "user-1",
+          record: {
+            name: "sess-1",
+            thread_id: "th-1",
+            state: "live",
+            autoApprovePatterns: ["/unterminated"],
+          },
+        }),
+        findUniqueLiveByNameAnywhere: vi.fn(),
+        add: vi.fn(),
+      },
+      pool: {
+        acquire: vi.fn(),
+        release: vi.fn(),
+      },
+      config: {
+        getEffective: vi.fn().mockReturnValue(null),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    await expect(sessionAttach(ctx as never, makeReq("session:attach", ["th-1"]) as never)).rejects.toMatchObject({
+      code: "invalid_params",
+    });
+    expect(ctx.pool.acquire).not.toHaveBeenCalled();
+    expect(ctx.sessions.add).not.toHaveBeenCalled();
+  });
+
   it("releases the acquired client if attach loses the registry add race after resume", async () => {
     vi.mocked(threadResume).mockResolvedValue(undefined as never);
 
@@ -434,5 +507,40 @@ describe("session handlers", () => {
 
     await expect(sessionAttach(ctx as never, req as never)).rejects.toThrow("lost race");
     expect(ctx.pool.release).toHaveBeenCalledWith("user-2::sess-1");
+  });
+
+  it("rejects fork when the source session has invalid auto-approve patterns", async () => {
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions: {
+        get: vi.fn((user: string, identifier: string) => (
+          identifier === "sess-1"
+            ? {
+                name: "sess-1",
+                thread_id: "th-1",
+                state: "live",
+                autoApprovePatterns: ["/unterminated"],
+              }
+            : null
+        )),
+      },
+      pool: {
+        acquire: vi.fn(),
+        release: vi.fn(),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    vi.mocked(threadFork).mockResolvedValue({
+      thread: { id: "th-2" },
+    } as never);
+
+    await expect(sessionFork(ctx as never, makeReq("session:fork", ["sess-1", "sess-2"]) as never)).rejects.toMatchObject({
+      code: "invalid_params",
+    });
+    expect(ctx.pool.acquire).not.toHaveBeenCalled();
+    expect(vi.mocked(threadFork)).not.toHaveBeenCalled();
   });
 });
