@@ -198,3 +198,16 @@ function matchCommand(tokens: string[], available: Set<string>): { path: string[
 export function commandKey(path: string[]): string {
   return path.join(":");
 }
+
+const SHORT_COMMANDS: Set<string> = new Set([
+  "status",
+  "daemon:status",
+  "daemon:user:list",
+  "session:info",
+  "session:list",
+  "message:history",
+]);
+
+export function supportsShort(method: string): boolean {
+  return SHORT_COMMANDS.has(method);
+}

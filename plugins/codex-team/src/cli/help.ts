@@ -280,9 +280,17 @@ const daemonGroup: HelpNode = {
     leaf({
       name: "status",
       summary: "Show daemon process, socket, and resource status.",
-      usage: "codex-team daemon status",
+      usage: "codex-team daemon status [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout.",
+        },
+      ],
       examples: [
         "codex-team daemon status",
       ],
@@ -973,9 +981,17 @@ const HELP_TREE: HelpNode = {
     leaf({
       name: "status",
       summary: "Show live sessions, pending events, and recent activity.",
-      usage: "codex-team -b <token> status",
+      usage: "codex-team -b <token> status [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout.",
+        },
+      ],
       examples: [
         "codex-team -b $TOKEN status",
       ],

@@ -106,6 +106,60 @@ describe("runCli", () => {
     );
   });
 
+  it("emits one compact line for successful --short responses", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            token: "token-1",
+            live_sessions: 2,
+            pending_requests: 1,
+            retained_events: 4,
+            retained_limit: 10,
+            app_server_count: 1,
+            daemon: {
+              started_at: "2026-04-23T00:59:00.000Z",
+            },
+          },
+        });
+      }, 0);
+    });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-23T01:00:00.000Z"));
+    const pending = runCli(["-b", "token-1", "status", "--short"]);
+    await vi.runAllTimersAsync();
+    const code = await pending;
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      "user=token-1 live=2 pending=1 retained=4/10 app_servers=1 daemon_age=1m\n",
+    );
+  });
+
+  it("rejects --short with markdown or table formatting before contacting the daemon", async () => {
+    const code = await runCli(["-b", "token-1", "message", "history", "sess-1", "--short", "--format", "markdown"]);
+
+    expect(code).toBe(1);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("--short cannot be used with --format markdown or --format table"));
+    expect(sockMocks.probeSock).not.toHaveBeenCalled();
+  });
+
   it("treats abnormal stream socket close as failure", async () => {
     const listeners: Record<string, ((...args: unknown[]) => void)[]> = {};
     const socket = {

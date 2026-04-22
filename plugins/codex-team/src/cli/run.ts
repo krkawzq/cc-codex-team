@@ -5,10 +5,11 @@ import type net from "node:net";
 import { connectSock, probeSock, writeMessage, onMessages } from "../ipc/sock";
 import type { IpcMessage, IpcRequest } from "../ipc/protocol";
 import { defaultSockPath } from "../paths";
-import { parseArgs, commandKey, type ParsedArgs } from "./args";
+import { parseArgs, commandKey, supportsShort, type ParsedArgs } from "./args";
 import { renderHelp } from "./help";
 import { err, ok } from "../result";
 import { ConfigStore } from "../daemon/config";
+import { formatShort } from "../format/short";
 
 const DAEMON_POLL_INTERVAL_MS = 100;
 const DEFAULT_DAEMON_READY_TIMEOUT_MS = 15000;
@@ -40,6 +41,16 @@ export async function runCli(argv: string[]): Promise<number> {
   }
 
   const method = commandKey(parsed.commandPath);
+  const short = truthy(parsed.flags.short);
+  const format = flagString(parsed.flags.format);
+  if (short && !supportsShort(method)) {
+    process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
+    return 1;
+  }
+  if (short && (format === "markdown" || format === "table")) {
+    process.stdout.write(JSON.stringify(err("invalid_params", "--short cannot be used with --format markdown or --format table")) + "\n");
+    return 1;
+  }
   const sockPath = parsed.daemonSock || defaultSockPath();
 
   if (method === "version") {
@@ -130,6 +141,10 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
     if ("error" in resp && resp.error) {
       process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
       return 1;
+    }
+    if (truthy(parsed.flags.short)) {
+      process.stdout.write(formatShort(method, resp.result) + "\n");
+      return 0;
     }
     const markdown = extractMarkdownResult(resp.result, parsed.flags.format);
     if (markdown !== null) {
@@ -390,6 +405,11 @@ function randomId(): string {
 
 function truthy(v: unknown): boolean {
   return v === true || v === "true" || v === "1";
+}
+
+function flagString(v: unknown): string | null {
+  if (Array.isArray(v)) return flagString(v[v.length - 1]);
+  return typeof v === "string" ? v : null;
 }
 
 function extractMarkdownResult(result: unknown, format: unknown): string | null {

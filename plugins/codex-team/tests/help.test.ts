@@ -37,6 +37,11 @@ describe("renderHelp", () => {
     expect(help).toContain("reset");
   });
 
+  it("documents --short for compact status commands", () => {
+    expect(renderHelp(["status"])).toContain("--short");
+    expect(renderHelp(["daemon", "status"])).toContain("--short");
+  });
+
   it("marks monitor events stream and interval flags as mutually exclusive", () => {
     const help = renderHelp(["monitor", "events"]);
 
