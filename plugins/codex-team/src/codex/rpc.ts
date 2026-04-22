@@ -11,6 +11,7 @@ export interface Thread {
   model_provider?: string;
   created_at?: number;
   updated_at?: number;
+  turns?: unknown[];
   [k: string]: unknown;
 }
 

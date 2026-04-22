@@ -85,6 +85,7 @@ describe("format helpers", () => {
       thread_id: "th-1",
       state: "live",
       model: "gpt-5.4",
+      autoApprovePatterns: [],
       created_at: "2025-01-01T00:00:00.000Z",
       last_active_at: "2025-01-02T00:00:00.000Z",
       turn_count: 2,

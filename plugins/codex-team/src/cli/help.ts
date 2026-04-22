@@ -456,11 +456,18 @@ const sessionGroup: HelpNode = {
           required: false,
           description: "Enable experimental Codex tools such as ask-user-question.",
         },
+        {
+          long: "--auto-approve",
+          type: "csv|regex",
+          required: false,
+          description: "Comma-separated approval target patterns to auto-accept for this session.",
+        },
       ],
       examples: [
         "codex-team -b $TOKEN session new audit --model gpt-5.4 --cwd /repo",
         "codex-team -b $TOKEN session new --profile fast-review",
         "codex-team -b $TOKEN session new askq --experimental-tools ask-user-question",
+        "codex-team -b $TOKEN session new audit --auto-approve 'git*,node *'",
       ],
       needs_bearer: true,
     }),

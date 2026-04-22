@@ -24,6 +24,7 @@ describe("renderHelp", () => {
     expect(help).toContain("--approval");
     expect(help).toContain("--effort");
     expect(help).toContain("--experimental-tools");
+    expect(help).toContain("--auto-approve");
   });
 
   it("renders daemon config subgroup help with its child commands", () => {

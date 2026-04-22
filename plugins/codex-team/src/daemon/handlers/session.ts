@@ -49,6 +49,7 @@ export const sessionNew: HandlerFn = async (ctx, req) => {
   }
 
   const experimentalTools = resolveExperimentalToolsForCreate(ctx, flags);
+  const autoApprovePatterns = resolveAutoApprovePatternsForCreate(flags);
   const startParams = await buildThreadStartParams(ctx, flags, experimentalTools);
 
   const client = await ctx.pool.acquire(user, keyFor(user, name), buildExperimentalToolAppServerOptions(experimentalTools));
@@ -78,6 +79,7 @@ export const sessionNew: HandlerFn = async (ctx, req) => {
     base_instructions: asString(flags["base-instructions"]) ?? undefined,
     developer_instructions: asString(flags["developer-instructions"]) ?? undefined,
     experimental_tools: experimentalTools.length > 0 ? experimentalTools : undefined,
+    autoApprovePatterns,
     created_at: now,
     last_active_at: now,
     turn_count: 0,
@@ -136,6 +138,7 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
         name,
         thread_id: threadId,
         state: "live",
+        autoApprovePatterns: anywhere?.record?.autoApprovePatterns ?? [],
         created_at: now,
         last_active_at: now,
         turn_count: 0,
@@ -266,6 +269,7 @@ export const sessionFork: HandlerFn = async (ctx, req) => {
     effort: source.effort,
     profile: source.profile,
     experimental_tools: source.experimental_tools,
+    autoApprovePatterns: source.autoApprovePatterns ?? [],
     created_at: now,
     last_active_at: now,
     turn_count: 0,
@@ -465,6 +469,13 @@ function resolveExperimentalToolsForCreate(ctx: DaemonContext, flags: Record<str
   return parseExperimentalTools(resolveDefault(ctx, "experimental.default_tools"));
 }
 
+function resolveAutoApprovePatternsForCreate(flags: Record<string, unknown>): string[] {
+  if (!hasFlag(flags, "auto-approve")) return [];
+  const raw = asString(flags["auto-approve"]);
+  if (raw === null) throw invalidParams("--auto-approve requires a comma-separated value");
+  return parseAutoApprovePatterns(raw);
+}
+
 function resolveExperimentalToolsForAttach(
   ctx: DaemonContext,
   flags: Record<string, unknown>,
@@ -481,6 +492,14 @@ function keyFor(user: string, name: string): string {
 
 function hasFlag(flags: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(flags, key);
+}
+
+function parseAutoApprovePatterns(raw: string): string[] {
+  if (raw.length === 0) return [];
+  return raw
+    .split(",")
+    .map((pattern) => pattern.trim())
+    .filter((pattern) => pattern.length > 0);
 }
 
 function deriveNameFromThreadId(threadId: string, ctx: DaemonContext, user: string): string {

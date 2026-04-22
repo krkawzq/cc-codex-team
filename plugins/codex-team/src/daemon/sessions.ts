@@ -24,6 +24,7 @@ export interface SessionRecord {
   base_instructions?: string;
   developer_instructions?: string;
   experimental_tools?: string[];
+  autoApprovePatterns: string[];
   created_at: string;
   last_active_at: string;
   turn_count: number;
@@ -67,6 +68,7 @@ export class SessionRegistry {
       }
       for (const rec of parsed.sessions ?? []) {
         if (!rec || typeof rec.name !== "string" || typeof rec.thread_id !== "string" || rec.thread_id.length === 0) continue;
+        rec.autoApprovePatterns = normalizeAutoApprovePatterns(rec.autoApprovePatterns);
         bucket.byName.set(rec.name, rec);
         bucket.byThreadId.set(rec.thread_id, rec);
         this.globalByThreadId.set(rec.thread_id, user);
@@ -162,6 +164,7 @@ export class SessionRegistry {
     if (patch.experimental_tools !== undefined) {
       rec.experimental_tools = patch.experimental_tools.length > 0 ? [...patch.experimental_tools] : undefined;
     }
+    if (patch.autoApprovePatterns !== undefined) rec.autoApprovePatterns = normalizeAutoApprovePatterns(patch.autoApprovePatterns);
     if (patch.app_server_client_id !== undefined) rec.app_server_client_id = patch.app_server_client_id;
 
     this.schedulePersist(user, 0);
@@ -271,6 +274,7 @@ export function validateSessionName(name: string): void {
 function validateRecord(record: SessionRecord): void {
   validateSessionName(record.name);
   if (!record.thread_id) throw invalidParams("thread_id is required");
+  record.autoApprovePatterns = normalizeAutoApprovePatterns(record.autoApprovePatterns);
 }
 
 export function generateSessionName(): string {
@@ -279,6 +283,11 @@ export function generateSessionName(): string {
 
 export function looksLikeThreadId(s: string): boolean {
   return UUID_RE.test(s) || s.startsWith("th-");
+}
+
+function normalizeAutoApprovePatterns(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((pattern): pattern is string => typeof pattern === "string");
 }
 
 void path;

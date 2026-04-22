@@ -114,6 +114,7 @@ describe("session handlers", () => {
     });
     expect(ctx.sessions.add).toHaveBeenCalledWith("user-1", expect.objectContaining({
       experimental_tools: ["ask-user-question"],
+      autoApprovePatterns: [],
     }));
   });
 
@@ -157,6 +158,41 @@ describe("session handlers", () => {
     expect(ctx.pool.acquire).toHaveBeenCalledWith("user-1", "user-1::sess-1", {
       configOverrides: ["features.default_mode_request_user_input=true"],
     });
+  });
+
+  it("stores explicit auto-approve patterns on new sessions", async () => {
+    vi.mocked(threadStart).mockResolvedValue({
+      thread: { id: "th-1" },
+    } as never);
+    vi.mocked(threadSetName).mockResolvedValue(undefined as never);
+
+    const client = {};
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+        touch: vi.fn(),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue(null),
+        add: vi.fn(),
+      },
+      pool: {
+        acquire: vi.fn().mockResolvedValue(client),
+        release: vi.fn(),
+      },
+      config: {
+        getEffective: vi.fn().mockReturnValue(null),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    await sessionNew(ctx as never, makeReq("session:new", ["sess-1"], {
+      "auto-approve": "git*, node *, /sh -c cat.*/i",
+    }) as never);
+
+    expect(ctx.sessions.add).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      autoApprovePatterns: ["git*", "node *", "/sh -c cat.*/i"],
+    }));
   });
 
   it("interrupts and cleans pending state on detach", async () => {
