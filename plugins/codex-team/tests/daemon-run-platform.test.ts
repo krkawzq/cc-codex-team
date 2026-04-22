@@ -63,20 +63,26 @@ describe("daemon/run platform behavior", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     for (const dir of dirs.splice(0, dirs.length)) {
       fs.rmSync(dir, { recursive: true, force: true });
     }
     vi.resetModules();
   });
 
-  it("uses an exclusive pidfile lock and can recover from a stale pidfile", async () => {
+  it("recovers immediately from a dead pidfile without waiting for file age", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-run-"));
     dirs.push(dir);
     const pidPath = path.join(dir, "daemon.pid");
     fs.mkdirSync(path.dirname(pidPath), { recursive: true });
-    fs.writeFileSync(pidPath, "stale");
-    const staleTime = Date.now() - 6000;
-    fs.utimesSync(pidPath, staleTime / 1000, staleTime / 1000);
+    fs.writeFileSync(pidPath, JSON.stringify({ pid: 999, created_at: new Date().toISOString() }));
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (pid === 999 && signal === 0) {
+        const err = Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+        throw err;
+      }
+      return true;
+    }) as typeof process.kill);
 
     runMocks.buildContext.mockReturnValue({
       sockPath: path.join(dir, "daemon.sock"),
@@ -91,10 +97,41 @@ describe("daemon/run platform behavior", () => {
 
     const { runDaemon } = await import("../src/daemon/run");
     void runDaemon();
-    await vi.advanceTimersByTimeAsync(350);
+    await vi.advanceTimersByTimeAsync(50);
 
     expect(runMocks.startServer).toHaveBeenCalledTimes(1);
     expect(JSON.parse(fs.readFileSync(pidPath, "utf8")).pid).toBe(process.pid);
+  });
+
+  it("refuses startup when the pidfile owner is still live even if the socket probe fails", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-run-"));
+    dirs.push(dir);
+    const pidPath = path.join(dir, "daemon.pid");
+    fs.mkdirSync(path.dirname(pidPath), { recursive: true });
+    fs.writeFileSync(pidPath, JSON.stringify({ pid: 777, created_at: new Date().toISOString() }));
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (pid === 777 && signal === 0) return true;
+      return true;
+    }) as typeof process.kill);
+
+    runMocks.buildContext.mockReturnValue({
+      sockPath: path.join(dir, "daemon.sock"),
+      dataDir: dir,
+      config: { getEffective: () => 6 },
+      users: { list: () => [] },
+      sessions: { listLive: () => [] },
+      activity: { lastActivityAt: new Date(), touch() {} },
+    });
+    runMocks.probeSock.mockResolvedValue(false);
+    runMocks.startServer.mockResolvedValue({});
+
+    const { runDaemon } = await import("../src/daemon/run");
+    const result = runDaemon();
+    await vi.advanceTimersByTimeAsync(3200);
+
+    await expect(result).resolves.toBe(1);
+    expect(runMocks.startServer).not.toHaveBeenCalled();
+    expect(JSON.parse(fs.readFileSync(pidPath, "utf8")).pid).toBe(777);
   });
 
   it("registers SIGBREAK shutdown handling on Windows", async () => {

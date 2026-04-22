@@ -62,6 +62,22 @@ describe("monitorEvents", () => {
     });
   });
 
+  it("returns invalid_params when --since points to an unknown checkpoint", async () => {
+    const stream = new FakeStream();
+    await monitorEvents({
+      users: { has: () => true },
+      config: { getEffective: () => 30 },
+      events: {
+        listSince: () => ({ ok: false, reason: "invalid_since" }),
+      },
+    } as never, makeReq({ since: "evt-404", stream: true }) as never, stream as never);
+
+    expect(stream.endedWith).toMatchObject({
+      code: "invalid_params",
+      message: "event 'evt-404' not found",
+    });
+  });
+
   it("streams backlog immediately and subscribes for future events in stream mode", async () => {
     const dispose = vi.fn();
     const stream = new FakeStream();

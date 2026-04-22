@@ -1,8 +1,11 @@
 import type { DaemonContext } from "./context";
 import { normalizeNotification, normalizeServerRequest } from "./normalize";
+import { threadResume } from "../codex/rpc";
 import { logger } from "../logger";
 
 export function wireDaemonEvents(ctx: DaemonContext): void {
+  const recoveringSessions = new Set<string>();
+
   ctx.pool.on("notification", (e) => {
     const norm = normalizeNotification(e.notification);
     const sessionName = resolveSession(ctx, e.user, norm.threadId);
@@ -75,6 +78,14 @@ export function wireDaemonEvents(ctx: DaemonContext): void {
   ctx.pool.on("server_request", (e) => {
     const norm = normalizeServerRequest(e.request);
     const sessionName = resolveSession(ctx, e.user, norm.threadId);
+    if (!sessionName) {
+      e.respondError(-32000, "session detached");
+      return;
+    }
+    if (ctx.queues.isTeardown(keyFor(e.user, sessionName))) {
+      e.respondError(-32000, "session detached");
+      return;
+    }
     const effectiveClient = ctx.pool.clientById(e.clientId);
     if (!effectiveClient) {
       logger.warn("server_request: no client to track", { user: e.user, kind: norm.kind });
@@ -103,12 +114,14 @@ export function wireDaemonEvents(ctx: DaemonContext): void {
   });
 
   ctx.pool.on("client_close", (e) => {
+    if (e.reason !== "unexpected") return;
     // When an app-server process dies, all its sessions are broken.
     for (const sessionKey of e.sessions) {
       const [user, sessionName] = parseKey(sessionKey);
       if (!user || !sessionName) continue;
       const rec = ctx.sessions.get(user, sessionName);
       if (!rec) continue;
+      ctx.sessions.update(user, sessionName, { recovery_state: "degraded" });
       ctx.events.append(user, {
         type: "turn.error",
         session: sessionName,
@@ -122,13 +135,39 @@ export function wireDaemonEvents(ctx: DaemonContext): void {
           },
         },
       });
-      ctx.queues.dispose(sessionKey);
+      ctx.queues.onClientClosed(sessionKey);
       for (const p of ctx.pending.removeForSession(user, sessionName)) {
         // No live client to respond through; just drop silently.
         void p;
       }
+      void recoverSession(user, sessionName, rec.thread_id);
     }
   });
+
+  async function recoverSession(user: string, sessionName: string, threadId: string): Promise<void> {
+    const recoveryKey = `${user}::${threadId}`;
+    if (recoveringSessions.has(recoveryKey)) return;
+    recoveringSessions.add(recoveryKey);
+    const sessionKey = keyFor(user, sessionName);
+    try {
+      const client = await ctx.pool.acquire(user, sessionKey);
+      await threadResume(client, threadId, ctx.retryOptions());
+      const live = ctx.sessions.get(user, sessionName);
+      if (live) {
+        ctx.sessions.update(user, sessionName, { recovery_state: null });
+      }
+    } catch (err) {
+      logger.warn("failed to recover session after client exit", {
+        user,
+        session: sessionName,
+        thread_id: threadId,
+        err: (err as Error).message,
+      });
+      ctx.pool.release(sessionKey);
+    } finally {
+      recoveringSessions.delete(recoveryKey);
+    }
+  }
 }
 
 function resolveSession(ctx: DaemonContext, user: string, threadId: string | null): string | null {

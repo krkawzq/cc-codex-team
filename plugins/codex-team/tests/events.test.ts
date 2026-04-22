@@ -41,6 +41,10 @@ describe("EventLog", () => {
       reason: "id_rotated",
       oldest_available_id: "evt-6",
     });
+    expect(log.listSince("user-1", "evt-999")).toEqual({
+      ok: false,
+      reason: "invalid_since",
+    });
 
     const listed = log.listSince("user-1", null, { includeDelta: false });
     expect(listed.ok).toBe(true);
@@ -99,6 +103,20 @@ describe("EventLog", () => {
 
     expect(log.retainedCount("user-1")).toBe(0);
     expect(log.oldestId("user-1")).toBeNull();
+  });
+
+  it("rejects newer persisted event-log schema versions", () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const filePath = path.join(dir, "users", encodeToken("user-1"), "events.log");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify({
+      schema_version: 2,
+      kind: "event_log_header",
+    }) + "\n");
+
+    const log = new EventLog(100, dir);
+    expect(() => log.loadUser("user-1")).toThrow(/schema_version/i);
   });
 });
 

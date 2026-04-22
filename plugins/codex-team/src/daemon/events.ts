@@ -22,9 +22,15 @@ export interface ListSinceRotated {
   oldest_available_id: string | null;
 }
 
-export type ListSinceResult = ListSinceOk | ListSinceRotated;
+export interface ListSinceInvalid {
+  ok: false;
+  reason: "invalid_since";
+}
+
+export type ListSinceResult = ListSinceOk | ListSinceRotated | ListSinceInvalid;
 
 const DELTA_SUFFIX = "_delta";
+const SCHEMA_VERSION = 1;
 
 export class EventLog {
   private retention: number;
@@ -46,35 +52,26 @@ export class EventLog {
   /** Load user's persisted events from disk (idempotent). */
   loadUser(user: string): void {
     if (this.loaded.has(user)) return;
-    this.loaded.add(user);
     if (!this.dataDir) return;
     const filePath = userEventLogPath(user, this.dataDir);
-    if (!fs.existsSync(filePath)) return;
-    try {
-      const raw = fs.readFileSync(filePath, "utf8");
-      const lines = raw.split("\n").filter(Boolean);
-      const tail = lines.slice(Math.max(0, lines.length - this.retention));
-      const buf: TeamEvent[] = [];
-      let maxSeq = 0;
-      for (const line of tail) {
-        try {
-          const ev = JSON.parse(line) as TeamEvent;
-          if (ev && typeof ev.id === "string") {
-            buf.push(ev);
-            const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
-            if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
-          }
-        } catch {
-          // skip malformed line
-        }
-      }
-      this.buffers.set(user, buf);
-      this.counters.set(user, maxSeq);
-      // If file contains way more than retention, compact it on load.
-      if (lines.length > this.retention * 1.5) this.compactFile(user, buf);
-    } catch (e) {
-      logger.warn("failed to load event log", { user, err: (e as Error).message });
+    if (!fs.existsSync(filePath)) {
+      this.loaded.add(user);
+      return;
     }
+    const raw = fs.readFileSync(filePath, "utf8");
+    const lines = raw.split("\n").filter(Boolean);
+    const { events, totalLines } = parsePersistedEvents(lines);
+    const buf = events.slice(Math.max(0, events.length - this.retention));
+    let maxSeq = 0;
+    for (const ev of buf) {
+      const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
+      if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
+    }
+    this.buffers.set(user, buf);
+    this.counters.set(user, maxSeq);
+    this.loaded.add(user);
+    // If file contains way more than retention, compact it on load.
+    if (totalLines > this.retention * 1.5) this.compactFile(user, buf);
   }
 
   setRetention(n: number): void {
@@ -173,7 +170,7 @@ export class EventLog {
         await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
         await fs.promises.mkdir(userDir(user, this.dataDir!), { recursive: true });
         const tmp = filePath + ".tmp";
-        await fs.promises.writeFile(tmp, buf.map((e) => JSON.stringify(e)).join("\n") + (buf.length ? "\n" : ""));
+        await fs.promises.writeFile(tmp, serializeEventFile(buf));
         await fs.promises.rename(tmp, filePath);
         this.rotatedSinceCompact.set(user, 0);
       } catch (e) {
@@ -215,7 +212,7 @@ export class EventLog {
         if (buf.length > 0 && compareSeq(sinceId, buf[0].id) < 0) {
           return { ok: false, reason: "id_rotated", oldest_available_id: buf[0].id };
         }
-        slice = [];
+        return { ok: false, reason: "invalid_since" };
       } else {
         slice = buf.slice(idx + 1);
       }
@@ -258,6 +255,10 @@ export class EventLog {
       try {
         await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
         await fs.promises.mkdir(userDir(user, this.dataDir!), { recursive: true });
+        if (!fs.existsSync(filePath)) {
+          await fs.promises.writeFile(filePath, serializeHeaderLine() + lines.join(""));
+          return;
+        }
         await fs.promises.appendFile(filePath, lines.join(""));
       } catch (e) {
         logger.warn("failed to append event log", { user, err: (e as Error).message });
@@ -286,4 +287,53 @@ function compareSeq(a: string, b: string): number {
 
 export function isDeltaType(type: string): boolean {
   return type.endsWith(DELTA_SUFFIX);
+}
+
+interface EventLogHeader {
+  schema_version: number;
+  kind: "event_log_header";
+}
+
+function parsePersistedEvents(lines: string[]): { events: TeamEvent[]; totalLines: number } {
+  if (lines.length === 0) return { events: [], totalLines: 0 };
+  let eventLines = lines;
+  let totalLines = lines.length;
+  const first = parseLine(lines[0]!);
+  if (isHeader(first)) {
+    if (first.schema_version > SCHEMA_VERSION) {
+      throw new Error(`event log schema_version ${first.schema_version} is newer than supported ${SCHEMA_VERSION}`);
+    }
+    eventLines = lines.slice(1);
+    totalLines = eventLines.length;
+  }
+  const events: TeamEvent[] = [];
+  for (const line of eventLines) {
+    const parsed = parseLine(line);
+    if (parsed && typeof parsed.id === "string") {
+      events.push(parsed as TeamEvent);
+    }
+  }
+  return { events, totalLines };
+}
+
+function parseLine(line: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(line) as Record<string, unknown>;
+  } catch (e) {
+    throw new Error(`failed to parse event log line: ${(e as Error).message}`);
+  }
+}
+
+function isHeader(value: Record<string, unknown> | null): value is EventLogHeader {
+  return value !== null &&
+    value.kind === "event_log_header" &&
+    typeof value.schema_version === "number";
+}
+
+function serializeHeaderLine(): string {
+  return JSON.stringify({ schema_version: SCHEMA_VERSION, kind: "event_log_header" } satisfies EventLogHeader) + "\n";
+}
+
+function serializeEventFile(buf: TeamEvent[]): string {
+  return serializeHeaderLine() + buf.map((e) => JSON.stringify(e)).join("\n") + (buf.length ? "\n" : "");
 }

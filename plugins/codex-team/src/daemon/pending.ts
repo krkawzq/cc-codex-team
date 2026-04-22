@@ -13,6 +13,7 @@ export interface PendingRequest {
   turn_id: string | null;
   created_at: string;
   raw: Record<string, unknown>;
+  claimed_at?: string | null;
 }
 
 export class PendingRegistry {
@@ -25,6 +26,7 @@ export class PendingRegistry {
       ...entry,
       request_id,
       created_at: new Date().toISOString(),
+      claimed_at: null,
     };
     this.byRequestId.set(request_id, rec);
     this.byJsonrpcKey.set(this.jsonrpcKey(entry.client, entry.jsonrpc_id), request_id);
@@ -33,6 +35,20 @@ export class PendingRegistry {
 
   get(requestId: string): PendingRequest | null {
     return this.byRequestId.get(requestId) ?? null;
+  }
+
+  claim(requestId: string, user: string): PendingRequest | null {
+    const rec = this.byRequestId.get(requestId);
+    if (!rec || rec.user !== user || rec.claimed_at) return null;
+    rec.claimed_at = new Date().toISOString();
+    return rec;
+  }
+
+  releaseClaim(requestId: string): PendingRequest | null {
+    const rec = this.byRequestId.get(requestId);
+    if (!rec) return null;
+    rec.claimed_at = null;
+    return rec;
   }
 
   remove(requestId: string): PendingRequest | null {

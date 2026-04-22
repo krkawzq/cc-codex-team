@@ -5,6 +5,8 @@ import type { User } from "../types";
 import { userDir, userMetadataPath, usersDir, decodeToken, encodeToken } from "../paths";
 import { CodexTeamError } from "../errors";
 
+const SCHEMA_VERSION = 1;
+
 export class UserRegistry {
   private users = new Map<string, User>();
   private readonly dataDir: string;
@@ -22,13 +24,20 @@ export class UserRegistry {
       if (fs.existsSync(metaPath)) {
         try {
           const raw = fs.readFileSync(metaPath, "utf8");
-          const user = JSON.parse(raw) as User;
+          const parsed = JSON.parse(raw) as UserEnvelope | User;
+          const user = normalizePersistedUser(parsed);
           if (user && typeof user.token === "string") {
-            validateToken(user.token);
-            this.users.set(user.token, user);
+            try {
+              validateToken(user.token);
+              this.users.set(user.token, user);
+            } catch {
+              // ignore invalid user payloads, but do not treat them as empty state
+            }
           }
-        } catch {
-          // skip invalid metadata instead of falling back to dirname decoding
+        } catch (e) {
+          if (isCanonicalUserDir(dirname)) {
+            throw new Error(`failed to load metadata.json for '${dirname}': ${(e as Error).message}`);
+          }
         }
         continue;
       }
@@ -95,7 +104,10 @@ export class UserRegistry {
     fs.mkdirSync(dir, { recursive: true });
     const metaPath = userMetadataPath(user.token, this.dataDir);
     const tmp = metaPath + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(user, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify({
+      schema_version: SCHEMA_VERSION,
+      user,
+    }, null, 2));
     fs.renameSync(tmp, metaPath);
   }
 }
@@ -106,5 +118,30 @@ function validateToken(token: string): void {
   }
   if (token.length > 256) {
     throw new CodexTeamError("invalid_params", "token too long (max 256)");
+  }
+}
+
+interface UserEnvelope {
+  schema_version?: number;
+  user?: User;
+}
+
+function normalizePersistedUser(parsed: UserEnvelope | User): User | null {
+  if (parsed && typeof parsed === "object" && "schema_version" in parsed) {
+    const env = parsed as UserEnvelope;
+    if (typeof env.schema_version === "number" && env.schema_version > SCHEMA_VERSION) {
+      throw new Error(`metadata.json schema_version ${env.schema_version} is newer than supported ${SCHEMA_VERSION}`);
+    }
+    return env.user ?? null;
+  }
+  return parsed as User;
+}
+
+function isCanonicalUserDir(dirname: string): boolean {
+  try {
+    const token = decodeToken(dirname);
+    return encodeToken(token) === dirname;
+  } catch {
+    return false;
   }
 }

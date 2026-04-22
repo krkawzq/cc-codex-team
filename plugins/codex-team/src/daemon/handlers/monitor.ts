@@ -41,9 +41,13 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
 
   const backlog = ctx.events.listSince(user, sinceId, { includeDelta: true });
   if (!backlog.ok) {
-    stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
-      oldest_available_id: backlog.oldest_available_id,
-    }));
+    if (backlog.reason === "id_rotated") {
+      stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
+        oldest_available_id: backlog.oldest_available_id,
+      }));
+    } else {
+      stream.end(invalidParams(`event '${sinceId}' not found`));
+    }
     return { streaming: true };
   }
 
@@ -68,7 +72,6 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     for (const e of batch) stream.chunk(e);
   }, intervalS * 1000);
 
-  // Emit any initial backlog immediately (otherwise user waits up to intervalS for first response).
   if (queue.length > 0) {
     const initial = queue.splice(0, queue.length);
     for (const e of initial) stream.chunk(e);
@@ -98,6 +101,13 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
   let activeChild: ReturnType<typeof spawn> | null = null;
   let activeTimeoutTimer: NodeJS.Timeout | null = null;
   let activeKillHardTimer: NodeJS.Timeout | null = null;
+  let activeTimedOut = false;
+
+  stream.onClose(() => {
+    cancelled = true;
+    if (timer) clearInterval(timer);
+    requestActiveChildShutdown();
+  });
 
   const runOnce = async (): Promise<void> => {
     if (cancelled || running) return;
@@ -108,16 +118,16 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
         const { file, args } = shellCommand(command);
         const child = spawn(file, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         activeChild = child;
+        activeTimedOut = false;
         let stdoutBuf = "";
         let stderrBuf = "";
-        let killed = false;
-        const killer = setTimeout(() => {
-          killed = true;
+        const timeoutTimer = setTimeout(() => {
+          activeTimedOut = true;
           clearActiveTimeoutTimer();
-          requestChildShutdown(child, true);
+          requestChildShutdown(child);
         }, timeoutS * 1000);
-        killer.unref();
-        activeTimeoutTimer = killer;
+        timeoutTimer.unref();
+        activeTimeoutTimer = timeoutTimer;
         child.stdout.setEncoding("utf8");
         child.stdout.on("data", (c) => { stdoutBuf += c; });
         child.stderr.setEncoding("utf8");
@@ -125,20 +135,22 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
         child.on("error", (err) => {
           clearActiveKillTimers();
           if (activeChild === child) activeChild = null;
-          stream.chunk({ __alarm_event: "spawn_error", error: err.message });
+          if (!cancelled) stream.chunk({ __alarm_event: "spawn_error", error: err.message });
           resolve();
         });
         child.on("exit", (code, signal) => {
           clearActiveKillTimers();
           if (activeChild === child) activeChild = null;
-          if (stdoutBuf) stream.chunk({ stdout: stdoutBuf });
-          if (stderrBuf) stream.chunk({ stderr: stderrBuf });
-          stream.chunk({
-            __alarm_event: killed ? "timeout" : "exit",
-            exit_code: code,
-            signal,
-            duration_ms: Date.now() - start,
-          });
+          if (!cancelled) {
+            if (stdoutBuf) stream.chunk({ stdout: stdoutBuf });
+            if (stderrBuf) stream.chunk({ stderr: stderrBuf });
+            stream.chunk({
+              __alarm_event: activeTimedOut ? "timeout" : "exit",
+              exit_code: code,
+              signal,
+              duration_ms: Date.now() - start,
+            });
+          }
           resolve();
         });
       });
@@ -149,24 +161,13 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
 
   await runOnce();
   if (once || cancelled) {
-    stream.end();
+    if (!cancelled) stream.end();
     return { streaming: true };
   }
 
   timer = setInterval(() => {
     void runOnce();
   }, intervalS * 1000);
-
-  stream.onClose(() => {
-    cancelled = true;
-    if (timer) clearInterval(timer);
-    clearActiveTimeoutTimer();
-    if (activeChild && activeChild.exitCode === null && activeChild.signalCode === null) {
-      requestChildShutdown(activeChild, false);
-      return;
-    }
-    clearActiveHardKillTimer();
-  });
   return { streaming: true };
 
   function clearActiveKillTimers(): void {
@@ -188,16 +189,19 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
     }
   }
 
-  function requestChildShutdown(child: ReturnType<typeof spawn>, forceAfterDelay: boolean): void {
+  function requestActiveChildShutdown(): void {
+    const child = activeChild;
+    if (!child) return;
+    requestChildShutdown(child);
+  }
+
+  function requestChildShutdown(child: ReturnType<typeof spawn>): void {
+    if (activeChild !== child) return;
+    if (child.exitCode !== null || child.signalCode !== null) return;
     try { child.stdin?.end(); } catch { /* ignore */ }
-    if (process.platform === "win32") {
-      // Signal-based child termination is forceful on Windows, so prefer stdin
-      // closure first and only fall back to kill() if the shell stays alive.
-      scheduleHardKill(child, 5000);
-      return;
-    }
+    scheduleHardKill(child, 5000);
+    if (process.platform === "win32") return;
     try { child.kill("SIGTERM"); } catch { /* ignore */ }
-    if (forceAfterDelay) scheduleHardKill(child, 5000);
   }
 
   function scheduleHardKill(child: ReturnType<typeof spawn>, delayMs: number): void {
@@ -227,8 +231,6 @@ function shellCommand(command: string): { file: string; args: string[] } {
     args: ["-c", command],
   };
 }
-
-// ----- helpers -----
 
 function asFlags(req: { params: Record<string, unknown> }): Record<string, unknown> {
   const f = req.params.flags;

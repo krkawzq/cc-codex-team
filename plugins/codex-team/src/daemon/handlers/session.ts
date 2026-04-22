@@ -25,6 +25,8 @@ import {
 import { renderContext } from "../../format/markdown";
 import { renderTable } from "../../format/table";
 
+const attachLocks = new Map<string, Promise<void>>();
+
 export const sessionNew: HandlerFn = async (ctx, req) => {
   requireUser(ctx, req);
   const user = req.bearer!;
@@ -85,59 +87,70 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
   const flags = asFlags(req);
   const takeover = isTrue(flags["takeover"]);
 
-  const existing = ctx.sessions.get(user, identifier);
-  if (existing) {
-    ctx.sessions.touch(user, existing.name);
-    return { session: existing, noop: true };
-  }
-
-  const anywhere = looksLikeThreadId(identifier)
-    ? ctx.sessions.findLiveAnywhere(identifier)
-    : ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
-  if (anywhere === "ambiguous") {
-    throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
-  }
-  if (anywhere && anywhere.user !== user) {
-    if (!takeover) {
-      throw new CodexTeamError("session_busy", `session is live under user '${anywhere.user}'. Pass --takeover to seize.`);
+  const lockThreadId = resolveAttachLockThreadId(ctx, identifier);
+  const attach = async () => {
+    const existing = ctx.sessions.get(user, identifier);
+    if (existing) {
+      ctx.sessions.touch(user, existing.name);
+      return { session: existing, noop: true };
     }
-    await seizeFromOtherUser(ctx, anywhere.user, user, anywhere.record);
-  }
 
-  const threadId = looksLikeThreadId(identifier) ? identifier : (anywhere?.record.thread_id ?? null);
-  if (!threadId) {
-    throw new CodexTeamError("session_not_found", `no session matches '${identifier}' in this user`);
-  }
+    const anywhere = looksLikeThreadId(identifier)
+      ? ctx.sessions.findLiveAnywhere(identifier)
+      : ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
+    if (anywhere === "ambiguous") {
+      throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
+    }
+    if (anywhere && anywhere.user !== user) {
+      if (!takeover) {
+        throw new CodexTeamError("session_busy", `session is live under user '${anywhere.user}'. Pass --takeover to seize.`);
+      }
+      await seizeFromOtherUser(ctx, anywhere.user, user, anywhere.record);
+    }
 
-  const name = anywhere?.record.name ?? deriveNameFromThreadId(threadId, ctx, user);
-  const client = await ctx.pool.acquire(user, keyFor(user, name));
-  try {
-    await threadResume(client, threadId, ctx.retryOptions());
-  } catch (e) {
-    ctx.pool.release(keyFor(user, name));
-    throw e;
-  }
+    const threadId = looksLikeThreadId(identifier) ? identifier : (anywhere?.record.thread_id ?? null);
+    if (!threadId) {
+      throw new CodexTeamError("session_not_found", `no session matches '${identifier}' in this user`);
+    }
+    ensureAttachOwnership(ctx, user, threadId);
 
-  const now = new Date().toISOString();
-  const record: SessionRecord = {
-    name,
-    thread_id: threadId,
-    state: "live",
-    created_at: now,
-    last_active_at: now,
-    turn_count: 0,
-    ...(anywhere?.record ? {
-      model: anywhere.record.model,
-      cwd: anywhere.record.cwd,
-      sandbox: anywhere.record.sandbox,
-      approval: anywhere.record.approval,
-      effort: anywhere.record.effort,
-      profile: anywhere.record.profile,
-    } : {}),
+    const name = anywhere?.record.name ?? deriveNameFromThreadId(threadId, ctx, user);
+    const sessionKey = keyFor(user, name);
+    const client = await ctx.pool.acquire(user, sessionKey);
+    let added = false;
+    try {
+      ensureAttachOwnership(ctx, user, threadId);
+      await threadResume(client, threadId, ctx.retryOptions());
+      ensureAttachOwnership(ctx, user, threadId);
+
+      const now = new Date().toISOString();
+      const record: SessionRecord = {
+        name,
+        thread_id: threadId,
+        state: "live",
+        created_at: now,
+        last_active_at: now,
+        turn_count: 0,
+        ...(anywhere?.record ? {
+          model: anywhere.record.model,
+          cwd: anywhere.record.cwd,
+          sandbox: anywhere.record.sandbox,
+          approval: anywhere.record.approval,
+          effort: anywhere.record.effort,
+          profile: anywhere.record.profile,
+        } : {}),
+      };
+      ctx.sessions.add(user, record);
+      added = true;
+      ctx.users.touch(user);
+      return { session: record };
+    } catch (e) {
+      if (!added) ctx.pool.release(sessionKey);
+      throw e;
+    }
   };
-  ctx.sessions.add(user, record);
-  ctx.users.touch(user);
-  return { session: record };
+
+  return lockThreadId ? await withAttachLock(lockThreadId, attach) : await attach();
 };
 
 export const sessionDetach: HandlerFn = async (ctx, req) => {
@@ -153,11 +166,16 @@ export const sessionDetach: HandlerFn = async (ctx, req) => {
   }
 
   const sessionKey = keyFor(user, rec.name);
+  const teardown = await ctx.queues.beginTeardown(sessionKey);
   const client = ctx.pool.clientForSession(sessionKey);
-  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+  const turnId = teardown.currentTurnId;
 
   if (client && !graceful && turnId) {
     try { await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions()); } catch { /* ignore if no turn */ }
+  }
+
+  if (graceful) {
+    await ctx.queues.waitForIdle(sessionKey);
   }
 
   if (client) {
@@ -434,6 +452,39 @@ function deriveNameFromThreadId(threadId: string, ctx: DaemonContext, user: stri
   return candidate;
 }
 
+function resolveAttachLockThreadId(ctx: DaemonContext, identifier: string): string | null {
+  if (looksLikeThreadId(identifier)) return identifier;
+  const anywhere = ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
+  if (anywhere === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
+  }
+  return anywhere?.record.thread_id ?? null;
+}
+
+function ensureAttachOwnership(ctx: DaemonContext, user: string, threadId: string): void {
+  const owner = ctx.sessions.findLiveAnywhere(threadId);
+  if (owner && owner.user !== user) {
+    throw new CodexTeamError("session_busy", `thread '${threadId}' is live under user '${owner.user}'`);
+  }
+}
+
+async function withAttachLock<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = attachLocks.get(threadId) ?? Promise.resolve();
+  let release!: () => void;
+  const next = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = prev.then(() => next);
+  attachLocks.set(threadId, tail);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (attachLocks.get(threadId) === tail) attachLocks.delete(threadId);
+  }
+}
+
 async function readInstructionFile(value: unknown, flag: string): Promise<string | null> {
   const filePath = asString(value);
   if (!filePath) return null;
@@ -451,8 +502,9 @@ async function seizeFromOtherUser(
   rec: SessionRecord,
 ): Promise<void> {
   const sessionKey = keyFor(fromUser, rec.name);
+  const teardown = await ctx.queues.beginTeardown(sessionKey);
   const client = ctx.pool.clientForSession(sessionKey);
-  const turnId = ctx.queues.getCurrentTurn(sessionKey);
+  const turnId = teardown.currentTurnId;
   if (client) {
     if (turnId) {
       try { await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions()); } catch { /* ignore */ }

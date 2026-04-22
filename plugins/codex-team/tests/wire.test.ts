@@ -2,7 +2,12 @@ import { EventEmitter } from "node:events";
 
 import { describe, expect, it, vi } from "vitest";
 
+vi.mock("../src/codex/rpc", () => ({
+  threadResume: vi.fn(),
+}));
+
 import { wireDaemonEvents } from "../src/daemon/wire";
+import { threadResume } from "../src/codex/rpc";
 
 class FakePool extends EventEmitter {
   clientById = vi.fn();
@@ -17,6 +22,7 @@ describe("wireDaemonEvents", () => {
       pool,
       sessions: {
         get: vi.fn().mockReturnValue({ name: "sess-1", thread_id: "th-1" }),
+        update: vi.fn(),
         remove: vi.fn(),
       },
       events: {
@@ -25,6 +31,8 @@ describe("wireDaemonEvents", () => {
       queues: {
         setCurrentTurn: vi.fn(),
         onTurnCompleted: vi.fn().mockResolvedValue(null),
+        isTeardown: vi.fn().mockReturnValue(false),
+        onClientClosed: vi.fn(),
         dispose: vi.fn(),
       },
       pending: {
@@ -60,6 +68,7 @@ describe("wireDaemonEvents", () => {
       pool,
       sessions: {
         get: vi.fn().mockReturnValue({ name: "sess-1", thread_id: "th-1" }),
+        update: vi.fn(),
         remove: vi.fn(),
       },
       events: {
@@ -68,6 +77,8 @@ describe("wireDaemonEvents", () => {
       queues: {
         setCurrentTurn: vi.fn(),
         onTurnCompleted: vi.fn().mockResolvedValue({ turn_id: "turn-2", queue_id: "q-1" }),
+        isTeardown: vi.fn().mockReturnValue(false),
+        onClientClosed: vi.fn(),
         dispose: vi.fn(),
       },
       pending: {
@@ -116,6 +127,7 @@ describe("wireDaemonEvents", () => {
       pool,
       sessions: {
         get: vi.fn().mockReturnValue({ name: "sess-1", thread_id: "th-1" }),
+        update: vi.fn(),
         remove: vi.fn(),
       },
       events: {
@@ -124,6 +136,8 @@ describe("wireDaemonEvents", () => {
       queues: {
         setCurrentTurn: vi.fn(),
         onTurnCompleted: vi.fn().mockResolvedValue(null),
+        isTeardown: vi.fn().mockReturnValue(false),
+        onClientClosed: vi.fn(),
         dispose: vi.fn(),
       },
       pending: {
@@ -165,6 +179,7 @@ describe("wireDaemonEvents", () => {
       pool,
       sessions: {
         get: vi.fn().mockReturnValue({ name: "sess-1", thread_id: "th-1" }),
+        update: vi.fn(),
         remove: vi.fn(),
       },
       events: {
@@ -173,6 +188,8 @@ describe("wireDaemonEvents", () => {
       queues: {
         setCurrentTurn: vi.fn(),
         onTurnCompleted: vi.fn().mockResolvedValue(null),
+        isTeardown: vi.fn().mockReturnValue(false),
+        onClientClosed: vi.fn(),
         dispose: vi.fn(),
       },
       pending: {
@@ -223,12 +240,14 @@ describe("wireDaemonEvents", () => {
     }));
   });
 
-  it("records turn.error and clears session pending state on client_close", () => {
+  it("recovers unexpected client_close by respawning and resuming the session", async () => {
     const pool = new FakePool();
+    pool.acquire = vi.fn().mockResolvedValue({ client: "replacement" });
     const ctx = {
       pool,
       sessions: {
         get: vi.fn().mockReturnValue({ name: "sess-1", thread_id: "th-1" }),
+        update: vi.fn(),
         remove: vi.fn(),
       },
       events: {
@@ -237,6 +256,8 @@ describe("wireDaemonEvents", () => {
       queues: {
         setCurrentTurn: vi.fn(),
         onTurnCompleted: vi.fn().mockResolvedValue(null),
+        isTeardown: vi.fn().mockReturnValue(false),
+        onClientClosed: vi.fn(),
         dispose: vi.fn(),
       },
       pending: {
@@ -248,6 +269,7 @@ describe("wireDaemonEvents", () => {
       },
       retryOptions: vi.fn().mockReturnValue({}),
     };
+    vi.mocked(threadResume).mockResolvedValue(undefined as never);
 
     wireDaemonEvents(ctx as never);
 
@@ -256,6 +278,11 @@ describe("wireDaemonEvents", () => {
       clientId: "client-1",
       sessions: ["user-1::sess-1"],
       exitCode: 9,
+      reason: "unexpected",
+    });
+
+    await vi.waitFor(() => {
+      expect(ctx.sessions.update).toHaveBeenCalledTimes(2);
     });
 
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
@@ -263,10 +290,15 @@ describe("wireDaemonEvents", () => {
       session: "sess-1",
       thread_id: "th-1",
       payload: expect.objectContaining({
-        will_retry: false,
-      }),
+          will_retry: false,
+        }),
     }));
-    expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
+    expect(ctx.sessions.update).toHaveBeenNthCalledWith(1, "user-1", "sess-1", { recovery_state: "degraded" });
+    expect(ctx.queues.onClientClosed).toHaveBeenCalledWith("user-1::sess-1");
     expect(ctx.pending.removeForSession).toHaveBeenCalledWith("user-1", "sess-1");
+    expect(pool.acquire).toHaveBeenCalledWith("user-1", "user-1::sess-1");
+    expect(vi.mocked(threadResume)).toHaveBeenCalledWith({ client: "replacement" }, "th-1", {});
+    expect(ctx.sessions.update).toHaveBeenNthCalledWith(2, "user-1", "sess-1", { recovery_state: null });
+    expect(ctx.queues.dispose).not.toHaveBeenCalled();
   });
 });

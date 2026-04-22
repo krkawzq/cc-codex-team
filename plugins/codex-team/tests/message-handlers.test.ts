@@ -13,6 +13,7 @@ vi.mock("../src/codex/rpc", () => ({
 
 import { messageApproval, messageHistory, messageInterrupt, messageSend } from "../src/daemon/handlers/message";
 import { threadTurnsList, turnInterrupt } from "../src/codex/rpc";
+import { PendingRegistry } from "../src/daemon/pending";
 
 function makeReq(positionals: string[], flags: Record<string, unknown> = {}) {
   return {
@@ -52,10 +53,12 @@ function makeLiveContext(overrides: Record<string, unknown> = {}) {
       getCurrentTurn: vi.fn().mockReturnValue("turn-1"),
       setCurrentTurn: vi.fn(),
     },
-    pending: {
-      get: vi.fn(),
-      remove: vi.fn(),
-    },
+      pending: {
+        get: vi.fn(),
+        claim: vi.fn(),
+        releaseClaim: vi.fn(),
+        remove: vi.fn(),
+      },
     retryOptions: vi.fn().mockReturnValue({}),
     ...overrides,
   };
@@ -162,8 +165,34 @@ describe("message handlers", () => {
             client: pendingClient,
             jsonrpc_id: 13,
             user: "user-1",
+              raw: { mode: "url" },
+            }),
+        claim: vi.fn()
+          .mockReturnValueOnce({
+            request_id: "req-a",
+            kind: "approval.command_execution",
+            client: pendingClient,
+            jsonrpc_id: 11,
+            user: "user-1",
+            raw: {},
+          })
+          .mockReturnValueOnce({
+            request_id: "req-b",
+            kind: "approval.permissions",
+            client: pendingClient,
+            jsonrpc_id: 12,
+            user: "user-1",
+            raw: { permissions: { fileSystem: { write: ["/tmp"] } } },
+          })
+          .mockReturnValueOnce({
+            request_id: "req-c",
+            kind: "approval.mcp_elicitation",
+            client: pendingClient,
+            jsonrpc_id: 13,
+            user: "user-1",
             raw: { mode: "url" },
           }),
+        releaseClaim: vi.fn(),
         remove: vi.fn(),
       },
     });
@@ -186,6 +215,34 @@ describe("message handlers", () => {
         _meta: null,
       },
     });
+  });
+
+  it("rejects a second approval writer once the first caller has claimed the pending request", async () => {
+    const pending = new PendingRegistry();
+    const responder = { respond: vi.fn() };
+    const claimed = pending.add({
+      client: responder as never,
+      jsonrpc_id: 77,
+      kind: "approval.command_execution",
+      user: "user-1",
+      session_name: "sess-1",
+      thread_id: "th-1",
+      turn_id: "turn-1",
+      raw: {},
+    });
+    const payloadPath = path.join(tmpRoot, "approval.json");
+    fs.writeFileSync(payloadPath, JSON.stringify({ decision: "accept" }));
+
+    const ctx = makeLiveContext({
+      pending,
+    });
+
+    const first = messageApproval(ctx as never, makeReq(["sess-1", claimed.request_id], { file: payloadPath }) as never);
+    const second = messageApproval(ctx as never, makeReq(["sess-1", claimed.request_id, "accept"]) as never);
+
+    await expect(second).rejects.toMatchObject({ code: "invalid_params" });
+    await expect(first).resolves.toMatchObject({ request_id: claimed.request_id, responded: true });
+    expect(responder.respond).toHaveBeenCalledTimes(1);
   });
 
   it("supports relative --since -N history windows", async () => {

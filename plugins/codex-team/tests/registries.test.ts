@@ -67,6 +67,22 @@ describe("UserRegistry", () => {
     const users = new UserRegistry(dir);
     expect(users.list()).toEqual([]);
   });
+
+  it("rejects newer persisted metadata schema versions", () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const userPath = path.join(usersDir(dir), encodeToken("token-1"));
+    fs.mkdirSync(userPath, { recursive: true });
+    fs.writeFileSync(path.join(userPath, "metadata.json"), JSON.stringify({
+      schema_version: 2,
+      user: {
+        token: "token-1",
+        created_at: "2025-01-01T00:00:00.000Z",
+      },
+    }));
+
+    expect(() => new UserRegistry(dir)).toThrow(/schema_version/i);
+  });
 });
 
 describe("SessionRegistry", () => {
@@ -143,6 +159,19 @@ describe("SessionRegistry", () => {
 
     const sessions = new SessionRegistry(dir);
     expect(sessions.listLive("user-1")).toEqual([]);
+  });
+
+  it("rejects newer persisted session schema versions", () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    fs.mkdirSync(path.dirname(userSessionsPath("user-1", dir)), { recursive: true });
+    fs.writeFileSync(userSessionsPath("user-1", dir), JSON.stringify({
+      schema_version: 2,
+      sessions: [],
+    }));
+
+    const sessions = new SessionRegistry(dir);
+    expect(() => sessions.listLive("user-1")).toThrow(/schema_version/i);
   });
 
   it("debounces touch persistence and flushes pending writes", async () => {

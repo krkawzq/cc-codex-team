@@ -99,6 +99,7 @@ export function probeSock(sockPath: string, timeoutMs = 200): Promise<boolean> {
     });
     sock.once("error", () => {
       clearTimeout(timer);
+      try { sock.destroy(); } catch { /* ignore */ }
       resolve(false);
     });
   });
