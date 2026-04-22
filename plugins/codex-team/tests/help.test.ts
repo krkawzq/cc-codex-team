@@ -52,6 +52,7 @@ describe("renderHelp", () => {
     expect(help).toContain("--json");
     expect(help).toContain("--file");
     expect(help).toContain("--stdin");
+    expect(help).toContain("--kind");
     expect(help).toContain("permissions: cancel is invalid.");
     expect(help).toContain("mcp_elicitation: accept-session is invalid; form mode needs --json.");
   });

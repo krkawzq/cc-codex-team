@@ -50,6 +50,21 @@ describe("runCli", () => {
     expect(sockMocks.probeSock).not.toHaveBeenCalled();
   });
 
+  it("rejects invalid approval shortcut hints before contacting the daemon", async () => {
+    const code = await runCli([
+      "-b", "token-1",
+      "message", "approval",
+      "sess-1",
+      "req-1",
+      "cancel",
+      "--kind", "approval.permissions",
+    ]);
+
+    expect(code).toBe(2);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("valid actions: accept, accept-session, decline"));
+    expect(sockMocks.probeSock).not.toHaveBeenCalled();
+  });
+
   it("returns daemon_unreachable when the daemon never comes up", async () => {
     vi.useFakeTimers();
     sockMocks.probeSock.mockResolvedValue(false);

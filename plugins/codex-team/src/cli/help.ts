@@ -709,14 +709,24 @@ const messageGroup: HelpNode = {
           description: "Use a shortcut that matches the approval kind.",
         },
       ],
-      flags: JSON_RESPONSE_FLAGS,
+      flags: [
+        ...JSON_RESPONSE_FLAGS,
+        {
+          long: "--kind",
+          type: "string",
+          required: false,
+          description: "Optional approval kind hint for local shortcut validation.",
+        },
+      ],
       notes: [
         "command_execution and file_change: all shortcuts are valid.",
         "permissions: cancel is invalid.",
         "mcp_elicitation: accept-session is invalid; form mode needs --json.",
+        "--kind validates the shortcut before contacting the daemon.",
       ],
       examples: [
         "codex-team -b $TOKEN message approval audit req-17 accept-session",
+        "codex-team -b $TOKEN message approval audit req-17 accept --kind approval.permissions",
         "codex-team -b $TOKEN message approval audit req-17 --file approval.json",
       ],
       needs_bearer: true,
