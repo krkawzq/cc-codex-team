@@ -30,6 +30,7 @@ export interface SessionRecord {
   base_instructions?: string;
   developer_instructions?: string;
   experimental_tools?: string[];
+  autoApprovePatterns: string[];
   created_at: string;
   last_active_at: string;
   turn_count: number;
@@ -82,6 +83,7 @@ export class SessionRegistry {
       }
       for (const rec of parsed.sessions ?? []) {
         if (!rec || typeof rec.name !== "string" || typeof rec.thread_id !== "string" || rec.thread_id.length === 0) continue;
+        rec.autoApprovePatterns = normalizeAutoApprovePatterns(rec.autoApprovePatterns);
         bucket.byName.set(rec.name, rec);
         bucket.byThreadId.set(rec.thread_id, rec);
         this.globalByThreadId.set(rec.thread_id, user);
@@ -187,6 +189,7 @@ export class SessionRegistry {
     if (patch.pending_user_inputs !== undefined) rec.pending_user_inputs = patch.pending_user_inputs;
     if (patch.token_usage_last_turn !== undefined) rec.token_usage_last_turn = patch.token_usage_last_turn;
     if (patch.crash_reason !== undefined) rec.crash_reason = patch.crash_reason;
+    if (patch.autoApprovePatterns !== undefined) rec.autoApprovePatterns = normalizeAutoApprovePatterns(patch.autoApprovePatterns);
     if (patch.app_server_client_id !== undefined) rec.app_server_client_id = patch.app_server_client_id;
 
     this.schedulePersist(user, 0);
@@ -299,6 +302,7 @@ function validateRecord(record: SessionRecord): void {
   if (record.state !== "live" && record.state !== "crashed") {
     throw invalidParams(`invalid session state: ${record.state}`);
   }
+  record.autoApprovePatterns = normalizeAutoApprovePatterns(record.autoApprovePatterns);
 }
 
 export function generateSessionName(): string {
@@ -370,6 +374,11 @@ function asObject(value: unknown): Record<string, unknown> {
 
 function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function normalizeAutoApprovePatterns(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((pattern): pattern is string => typeof pattern === "string");
 }
 
 void path;

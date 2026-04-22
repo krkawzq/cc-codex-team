@@ -7,13 +7,15 @@ describe("daemon normalize", () => {
     expect(normalizeServerRequest({
       id: 1,
       method: "item/permissions/requestApproval",
-      params: { threadId: "th-1", turnId: "turn-1", itemId: "item-1", permissions: { fs: true } },
+      params: { threadId: "th-1", turnId: "turn-1", itemId: "item-1", command: "git status", permissions: { fs: true } },
     })).toMatchObject({
       kind: "approval.permissions",
+      autoApproveTarget: "git status",
       threadId: "th-1",
       payload: {
         turn_id: "turn-1",
         item_id: "item-1",
+        command: "git status",
         permissions: { fs: true },
       },
     });

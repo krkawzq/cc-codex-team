@@ -9,6 +9,7 @@ import { parseArgs, commandKey, type ParsedArgs } from "./args";
 import { renderHelp } from "./help";
 import { err, ok } from "../result";
 import { ConfigStore } from "../daemon/config";
+import { validateApprovalAction } from "./approval-validation";
 
 const DAEMON_POLL_INTERVAL_MS = 100;
 const DEFAULT_DAEMON_READY_TIMEOUT_MS = 15000;
@@ -60,6 +61,12 @@ export async function runCli(argv: string[]): Promise<number> {
     return 1;
   }
 
+  const approvalValidationError = validateApprovalHint(method, parsed);
+  if (approvalValidationError) {
+    process.stdout.write(JSON.stringify(err("invalid_params", approvalValidationError)) + "\n");
+    return 2;
+  }
+
   const ready = await ensureDaemon(sockPath);
   if (!ready) {
     process.stdout.write(JSON.stringify(err("daemon_unreachable", "daemon did not become ready in time")) + "\n");
@@ -71,6 +78,15 @@ export async function runCli(argv: string[]): Promise<number> {
 
 function isDaemonLevel(method: string): boolean {
   return method === "version" || method === "daemon:status" || method.startsWith("daemon:");
+}
+
+function validateApprovalHint(method: string, parsed: ParsedArgs): string | null {
+  if (method !== "message:approval") return null;
+  const kindHint = asStringFlag(parsed.flags.kind);
+  const action = parsed.positionals[2];
+  if (!kindHint || typeof action !== "string" || action.length === 0) return null;
+  const validation = validateApprovalAction(kindHint, action);
+  return validation.ok ? null : validation.message;
 }
 
 async function runVersion(sockPath: string): Promise<number> {
@@ -432,6 +448,14 @@ function validateCliFlags(parsed: ParsedArgs, method: string): string | null {
     return "--since and --cursor are mutually exclusive";
   }
   return null;
+}
+
+function asStringFlag(value: string | boolean | string[] | undefined): string | null {
+  if (Array.isArray(value)) {
+    const last = value[value.length - 1];
+    return typeof last === "string" ? last : null;
+  }
+  return typeof value === "string" ? value : null;
 }
 
 function isTransientConnectError(err: Error & { code?: string }): boolean {

@@ -36,6 +36,8 @@ const OVERFLOW_FLUSH_DELAY_MS = 250;
 const FLUSH_RETRY_DELAY_MS = 250;
 const MAX_PENDING_WRITE_BYTES = 1024 * 1024;
 
+export const AUTO_APPROVED_EVENT_TYPE = "auto_approved";
+
 export class EventLog {
   private retention: number;
   private dataDir: string | null;

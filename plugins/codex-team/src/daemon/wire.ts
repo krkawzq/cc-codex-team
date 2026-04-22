@@ -1,9 +1,16 @@
+import crypto from "node:crypto";
+
 import type { DaemonContext } from "./context";
 import { normalizeNotification, normalizeServerRequest } from "./normalize";
+import { AUTO_APPROVED_EVENT_TYPE } from "./events";
 import type { PoolClientClose, PoolNotification, PoolServerRequest } from "../codex/pool";
-import { threadUnsubscribe } from "../codex/rpc";
+import type { JsonValue } from "../codex/errors";
+import { threadResume, threadUnsubscribe } from "../codex/rpc";
 import { isoFromUnixSeconds, normalizeTokenUsage } from "./sessions";
 import { logger } from "../logger";
+import { matchAutoApprovePattern } from "./auto-approve";
+import { buildExperimentalToolAppServerOptions } from "./experimentalTools";
+import { buildApprovalShortcutResponse, preferredAutoApprovalShortcut } from "./handlers/message";
 
 export function wireDaemonEvents(ctx: DaemonContext): void {
   ctx.pool.on("notification", (e) => {
@@ -208,6 +215,10 @@ async function handleServerRequest(
     return;
   }
 
+  if (await maybeAutoApproveRequest(ctx, e.user, sessionName, norm, effectiveClient, e.request.id)) {
+    return;
+  }
+
   const pending = ctx.pending.add({
     client: effectiveClient,
     jsonrpc_id: e.request.id,
@@ -282,6 +293,78 @@ function resolveSession(ctx: DaemonContext, user: string, threadId: string | nul
   if (!threadId) return null;
   const rec = ctx.sessions.get(user, threadId);
   return rec ? rec.name : null;
+}
+
+async function maybeAutoApproveRequest(
+  ctx: DaemonContext,
+  user: string,
+  sessionName: string,
+  norm: ReturnType<typeof normalizeServerRequest>,
+  client: NonNullable<ReturnType<DaemonContext["pool"]["clientById"]>>,
+  jsonrpcId: string | number,
+): Promise<boolean> {
+  if (!norm.kind.startsWith("approval.")) return false;
+  const rec = ctx.sessions.get(user, sessionName);
+  const patterns = rec?.autoApprovePatterns ?? [];
+  if (patterns.length === 0) return false;
+
+  const shortcut = preferredAutoApprovalShortcut(norm.kind);
+  if (!shortcut) return false;
+
+  const match = matchAutoApprovePattern(patterns, norm.autoApproveTarget);
+  if (!match) return false;
+
+  const requestId = `req-${crypto.randomBytes(4).toString("hex")}`;
+  const response = buildApprovalShortcutResponse(norm.kind, norm.payload.raw as Record<string, unknown>, shortcut);
+
+  let ack: { backpressured: boolean };
+  try {
+    ack = await client.respondAck(jsonrpcId, response as JsonValue);
+  } catch (err) {
+    await emitWarning(ctx, user, sessionName, norm.threadId, {
+      message: `auto-approval reply delivery failed: ${(err as Error).message}`,
+      kind: "auto_approval_reply_delivery_failed",
+      request_id: requestId,
+    });
+    return false;
+  }
+
+  await ctx.events.append(user, {
+    type: AUTO_APPROVED_EVENT_TYPE,
+    session: sessionName,
+    thread_id: norm.threadId,
+    payload: {
+      request_id: requestId,
+      kind: norm.kind,
+      matched_pattern: match.matchedPattern,
+      command_preview: match.commandPreview,
+    },
+  }).catch(() => undefined);
+
+  if (ack.backpressured) {
+    await emitWarning(ctx, user, sessionName, norm.threadId, {
+      message: "auto-approval reply is delayed by app-server stdin backpressure",
+      kind: "auto_approval_reply_backpressured",
+      request_id: requestId,
+    });
+  }
+
+  return true;
+}
+
+async function emitWarning(
+  ctx: DaemonContext,
+  user: string,
+  session: string | null,
+  threadId: string | null,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await ctx.events.append(user, {
+    type: "warning",
+    session,
+    thread_id: threadId,
+    payload,
+  }).catch(() => undefined);
 }
 
 function keyFor(user: string, name: string): string {

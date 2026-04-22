@@ -25,6 +25,7 @@ describe("renderHelp", () => {
     expect(help).toContain("--approval");
     expect(help).toContain("--effort");
     expect(help).toContain("--experimental-tools");
+    expect(help).toContain("--auto-approve");
   });
 
   it("renders daemon config subgroup help with its child commands", () => {
@@ -55,6 +56,7 @@ describe("renderHelp", () => {
     expect(help).toContain("--json");
     expect(help).toContain("--file");
     expect(help).toContain("--stdin");
+    expect(help).toContain("--kind");
     expect(help).toContain("permissions: cancel is invalid.");
     expect(help).toContain("mcp_elicitation: accept-session is invalid; form mode needs --json.");
   });
