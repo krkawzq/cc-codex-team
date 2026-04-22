@@ -44,7 +44,15 @@ const COMMANDS: Set<string> = new Set([
   "monitor:alarm",
 ]);
 
-const COMMAND_GROUPS = new Set(["daemon", "session", "message", "monitor"]);
+const HELP_PATHS: Set<string> = new Set([
+  ...COMMANDS,
+  "daemon",
+  "daemon:user",
+  "daemon:config",
+  "session",
+  "message",
+  "monitor",
+]);
 
 interface GlobalSpec {
   name: "bearer" | "verbose" | "help" | "daemonSock";
@@ -91,18 +99,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
       else if (spec.name === "daemonSock") result.daemonSock = v;
     } else {
       if (spec.name === "verbose") result.verbose = true;
-      else if (spec.name === "help") result.help = true;
+      else if (spec.name === "help") {
+        result.help = true;
+        break;
+      }
     }
   }
 
-  const matched = matchCommand(nonGlobal);
+  const matched = matchCommand(nonGlobal, result.help ? HELP_PATHS : COMMANDS);
   if (!matched) {
     if (nonGlobal.length === 0) {
       result.help = true;
-      return result;
-    }
-    if (result.help && nonGlobal.length === 1 && COMMAND_GROUPS.has(nonGlobal[0])) {
-      result.commandPath = [nonGlobal[0]];
       return result;
     }
     result.unknown = `unknown command: ${nonGlobal.join(" ")}`;
@@ -177,11 +184,11 @@ function setFlag(flags: Record<string, string | boolean | string[]>, key: string
   }
 }
 
-function matchCommand(tokens: string[]): { path: string[]; remaining: string[] } | null {
+function matchCommand(tokens: string[], available: Set<string>): { path: string[]; remaining: string[] } | null {
   const maxDepth = Math.min(tokens.length, 3);
   for (let len = maxDepth; len >= 1; len--) {
     const key = tokens.slice(0, len).join(":");
-    if (COMMANDS.has(key)) {
+    if (available.has(key)) {
       return { path: tokens.slice(0, len), remaining: tokens.slice(len) };
     }
   }
