@@ -49,6 +49,9 @@ describe("daemonStatus dist freshness", () => {
       users: {
         list: () => [{ token: "user-1" }],
       },
+      sessions: {
+        listLive: () => [{ name: "sess-1" }],
+      },
       pool: {
         processCount: () => 2,
       },

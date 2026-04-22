@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { formatShort } from "../src/format/short";
+import { daemonStatus } from "../src/daemon/handlers/daemon";
 
 describe("formatShort", () => {
   afterEach(() => {
@@ -150,5 +151,28 @@ describe("formatShort", () => {
     })).toBe(
       "turn-1 completed unknown items=unknown",
     );
+  });
+
+  it("renders session counts from daemonStatus output", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-23T01:00:00.000Z"));
+
+    const data = await daemonStatus({
+      startedAt: new Date("2026-04-23T00:00:00.000Z"),
+      sockPath: "/tmp/daemon.sock",
+      dataDir: "/tmp/data",
+      logPath: "/tmp/daemon.log",
+      users: {
+        list: () => [{ token: "user-1" }, { token: "user-2" }],
+      },
+      sessions: {
+        listLive: (token: string) => token === "user-1" ? [{ name: "sess-a" }, { name: "sess-b" }] : [{ name: "sess-c" }],
+      },
+      pool: {
+        processCount: () => 1,
+      },
+    } as never);
+
+    expect(formatShort("daemon:status", data)).toContain("sessions=3");
   });
 });
