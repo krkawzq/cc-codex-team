@@ -859,6 +859,13 @@ const monitorGroup: HelpNode = {
           description: "Include high-frequency *.delta events.",
         },
         {
+          long: "--summary",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Emit compact NDJSON lines with only id, ts, type, session, and a type-specific key.",
+        },
+        {
           long: "--since",
           type: "string",
           required: false,

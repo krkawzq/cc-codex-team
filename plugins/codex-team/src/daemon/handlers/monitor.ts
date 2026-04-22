@@ -9,6 +9,14 @@ const MAX_INTERVAL_QUEUE_EVENTS = 512;
 const MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
 const MAX_FLUSH_EVENTS_PER_TICK = 64;
 
+interface MonitorEventSummary {
+  id: string;
+  ts: string;
+  type: string;
+  session: string | null;
+  key: string | null;
+}
+
 export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor events requires streaming");
   const user = req.bearer;
@@ -27,10 +35,14 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   if (intervalS <= 0 && !streamMode) throw invalidParams("--interval must be > 0");
 
   const includeDelta = isTrue(flags["include-delta"]);
+  const summaryMode = isTrue(flags["summary"]);
   const filterTypes = parseTypeList(flags["filter"]);
   const excludeTypes = parseTypeList(flags["exclude"]);
   const sinceId = asString(flags["since"]);
   const sessionFilter = asString(flags["session"]);
+  const emit = (event: TeamEvent): void => {
+    stream.chunk(summaryMode ? summarizeEvent(event) : event);
+  };
 
   const accept = (e: TeamEvent): boolean => {
     if (!includeDelta && isDeltaType(e.type)) return false;
@@ -100,10 +112,10 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   }
 
   if (streamMode) {
-    for (const e of queue) stream.chunk(e);
+    for (const e of queue) emit(e);
     queue.length = 0;
     const sub = ctx.events.subscribe(user, (e) => {
-      if (accept(e)) stream.chunk(e);
+      if (accept(e)) emit(e);
     });
     stream.onClose(() => sub.dispose());
     return { streaming: true };
@@ -127,11 +139,11 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     if (closed || draining) return;
     draining = true;
     const overflowEvent = takeOverflowEvent();
-    if (overflowEvent) stream.chunk(overflowEvent);
+    if (overflowEvent) emit(overflowEvent);
     const batch = queue.splice(0, MAX_FLUSH_EVENTS_PER_TICK);
     for (const event of batch) {
       queueBytes = Math.max(0, queueBytes - eventSize(event));
-      stream.chunk(event);
+      emit(event);
     }
     draining = false;
     if (overflowDropped > 0 || queue.length > 0) scheduleDrain(1);
@@ -347,4 +359,46 @@ function numConfig(ctx: { config: { getEffective(k: string): unknown } }, key: s
 
 function eventSize(event: TeamEvent): number {
   return Buffer.byteLength(JSON.stringify(event));
+}
+
+function summarizeEvent(event: TeamEvent): MonitorEventSummary {
+  return {
+    id: event.id,
+    ts: event.ts,
+    type: event.type,
+    session: event.session,
+    key: summarizeEventKey(event),
+  };
+}
+
+function summarizeEventKey(event: TeamEvent): string | null {
+  const payload = event.payload;
+
+  if (event.type.startsWith("turn.")) return asPayloadString(payload.turn_id);
+  if (event.type.startsWith("approval.") || event.type === "user_input.request" || event.type === "server_request_resolved") {
+    return asPayloadString(payload.request_id);
+  }
+  if (event.type.startsWith("item.")) {
+    return asPayloadString(payload.type) ?? asPayloadString(payload.item_type) ?? asPayloadString(payload.item_id);
+  }
+  if (event.type.startsWith("thread.")) return asPayloadString(payload.thread_id) ?? event.thread_id;
+  if (event.type.startsWith("hook.")) return asPayloadString(payload.hook_id);
+  if (event.type.startsWith("mcp_server.")) return asPayloadString(payload.name);
+  if (event.type.startsWith("fuzzy_file_search.")) return asPayloadString(payload.search_session_id);
+  if (event.type === "monitor.overflow") return asPayloadString(payload.dropped_count);
+  return (
+    asPayloadString(payload.turn_id) ??
+    asPayloadString(payload.request_id) ??
+    asPayloadString(payload.type) ??
+    asPayloadString(payload.item_id) ??
+    asPayloadString(payload.thread_id) ??
+    asPayloadString(payload.name) ??
+    event.thread_id
+  );
+}
+
+function asPayloadString(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
 }
