@@ -99,7 +99,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
       else if (spec.name === "daemonSock") result.daemonSock = v;
     } else {
       if (spec.name === "verbose") result.verbose = true;
-      else if (spec.name === "help") result.help = true;
+      else if (spec.name === "help") {
+        result.help = true;
+        break;
+      }
     }
   }
 

@@ -71,4 +71,24 @@ describe("parseArgs", () => {
     expect(leaf.positionals).toEqual([]);
     expect(leaf.unknown).toBeNull();
   });
+
+  it("treats --help as a command-path terminator", () => {
+    const daemonGroup = parseArgs(["daemon", "--help", "user", "create"]);
+    expect(daemonGroup.help).toBe(true);
+    expect(daemonGroup.commandPath).toEqual(["daemon"]);
+    expect(daemonGroup.positionals).toEqual([]);
+    expect(daemonGroup.unknown).toBeNull();
+
+    const sessionGroup = parseArgs(["session", "--help", "new"]);
+    expect(sessionGroup.help).toBe(true);
+    expect(sessionGroup.commandPath).toEqual(["session"]);
+    expect(sessionGroup.positionals).toEqual([]);
+    expect(sessionGroup.unknown).toBeNull();
+
+    const sessionLeaf = parseArgs(["session", "new", "--help"]);
+    expect(sessionLeaf.help).toBe(true);
+    expect(sessionLeaf.commandPath).toEqual(["session", "new"]);
+    expect(sessionLeaf.positionals).toEqual([]);
+    expect(sessionLeaf.unknown).toBeNull();
+  });
 });
