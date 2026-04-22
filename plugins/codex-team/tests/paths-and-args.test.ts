@@ -1,9 +1,28 @@
-import { describe, expect, it } from "vitest";
+import os from "node:os";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { parseArgs } from "../src/cli/args";
-import { decodeToken, defaultSockPath, encodeToken, isFilesystemSockPath, isNamedPipePath, normalizeSockPath } from "../src/paths";
+import { decodeToken, defaultSockPath, encodeToken, homeDir, isFilesystemSockPath, isNamedPipePath, normalizeSockPath } from "../src/paths";
+
+function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", {
+    configurable: true,
+    value: platform,
+  });
+  try {
+    return fn();
+  } finally {
+    if (original) Object.defineProperty(process, "platform", original);
+  }
+}
 
 describe("paths", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("encodes tokens as URL-safe base64 and decodes losslessly", () => {
     const token = "abc+/=汉字 token";
     const encoded = encodeToken(token);
@@ -32,6 +51,20 @@ describe("paths", () => {
 
   it("uses a named pipe default on Windows", () => {
     expect(isNamedPipePath(defaultSockPath("C:\\Users\\me\\.codex-team", "win32"))).toBe(true);
+  });
+
+  it("prefers the Windows home directory over a POSIX-style HOME override", () => {
+    vi.spyOn(os, "homedir").mockReturnValue("C:\\Users\\native");
+    const originalHome = process.env.HOME;
+    process.env.HOME = "/c/Users/msys";
+
+    try {
+      const resolved = withPlatform("win32", () => homeDir());
+      expect(resolved).toBe("C:\\Users\\native");
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
   });
 });
 

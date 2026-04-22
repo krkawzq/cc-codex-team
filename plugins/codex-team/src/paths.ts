@@ -7,6 +7,7 @@ const WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\";
 const UNIX_SOCKET_MAX_BYTES = 90;
 
 export function homeDir(): string {
+  if (process.platform === "win32") return os.homedir() || process.env.USERPROFILE || process.env.HOME || "\\";
   return process.env.HOME || os.homedir() || "/";
 }
 
