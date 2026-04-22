@@ -58,4 +58,17 @@ describe("parseArgs", () => {
     expect(parseArgs(["bogus"]).unknown).toMatch("unknown command");
     expect(parseArgs(["-b"]).unknown).toBe("flag -b requires a value");
   });
+
+  it("resolves subgroup help paths and skips positional validation", () => {
+    const subgroup = parseArgs(["daemon", "config", "--help"]);
+    expect(subgroup.help).toBe(true);
+    expect(subgroup.commandPath).toEqual(["daemon", "config"]);
+    expect(subgroup.unknown).toBeNull();
+
+    const leaf = parseArgs(["message", "approval", "--help"]);
+    expect(leaf.help).toBe(true);
+    expect(leaf.commandPath).toEqual(["message", "approval"]);
+    expect(leaf.positionals).toEqual([]);
+    expect(leaf.unknown).toBeNull();
+  });
 });

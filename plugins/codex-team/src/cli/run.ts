@@ -6,7 +6,7 @@ import { connectSock, probeSock, writeMessage, onMessages } from "../ipc/sock";
 import type { IpcMessage, IpcRequest } from "../ipc/protocol";
 import { defaultSockPath } from "../paths";
 import { parseArgs, commandKey, type ParsedArgs } from "./args";
-import { helpTextFor } from "./help";
+import { renderHelp } from "./help";
 import { err, ok } from "../result";
 import { ConfigStore } from "../daemon/config";
 
@@ -35,7 +35,7 @@ export async function runCli(argv: string[]): Promise<number> {
   }
 
   if (parsed.help || parsed.commandPath.length === 0) {
-    process.stdout.write(helpTextFor(parsed.commandPath));
+    process.stdout.write(renderHelp(parsed.commandPath));
     return 0;
   }
 
