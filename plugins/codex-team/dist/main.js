@@ -23,13 +23,13 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/main.ts
-var import_node_fs17 = __toESM(require("fs"));
-var import_node_path15 = __toESM(require("path"));
+var import_node_fs18 = __toESM(require("fs"));
+var import_node_path16 = __toESM(require("path"));
 
 // src/cli/run.ts
-var import_node_fs5 = __toESM(require("fs"));
-var import_node_path6 = __toESM(require("path"));
-var import_node_child_process = require("child_process");
+var import_node_fs7 = __toESM(require("fs"));
+var import_node_path7 = __toESM(require("path"));
+var import_node_child_process3 = require("child_process");
 var import_promises = require("timers/promises");
 
 // src/ipc/sock.ts
@@ -266,6 +266,7 @@ function unlinkSockIfStale(sockPath) {
 // src/cli/args.ts
 var COMMANDS = /* @__PURE__ */ new Set([
   "version",
+  "doctor",
   "status",
   "daemon:status",
   "daemon:start",
@@ -450,10 +451,11 @@ function matchCommand(tokens, available) {
   }
   return null;
 }
-function commandKey(path16) {
-  return path16.join(":");
+function commandKey(path17) {
+  return path17.join(":");
 }
 var SHORT_COMMANDS = /* @__PURE__ */ new Set([
+  "doctor",
   "status",
   "daemon:status",
   "daemon:user:list",
@@ -1082,48 +1084,6 @@ var sessionGroup = {
           description: "List every known session, not only live ones."
         },
         {
-          long: "--cursor",
-          type: "string",
-          default: "",
-          required: false,
-          description: "Pagination cursor from a previous session list page."
-        },
-        {
-          long: "--limit",
-          type: "int",
-          default: "50",
-          required: false,
-          description: "Maximum number of sessions to return."
-        },
-        {
-          long: "--archived",
-          type: "enum",
-          default: "exclude",
-          required: false,
-          description: "Include archived sessions, exclude them, or return only archived sessions."
-        },
-        {
-          long: "--state",
-          type: "string",
-          default: "",
-          required: false,
-          description: "Comma-separated session states to keep: live, crashed, closed, archived."
-        },
-        {
-          long: "--owner",
-          type: "string",
-          default: "self",
-          required: false,
-          description: "Best-effort owner filter: self, any, or an explicit bearer token."
-        },
-        {
-          long: "--loaded-only",
-          type: "bool",
-          default: "false",
-          required: false,
-          description: "List threads currently loaded in app-server memory instead of persisted thread/list results."
-        },
-        {
           long: "--sort",
           type: "enum",
           default: "last_active",
@@ -1146,9 +1106,7 @@ var sessionGroup = {
         }
       ],
       examples: [
-        "codex-team -b $TOKEN session list --all --format table",
-        "codex-team -b $TOKEN session list --all --limit 25 --cursor abc123",
-        "codex-team -b $TOKEN session list --loaded-only --owner any"
+        "codex-team -b $TOKEN session list --all --format table"
       ],
       needs_bearer: true
     }),
@@ -1697,6 +1655,31 @@ var HELP_TREE = {
       ],
       needs_bearer: false
     }),
+    {
+      name: "doctor",
+      summary: "Run local environment and daemon bootstrap diagnostics.",
+      usage: "codex-team doctor [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one summary line with verdict, failed checks, and warnings."
+        }
+      ],
+      examples: [
+        "codex-team doctor",
+        "codex-team doctor --short"
+      ],
+      notes: [
+        "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
+        "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness."
+      ],
+      subcommands: [],
+      needs_bearer: false
+    },
     leaf({
       name: "status",
       summary: "Show live sessions, pending events, and recent activity.",
@@ -1724,15 +1707,15 @@ var HELP_TREE = {
   ],
   needs_bearer: false
 };
-function findNode(path16, node = HELP_TREE) {
-  if (path16.length === 0) return node;
-  const [head, ...rest] = path16;
+function findNode(path17, node = HELP_TREE) {
+  if (path17.length === 0) return node;
+  const [head, ...rest] = path17;
   const child = node.subcommands.find((entry) => entry.name === head);
   if (!child) return null;
   return findNode(rest, child);
 }
-function formatCommandPath(path16) {
-  return path16.length === 0 ? "codex-team" : `codex-team ${path16.join(" ")}`;
+function formatCommandPath(path17) {
+  return path17.length === 0 ? "codex-team" : `codex-team ${path17.join(" ")}`;
 }
 function formatPositional(positional) {
   return positional.required ? `<${positional.name}>` : `[${positional.name}]`;
@@ -1812,9 +1795,9 @@ function renderExamples(node) {
     ...node.examples.map((example) => `  ${example}`)
   ];
 }
-function renderHelp(path16) {
-  const node = findNode(path16) ?? HELP_TREE;
-  const resolvedPath = findNode(path16) ? path16 : [];
+function renderHelp(path17) {
+  const node = findNode(path17) ?? HELP_TREE;
+  const resolvedPath = findNode(path17) ? path17 : [];
   const sections = [
     [formatCommandPath(resolvedPath), node.summary],
     ["USAGE", `  ${node.usage}`]
@@ -1996,9 +1979,7 @@ var CONFIG_KEYS = {
   "daemon.connect_retry_attempts": { type: "int", default: 3, needsRestart: false, description: "CLI retries for transient daemon connect errors" },
   "daemon.connect_retry_delay_seconds": { type: "float", default: 0.25, needsRestart: false, description: "delay between transient daemon connect retries" },
   "monitor.default_interval_seconds": { type: "int", default: 30, needsRestart: false, description: "default --interval for `monitor events`" },
-  "monitor.cursor_persist_debounce_ms": { type: "int", default: 200, needsRestart: false, description: "debounce for cursor auto-updates from `monitor events` (milliseconds)" },
   "monitor.event_log_retention": { type: "int", default: 1e4, needsRestart: false, description: "per-user ring-buffer event retention" },
-  "session.persist_debounce_ms": { type: "int", default: 50, needsRestart: false, description: "debounce for persisting coarse session metadata" },
   "session.auto_approve_command_patterns": {
     type: "string",
     default: "",
@@ -2711,20 +2692,16 @@ function compactSessionContext(data) {
 }
 function compactSessionList(data) {
   const value = asObject2(data);
-  const remote = value.all === true || value.loaded_only === true;
+  const all = value.all === true;
   const out = {
-    sessions: asArray(value.sessions).map((entry) => remote ? projectSession(entry, {
-      includeModel: true,
-      includeBusy: true
-    }) : projectSession(entry, {
+    sessions: asArray(value.sessions).map((entry) => all ? projectThread(entry) : projectSession(entry, {
       includeModel: true,
       includeTurnCount: true,
       includeCurrentTurnId: true
     }))
   };
   copyIfPresent(out, value, "all");
-  if (value.loaded_only === true) copyIfPresent(out, value, "loaded_only");
-  if (remote) copyIfPresent(out, value, "next_cursor");
+  if (all) copyIfPresent(out, value, "next_cursor");
   return out;
 }
 function compactSessionHeal(data) {
@@ -2806,7 +2783,6 @@ function projectSession(value, options) {
   if (options.includeItemsInTurn) copyIfPresent(out, session, "items_in_turn");
   if (options.includePendingApprovals) copyIfPresent(out, session, "pending_approvals");
   if (options.includePendingUserInputs) copyIfPresent(out, session, "pending_user_inputs");
-  if (options.includeBusy) copyIfPresent(out, session, "busy");
   return out;
 }
 function projectThread(value) {
@@ -2901,6 +2877,498 @@ function hasOwn2(record, key) {
   return Object.prototype.hasOwnProperty.call(record, key);
 }
 
+// src/cli/doctor.ts
+var import_node_fs6 = __toESM(require("fs"));
+var import_node_net2 = __toESM(require("net"));
+var import_node_os2 = __toESM(require("os"));
+var import_node_path6 = __toESM(require("path"));
+var import_node_child_process2 = require("child_process");
+
+// src/daemon/processes.ts
+var import_node_fs5 = __toESM(require("fs"));
+var import_node_child_process = require("child_process");
+function readLinuxCmdline(pid) {
+  try {
+    const raw = import_node_fs5.default.readFileSync(`/proc/${pid}/cmdline`);
+    const commandLine = raw.toString("utf8").replace(/\0/g, " ").trim() || null;
+    return { commandLine, source: "proc", reliable: true };
+  } catch {
+    return { commandLine: null, source: null, reliable: false };
+  }
+}
+function readLinuxStartTime(pid) {
+  try {
+    const raw = import_node_fs5.default.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const lastParen = raw.lastIndexOf(")");
+    if (lastParen < 0) return null;
+    const rest = raw.slice(lastParen + 2).trim().split(/\s+/);
+    const startTime = rest[19];
+    return typeof startTime === "string" && startTime.length > 0 ? startTime : null;
+  } catch {
+    return null;
+  }
+}
+function readPsCommand(pid) {
+  try {
+    const raw = (0, import_node_child_process.execFileSync)("ps", ["-p", String(pid), "-o", "command="], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const commandLine = raw.trim();
+    return { commandLine: commandLine.length > 0 ? commandLine : null, source: "ps", reliable: true };
+  } catch {
+    return { commandLine: null, source: null, reliable: false };
+  }
+}
+function readPsStartTime(pid) {
+  try {
+    const raw = (0, import_node_child_process.execFileSync)("ps", ["-p", String(pid), "-o", "lstart="], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const startTime = raw.trim();
+    return startTime.length > 0 ? startTime : null;
+  } catch {
+    return null;
+  }
+}
+function readWindowsCommand(pid) {
+  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CommandLine) { [Console]::Out.Write($p.CommandLine) }`;
+  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
+    try {
+      const raw = (0, import_node_child_process.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8"
+      });
+      const commandLine = raw.trim();
+      if (commandLine.length > 0) return { commandLine, source: "powershell", reliable: true };
+    } catch {
+    }
+  }
+  try {
+    const raw = (0, import_node_child_process.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CommandLine", "/value"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CommandLine="));
+    const commandLine = line?.slice("CommandLine=".length).trim() ?? "";
+    if (commandLine.length > 0) return { commandLine, source: "wmic", reliable: true };
+  } catch {
+  }
+  try {
+    const raw = (0, import_node_child_process.execFileSync)("tasklist", ["/FO", "LIST", "/NH", "/FI", `PID eq ${pid}`], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => /^Image Name:/i.test(entry));
+    const commandLine = line?.replace(/^Image Name:\s*/i, "").trim() ?? "";
+    if (commandLine.length > 0) return { commandLine, source: "tasklist", reliable: false };
+  } catch {
+  }
+  return { commandLine: null, source: null, reliable: false };
+}
+function readWindowsStartTime(pid) {
+  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CreationDate) { [Console]::Out.Write($p.CreationDate) }`;
+  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
+    try {
+      const raw = (0, import_node_child_process.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8"
+      });
+      const startTime = raw.trim();
+      if (startTime.length > 0) return startTime;
+    } catch {
+    }
+  }
+  try {
+    const raw = (0, import_node_child_process.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CreationDate", "/value"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CreationDate="));
+    const startTime = line?.slice("CreationDate=".length).trim() ?? "";
+    return startTime.length > 0 ? startTime : null;
+  } catch {
+    return null;
+  }
+}
+function inspectProcessCommandLine(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return { commandLine: null, source: null, reliable: false };
+  if (process.platform === "linux") return readLinuxCmdline(pid);
+  if (process.platform === "darwin" || process.platform === "freebsd") return readPsCommand(pid);
+  if (process.platform === "win32") return readWindowsCommand(pid);
+  return { commandLine: null, source: null, reliable: false };
+}
+function readProcessStartTime(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  if (process.platform === "linux") return readLinuxStartTime(pid);
+  if (process.platform === "darwin" || process.platform === "freebsd") return readPsStartTime(pid);
+  if (process.platform === "win32") return readWindowsStartTime(pid);
+  return null;
+}
+function inspectCodexAppServerProcess(pid) {
+  const inspection = inspectProcessCommandLine(pid);
+  if (!inspection.commandLine) return "unknown";
+  if (looksLikeCodexAppServerCommand(inspection.commandLine)) return "match";
+  if (!inspection.reliable) return "unknown";
+  return "mismatch";
+}
+function isLikelyCodexTeamDaemonProcess(pid) {
+  const inspection = inspectProcessCommandLine(pid);
+  return inspection.commandLine !== null && inspection.commandLine.includes("--daemon-internal");
+}
+function looksLikeCodexAppServerCommand(commandLine) {
+  return commandLine.includes("app-server") && (commandLine.includes("codex") || commandLine.includes("codex-cli-bin"));
+}
+
+// src/cli/doctor.ts
+var DEFAULT_DEPS = {
+  fs: import_node_fs6.default,
+  spawnSync: import_node_child_process2.spawnSync,
+  createServer: import_node_net2.default.createServer,
+  createConnection: import_node_net2.default.createConnection,
+  kill: process.kill.bind(process),
+  isLikelyCodexTeamDaemonProcess
+};
+function buildDoctorContext(options = {}) {
+  const config = new ConfigStore();
+  const dataDir = options.dataDir ?? config.resolvedDataDir();
+  const sockPath = options.sockPath ?? (options.dataDir ? defaultSockPath(dataDir) : config.resolvedSockPath());
+  return {
+    packageRoot: options.packageRoot ?? PACKAGE_ROOT,
+    dataDir,
+    sockPath,
+    pidPath: pidFilePath(dataDir),
+    launcherPath: import_node_path6.default.join(options.packageRoot ?? PACKAGE_ROOT, "bin", "codex-team"),
+    pathEnv: options.pathEnv ?? process.env.PATH
+  };
+}
+function checkNode() {
+  const version2 = process.versions.node || "unknown";
+  const major = Number.parseInt(version2.split(".")[0] ?? "", 10);
+  if (!Number.isFinite(major) || major < 18) {
+    return fail("node", `node version ${version2}, need >=18`);
+  }
+  return ok2("node", `node=${version2}`);
+}
+function checkCodexBin(_ctx, deps = DEFAULT_DEPS) {
+  const result = deps.spawnSync("codex", ["--version"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  if (result.error) {
+    const err2 = result.error;
+    if (err2.code === "ENOENT") return fail("codex", "codex binary not found on PATH");
+    return fail("codex", `codex --version errored: ${err2.message}`);
+  }
+  if (result.status !== 0) {
+    return fail("codex", `codex --version errored: ${formatSpawnFailure(result)}`);
+  }
+  const version2 = firstLine(result.stdout) || firstLine(result.stderr) || "unknown";
+  return ok2("codex", `codex=${version2}`);
+}
+function checkLauncherOnPath(ctx, deps = DEFAULT_DEPS) {
+  const resolved = resolveOnPath("codex-team", ctx.pathEnv, deps.fs);
+  if (resolved) {
+    return ok2("path", `codex-team=${resolved}`);
+  }
+  return warn("path", `codex-team not on PATH; use ${ctx.launcherPath}`);
+}
+function checkDataDirWritable(ctx, deps = DEFAULT_DEPS) {
+  const testPath = import_node_path6.default.join(ctx.dataDir, ".doctor-write-test");
+  try {
+    deps.fs.mkdirSync(ctx.dataDir, { recursive: true });
+    deps.fs.writeFileSync(testPath, "ok");
+    deps.fs.unlinkSync(testPath);
+    return ok2("data_dir", `data_dir=${ctx.dataDir} writable`);
+  } catch (e) {
+    try {
+      deps.fs.unlinkSync(testPath);
+    } catch {
+    }
+    return fail("data_dir", `data_dir not writable: ${ctx.dataDir}`);
+  }
+}
+async function checkSocketBind(_ctx, deps = DEFAULT_DEPS) {
+  const sockPath = import_node_path6.default.join(import_node_os2.default.tmpdir(), `ct-doctor-${process.pid}-${Date.now()}.sock`);
+  const endpoint = normalizeSockPath(sockPath);
+  const server = deps.createServer();
+  const cleanup = async () => {
+    await new Promise((resolve) => {
+      try {
+        server.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+    if (isFilesystemSockPath(sockPath)) {
+      try {
+        deps.fs.unlinkSync(endpoint);
+      } catch {
+      }
+    }
+  };
+  if (isFilesystemSockPath(sockPath)) {
+    try {
+      deps.fs.unlinkSync(endpoint);
+    } catch {
+    }
+  }
+  const listenResult = await new Promise((resolve) => {
+    const onError = (error) => {
+      server.off("listening", onListening);
+      resolve({ ok: false, error });
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve({ ok: true });
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(endpoint);
+  });
+  if (!listenResult.ok) {
+    await cleanup();
+    const code = listenResult.error.code ?? "UNKNOWN";
+    if (code === "EPERM" || code === "EACCES") {
+      return fail("socket_bind", `socket_bind ${code} - sandbox forbids listen(); codex-team won't work here`);
+    }
+    return fail("socket_bind", `socket_bind ${code} - listen() failed: ${listenResult.error.message}`);
+  }
+  await cleanup();
+  return ok2("socket_bind", "socket_bind permitted");
+}
+function checkDaemonPid(ctx, deps = DEFAULT_DEPS) {
+  const record = readPidRecord(ctx.pidPath, deps.fs);
+  if (!record) {
+    return {
+      ...ok2("daemon_pid", "daemon not running (will auto-spawn on first `-b` call)"),
+      daemonState: "not_running",
+      pid: null
+    };
+  }
+  const alive = isPidReachable(record.pid, deps.kill);
+  const isDaemon = alive && deps.isLikelyCodexTeamDaemonProcess(record.pid);
+  if (isDaemon) {
+    return {
+      ...ok2("daemon_pid", `daemon running, pid=${record.pid}`),
+      daemonState: "running",
+      pid: record.pid
+    };
+  }
+  const reason = alive ? `pid ${record.pid} is not a codex-team daemon` : `pid ${record.pid} is not running`;
+  return {
+    ...warn("daemon_pid", `stale pidfile: ${reason}. Safe to remove manually: \`rm ${ctx.pidPath}\``),
+    daemonState: "not_running",
+    pid: record.pid
+  };
+}
+async function checkDaemonSocket(ctx, pidResult, deps = DEFAULT_DEPS) {
+  if (pidResult.daemonState !== "running") {
+    return skip("daemon_socket", "daemon_socket (daemon not running)");
+  }
+  const result = await connectSockOnce(ctx.sockPath, 2e3, deps.createConnection);
+  if (result.ok) {
+    return ok2("daemon_socket", "daemon_socket reachable");
+  }
+  const code = result.code ?? "UNKNOWN";
+  return fail("daemon_socket", `daemon_socket ${code} - ${interpretSocketConnectError(code, result.message)}`);
+}
+function checkDistFreshness(ctx, deps = DEFAULT_DEPS) {
+  const distPath = import_node_path6.default.join(ctx.packageRoot, "dist", "main.js");
+  const distStat = statIfExists(distPath, deps.fs);
+  if (!distStat) {
+    return warn("dist", "dist missing; run `npm run build` in plugins/codex-team");
+  }
+  const sourceNewest = newestMtime(import_node_path6.default.join(ctx.packageRoot, "src"), deps.fs);
+  if (sourceNewest !== null && sourceNewest > distStat.mtimeMs) {
+    return warn("dist", "source newer than dist; run `npm run build` in plugins/codex-team");
+  }
+  return ok2("dist", "dist current");
+}
+async function runDoctor(options = {}, deps = DEFAULT_DEPS) {
+  const ctx = buildDoctorContext(options);
+  const write = options.write ?? ((line) => process.stdout.write(line));
+  const results = [];
+  results.push(checkNode());
+  results.push(checkCodexBin(ctx, deps));
+  results.push(checkLauncherOnPath(ctx, deps));
+  results.push(checkDataDirWritable(ctx, deps));
+  results.push(await checkSocketBind(ctx, deps));
+  const daemonPid = checkDaemonPid(ctx, deps);
+  results.push(daemonPid);
+  results.push(await checkDaemonSocket(ctx, daemonPid, deps));
+  results.push(checkDistFreshness(ctx, deps));
+  const verdict = summarizeVerdict(results);
+  if (options.short) {
+    const failed = summarizeIds(results, "fail");
+    const warned = summarizeIds(results, "warn");
+    write(`doctor=${verdict} failed=${failed} warned=${warned}
+`);
+    return exitCodeForVerdict(verdict);
+  }
+  for (const result of results) {
+    write(`[${renderStatus(result.status)}] ${result.message}
+`);
+  }
+  write(`=== ${verdict} ===
+`);
+  return exitCodeForVerdict(verdict);
+}
+function summarizeVerdict(results) {
+  if (results.some((result) => result.status === "fail")) return "BROKEN";
+  if (results.some((result) => result.status === "warn")) return "DEGRADED";
+  return "HEALTHY";
+}
+function summarizeIds(results, status2) {
+  const ids = results.filter((result) => result.status === status2).map((result) => result.id);
+  return ids.length > 0 ? ids.join(",") : "none";
+}
+function exitCodeForVerdict(verdict) {
+  if (verdict === "BROKEN") return 2;
+  if (verdict === "DEGRADED") return 1;
+  return 0;
+}
+function renderStatus(status2) {
+  switch (status2) {
+    case "warn":
+      return "WARN";
+    case "fail":
+      return "FAIL";
+    case "skip":
+      return "SKIP";
+    case "ok":
+    default:
+      return "OK";
+  }
+}
+function ok2(id, message) {
+  return { id, status: "ok", message };
+}
+function warn(id, message) {
+  return { id, status: "warn", message };
+}
+function fail(id, message) {
+  return { id, status: "fail", message };
+}
+function skip(id, message) {
+  return { id, status: "skip", message };
+}
+function resolveOnPath(command, pathEnv, doctorFs) {
+  const segments = (pathEnv ?? "").split(import_node_path6.default.delimiter).filter(Boolean);
+  const candidates = process.platform === "win32" ? windowsExecutableCandidates(command) : [command];
+  for (const segment of segments) {
+    for (const candidate of candidates) {
+      const target = import_node_path6.default.join(segment, candidate);
+      try {
+        const stat = doctorFs.statSync(target);
+        if (!stat.isFile()) continue;
+        if (process.platform === "win32" || (stat.mode & 73) !== 0) return target;
+      } catch {
+      }
+    }
+  }
+  return null;
+}
+function windowsExecutableCandidates(command) {
+  const pathext = (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").map((entry) => entry.trim()).filter(Boolean);
+  if (/\.[^./\\]+$/.test(command)) return [command];
+  return [command, ...pathext.map((ext) => `${command}${ext.toLowerCase()}`), ...pathext.map((ext) => `${command}${ext.toUpperCase()}`)];
+}
+function readPidRecord(pidPath, doctorFs) {
+  try {
+    const raw = doctorFs.readFileSync(pidPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
+    return { pid: Math.floor(parsed.pid) };
+  } catch {
+    return null;
+  }
+}
+function isPidReachable(pid, kill) {
+  try {
+    kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function statIfExists(target, doctorFs) {
+  try {
+    return doctorFs.statSync(target);
+  } catch {
+    return null;
+  }
+}
+function newestMtime(target, doctorFs) {
+  const stat = statIfExists(target, doctorFs);
+  if (!stat) return null;
+  if (!stat.isDirectory()) return stat.mtimeMs;
+  let newest = null;
+  let entries;
+  try {
+    entries = doctorFs.readdirSync(target, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    const childNewest = newestMtime(import_node_path6.default.join(target, entry.name), doctorFs);
+    if (childNewest !== null && (newest === null || childNewest > newest)) {
+      newest = childNewest;
+    }
+  }
+  return newest;
+}
+function firstLine(value) {
+  const text = typeof value === "string" ? value : value ? value.toString("utf8") : "";
+  return text.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+}
+function formatSpawnFailure(result) {
+  const signal = result.signal ? `signal ${result.signal}` : null;
+  const status2 = typeof result.status === "number" ? `exit ${result.status}` : null;
+  const detail = firstLine(result.stderr) || firstLine(result.stdout);
+  return [status2 ?? signal ?? "unknown failure", detail].filter(Boolean).join(": ");
+}
+function connectSockOnce(sockPath, timeoutMs, createConnection) {
+  return new Promise((resolve) => {
+    const sock = createConnection(normalizeSockPath(sockPath));
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        sock.destroy();
+      } catch {
+      }
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      finish({ ok: false, code: "ETIMEDOUT", message: `connect timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    timer.unref();
+    sock.once("connect", () => finish({ ok: true }));
+    sock.once("error", (error) => {
+      finish({ ok: false, code: error.code, message: error.message });
+    });
+  });
+}
+function interpretSocketConnectError(code, message) {
+  switch (code) {
+    case "ENOENT":
+      return "sock file missing";
+    case "ECONNREFUSED":
+      return "sock exists but nothing is accepting connections";
+    case "EACCES":
+    case "EPERM":
+      return "permission denied while connecting";
+    case "ETIMEDOUT":
+      return message;
+    default:
+      return message || "connect failed";
+  }
+}
+
 // src/cli/run.ts
 var DAEMON_POLL_INTERVAL_MS = 100;
 var DEFAULT_DAEMON_READY_TIMEOUT_MS = 15e3;
@@ -2929,14 +3397,20 @@ async function runCli(argv) {
     process.stdout.write(renderHelp(parsed.commandPath));
     return 0;
   }
-  warnLegacyWindowsDataDir((warning) => {
-    process.stderr.write(warning.message + "\n");
-  });
   const method = commandKey(parsed.commandPath);
+  if (method !== "doctor") {
+    warnLegacyWindowsDataDir((warning) => {
+      process.stderr.write(warning.message + "\n");
+    });
+  }
   const short = truthy(parsed.flags.short);
   const format = flagString(parsed.flags.format);
   if (short && !supportsShort(method)) {
     process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
+    return 1;
+  }
+  if (method === "doctor" && truthy(parsed.flags.full)) {
+    process.stdout.write(JSON.stringify(err("invalid_params", `--full is not supported for '${method}'`)) + "\n");
     return 1;
   }
   if (short && (format === "markdown" || format === "table")) {
@@ -2944,6 +3418,9 @@ async function runCli(argv) {
     return 1;
   }
   const sockPath = parsed.daemonSock || defaultSockPath();
+  if (method === "doctor") {
+    return await runDoctor({ short, sockPath });
+  }
   if (method === "version") {
     return await runVersion(sockPath);
   }
@@ -2966,7 +3443,7 @@ async function runCli(argv) {
   }
   const ready = await ensureDaemon(sockPath);
   if (!ready.ok) {
-    process.stdout.write(JSON.stringify(err("daemon_unreachable", ready.message)) + "\n");
+    process.stdout.write(JSON.stringify(err(ready.code, ready.message, ready.data)) + "\n");
     return 1;
   }
   return await dispatchCommand(sockPath, parsed, method);
@@ -3094,8 +3571,8 @@ async function runStream(sock, parsed, method) {
       if (stdoutBlocked) return;
       while (stdoutQueue.length > 0) {
         const next = stdoutQueue[0];
-        const ok2 = process.stdout.write(next.line);
-        if (!ok2) {
+        const ok3 = process.stdout.write(next.line);
+        if (!ok3) {
           stdoutBlocked = true;
           if (!socketPaused && typeof sock.pause === "function") {
             socketPaused = true;
@@ -3238,35 +3715,76 @@ async function requestOnceWithRetry(sockPath, opts, cliConfig, allowRetry) {
 }
 async function ensureDaemon(sockPath) {
   const cliConfig = readCliConfig();
+  const config = new ConfigStore();
+  const dataDir = config.resolvedDataDir();
+  const pidPath = pidFilePath(dataDir);
+  const stderrPath = daemonSpawnStderrPath(dataDir);
   if (await probeSock(sockPath, 200)) {
-    return { ok: true, message: "" };
+    return { ok: true, code: "", message: "" };
+  }
+  const staleState = detectStaleDaemonArtifacts(sockPath, pidPath);
+  if (staleState) {
+    return {
+      ok: false,
+      code: "daemon_unreachable",
+      message: `stale daemon.pid + daemon.sock (pid ${staleState.pid} is not running); remove them and retry`,
+      data: {
+        pid_path: pidPath,
+        sock_path: staleState.sockPath,
+        pid: staleState.pid
+      }
+    };
   }
   try {
-    spawnDaemon();
-    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
-      return { ok: true, message: "" };
+    const child = spawnDaemon();
+    const firstAttempt = await waitForDaemonReady(sockPath, child, cliConfig.readyTimeoutMs);
+    if (firstAttempt.ready) {
+      return { ok: true, code: "", message: "" };
     }
   } catch (e) {
     return {
       ok: false,
+      code: "daemon_unreachable",
       message: `failed to spawn daemon: ${e.message}`
     };
   }
-  const stderrPath = daemonSpawnStderrPath();
   try {
-    spawnDaemon(stderrPath);
-    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
-      return { ok: true, message: "" };
+    const child = spawnDaemon(stderrPath);
+    const secondAttempt = await waitForDaemonReady(sockPath, child, cliConfig.readyTimeoutMs);
+    if (secondAttempt.ready) {
+      return { ok: true, code: "", message: "" };
+    }
+    if (secondAttempt.exited) {
+      return buildEarlyExitFailure(stderrPath, secondAttempt);
     }
   } catch (e) {
     return {
       ok: false,
+      code: "daemon_unreachable",
       message: `failed to spawn daemon with stderr capture: ${e.message}`
+    };
+  }
+  const stderrTail = readTail(stderrPath, 4096);
+  const parsedBootstrap = parseBootstrapStderr(stderrTail);
+  if (parsedBootstrap?.code === "socket_bind_denied") {
+    return {
+      ok: false,
+      code: parsedBootstrap.code,
+      message: parsedBootstrap.message,
+      data: {
+        ...parsedBootstrap.data ?? {},
+        ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
+      }
     };
   }
   return {
     ok: false,
-    message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`
+    code: "daemon_unreachable",
+    message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`,
+    data: {
+      stderr_path: stderrPath,
+      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
+    }
   };
 }
 async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDelayMs) {
@@ -3285,32 +3803,48 @@ async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDel
   }
   throw lastError ?? new Error("connect failed");
 }
-async function waitForDaemonReady(sockPath, timeoutMs) {
+async function waitForDaemonReady(sockPath, child, timeoutMs) {
+  let exited = false;
+  let exitCode = null;
+  let signal = null;
+  const onExit = (code, nextSignal) => {
+    exited = true;
+    exitCode = code;
+    signal = nextSignal;
+  };
+  child.once("exit", onExit);
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await (0, import_promises.setTimeout)(DAEMON_POLL_INTERVAL_MS);
-    if (await probeSock(sockPath, 200)) return true;
+  try {
+    while (Date.now() < deadline) {
+      await (0, import_promises.setTimeout)(DAEMON_POLL_INTERVAL_MS);
+      if (await probeSock(sockPath, 200)) return { ready: true, exited, exitCode, signal };
+      if (exited) return { ready: false, exited, exitCode, signal };
+    }
+  } finally {
+    if (typeof child.off === "function") child.off("exit", onExit);
+    else if (typeof child.removeListener === "function") child.removeListener("exit", onExit);
   }
-  return false;
+  return { ready: false, exited, exitCode, signal };
 }
 function spawnDaemon(stderrPath) {
   const args = [process.argv[1], "--daemon-internal"];
   let stderrFd = null;
   try {
     if (stderrPath) {
-      import_node_fs5.default.mkdirSync(import_node_path6.default.dirname(stderrPath), { recursive: true });
-      stderrFd = import_node_fs5.default.openSync(stderrPath, "w");
+      import_node_fs7.default.mkdirSync(import_node_path7.default.dirname(stderrPath), { recursive: true });
+      stderrFd = import_node_fs7.default.openSync(stderrPath, "w");
       args.push(DAEMON_STDERR_FLAG, stderrPath);
     }
-    const child = (0, import_node_child_process.spawn)(process.execPath, args, {
+    const child = (0, import_node_child_process3.spawn)(process.execPath, args, {
       detached: true,
       stdio: stderrFd === null ? "ignore" : ["ignore", "ignore", stderrFd],
       env: process.env,
       windowsHide: true
     });
     child.unref();
+    return child;
   } finally {
-    if (stderrFd !== null) import_node_fs5.default.closeSync(stderrFd);
+    if (stderrFd !== null) import_node_fs7.default.closeSync(stderrFd);
   }
 }
 function getCliVersion() {
@@ -3319,8 +3853,93 @@ function getCliVersion() {
 function randomId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
-function daemonSpawnStderrPath() {
-  return import_node_path6.default.join(defaultDataDir(), "daemon-spawn.stderr");
+function daemonSpawnStderrPath(dataDir) {
+  return import_node_path7.default.join(dataDir, "daemon-spawn.stderr");
+}
+function detectStaleDaemonArtifacts(sockPath, pidPath) {
+  const pidRecord = readPidFile(pidPath);
+  if (!pidRecord) return null;
+  if (isPidAlive(pidRecord.pid)) return null;
+  if (!isFilesystemSockPath(sockPath)) return null;
+  const normalizedSockPath = normalizeSockPath(sockPath);
+  if (!import_node_fs7.default.existsSync(normalizedSockPath)) return null;
+  return {
+    pid: pidRecord.pid,
+    sockPath: normalizedSockPath
+  };
+}
+function readPidFile(targetPath) {
+  try {
+    const raw = import_node_fs7.default.readFileSync(targetPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
+    return { pid: Math.floor(parsed.pid) };
+  } catch {
+    return null;
+  }
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function buildEarlyExitFailure(stderrPath, result) {
+  const stderrTail = readTail(stderrPath, 4096);
+  const parsedBootstrap = parseBootstrapStderr(stderrTail);
+  if (parsedBootstrap?.code === "socket_bind_denied") {
+    return {
+      ok: false,
+      code: parsedBootstrap.code,
+      message: parsedBootstrap.message,
+      data: {
+        ...parsedBootstrap.data ?? {},
+        ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
+      }
+    };
+  }
+  return {
+    ok: false,
+    code: "daemon_unreachable",
+    message: parsedBootstrap?.message ?? "daemon exited before becoming ready",
+    data: {
+      stderr_path: stderrPath,
+      ...typeof result.exitCode === "number" ? { exit_code: result.exitCode } : {},
+      ...result.signal ? { signal: result.signal } : {},
+      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
+    }
+  };
+}
+function readTail(filePath, maxBytes) {
+  try {
+    const raw = import_node_fs7.default.readFileSync(filePath, "utf8");
+    if (raw.length <= maxBytes) return raw.trim();
+    return raw.slice(-maxBytes).trim();
+  } catch {
+    return null;
+  }
+}
+function parseBootstrapStderr(stderrTail) {
+  if (!stderrTail) return null;
+  const prefix = "[codex-team-daemon-bootstrap] ";
+  const lines = stderrTail.split(/\r?\n/).reverse();
+  for (const line of lines) {
+    if (!line.startsWith(prefix)) continue;
+    try {
+      const parsed = JSON.parse(line.slice(prefix.length));
+      if (typeof parsed.code !== "string" || typeof parsed.message !== "string") continue;
+      return {
+        code: parsed.code,
+        message: parsed.message,
+        data: parsed.data && typeof parsed.data === "object" && !Array.isArray(parsed.data) ? parsed.data : void 0
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 function truthy(v) {
   return v === true || v === "true" || v === "1";
@@ -3343,7 +3962,6 @@ function extractCursorEventId(result) {
 }
 function createStreamAckCallback(method, sock, reqId, data) {
   if (method !== "monitor:events") return void 0;
-  if (!isStreamChunkAckable(data)) return void 0;
   const eventId = extractStreamEventId(data);
   if (!eventId) return void 0;
   return () => sendStreamAck(sock, reqId, eventId);
@@ -3352,11 +3970,6 @@ function extractStreamEventId(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;
   const id = data.id;
   return typeof id === "string" && id.length > 0 ? id : null;
-}
-function isStreamChunkAckable(data) {
-  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
-  const ackable = data.ackable;
-  return ackable !== false;
 }
 function sendStreamAck(sock, reqId, eventId) {
   if (sock.destroyed) return;
@@ -3417,12 +4030,8 @@ function formatDuration(ms) {
 }
 
 // src/daemon/run.ts
-var import_node_fs16 = __toESM(require("fs"));
-var import_node_path14 = __toESM(require("path"));
-
-// src/daemon/users.ts
-var import_node_fs6 = __toESM(require("fs"));
-var import_node_path7 = __toESM(require("path"));
+var import_node_fs17 = __toESM(require("fs"));
+var import_node_path15 = __toESM(require("path"));
 
 // src/errors.ts
 var CodexTeamError = class extends Error {
@@ -3443,6 +4052,8 @@ function methodNotFound(method) {
 }
 
 // src/daemon/users.ts
+var import_node_fs8 = __toESM(require("fs"));
+var import_node_path8 = __toESM(require("path"));
 var SCHEMA_VERSION = 1;
 var UserRegistry = class {
   users = /* @__PURE__ */ new Map();
@@ -3453,12 +4064,12 @@ var UserRegistry = class {
   }
   loadFromDisk() {
     const root = usersDir(this.dataDir);
-    if (!import_node_fs6.default.existsSync(root)) return;
-    for (const dirname of import_node_fs6.default.readdirSync(root)) {
-      const metaPath = import_node_path7.default.join(root, dirname, "metadata.json");
-      if (import_node_fs6.default.existsSync(metaPath)) {
+    if (!import_node_fs8.default.existsSync(root)) return;
+    for (const dirname of import_node_fs8.default.readdirSync(root)) {
+      const metaPath = import_node_path8.default.join(root, dirname, "metadata.json");
+      if (import_node_fs8.default.existsSync(metaPath)) {
         try {
-          const raw = import_node_fs6.default.readFileSync(metaPath, "utf8");
+          const raw = import_node_fs8.default.readFileSync(metaPath, "utf8");
           const parsed = JSON.parse(raw);
           const user = normalizePersistedUser(parsed);
           if (user && typeof user.token === "string") {
@@ -3513,7 +4124,7 @@ var UserRegistry = class {
     this.users.delete(token);
     const dir = userDir(token, this.dataDir);
     try {
-      import_node_fs6.default.rmSync(dir, { recursive: true, force: true });
+      import_node_fs8.default.rmSync(dir, { recursive: true, force: true });
     } catch {
     }
   }
@@ -3525,14 +4136,14 @@ var UserRegistry = class {
   }
   persist(user) {
     const dir = userDir(user.token, this.dataDir);
-    import_node_fs6.default.mkdirSync(dir, { recursive: true });
+    import_node_fs8.default.mkdirSync(dir, { recursive: true });
     const metaPath = userMetadataPath(user.token, this.dataDir);
     const tmp = metaPath + ".tmp";
-    import_node_fs6.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs8.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION,
       user
     }, null, 2));
-    import_node_fs6.default.renameSync(tmp, metaPath);
+    import_node_fs8.default.renameSync(tmp, metaPath);
   }
 };
 function validateToken(token) {
@@ -3564,51 +4175,30 @@ function isCanonicalUserDir(dirname) {
 
 // src/daemon/sessions.ts
 var import_node_crypto2 = __toESM(require("crypto"));
-var import_node_fs7 = __toESM(require("fs"));
-var import_node_path8 = __toESM(require("path"));
+var import_node_fs9 = __toESM(require("fs"));
+var import_node_path9 = __toESM(require("path"));
 var NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var SCHEMA_VERSION2 = 1;
-var DEFAULT_PERSIST_DEBOUNCE_MS = 50;
-var VOLATILE_SESSION_FIELDS = /* @__PURE__ */ new Set([
-  "last_turn_id",
-  "current_turn_id",
-  "current_turn_started_at",
-  "current_item_type",
-  "items_in_turn",
-  "pending_approvals",
-  "pending_user_inputs",
-  "token_usage_last_turn"
-]);
 var SessionRegistry = class {
   dataDir;
-  resolvePersistDebounceMs;
   users = /* @__PURE__ */ new Map();
   globalByThreadId = /* @__PURE__ */ new Map();
   touchTimers = /* @__PURE__ */ new Map();
   writeChains = /* @__PURE__ */ new Map();
-  constructor(dataDir, opts = {}) {
+  constructor(dataDir) {
     this.dataDir = dataDir;
-    const configured = opts.persistDebounceMs;
-    if (typeof configured === "function") {
-      this.resolvePersistDebounceMs = () => clampPersistDebounceMs(configured());
-    } else if (typeof configured === "number") {
-      const value = clampPersistDebounceMs(configured);
-      this.resolvePersistDebounceMs = () => value;
-    } else {
-      this.resolvePersistDebounceMs = () => DEFAULT_PERSIST_DEBOUNCE_MS;
-    }
   }
   loadForUser(user) {
     if (this.users.has(user)) return;
     const bucket = this.emptyBucket();
     const p = userSessionsPath(user, this.dataDir);
-    if (!import_node_fs7.default.existsSync(p)) {
+    if (!import_node_fs9.default.existsSync(p)) {
       this.users.set(user, bucket);
       return;
     }
     try {
-      const raw = import_node_fs7.default.readFileSync(p, "utf8");
+      const raw = import_node_fs9.default.readFileSync(p, "utf8");
       const parsed = JSON.parse(raw);
       if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION2) {
         throw new Error(`sessions.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION2}`);
@@ -3676,14 +4266,13 @@ var SessionRegistry = class {
     b.byName.set(record.name, record);
     b.byThreadId.set(record.thread_id, record);
     this.globalByThreadId.set(record.thread_id, user);
-    this.schedulePersist(user, this.persistDebounceMs());
+    this.schedulePersist(user, 0);
   }
   update(user, name, patch) {
     this.loadForUser(user);
     const b = this.users.get(user);
     const rec = b.byName.get(name);
     if (!rec) throw new CodexTeamError("session_not_found", `session '${name}' not found`);
-    let persistNeeded = false;
     if (patch.name && patch.name !== rec.name) {
       if (!NAME_RE.test(patch.name)) throw invalidParams(`invalid session name: ${patch.name}`);
       if (patch.name.startsWith("th-")) throw invalidParams("session name cannot start with 'th-'");
@@ -3691,40 +4280,31 @@ var SessionRegistry = class {
       b.byName.delete(rec.name);
       rec.name = patch.name;
       b.byName.set(rec.name, rec);
-      persistNeeded = true;
     }
-    persistNeeded = applySessionFieldUpdate(rec, "last_active_at", patch.last_active_at) || persistNeeded;
-    persistNeeded = applySessionFieldUpdate(rec, "turn_count", patch.turn_count) || persistNeeded;
-    persistNeeded = applySessionFieldUpdate(rec, "state", patch.state) || persistNeeded;
-    persistNeeded = applySessionFieldUpdate(rec, "recovery_state", patch.recovery_state ?? void 0, patch.recovery_state !== void 0) || persistNeeded;
-    persistNeeded = applySessionFieldUpdate(rec, "model", patch.model) || persistNeeded;
-    persistNeeded = applySessionFieldUpdate(rec, "cwd", patch.cwd) || persistNeeded;
-    persistNeeded = applySessionFieldUpdate(rec, "sandbox", patch.sandbox) || persistNeeded;
-    persistNeeded = applySessionFieldUpdate(rec, "approval", patch.approval) || persistNeeded;
-    persistNeeded = applySessionFieldUpdate(rec, "effort", patch.effort) || persistNeeded;
-    persistNeeded = applySessionFieldUpdate(rec, "profile", patch.profile) || persistNeeded;
-    persistNeeded = applySessionFieldUpdate(rec, "base_instructions", patch.base_instructions) || persistNeeded;
-    persistNeeded = applySessionFieldUpdate(rec, "developer_instructions", patch.developer_instructions) || persistNeeded;
+    if (patch.last_active_at !== void 0) rec.last_active_at = patch.last_active_at;
+    if (patch.turn_count !== void 0) rec.turn_count = patch.turn_count;
+    if (patch.state !== void 0) rec.state = patch.state;
+    if (patch.recovery_state !== void 0) rec.recovery_state = patch.recovery_state ?? void 0;
+    if (patch.model !== void 0) rec.model = patch.model;
+    if (patch.cwd !== void 0) rec.cwd = patch.cwd;
+    if (patch.sandbox !== void 0) rec.sandbox = patch.sandbox;
+    if (patch.approval !== void 0) rec.approval = patch.approval;
+    if (patch.effort !== void 0) rec.effort = patch.effort;
+    if (patch.profile !== void 0) rec.profile = patch.profile;
     if (patch.experimental_tools !== void 0) {
-      const normalized = patch.experimental_tools.length > 0 ? [...patch.experimental_tools] : void 0;
-      persistNeeded = applySessionFieldUpdate(rec, "experimental_tools", normalized, true) || persistNeeded;
+      rec.experimental_tools = patch.experimental_tools.length > 0 ? [...patch.experimental_tools] : void 0;
     }
-    applySessionFieldUpdate(rec, "last_turn_id", patch.last_turn_id);
-    applySessionFieldUpdate(rec, "current_turn_id", patch.current_turn_id);
-    applySessionFieldUpdate(rec, "current_turn_started_at", patch.current_turn_started_at);
-    applySessionFieldUpdate(rec, "current_item_type", patch.current_item_type);
-    applySessionFieldUpdate(rec, "items_in_turn", patch.items_in_turn);
-    applySessionFieldUpdate(rec, "pending_approvals", patch.pending_approvals);
-    applySessionFieldUpdate(rec, "pending_user_inputs", patch.pending_user_inputs);
-    applySessionFieldUpdate(rec, "token_usage_last_turn", patch.token_usage_last_turn);
-    persistNeeded = applySessionFieldUpdate(rec, "crash_reason", patch.crash_reason) || persistNeeded;
-    if (patch.autoApprovePatterns !== void 0) {
-      const normalized = normalizeAutoApprovePatterns(patch.autoApprovePatterns);
-      persistNeeded = applySessionFieldUpdate(rec, "autoApprovePatterns", normalized) || persistNeeded;
-    }
-    if (persistNeeded) {
-      this.schedulePersist(user, this.persistDebounceMs());
-    }
+    if (patch.last_turn_id !== void 0) rec.last_turn_id = patch.last_turn_id;
+    if (patch.current_turn_id !== void 0) rec.current_turn_id = patch.current_turn_id;
+    if (patch.current_turn_started_at !== void 0) rec.current_turn_started_at = patch.current_turn_started_at;
+    if (patch.current_item_type !== void 0) rec.current_item_type = patch.current_item_type;
+    if (patch.items_in_turn !== void 0) rec.items_in_turn = patch.items_in_turn;
+    if (patch.pending_approvals !== void 0) rec.pending_approvals = patch.pending_approvals;
+    if (patch.pending_user_inputs !== void 0) rec.pending_user_inputs = patch.pending_user_inputs;
+    if (patch.token_usage_last_turn !== void 0) rec.token_usage_last_turn = patch.token_usage_last_turn;
+    if (patch.crash_reason !== void 0) rec.crash_reason = patch.crash_reason;
+    if (patch.autoApprovePatterns !== void 0) rec.autoApprovePatterns = normalizeAutoApprovePatterns(patch.autoApprovePatterns);
+    this.schedulePersist(user, 0);
     return rec;
   }
   remove(user, name) {
@@ -3735,7 +4315,7 @@ var SessionRegistry = class {
     b.byName.delete(rec.name);
     b.byThreadId.delete(rec.thread_id);
     this.globalByThreadId.delete(rec.thread_id);
-    this.schedulePersist(user, this.persistDebounceMs());
+    this.schedulePersist(user, 0);
     return rec;
   }
   removeAllForUser(user) {
@@ -3765,7 +4345,7 @@ var SessionRegistry = class {
     const rec = b.byName.get(name);
     if (!rec) return;
     rec.last_active_at = (/* @__PURE__ */ new Date()).toISOString();
-    this.schedulePersist(user, this.persistDebounceMs());
+    this.schedulePersist(user, 250);
   }
   async flush() {
     for (const [user, timer] of this.touchTimers) {
@@ -3777,16 +4357,16 @@ var SessionRegistry = class {
   }
   async persistAsync(user) {
     const dir = userDir(user, this.dataDir);
-    await import_node_fs7.default.promises.mkdir(dir, { recursive: true });
+    await import_node_fs9.default.promises.mkdir(dir, { recursive: true });
     const p = userSessionsPath(user, this.dataDir);
     const bucket = this.users.get(user);
     const payload = {
       schema_version: SCHEMA_VERSION2,
-      sessions: bucket ? Array.from(bucket.byName.values()).map((record) => toPersistedRecord(record)) : []
+      sessions: bucket ? Array.from(bucket.byName.values()) : []
     };
     const tmp = p + ".tmp";
-    await import_node_fs7.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
-    await import_node_fs7.default.promises.rename(tmp, p);
+    await import_node_fs9.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
+    await import_node_fs9.default.promises.rename(tmp, p);
   }
   schedulePersist(user, delayMs) {
     const existing = this.touchTimers.get(user);
@@ -3807,9 +4387,6 @@ var SessionRegistry = class {
   }
   emptyBucket() {
     return { byName: /* @__PURE__ */ new Map(), byThreadId: /* @__PURE__ */ new Map() };
-  }
-  persistDebounceMs() {
-    return this.resolvePersistDebounceMs();
   }
 };
 function validateSessionName(name) {
@@ -3902,14 +4479,14 @@ function normalizeLoadedRecord(value) {
     created_at: createdAt,
     last_active_at: lastActiveAt,
     turn_count: normalizeOptionalNumber(rec.turn_count) ?? 0,
-    last_turn_id: runtimeDefaults.last_turn_id,
-    current_turn_id: runtimeDefaults.current_turn_id,
-    current_turn_started_at: runtimeDefaults.current_turn_started_at,
-    current_item_type: runtimeDefaults.current_item_type,
-    items_in_turn: runtimeDefaults.items_in_turn,
-    pending_approvals: runtimeDefaults.pending_approvals,
-    pending_user_inputs: runtimeDefaults.pending_user_inputs,
-    token_usage_last_turn: runtimeDefaults.token_usage_last_turn,
+    last_turn_id: normalizeOptionalString(rec.last_turn_id) ?? runtimeDefaults.last_turn_id,
+    current_turn_id: normalizeOptionalString(rec.current_turn_id) ?? runtimeDefaults.current_turn_id,
+    current_turn_started_at: normalizeOptionalString(rec.current_turn_started_at) ?? runtimeDefaults.current_turn_started_at,
+    current_item_type: normalizeOptionalString(rec.current_item_type) ?? runtimeDefaults.current_item_type,
+    items_in_turn: normalizeOptionalNumber(rec.items_in_turn) ?? runtimeDefaults.items_in_turn,
+    pending_approvals: normalizeOptionalNumber(rec.pending_approvals) ?? runtimeDefaults.pending_approvals,
+    pending_user_inputs: normalizeOptionalNumber(rec.pending_user_inputs) ?? runtimeDefaults.pending_user_inputs,
+    token_usage_last_turn: normalizeTokenUsage(rec.token_usage_last_turn) ?? runtimeDefaults.token_usage_last_turn,
     crash_reason: normalizeOptionalString(rec.crash_reason) ?? runtimeDefaults.crash_reason
   };
 }
@@ -3939,80 +4516,16 @@ function normalizeStringArray(value) {
 function normalizeOptionalNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
-function applySessionFieldUpdate(record, key, nextValue, present = nextValue !== void 0) {
-  if (!present) return false;
-  if (sessionFieldEquals(record[key], nextValue)) return false;
-  record[key] = cloneSessionField(nextValue);
-  return !VOLATILE_SESSION_FIELDS.has(key);
-}
-function cloneSessionField(value) {
-  if (Array.isArray(value)) {
-    return [...value];
-  }
-  if (value && typeof value === "object") {
-    return { ...value };
-  }
-  return value;
-}
-function sessionFieldEquals(left, right) {
-  if (Array.isArray(left) || Array.isArray(right)) {
-    return arrayEquals(
-      Array.isArray(left) ? left : [],
-      Array.isArray(right) ? right : []
-    );
-  }
-  if (isPlainObject(left) || isPlainObject(right)) {
-    if (!isPlainObject(left) || !isPlainObject(right)) return false;
-    const leftKeys = Object.keys(left);
-    const rightKeys = Object.keys(right);
-    if (leftKeys.length !== rightKeys.length) return false;
-    for (const key of leftKeys) {
-      if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
-      if (!sessionFieldEquals(left[key], right[key])) return false;
-    }
-    return true;
-  }
-  return left === right;
-}
-function arrayEquals(left, right) {
-  if (left.length !== right.length) return false;
-  for (let i = 0; i < left.length; i += 1) {
-    if (!sessionFieldEquals(left[i], right[i])) return false;
-  }
-  return true;
-}
-function isPlainObject(value) {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-function toPersistedRecord(record) {
-  const persisted = {};
-  for (const [key, value] of Object.entries(record)) {
-    if (VOLATILE_SESSION_FIELDS.has(key)) continue;
-    persisted[key] = clonePersistedValue(value);
-  }
-  return persisted;
-}
-function clonePersistedValue(value) {
-  if (Array.isArray(value)) return [...value];
-  if (isPlainObject(value)) return { ...value };
-  return value;
-}
-function clampPersistDebounceMs(value) {
-  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_PERSIST_DEBOUNCE_MS;
-  return Math.max(0, Math.floor(value));
-}
 
 // src/daemon/events.ts
-var import_node_fs8 = __toESM(require("fs"));
-var import_node_path9 = __toESM(require("path"));
+var import_node_fs10 = __toESM(require("fs"));
+var import_node_path10 = __toESM(require("path"));
 var DELTA_SUFFIX = "_delta";
 var SCHEMA_VERSION3 = 1;
 var DEFAULT_FLUSH_DELAY_MS = 25;
 var OVERFLOW_FLUSH_DELAY_MS = 250;
 var FLUSH_RETRY_DELAY_MS = 250;
 var MAX_PENDING_WRITE_BYTES = 1024 * 1024;
-var MAX_PENDING_BACKLOG_BYTES = 16 * 1024 * 1024;
-var MAX_PENDING_LINE_MULTIPLIER = 10;
 var EVENT_ID_SOFT_LIMIT = 2 ** 52;
 var AUTO_APPROVED_EVENT_TYPE = "auto_approved";
 var APPROVAL_REQUEST_CANCELLED_EVENT_TYPE = "approval.request_cancelled";
@@ -4020,93 +4533,6 @@ var SESSION_CLOSED_EVENT_TYPE = "session.closed";
 var SESSION_CRASHED_EVENT_TYPE = "session.crashed";
 var SESSION_PENDING_DROPPED_EVENT_TYPE = "session.pending_dropped";
 var USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE = "user_input.request_cancelled";
-var EventRingBuffer = class {
-  capacity;
-  items;
-  start = 0;
-  count = 0;
-  slotsById = /* @__PURE__ */ new Map();
-  constructor(capacity, initial = []) {
-    this.capacity = Math.max(1, capacity);
-    this.items = new Array(this.capacity);
-    for (const event of initial) this.push(event);
-  }
-  get length() {
-    return this.count;
-  }
-  setCapacity(capacity) {
-    const nextCapacity = Math.max(1, capacity);
-    if (nextCapacity === this.capacity) return 0;
-    const events = this.toArray();
-    const dropped = Math.max(0, events.length - nextCapacity);
-    this.capacity = nextCapacity;
-    this.items = new Array(this.capacity);
-    this.start = 0;
-    this.count = 0;
-    this.slotsById.clear();
-    for (const event of events.slice(-nextCapacity)) this.push(event);
-    return dropped;
-  }
-  push(event) {
-    if (this.count === this.capacity) {
-      const slot2 = this.start;
-      const evicted = this.items[slot2] ?? null;
-      if (evicted) this.slotsById.delete(evicted.id);
-      this.items[slot2] = event;
-      this.slotsById.set(event.id, slot2);
-      this.start = (this.start + 1) % this.capacity;
-      return evicted;
-    }
-    const slot = (this.start + this.count) % this.capacity;
-    this.items[slot] = event;
-    this.slotsById.set(event.id, slot);
-    this.count += 1;
-    return null;
-  }
-  oldestId() {
-    return this.count === 0 ? null : this.items[this.start]?.id ?? null;
-  }
-  toArray() {
-    const events = [];
-    for (let offset = 0; offset < this.count; offset++) {
-      const event = this.at(offset);
-      if (event) events.push(event);
-    }
-    return events;
-  }
-  listSince(sinceId) {
-    if (!sinceId) return { ok: true, events: this.toArray() };
-    const slot = this.slotsById.get(sinceId);
-    if (slot === void 0) {
-      const oldest = this.oldestId();
-      if (oldest && compareSeq(sinceId, oldest) < 0) {
-        return { ok: false, reason: "id_rotated", oldest_available_id: oldest };
-      }
-      return { ok: false, reason: "invalid_since" };
-    }
-    const events = [];
-    for (let offset = this.relativeIndex(slot) + 1; offset < this.count; offset++) {
-      const event = this.at(offset);
-      if (event) events.push(event);
-    }
-    return { ok: true, events };
-  }
-  findLast(predicate) {
-    for (let offset = this.count - 1; offset >= 0; offset--) {
-      const event = this.at(offset);
-      if (event && predicate(event)) return event;
-    }
-    return null;
-  }
-  at(offset) {
-    if (offset < 0 || offset >= this.count) return null;
-    const slot = (this.start + offset) % this.capacity;
-    return this.items[slot] ?? null;
-  }
-  relativeIndex(slot) {
-    return slot >= this.start ? slot - this.start : this.capacity - this.start + slot;
-  }
-};
 var EventLog = class {
   retention;
   dataDir;
@@ -4122,9 +4548,7 @@ var EventLog = class {
   writeChains = /* @__PURE__ */ new Map();
   userOps = /* @__PURE__ */ new Map();
   overflowWarned = /* @__PURE__ */ new Set();
-  backlogOverflowWarned = /* @__PURE__ */ new Set();
   eventIdOverflowWarned = /* @__PURE__ */ new Set();
-  compacting = /* @__PURE__ */ new Set();
   constructor(retention = 1e4, dataDir = null) {
     this.retention = Math.max(100, retention);
     this.dataDir = dataDir;
@@ -4138,24 +4562,36 @@ var EventLog = class {
       return;
     }
     const filePath = userEventLogPath(user, this.dataDir);
-    if (!import_node_fs8.default.existsSync(filePath)) {
+    if (!import_node_fs10.default.existsSync(filePath)) {
       this.ensureUserState(user);
       this.loaded.add(user);
       this.loadPromises.delete(user);
       return;
     }
-    const raw = import_node_fs8.default.readFileSync(filePath, "utf8");
+    const raw = import_node_fs10.default.readFileSync(filePath, "utf8");
     const lines = raw.split("\n").filter(Boolean);
     const { events, totalLines } = parsePersistedEvents(lines);
-    this.hydrateLoadedUser(user, events, totalLines);
+    const buf = events.slice(Math.max(0, events.length - this.retention));
+    let maxSeq = 0;
+    for (const ev of buf) {
+      const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
+      if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
+    }
+    this.buffers.set(user, buf);
+    this.counters.set(user, maxSeq);
     this.loaded.add(user);
     this.loadPromises.delete(user);
+    if (totalLines > this.retention * 1.5) this.compactFile(user, buf);
   }
   setRetention(n) {
     this.retention = Math.max(100, n);
     for (const [user, buf] of this.buffers) {
-      const dropped = buf.setCapacity(this.retention);
-      if (dropped > 0) this.bumpCompactionDebt(user, dropped);
+      let rotated = false;
+      while (buf.length > this.retention) {
+        buf.shift();
+        rotated = true;
+      }
+      if (rotated) this.bumpCompactionDebt(user);
     }
   }
   retainedCount(user) {
@@ -4179,9 +4615,9 @@ var EventLog = class {
     ]);
     await Promise.all(Array.from(this.loadPromises.values()).map((p) => p.catch(() => void 0)));
     for (const user of users) {
-      const scheduled = this.flushTimers.get(user);
-      if (scheduled) {
-        clearTimeout(scheduled.timer);
+      const timer = this.flushTimers.get(user);
+      if (timer) {
+        clearTimeout(timer);
         this.flushTimers.delete(user);
       }
       await this.flushUser(user);
@@ -4189,9 +4625,9 @@ var EventLog = class {
     await Promise.all(Array.from(this.writeChains.values()).map((p) => p.catch(() => void 0)));
   }
   async clearUser(user) {
-    const scheduled = this.flushTimers.get(user);
-    if (scheduled) {
-      clearTimeout(scheduled.timer);
+    const timer = this.flushTimers.get(user);
+    if (timer) {
+      clearTimeout(timer);
       this.flushTimers.delete(user);
     }
     await (this.loadPromises.get(user)?.catch(() => void 0) ?? Promise.resolve());
@@ -4208,9 +4644,7 @@ var EventLog = class {
     this.loaded.delete(user);
     this.loadPromises.delete(user);
     this.overflowWarned.delete(user);
-    this.backlogOverflowWarned.delete(user);
     this.eventIdOverflowWarned.delete(user);
-    this.compacting.delete(user);
   }
   subscribe(user, cb) {
     let set = this.subscribers.get(user);
@@ -4234,29 +4668,40 @@ var EventLog = class {
   async listSince(user, sinceId, opts = { includeDelta: false }) {
     await this.ensureLoaded(user);
     return await this.withUserLock(user, async () => {
-      const buf = this.buffers.get(user);
-      if (!buf) return { ok: true, events: [] };
-      const listed = buf.listSince(sinceId);
-      if (!listed.ok) return listed;
-      let slice = listed.events;
+      const buf = this.buffers.get(user) ?? [];
+      let slice;
+      if (!sinceId) {
+        slice = buf.slice();
+      } else {
+        const idx = buf.findIndex((e) => e.id === sinceId);
+        if (idx < 0) {
+          if (buf.length > 0 && compareSeq(sinceId, buf[0].id) < 0) {
+            return { ok: false, reason: "id_rotated", oldest_available_id: buf[0].id };
+          }
+          return { ok: false, reason: "invalid_since" };
+        }
+        slice = buf.slice(idx + 1);
+      }
       if (!opts.includeDelta) slice = slice.filter((e) => !e.type.endsWith(DELTA_SUFFIX));
       return { ok: true, events: slice };
     });
   }
   oldestId(user) {
-    return this.buffers.get(user)?.oldestId() ?? null;
+    const buf = this.buffers.get(user);
+    return buf && buf.length > 0 ? buf[0].id : null;
   }
   latestEvent(user, filter = {}) {
     this.loadUser(user);
-    const buf = this.buffers.get(user);
-    if (!buf) return null;
+    const buf = this.buffers.get(user) ?? [];
     const types = filter.types ? new Set(filter.types) : null;
-    return buf.findLast((event) => {
-      if (filter.session !== void 0 && event.session !== filter.session) return false;
-      if (filter.thread_id !== void 0 && event.thread_id !== filter.thread_id) return false;
-      if (types && !types.has(event.type)) return false;
-      return true;
-    });
+    for (let i = buf.length - 1; i >= 0; i--) {
+      const event = buf[i];
+      if (filter.session !== void 0 && event.session !== filter.session) continue;
+      if (filter.thread_id !== void 0 && event.thread_id !== filter.thread_id) continue;
+      if (types && !types.has(event.type)) continue;
+      return event;
+    }
+    return null;
   }
   async ensureLoaded(user) {
     if (this.loaded.has(user)) return;
@@ -4281,10 +4726,18 @@ var EventLog = class {
         return;
       }
       const filePath = userEventLogPath(user, this.dataDir);
-      const raw = await import_node_fs8.default.promises.readFile(filePath, "utf8");
+      const raw = await import_node_fs10.default.promises.readFile(filePath, "utf8");
       const lines = raw.split("\n").filter(Boolean);
       const { events, totalLines } = parsePersistedEvents(lines);
-      this.hydrateLoadedUser(user, events, totalLines);
+      const buf = events.slice(Math.max(0, events.length - this.retention));
+      let maxSeq = 0;
+      for (const ev of buf) {
+        const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
+        if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
+      }
+      this.buffers.set(user, buf);
+      this.counters.set(user, maxSeq);
+      if (totalLines > this.retention * 1.5) this.compactFile(user, buf);
       shouldMarkLoaded = true;
     } catch (e) {
       if (e.code === "ENOENT") {
@@ -4313,8 +4766,13 @@ var EventLog = class {
       ...input
     };
     const buf = this.buffers.get(user);
-    const evicted = buf.push(event);
-    if (evicted) this.bumpCompactionDebt(user);
+    buf.push(event);
+    let rotated = false;
+    while (buf.length > this.retention) {
+      buf.shift();
+      rotated = true;
+    }
+    if (rotated) this.bumpCompactionDebt(user);
     this.dispatchSubscribers(user, event);
     if (opts.persist !== false) this.appendToFile(user, event);
     return event;
@@ -4368,9 +4826,7 @@ var EventLog = class {
     this.pendingLines.set(user, pending);
     const totalBytes = (this.pendingBytes.get(user) ?? 0) + bytes;
     this.pendingBytes.set(user, totalBytes);
-    this.enforcePendingBacklogCap(user);
-    const currentBytes = this.pendingBytes.get(user) ?? 0;
-    if (currentBytes > MAX_PENDING_WRITE_BYTES) {
+    if (totalBytes > MAX_PENDING_WRITE_BYTES) {
       if (!this.overflowWarned.has(user)) {
         this.overflowWarned.add(user);
         this.appendLoaded(user, {
@@ -4380,7 +4836,7 @@ var EventLog = class {
           payload: {
             message: "event log backlog exceeded 1048576 bytes; writes are being retried more slowly",
             kind: "event_log_backpressure",
-            pending_bytes: currentBytes
+            pending_bytes: totalBytes
           }
         }, { persist: false });
       }
@@ -4389,119 +4845,81 @@ var EventLog = class {
     }
     this.scheduleFlush(user, DEFAULT_FLUSH_DELAY_MS);
   }
-  requestCompaction(user) {
-    if (!this.dataDir || this.compacting.has(user)) return;
-    this.compacting.add(user);
-    void this.compactFile(user).finally(() => {
-      this.compacting.delete(user);
-      if ((this.rotatedSinceCompact.get(user) ?? 0) >= this.compactionThreshold()) {
-        this.requestCompaction(user);
-      }
-    });
-  }
-  async compactFile(user) {
+  compactFile(user, buf) {
     if (!this.dataDir) return;
-    const filePath = userEventLogPath(user, this.dataDir);
-    let pendingLines = [];
-    let pendingBytes = 0;
-    let debtSnapshot = 0;
-    let writePromise = null;
-    await this.withUserLock(user, async () => {
-      const scheduled = this.flushTimers.get(user);
-      if (scheduled) {
-        clearTimeout(scheduled.timer);
-        this.flushTimers.delete(user);
-      }
-      pendingLines = [...this.pendingLines.get(user) ?? []];
-      pendingBytes = this.pendingBytes.get(user) ?? 0;
-      this.pendingLines.delete(user);
-      this.pendingBytes.delete(user);
-      debtSnapshot = this.rotatedSinceCompact.get(user) ?? 0;
-      const contents = serializeEventFile(this.buffers.get(user)?.toArray() ?? []);
-      writePromise = this.enqueueFsOp(user, async () => {
-        try {
-          await import_node_fs8.default.promises.mkdir(import_node_path9.default.dirname(filePath), { recursive: true });
-          await import_node_fs8.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
-          const tmp = filePath + ".tmp";
-          await import_node_fs8.default.promises.writeFile(tmp, contents);
-          await import_node_fs8.default.promises.rename(tmp, filePath);
-          return true;
-        } catch (e) {
-          logger.warn("event log compaction failed", { user, err: e.message });
-          return false;
-        }
-      });
-    });
-    if (!writePromise) return;
-    const ok2 = await writePromise;
-    if (!ok2) {
-      await this.withUserLock(user, async () => {
-        this.restorePendingLines(user, pendingLines, pendingBytes);
-        this.scheduleFlush(user, FLUSH_RETRY_DELAY_MS, true);
-      });
-      return;
+    const timer = this.flushTimers.get(user);
+    if (timer) {
+      clearTimeout(timer);
+      this.flushTimers.delete(user);
     }
-    await this.withUserLock(user, async () => {
-      const currentDebt = this.rotatedSinceCompact.get(user) ?? 0;
-      this.rotatedSinceCompact.set(user, Math.max(0, currentDebt - debtSnapshot));
+    this.pendingLines.delete(user);
+    this.pendingBytes.delete(user);
+    const filePath = userEventLogPath(user, this.dataDir);
+    void this.enqueueFsOp(user, async () => {
+      try {
+        await import_node_fs10.default.promises.mkdir(import_node_path10.default.dirname(filePath), { recursive: true });
+        await import_node_fs10.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+        const tmp = filePath + ".tmp";
+        await import_node_fs10.default.promises.writeFile(tmp, serializeEventFile(buf));
+        await import_node_fs10.default.promises.rename(tmp, filePath);
+        this.rotatedSinceCompact.set(user, 0);
+      } catch (e) {
+        logger.warn("event log compaction failed", { user, err: e.message });
+      }
     });
   }
-  bumpCompactionDebt(user, amount = 1) {
-    const debt = (this.rotatedSinceCompact.get(user) ?? 0) + amount;
+  bumpCompactionDebt(user) {
+    const debt = (this.rotatedSinceCompact.get(user) ?? 0) + 1;
     this.rotatedSinceCompact.set(user, debt);
-    if (debt >= this.compactionThreshold()) this.requestCompaction(user);
+    if (debt >= Math.max(100, Math.floor(this.retention / 2))) {
+      this.compactFile(user, this.buffers.get(user) ?? []);
+    }
   }
   scheduleFlush(user, delayMs, reset = false) {
     if (!this.dataDir) return;
-    const dueAt = Date.now() + delayMs;
-    const existing = this.flushTimers.get(user);
-    if (existing) {
-      if (!reset || existing.dueAt <= dueAt) return;
-      clearTimeout(existing.timer);
+    if (this.flushTimers.has(user)) {
+      if (!reset) return;
+      clearTimeout(this.flushTimers.get(user));
     }
     const timer = setTimeout(() => {
-      const scheduled = this.flushTimers.get(user);
-      if (!scheduled || scheduled.timer !== timer) return;
       this.flushTimers.delete(user);
       void this.flushUser(user);
     }, delayMs);
-    timer.unref?.();
-    this.flushTimers.set(user, { dueAt, timer });
+    timer.unref();
+    this.flushTimers.set(user, timer);
   }
   async flushUser(user) {
     if (!this.dataDir) return;
-    const filePath = userEventLogPath(user, this.dataDir);
-    let snapshotLines = null;
-    let snapshotBytes = 0;
-    let writePromise = null;
-    await this.withUserLock(user, async () => {
+    const snapshot = await this.withUserLock(user, async () => {
       const lines = this.pendingLines.get(user);
-      if (!lines || lines.length === 0) return;
-      snapshotLines = [...lines];
-      snapshotBytes = this.pendingBytes.get(user) ?? 0;
+      if (!lines || lines.length === 0) return null;
+      const bytes = this.pendingBytes.get(user) ?? 0;
       this.pendingLines.delete(user);
       this.pendingBytes.delete(user);
-      writePromise = this.enqueueFsOp(user, async () => {
-        try {
-          await import_node_fs8.default.promises.mkdir(import_node_path9.default.dirname(filePath), { recursive: true });
-          await import_node_fs8.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
-          if (!import_node_fs8.default.existsSync(filePath)) {
-            await import_node_fs8.default.promises.writeFile(filePath, serializeHeaderLine() + snapshotLines.join(""));
-          } else {
-            await import_node_fs8.default.promises.appendFile(filePath, snapshotLines.join(""));
-          }
-          return true;
-        } catch (e) {
-          logger.warn("failed to append event log", { user, err: e.message });
-          return false;
-        }
-      });
+      return { lines: [...lines], bytes };
     });
-    if (!snapshotLines || !writePromise) return;
-    const ok2 = await writePromise;
-    if (!ok2) {
+    if (!snapshot) return;
+    const filePath = userEventLogPath(user, this.dataDir);
+    const ok3 = await this.enqueueFsOp(user, async () => {
+      try {
+        await import_node_fs10.default.promises.mkdir(import_node_path10.default.dirname(filePath), { recursive: true });
+        await import_node_fs10.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+        if (!import_node_fs10.default.existsSync(filePath)) {
+          await import_node_fs10.default.promises.writeFile(filePath, serializeHeaderLine() + snapshot.lines.join(""));
+        } else {
+          await import_node_fs10.default.promises.appendFile(filePath, snapshot.lines.join(""));
+        }
+        return true;
+      } catch (e) {
+        logger.warn("failed to append event log", { user, err: e.message });
+        return false;
+      }
+    });
+    if (!ok3) {
       await this.withUserLock(user, async () => {
-        this.restorePendingLines(user, snapshotLines, snapshotBytes);
+        const pending = this.pendingLines.get(user) ?? [];
+        this.pendingLines.set(user, [...snapshot.lines, ...pending]);
+        this.pendingBytes.set(user, (this.pendingBytes.get(user) ?? 0) + snapshot.bytes);
         this.scheduleFlush(user, FLUSH_RETRY_DELAY_MS, true);
       });
       return;
@@ -4509,84 +4927,10 @@ var EventLog = class {
     if ((this.pendingBytes.get(user) ?? 0) <= Math.floor(MAX_PENDING_WRITE_BYTES / 2)) {
       this.overflowWarned.delete(user);
     }
-    if (this.pendingBacklogRecovered(user)) this.backlogOverflowWarned.delete(user);
   }
   ensureUserState(user) {
-    if (!this.buffers.has(user)) this.buffers.set(user, new EventRingBuffer(this.retention));
+    if (!this.buffers.has(user)) this.buffers.set(user, []);
     if (!this.counters.has(user)) this.counters.set(user, 0);
-  }
-  hydrateLoadedUser(user, events, totalLines) {
-    const buf = new EventRingBuffer(this.retention, events);
-    let maxSeq = 0;
-    for (const ev of buf.toArray()) {
-      const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
-      if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
-    }
-    this.buffers.set(user, buf);
-    this.counters.set(user, maxSeq);
-    if (totalLines > this.retention * 1.5) this.requestCompaction(user);
-  }
-  compactionThreshold() {
-    return Math.max(100, Math.floor(this.retention / 2));
-  }
-  maxPendingLineCount() {
-    return Math.max(1, this.retention * MAX_PENDING_LINE_MULTIPLIER);
-  }
-  restorePendingLines(user, lines, bytes) {
-    if (lines.length === 0 || bytes <= 0) return;
-    const pending = this.pendingLines.get(user) ?? [];
-    this.pendingLines.set(user, [...lines, ...pending]);
-    this.pendingBytes.set(user, bytes + (this.pendingBytes.get(user) ?? 0));
-    this.enforcePendingBacklogCap(user);
-  }
-  enforcePendingBacklogCap(user) {
-    const pending = this.pendingLines.get(user);
-    if (!pending || pending.length === 0) {
-      this.pendingLines.delete(user);
-      this.pendingBytes.delete(user);
-      return;
-    }
-    const maxLines = this.maxPendingLineCount();
-    let totalBytes = this.pendingBytes.get(user) ?? 0;
-    let droppedLines = 0;
-    let droppedBytes = 0;
-    while (pending.length > maxLines || totalBytes > MAX_PENDING_BACKLOG_BYTES) {
-      const dropped = pending.shift();
-      if (!dropped) break;
-      const lineBytes = Buffer.byteLength(dropped);
-      totalBytes -= lineBytes;
-      droppedLines += 1;
-      droppedBytes += lineBytes;
-    }
-    if (pending.length === 0) {
-      this.pendingLines.delete(user);
-      this.pendingBytes.delete(user);
-    } else {
-      this.pendingBytes.set(user, totalBytes);
-    }
-    if (droppedLines > 0 && !this.backlogOverflowWarned.has(user)) {
-      this.backlogOverflowWarned.add(user);
-      this.appendLoaded(user, {
-        type: "warning",
-        session: null,
-        thread_id: null,
-        payload: {
-          message: `event log backlog exceeded ${maxLines} lines or ${MAX_PENDING_BACKLOG_BYTES} bytes; dropping oldest pending persisted entries`,
-          kind: "event_log_backlog_overflow",
-          dropped_lines: droppedLines,
-          dropped_bytes: droppedBytes,
-          max_pending_lines: maxLines,
-          max_pending_bytes: MAX_PENDING_BACKLOG_BYTES,
-          pending_lines: pending.length,
-          pending_bytes: Math.max(totalBytes, 0)
-        }
-      }, { persist: false });
-    }
-  }
-  pendingBacklogRecovered(user) {
-    const pendingLines = this.pendingLines.get(user)?.length ?? 0;
-    const pendingBytes = this.pendingBytes.get(user) ?? 0;
-    return pendingLines <= Math.floor(this.maxPendingLineCount() / 2) && pendingBytes <= Math.floor(MAX_PENDING_BACKLOG_BYTES / 2);
   }
   async withUserLock(user, fn) {
     const prev = this.userOps.get(user) ?? Promise.resolve();
@@ -4669,9 +5013,9 @@ function serializeEventFile(buf) {
 }
 
 // src/daemon/cursors.ts
-var import_node_fs9 = __toESM(require("fs"));
-var import_node_os2 = __toESM(require("os"));
-var import_node_path10 = __toESM(require("path"));
+var import_node_fs11 = __toESM(require("fs"));
+var import_node_os3 = __toESM(require("os"));
+var import_node_path11 = __toESM(require("path"));
 var import_promises2 = require("timers/promises");
 var CURSOR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 var SCHEMA_VERSION4 = 1;
@@ -4683,7 +5027,6 @@ var CursorStore = class {
   users = /* @__PURE__ */ new Map();
   loaded = /* @__PURE__ */ new Set();
   writeChains = /* @__PURE__ */ new Map();
-  pendingPersists = /* @__PURE__ */ new Map();
   constructor(dataDir) {
     this.dataDir = dataDir;
   }
@@ -4712,7 +5055,6 @@ var CursorStore = class {
       auto_update: input.auto_update ?? existing?.auto_update ?? true
     };
     bucket.set(cursor.name, cursor);
-    this.discardPendingPersist(user, cursor.name);
     try {
       await this.enqueuePersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) });
     } catch (error) {
@@ -4736,26 +5078,11 @@ var CursorStore = class {
       auto_update: input.auto_update ?? existing?.auto_update ?? true
     };
     bucket.set(cursor.name, cursor);
-    this.discardPendingPersist(user, cursor.name);
     try {
       await this.enqueuePersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) });
     } catch (error) {
       logger.warn("failed to persist cursors.json", { user, err: error.message });
     }
-    return cloneCursor(cursor);
-  }
-  saveBestEffortDebounced(user, input, debounceMs) {
-    validateCursorName(input.name);
-    const bucket = this.bucket(user);
-    const existing = bucket.get(input.name);
-    const cursor = {
-      name: input.name,
-      event_id: input.event_id ?? null,
-      updated_at: (/* @__PURE__ */ new Date()).toISOString(),
-      auto_update: input.auto_update ?? existing?.auto_update ?? true
-    };
-    bucket.set(cursor.name, cursor);
-    this.scheduleBestEffortPersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) }, debounceMs);
     return cloneCursor(cursor);
   }
   async delete(user, name) {
@@ -4764,7 +5091,6 @@ var CursorStore = class {
     const existing = bucket.get(name);
     const deleted = bucket.delete(name);
     if (!deleted) return false;
-    this.discardPendingPersist(user, name);
     try {
       await this.enqueuePersist(user, { type: "delete", name });
     } catch (error) {
@@ -4774,56 +5100,10 @@ var CursorStore = class {
     return true;
   }
   async clearUser(user) {
-    await this.flushUser(user);
     await (this.writeChains.get(user)?.catch(() => void 0) ?? Promise.resolve());
     this.writeChains.delete(user);
-    this.clearPendingPersistState(user);
     this.users.delete(user);
     this.loaded.delete(user);
-  }
-  async flushUser(user) {
-    while (true) {
-      const state = this.pendingPersists.get(user);
-      if (!state) {
-        await (this.writeChains.get(user)?.catch(() => void 0) ?? Promise.resolve());
-        return;
-      }
-      if (state.timer) {
-        clearTimeout(state.timer);
-        state.timer = null;
-      }
-      if (state.flushing) {
-        await state.flushing;
-        continue;
-      }
-      if (state.ops.size === 0) {
-        this.clearPendingPersistState(user);
-        await (this.writeChains.get(user)?.catch(() => void 0) ?? Promise.resolve());
-        return;
-      }
-      const ops = Array.from(state.ops.values(), clonePersistOp);
-      state.ops.clear();
-      const flushPromise = this.enqueuePersist(user, ops).catch((error) => {
-        logger.warn("failed to persist cursors.json", { user, err: error.message });
-      }).finally(() => {
-        if (this.pendingPersists.get(user) !== state) return;
-        state.flushing = null;
-        if (!state.timer && state.ops.size === 0) {
-          this.pendingPersists.delete(user);
-        }
-      });
-      state.flushing = flushPromise;
-      await flushPromise;
-    }
-  }
-  async flush() {
-    const users = /* @__PURE__ */ new Set([
-      ...this.pendingPersists.keys(),
-      ...this.writeChains.keys()
-    ]);
-    for (const user of users) {
-      await this.flushUser(user);
-    }
   }
   bucket(user) {
     this.loadForUser(user);
@@ -4838,9 +5118,9 @@ var CursorStore = class {
     if (this.loaded.has(user)) return;
     const bucket = /* @__PURE__ */ new Map();
     const filePath = cursorFilePath(user, this.dataDir);
-    if (import_node_fs9.default.existsSync(filePath)) {
+    if (import_node_fs11.default.existsSync(filePath)) {
       try {
-        for (const cursor of loadEnvelopeFromText(import_node_fs9.default.readFileSync(filePath, "utf8")).cursors.values()) {
+        for (const cursor of loadEnvelopeFromText(import_node_fs11.default.readFileSync(filePath, "utf8")).cursors.values()) {
           bucket.set(cursor.name, cloneCursor(cursor));
         }
       } catch (error) {
@@ -4851,107 +5131,82 @@ var CursorStore = class {
     this.loaded.add(user);
   }
   enqueuePersist(user, op) {
-    const ops = Array.isArray(op) ? op.map(clonePersistOp) : [clonePersistOp(op)];
     const previous = this.writeChains.get(user) ?? Promise.resolve();
-    const next = previous.catch(() => void 0).then(() => this.persistAsync(user, ops));
+    const next = previous.catch(() => void 0).then(() => this.persistAsync(user, op));
     this.writeChains.set(user, next);
     return next;
   }
-  async persistAsync(user, ops) {
+  async persistAsync(user, op) {
     const dir = userDir(user, this.dataDir);
-    await import_node_fs9.default.promises.mkdir(dir, { recursive: true });
+    await import_node_fs11.default.promises.mkdir(dir, { recursive: true });
     const filePath = cursorFilePath(user, this.dataDir);
-    const lock = await acquireCursorLock(filePath);
+    const releaseLock = await acquireCursorLock(filePath);
     const tmpPath = makeTempPath(filePath);
     try {
       const persisted = await loadEnvelopeFromFile(filePath);
-      for (const op of ops) applyPersistOp(persisted, op);
+      applyPersistOp(persisted, op);
       const payload = {
         schema_version: SCHEMA_VERSION4,
         cursors: sorted(persisted)
       };
-      await import_node_fs9.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
-      await import_node_fs9.default.promises.rename(tmpPath, filePath);
+      await import_node_fs11.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
+      await import_node_fs11.default.promises.rename(tmpPath, filePath);
     } finally {
-      await import_node_fs9.default.promises.unlink(tmpPath).catch(() => void 0);
-      await lock.release();
+      await import_node_fs11.default.promises.unlink(tmpPath).catch(() => void 0);
+      await releaseLock();
     }
-  }
-  scheduleBestEffortPersist(user, op, debounceMs) {
-    const state = this.getPendingPersistState(user);
-    state.ops.set(persistKey(op), clonePersistOp(op));
-    if (state.timer) clearTimeout(state.timer);
-    state.timer = setTimeout(() => {
-      state.timer = null;
-      void this.flushUser(user);
-    }, Math.max(0, debounceMs));
-    state.timer.unref();
-  }
-  discardPendingPersist(user, cursorName) {
-    const state = this.pendingPersists.get(user);
-    if (!state) return;
-    state.ops.delete(cursorName);
-    if (!state.timer && !state.flushing && state.ops.size === 0) {
-      this.pendingPersists.delete(user);
-    }
-  }
-  getPendingPersistState(user) {
-    let state = this.pendingPersists.get(user);
-    if (!state) {
-      state = {
-        timer: null,
-        ops: /* @__PURE__ */ new Map(),
-        flushing: null
-      };
-      this.pendingPersists.set(user, state);
-    }
-    return state;
-  }
-  clearPendingPersistState(user) {
-    const state = this.pendingPersists.get(user);
-    if (!state) return;
-    if (state.timer) clearTimeout(state.timer);
-    this.pendingPersists.delete(user);
   }
 };
 function cursorFilePath(user, dataDir) {
-  return import_node_path10.default.join(userDir(user, dataDir), "cursors.json");
+  return import_node_path11.default.join(userDir(user, dataDir), "cursors.json");
 }
 async function acquireCursorLock(filePath) {
   const lockPath = `${filePath}.lock`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (true) {
     try {
-      const created = await tryCreateCursorLock(lockPath);
-      if (created) return created;
+      const handle = await import_node_fs11.default.promises.open(lockPath, "wx");
+      try {
+        await handle.writeFile(JSON.stringify(makeCursorLockRecord()));
+      } finally {
+        await handle.close();
+      }
+      return async () => {
+        await import_node_fs11.default.promises.unlink(lockPath).catch(() => void 0);
+      };
     } catch (error) {
       const err2 = error;
       if (err2.code !== "EEXIST") throw error;
-      const reclaimed = await reclaimStaleCursorLock(lockPath);
-      if (reclaimed) return reclaimed;
+      if (await reclaimStaleCursorLock(lockPath)) {
+        return async () => {
+          await import_node_fs11.default.promises.unlink(lockPath).catch(() => void 0);
+        };
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for cursor lock '${lockPath}'`);
+      }
+      await (0, import_promises2.setTimeout)(LOCK_RETRY_MS);
     }
-    if (Date.now() >= deadline) {
-      throw new Error(`timed out waiting for cursor lock '${lockPath}'`);
-    }
-    await (0, import_promises2.setTimeout)(LOCK_RETRY_MS);
   }
 }
 async function reclaimStaleCursorLock(lockPath) {
   const lock = await readCursorLock(lockPath);
-  if (!lock || !isStaleCursorLock(lock)) return null;
+  if (!lock || !isStaleCursorLock(lock)) return false;
+  const tmpPath = `${lockPath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  await import_node_fs11.default.promises.writeFile(tmpPath, JSON.stringify(makeCursorLockRecord()));
   try {
-    await import_node_fs9.default.promises.unlink(lockPath);
+    await import_node_fs11.default.promises.rename(tmpPath, lockPath);
+    return true;
   } catch (error) {
     const err2 = error;
-    if (err2.code === "ENOENT") return null;
-    throw error;
-  }
-  try {
-    return await tryCreateCursorLock(lockPath);
-  } catch (error) {
-    const err2 = error;
-    if (err2.code === "EEXIST") return null;
-    throw error;
+    if (err2.code === "EEXIST" || err2.code === "EPERM") {
+      await import_node_fs11.default.promises.unlink(lockPath).catch(() => void 0);
+      await import_node_fs11.default.promises.rename(tmpPath, lockPath);
+      return true;
+    }
+    return false;
+  } finally {
+    await import_node_fs11.default.promises.unlink(tmpPath).catch(() => void 0);
   }
 }
 function makeTempPath(filePath) {
@@ -4961,13 +5216,12 @@ function makeCursorLockRecord() {
   return {
     pid: process.pid,
     started_at: (/* @__PURE__ */ new Date()).toISOString(),
-    host: import_node_os2.default.hostname(),
-    nonce: Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+    host: import_node_os3.default.hostname()
   };
 }
 async function loadEnvelopeFromFile(filePath) {
   try {
-    const raw = await import_node_fs9.default.promises.readFile(filePath, "utf8");
+    const raw = await import_node_fs11.default.promises.readFile(filePath, "utf8");
     return loadEnvelopeFromText(raw).cursors;
   } catch (error) {
     const err2 = error;
@@ -4989,7 +5243,7 @@ function loadEnvelopeFromText(raw) {
 }
 async function readCursorLock(lockPath) {
   try {
-    const raw = await import_node_fs9.default.promises.readFile(lockPath, "utf8");
+    const raw = await import_node_fs11.default.promises.readFile(lockPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || typeof parsed.started_at !== "string" || typeof parsed.host !== "string") {
       return null;
@@ -4997,24 +5251,19 @@ async function readCursorLock(lockPath) {
     return {
       pid: parsed.pid,
       started_at: parsed.started_at,
-      host: parsed.host,
-      ...typeof parsed.nonce === "string" && parsed.nonce.length > 0 ? { nonce: parsed.nonce } : {}
+      host: parsed.host
     };
   } catch {
     return null;
   }
 }
-async function verifyCursorLockOwnership(lockPath, expected) {
-  const current = await readCursorLock(lockPath);
-  return current?.pid === expected.pid && current.started_at === expected.started_at && current.host === expected.host && current.nonce === expected.nonce;
-}
 function isStaleCursorLock(lock) {
-  if (!isPidAlive(lock.pid)) return true;
+  if (!isPidAlive2(lock.pid)) return true;
   if (lock.pid === process.pid) return false;
   const startedAt = Date.parse(lock.started_at);
   return Number.isFinite(startedAt) && Date.now() - startedAt > LOCK_STALE_MS;
 }
-function isPidAlive(pid) {
+function isPidAlive2(pid) {
   try {
     process.kill(pid, 0);
     return true;
@@ -5028,13 +5277,6 @@ function applyPersistOp(bucket, op) {
     return;
   }
   bucket.set(op.cursor.name, cloneCursorRecord(op.cursor));
-}
-function clonePersistOp(op) {
-  if (op.type === "delete") return { type: "delete", name: op.name };
-  return { type: "upsert", cursor: cloneCursorRecord(op.cursor) };
-}
-function persistKey(op) {
-  return op.type === "delete" ? op.name : op.cursor.name;
 }
 function validateCursorName(name) {
   if (!CURSOR_NAME_RE.test(name)) {
@@ -5055,32 +5297,6 @@ function cloneCursorRecord(cursor) {
     updated_at: cursor.updated_at,
     auto_update: cursor.auto_update
   };
-}
-async function tryCreateCursorLock(lockPath) {
-  const handle = await import_node_fs9.default.promises.open(lockPath, "wx");
-  const record = makeCursorLockRecord();
-  try {
-    await handle.writeFile(JSON.stringify(record));
-    await handle.sync();
-    if (!await verifyCursorLockOwnership(lockPath, record)) {
-      await handle.close().catch(() => void 0);
-      return null;
-    }
-    return {
-      lockPath,
-      record,
-      release: async () => {
-        const owned = await verifyCursorLockOwnership(lockPath, record);
-        await handle.close().catch(() => void 0);
-        if (owned) {
-          await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
-        }
-      }
-    };
-  } catch (error) {
-    await handle.close().catch(() => void 0);
-    throw error;
-  }
 }
 function isPersistedCursor(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -5149,15 +5365,6 @@ var PendingRegistry = class {
   }
   removeForSession(user, sessionName) {
     return this.removeMatching((rec) => rec.user === user && rec.session_name === sessionName);
-  }
-  renameSession(user, oldSessionName, newSessionName) {
-    let renamed = 0;
-    for (const rec of this.allRequests()) {
-      if (rec.user !== user || rec.session_name !== oldSessionName) continue;
-      rec.session_name = newSessionName;
-      renamed += 1;
-    }
-    return renamed;
   }
   removeForUser(user) {
     return this.removeMatching((rec) => rec.user === user);
@@ -5400,25 +5607,13 @@ async function threadSetName(client, threadId, name, retry = DEFAULT_RETRY) {
   await retryOnOverload(() => client.request("thread/name/set", { threadId, name }), retry);
 }
 async function threadList(client, params = {}, retry = DEFAULT_RETRY) {
-  const requestParams = {};
-  if (params.cursor !== void 0) requestParams.cursor = params.cursor;
-  if (params.pageSize !== void 0) requestParams.limit = params.pageSize;
-  if (params.includeArchived !== void 0) requestParams.includeArchived = params.includeArchived;
-  if (params.sortKey !== void 0) requestParams.sortKey = params.sortKey;
-  const result = await retryOnOverload(() => client.request("thread/list", requestParams), retry);
+  const result = await retryOnOverload(() => client.request("thread/list", params), retry);
   const obj = asObject4(result);
   const data = Array.isArray(obj.data) ? obj.data : [];
   return {
     data,
     nextCursor: obj.nextCursor ?? null,
     backwardsCursor: obj.backwardsCursor ?? null
-  };
-}
-async function threadLoadedList(client, retry = DEFAULT_RETRY) {
-  const result = await retryOnOverload(() => client.request("thread/loadedList", {}), retry);
-  const obj = asObject4(result);
-  return {
-    threads: Array.isArray(obj.threads) ? obj.threads : []
   };
 }
 async function threadRead(client, threadId, retry = DEFAULT_RETRY) {
@@ -5491,8 +5686,8 @@ var TurnQueues = class {
   async sendOrQueue(sessionKey, client, threadId, input, retry) {
     return await this.withSessionLock(sessionKey, async (state) => {
       assertActive(state);
-      if (state.currentTurnId || state.draining || state.pending.length > 0) {
-        const queued = { id: queueId(), input, enqueuedAt: (/* @__PURE__ */ new Date()).toISOString(), failedAttempts: 0 };
+      if (state.currentTurnId || state.draining) {
+        const queued = { id: queueId(), input, enqueuedAt: (/* @__PURE__ */ new Date()).toISOString() };
         state.pending.push(queued);
         return { started: false, turn_id: state.currentTurnId, queue_id: queued.id, queued_depth: state.pending.length };
       }
@@ -5516,17 +5711,11 @@ var TurnQueues = class {
     this.resolveIdleWaiters(state);
   }
   isTeardown(sessionKey) {
-    const state = this.states.get(sessionKey);
-    if (!state) return true;
-    return state.tearingDown;
-  }
-  markTeardown(sessionKey) {
-    const state = this.getOrInit(sessionKey);
-    state.tearingDown = true;
+    return this.states.get(sessionKey)?.tearingDown ?? false;
   }
   async beginTeardown(sessionKey) {
-    this.markTeardown(sessionKey);
     const state = this.getOrInit(sessionKey);
+    state.tearingDown = true;
     await state.serial;
     return { currentTurnId: state.currentTurnId };
   }
@@ -5563,21 +5752,48 @@ var TurnQueues = class {
   }
   async onTurnCompleted(sessionKey, client, threadId, retry) {
     return await this.withSessionLock(sessionKey, async (state) => {
-      return await this.releaseCurrentTurnAndDrain(state, sessionKey, client, threadId, retry);
+      state.draining = true;
+      state.currentTurnId = null;
+      this.resolveIdleWaiters(state);
+      if (state.pending.length === 0 || !client || state.disposed || state.tearingDown) {
+        state.draining = false;
+        this.resolveIdleWaiters(state);
+        return { turn_id: null, queue_id: null, failed: false };
+      }
+      const next = state.pending[0];
+      const generation = state.generation;
+      try {
+        if (!isStateUsable(state, generation)) {
+          return { turn_id: null, queue_id: null, failed: false };
+        }
+        const res = await turnStart(client, threadId, next.input, retry);
+        if (!isStateUsable(state, generation)) {
+          return { turn_id: null, queue_id: null, failed: false };
+        }
+        state.pending.shift();
+        state.currentTurnId = res.turnId;
+        return { turn_id: res.turnId, queue_id: next.id, failed: false };
+      } catch (e) {
+        if (!isStateUsable(state, generation)) {
+          return { turn_id: null, queue_id: null, failed: false };
+        }
+        const err2 = e;
+        logger.warn("failed to dispatch queued turn", { session: sessionKey, err: err2.message, queue_id: next.id });
+        return {
+          turn_id: null,
+          queue_id: next.id,
+          failed: true,
+          error_message: err2.message
+        };
+      } finally {
+        if (isSameGeneration(state, generation)) {
+          state.draining = false;
+          this.resolveIdleWaiters(state);
+        }
+      }
     });
   }
-  async onTurnErrored(sessionKey, turnId, options, client, threadId, retry) {
-    return await this.withSessionLock(sessionKey, async (state) => {
-      if (options.willRetry) {
-        return { turn_id: null, queue_id: null, failed: false, dropped: [] };
-      }
-      if (state.currentTurnId && turnId && state.currentTurnId !== turnId) {
-        return { turn_id: null, queue_id: null, failed: false, dropped: [] };
-      }
-      return await this.releaseCurrentTurnAndDrain(state, sessionKey, client, threadId, retry);
-    });
-  }
-  finalDispose(sessionKey) {
+  dispose(sessionKey) {
     const state = this.states.get(sessionKey);
     if (!state) return { dropped: 0 };
     state.disposed = true;
@@ -5590,9 +5806,6 @@ var TurnQueues = class {
     this.resolveIdleWaiters(state);
     this.states.delete(sessionKey);
     return { dropped };
-  }
-  dispose(sessionKey) {
-    return this.finalDispose(sessionKey);
   }
   getOrInit(sessionKey) {
     let state = this.states.get(sessionKey);
@@ -5626,69 +5839,6 @@ var TurnQueues = class {
       release();
     }
   }
-  async releaseCurrentTurnAndDrain(state, sessionKey, client, threadId, retry) {
-    state.draining = true;
-    state.currentTurnId = null;
-    this.resolveIdleWaiters(state);
-    const generation = state.generation;
-    const dropped = [];
-    try {
-      while (state.pending.length > 0 && client && !state.disposed && !state.tearingDown) {
-        const next = state.pending[0];
-        try {
-          if (!isStateUsable(state, generation)) {
-            return { turn_id: null, queue_id: null, failed: false, dropped };
-          }
-          const res = await turnStart(client, threadId, next.input, retry);
-          if (!isStateUsable(state, generation)) {
-            return { turn_id: null, queue_id: null, failed: false, dropped };
-          }
-          state.pending.shift();
-          state.currentTurnId = res.turnId;
-          return { turn_id: res.turnId, queue_id: next.id, failed: false, dropped };
-        } catch (e) {
-          if (!isStateUsable(state, generation)) {
-            return { turn_id: null, queue_id: null, failed: false, dropped };
-          }
-          const err2 = e;
-          next.failedAttempts += 1;
-          logger.warn("failed to dispatch queued turn", {
-            session: sessionKey,
-            err: err2.message,
-            queue_id: next.id,
-            failure_count: next.failedAttempts
-          });
-          if (next.failedAttempts < queueHeadRetryMax(retry)) {
-            return {
-              turn_id: null,
-              queue_id: next.id,
-              failed: true,
-              error_message: err2.message,
-              dropped
-            };
-          }
-          state.pending.shift();
-          dropped.push({
-            queue_id: next.id,
-            error_message: err2.message,
-            failure_count: next.failedAttempts
-          });
-          logger.warn("dropping queued turn after repeated dispatch failures", {
-            session: sessionKey,
-            err: err2.message,
-            queue_id: next.id,
-            failure_count: next.failedAttempts
-          });
-        }
-      }
-      return { turn_id: null, queue_id: null, failed: false, dropped };
-    } finally {
-      if (isSameGeneration(state, generation)) {
-        state.draining = false;
-        this.resolveIdleWaiters(state);
-      }
-    }
-  }
   isIdle(state) {
     return state.currentTurnId === null && !state.draining;
   }
@@ -5712,170 +5862,24 @@ function isSameGeneration(state, generation) {
 function isStateUsable(state, generation) {
   return !state.disposed && !state.tearingDown && isSameGeneration(state, generation);
 }
-function queueHeadRetryMax(retry) {
-  const candidate = retry?.maxAttempts;
-  if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) {
-    return Math.floor(candidate);
-  }
-  return 3;
-}
 
 // src/daemon/orphans.ts
 var import_node_crypto5 = __toESM(require("crypto"));
-var import_node_fs11 = __toESM(require("fs"));
-var import_node_path11 = __toESM(require("path"));
+var import_node_fs12 = __toESM(require("fs"));
+var import_node_path12 = __toESM(require("path"));
 var import_promises4 = require("timers/promises");
-
-// src/daemon/processes.ts
-var import_node_fs10 = __toESM(require("fs"));
-var import_node_child_process2 = require("child_process");
-function readLinuxCmdline(pid) {
-  try {
-    const raw = import_node_fs10.default.readFileSync(`/proc/${pid}/cmdline`);
-    const commandLine = raw.toString("utf8").replace(/\0/g, " ").trim() || null;
-    return { commandLine, source: "proc", reliable: true };
-  } catch {
-    return { commandLine: null, source: null, reliable: false };
-  }
-}
-function readLinuxStartTime(pid) {
-  try {
-    const raw = import_node_fs10.default.readFileSync(`/proc/${pid}/stat`, "utf8");
-    const lastParen = raw.lastIndexOf(")");
-    if (lastParen < 0) return null;
-    const rest = raw.slice(lastParen + 2).trim().split(/\s+/);
-    const startTime = rest[19];
-    return typeof startTime === "string" && startTime.length > 0 ? startTime : null;
-  } catch {
-    return null;
-  }
-}
-function readPsCommand(pid) {
-  try {
-    const raw = (0, import_node_child_process2.execFileSync)("ps", ["-p", String(pid), "-o", "command="], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const commandLine = raw.trim();
-    return { commandLine: commandLine.length > 0 ? commandLine : null, source: "ps", reliable: true };
-  } catch {
-    return { commandLine: null, source: null, reliable: false };
-  }
-}
-function readPsStartTime(pid) {
-  try {
-    const raw = (0, import_node_child_process2.execFileSync)("ps", ["-p", String(pid), "-o", "lstart="], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const startTime = raw.trim();
-    return startTime.length > 0 ? startTime : null;
-  } catch {
-    return null;
-  }
-}
-function readWindowsCommand(pid) {
-  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CommandLine) { [Console]::Out.Write($p.CommandLine) }`;
-  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
-    try {
-      const raw = (0, import_node_child_process2.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
-        stdio: ["ignore", "pipe", "ignore"],
-        encoding: "utf8"
-      });
-      const commandLine = raw.trim();
-      if (commandLine.length > 0) return { commandLine, source: "powershell", reliable: true };
-    } catch {
-    }
-  }
-  try {
-    const raw = (0, import_node_child_process2.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CommandLine", "/value"], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CommandLine="));
-    const commandLine = line?.slice("CommandLine=".length).trim() ?? "";
-    if (commandLine.length > 0) return { commandLine, source: "wmic", reliable: true };
-  } catch {
-  }
-  try {
-    const raw = (0, import_node_child_process2.execFileSync)("tasklist", ["/FO", "LIST", "/NH", "/FI", `PID eq ${pid}`], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => /^Image Name:/i.test(entry));
-    const commandLine = line?.replace(/^Image Name:\s*/i, "").trim() ?? "";
-    if (commandLine.length > 0) return { commandLine, source: "tasklist", reliable: false };
-  } catch {
-  }
-  return { commandLine: null, source: null, reliable: false };
-}
-function readWindowsStartTime(pid) {
-  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CreationDate) { [Console]::Out.Write($p.CreationDate) }`;
-  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
-    try {
-      const raw = (0, import_node_child_process2.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
-        stdio: ["ignore", "pipe", "ignore"],
-        encoding: "utf8"
-      });
-      const startTime = raw.trim();
-      if (startTime.length > 0) return startTime;
-    } catch {
-    }
-  }
-  try {
-    const raw = (0, import_node_child_process2.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CreationDate", "/value"], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CreationDate="));
-    const startTime = line?.slice("CreationDate=".length).trim() ?? "";
-    return startTime.length > 0 ? startTime : null;
-  } catch {
-    return null;
-  }
-}
-function inspectProcessCommandLine(pid) {
-  if (!Number.isFinite(pid) || pid <= 0) return { commandLine: null, source: null, reliable: false };
-  if (process.platform === "linux") return readLinuxCmdline(pid);
-  if (process.platform === "darwin" || process.platform === "freebsd") return readPsCommand(pid);
-  if (process.platform === "win32") return readWindowsCommand(pid);
-  return { commandLine: null, source: null, reliable: false };
-}
-function readProcessStartTime(pid) {
-  if (!Number.isFinite(pid) || pid <= 0) return null;
-  if (process.platform === "linux") return readLinuxStartTime(pid);
-  if (process.platform === "darwin" || process.platform === "freebsd") return readPsStartTime(pid);
-  if (process.platform === "win32") return readWindowsStartTime(pid);
-  return null;
-}
-function inspectCodexAppServerProcess(pid) {
-  const inspection = inspectProcessCommandLine(pid);
-  if (!inspection.commandLine) return "unknown";
-  if (looksLikeCodexAppServerCommand(inspection.commandLine)) return "match";
-  if (!inspection.reliable) return "unknown";
-  return "mismatch";
-}
-function isLikelyCodexTeamDaemonProcess(pid) {
-  const inspection = inspectProcessCommandLine(pid);
-  return inspection.commandLine !== null && inspection.commandLine.includes("--daemon-internal");
-}
-function looksLikeCodexAppServerCommand(commandLine) {
-  return commandLine.includes("app-server") && (commandLine.includes("codex") || commandLine.includes("codex-cli-bin"));
-}
-
-// src/daemon/orphans.ts
 var SCHEMA_VERSION5 = 2;
 var TERM_GRACE_MS = 2e3;
 var KILL_GRACE_MS = 500;
 var POLL_MS = 100;
 function orphanPidsPath(dataDir) {
-  return import_node_path11.default.join(dataDir, "codex-pids.json");
+  return import_node_path12.default.join(dataDir, "codex-pids.json");
 }
-function readPidFile(dataDir) {
+function readPidFile2(dataDir) {
   const p = orphanPidsPath(dataDir);
-  if (!import_node_fs11.default.existsSync(p)) return [];
+  if (!import_node_fs12.default.existsSync(p)) return [];
   try {
-    const raw = import_node_fs11.default.readFileSync(p, "utf8");
+    const raw = import_node_fs12.default.readFileSync(p, "utf8");
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
       return parsed.filter((x) => typeof x === "number" && Number.isFinite(x)).map((pid) => ({
@@ -5900,19 +5904,19 @@ function readPidFile(dataDir) {
 function writePidFile(dataDir, pids) {
   const p = orphanPidsPath(dataDir);
   try {
-    import_node_fs11.default.mkdirSync(import_node_path11.default.dirname(p), { recursive: true });
+    import_node_fs12.default.mkdirSync(import_node_path12.default.dirname(p), { recursive: true });
     const tmp = p + ".tmp";
-    import_node_fs11.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs12.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION5,
       processes: pids
     }));
-    import_node_fs11.default.renameSync(tmp, p);
+    import_node_fs12.default.renameSync(tmp, p);
   } catch (e) {
     logger.warn("failed to persist codex pid file", { err: e.message });
   }
 }
 async function reapOrphans(dataDir) {
-  const pids = readPidFile(dataDir);
+  const pids = readPidFile2(dataDir);
   let killed = 0;
   const retryPids = [];
   for (const tracked of pids) {
@@ -6040,10 +6044,10 @@ async function waitForTrackedExit(tracked, timeoutMs) {
 var import_node_events2 = require("events");
 
 // src/codex/appServerClient.ts
-var import_node_child_process3 = require("child_process");
+var import_node_child_process4 = require("child_process");
 var import_node_events = require("events");
 var import_node_crypto6 = require("crypto");
-var import_node_path12 = __toESM(require("path"));
+var import_node_path13 = __toESM(require("path"));
 var STDERR_TAIL_LINES = 400;
 var DEFAULT_REQUEST_TIMEOUT_MS = 12e4;
 var AppServerClient = class extends import_node_events.EventEmitter {
@@ -6085,7 +6089,7 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     const launch = resolveLaunch(this.options.bin, args);
     const env = { ...process.env, ...this.options.env ?? {} };
     logger.debug("spawning app-server", { bin: launch.command, args: launch.args });
-    this.proc = (0, import_node_child_process3.spawn)(launch.command, launch.args, {
+    this.proc = (0, import_node_child_process4.spawn)(launch.command, launch.args, {
       cwd: this.options.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -6305,9 +6309,9 @@ function resolveLaunch(bin, args) {
   return { command: resolved, args };
 }
 function resolveWindowsCommand(bin) {
-  if (bin.includes("\\") || bin.includes("/") || import_node_path12.default.extname(bin).length > 0) return bin;
+  if (bin.includes("\\") || bin.includes("/") || import_node_path13.default.extname(bin).length > 0) return bin;
   try {
-    const raw = (0, import_node_child_process3.execFileSync)("where", [bin], {
+    const raw = (0, import_node_child_process4.execFileSync)("where", [bin], {
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf8"
     });
@@ -6541,9 +6545,7 @@ function buildContext(opts = {}) {
     logPath
   });
   const users = new UserRegistry(dataDir);
-  const sessions = new SessionRegistry(dataDir, {
-    persistDebounceMs: () => toInt2(config.getEffective("session.persist_debounce_ms"), 50)
-  });
+  const sessions = new SessionRegistry(dataDir);
   sessions.loadAllUsers(users.list().map((u) => u.token));
   const pidTracker = new PidTracker(dataDir);
   const maxPerProcess = config.getEffective("app_server.max_sessions_per_process");
@@ -6715,12 +6717,12 @@ var status = async (ctx, req) => {
 };
 
 // src/daemon/handlers/daemon.ts
-var import_node_fs13 = __toESM(require("fs"));
-var import_node_path13 = __toESM(require("path"));
-var import_node_child_process4 = require("child_process");
+var import_node_fs14 = __toESM(require("fs"));
+var import_node_path14 = __toESM(require("path"));
+var import_node_child_process5 = require("child_process");
 
 // src/daemon/shutdown.ts
-var import_node_fs12 = __toESM(require("fs"));
+var import_node_fs13 = __toESM(require("fs"));
 var shuttingDown = false;
 async function shutdownDaemon(ctx, reason, exitCode = 0) {
   if (shuttingDown) return;
@@ -6760,14 +6762,9 @@ async function shutdownDaemon(ctx, reason, exitCode = 0) {
   } catch (e) {
     logger.error("event log flush error", { err: e.message });
   }
-  try {
-    await ctx.cursors.flush();
-  } catch (e) {
-    logger.error("cursor flush error", { err: e.message });
-  }
   unlinkSockIfStale(ctx.sockPath);
   try {
-    import_node_fs12.default.unlinkSync(pidFilePath(ctx.dataDir));
+    import_node_fs13.default.unlinkSync(pidFilePath(ctx.dataDir));
   } catch {
   }
   setTimeout(() => process.exit(exitCode), 10);
@@ -6810,7 +6807,7 @@ var daemonStop = async (ctx, req) => {
 };
 var daemonRestart = async (ctx) => {
   const entry = process.argv[1];
-  (0, import_node_child_process4.spawn)(process.execPath, [entry, "--daemon-internal"], {
+  (0, import_node_child_process5.spawn)(process.execPath, [entry, "--daemon-internal"], {
     detached: true,
     stdio: "ignore",
     env: process.env,
@@ -6972,7 +6969,7 @@ var daemonLogsStream = async (ctx, req, stream) => {
   }
   const syncAppended = async () => {
     try {
-      const stat = await import_node_fs13.default.promises.stat(logPath);
+      const stat = await import_node_fs14.default.promises.stat(logPath);
       if (stat.size < offset) offset = 0;
       if (stat.size === offset) return;
       const chunk = await readBytes(logPath, offset, stat.size - offset);
@@ -6994,8 +6991,8 @@ var daemonLogsStream = async (ctx, req, stream) => {
     }, 50);
     debounceTimer.unref();
   };
-  const watcher = import_node_fs13.default.watch(import_node_path13.default.dirname(logPath), { persistent: true }, (_event, filename) => {
-    if (!filename || filename.toString() === import_node_path13.default.basename(logPath)) scheduleSync();
+  const watcher = import_node_fs14.default.watch(import_node_path14.default.dirname(logPath), { persistent: true }, (_event, filename) => {
+    if (!filename || filename.toString() === import_node_path14.default.basename(logPath)) scheduleSync();
   });
   stream.onClose(() => {
     closed = true;
@@ -7048,7 +7045,7 @@ function safeParseOr(line, fallback) {
 }
 async function readTextIfExists(filePath) {
   try {
-    return await import_node_fs13.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs14.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw e;
@@ -7056,7 +7053,7 @@ async function readTextIfExists(filePath) {
 }
 async function readBytes(filePath, start, length) {
   if (length <= 0) return "";
-  const handle = await import_node_fs13.default.promises.open(filePath, "r");
+  const handle = await import_node_fs14.default.promises.open(filePath, "r");
   try {
     const buffer = Buffer.alloc(length);
     const { bytesRead } = await handle.read(buffer, 0, length, start);
@@ -7069,8 +7066,8 @@ function getPkgVersion() {
   return VERSION;
 }
 async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
-  const distPath = import_node_path13.default.join(packageRoot, "dist", "main.js");
-  const distStat = await statIfExists(distPath);
+  const distPath = import_node_path14.default.join(packageRoot, "dist", "main.js");
+  const distStat = await statIfExists2(distPath);
   if (!distStat) {
     return {
       dist_built_at: null,
@@ -7079,16 +7076,16 @@ async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
     };
   }
   const builtAt = new Date(distStat.mtimeMs).toISOString();
-  const sourceNewestMtime = await getNewestMtime(import_node_path13.default.join(packageRoot, "src"));
+  const sourceNewestMtime = await getNewestMtime(import_node_path14.default.join(packageRoot, "src"));
   return {
     dist_built_at: builtAt,
     dist_age_seconds: Math.max(0, Math.floor((Date.now() - distStat.mtimeMs) / 1e3)),
     source_newer_than_dist: sourceNewestMtime === null ? null : sourceNewestMtime > distStat.mtimeMs
   };
 }
-async function statIfExists(filePath) {
+async function statIfExists2(filePath) {
   try {
-    return await import_node_fs13.default.promises.stat(filePath);
+    return await import_node_fs14.default.promises.stat(filePath);
   } catch (e) {
     if (e.code === "ENOENT") return null;
     return null;
@@ -7097,27 +7094,27 @@ async function statIfExists(filePath) {
 async function getNewestMtime(dirPath) {
   let entries;
   try {
-    entries = await import_node_fs13.default.promises.readdir(dirPath, { withFileTypes: true });
+    entries = await import_node_fs14.default.promises.readdir(dirPath, { withFileTypes: true });
   } catch (e) {
     if (e.code === "ENOENT") return null;
     return null;
   }
   let newest = null;
   for (const entry of entries) {
-    const entryPath = import_node_path13.default.join(dirPath, entry.name);
+    const entryPath = import_node_path14.default.join(dirPath, entry.name);
     if (entry.isDirectory()) {
       const childNewest = await getNewestMtime(entryPath);
       if (childNewest !== null && (newest === null || childNewest > newest)) newest = childNewest;
       continue;
     }
-    const stat = await statIfExists(entryPath);
+    const stat = await statIfExists2(entryPath);
     if (stat && (newest === null || stat.mtimeMs > newest)) newest = stat.mtimeMs;
   }
   return newest;
 }
 
 // src/daemon/handlers/session.ts
-var import_node_fs14 = __toESM(require("fs"));
+var import_node_fs15 = __toESM(require("fs"));
 
 // src/daemon/experimentalTools.ts
 var TOOL_SPECS = [
@@ -7378,8 +7375,8 @@ function renderCommandExecution(item, ctx) {
 }
 function renderFileChange(item, ctx) {
   const attrs = baseItemAttrs(item, { includeType: false });
-  const path16 = asString4(item.path);
-  if (path16) attrs.path = path16;
+  const path17 = asString4(item.path);
+  if (path17) attrs.path = path17;
   if (item.status !== void 0) attrs.status = item.status;
   const diffBody = extractDiff(item) ?? "";
   return renderBodyTag("file-patch", attrs, diffBody, ctx);
@@ -7683,8 +7680,6 @@ function stringify(v) {
 
 // src/daemon/handlers/session.ts
 var attachLocks = /* @__PURE__ */ new Map();
-var DEFAULT_SESSION_LIST_LIMIT = 50;
-var LOCAL_SESSION_LIST_CURSOR_PREFIX = "local:";
 var sessionNew = async (ctx, req) => {
   requireUser(ctx, req);
   const user = req.bearer;
@@ -7839,9 +7834,9 @@ var sessionDetach = async (ctx, req) => {
     }
   }
   ctx.pool.release(sessionKey);
+  ctx.queues.dispose(sessionKey);
   await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
   ctx.sessions.remove(user, rec.name);
-  ctx.queues.finalDispose(sessionKey);
   await appendSessionClosed(ctx, user, rec, "user_detach");
   return { session: rec, noop: false, graceful };
 };
@@ -7862,13 +7857,7 @@ var sessionRename = async (ctx, req) => {
     }
   }
   const updated = ctx.sessions.update(user, oldName, { name: newName });
-  if (typeof ctx.queues.rekey === "function") {
-    ctx.queues.rekey(keyFor(user, oldName), keyFor(user, newName));
-  }
   ctx.pool.rekeySession(keyFor(user, oldName), keyFor(user, newName));
-  if (typeof ctx.pending.renameSession === "function") {
-    ctx.pending.renameSession(user, oldName, newName);
-  }
   return { session: updated };
 };
 var sessionFork = async (ctx, req) => {
@@ -7982,73 +7971,36 @@ var sessionList = async (ctx, req) => {
   const user = req.bearer;
   const flags = asFlags(req);
   const all = isTrue2(flags["all"]);
-  const loadedOnly = isTrue2(flags["loaded-only"]);
   const sortField = asString5(flags["sort"]) ?? "last_active";
   const format = asString5(flags["format"]) ?? "json";
-  const cursor = parseSessionListCursor(flags);
-  const limit = parseSessionListLimit(flags);
-  const archivedMode = parseArchivedMode(flags);
-  const stateFilter = parseSessionStateFilter(flags);
-  const ownerFilter = parseOwnerFilter(flags);
   if (format !== "json" && format !== "table") {
     throw invalidParams(`--format must be 'json' or 'table'`);
   }
-  const response = { all, sort: sortField, format };
-  if (loadedOnly) response.loaded_only = true;
-  if (!all && !loadedOnly) {
-    const live = listRegistrySessions(ctx, user, ownerFilter).filter((session) => matchesArchivedMode(session, archivedMode)).filter((session) => matchesStateFilter(session, stateFilter));
-    const sorted2 = sortSessionRows(live, sortField);
-    const page = paginateLocalSessionRows(sorted2, limit, cursor);
-    response.sessions = page.sessions;
-    response.next_cursor = page.nextCursor;
+  if (!all) {
+    const live = ctx.sessions.listLive(user);
+    const sorted2 = sortSessions(live, sortField);
+    const response2 = { sessions: sorted2, all: false, sort: sortField, format };
     if (format === "table") {
-      response.table = renderTable2(page.sessions, [
-        "name",
-        "thread_id",
-        "state",
-        "model",
-        "busy",
-        "turn_count",
-        "last_active_at"
-      ]);
+      response2.table = renderTable2(
+        sorted2,
+        ["name", "thread_id", "state", "model", "turn_count", "last_active_at"]
+      );
     }
-    return response;
+    return response2;
   }
   const client = await ctx.pool.acquireForAdhoc(user);
-  if (loadedOnly) {
-    const result2 = await threadLoadedList(client, ctx.retryOptions());
-    const decorated = result2.threads.map((thread) => decorateThreadSession(ctx, user, thread)).filter((session) => matchesOwnerFilter(session, ownerFilter, user)).filter((session) => matchesArchivedMode(session, archivedMode)).filter((session) => matchesStateFilter(session, stateFilter));
-    const page = paginateLocalSessionRows(sortSessionRows(decorated, sortField), limit, cursor);
-    const sessions2 = page.sessions.map(stripInternalSessionMetadata);
-    response.sessions = page.sessions;
-    response.next_cursor = page.nextCursor;
-    response.sessions = sessions2;
-    if (format === "table") {
-      response.table = renderTable2(page.sessions, [
-        "name",
-        "thread_id",
-        "state",
-        "model",
-        "busy",
-        "updated_at"
-      ]);
-    }
-    return response;
-  }
-  const result = await threadList(client, {
-    cursor: cursor ?? void 0,
-    pageSize: limit,
-    includeArchived: archivedMode !== "exclude"
-  }, ctx.retryOptions());
-  const sessions = result.data.map((thread) => decorateThreadSession(ctx, user, thread)).filter((session) => matchesOwnerFilter(session, ownerFilter, user)).filter((session) => matchesArchivedMode(session, archivedMode)).filter((session) => matchesStateFilter(session, stateFilter)).map(stripInternalSessionMetadata);
-  Object.assign(response, {
-    sessions,
-    next_cursor: result.nextCursor
-  });
+  const result = await threadList(client, {}, ctx.retryOptions());
+  const response = {
+    sessions: result.data,
+    next_cursor: result.nextCursor,
+    all: true,
+    sort: sortField,
+    format
+  };
   if (format === "table") {
     response.table = renderTable2(
-      sessions,
-      ["name", "thread_id", "state", "model", "busy", "updated_at"]
+      result.data,
+      ["id", "status", "preview", "cwd", "updated_at"]
     );
   }
   return response;
@@ -8064,7 +8016,7 @@ var sessionHealth = async (ctx, req) => {
   const client = ctx.pool.clientForSession(sessionKey);
   const appServerAlive = isClientAlive(client);
   const currentTurnStartedAt = rec.current_turn_started_at ?? null;
-  const pending = typeof ctx.pending.listForUser === "function" ? ctx.pending.listForUser(user).filter((entry) => entry.thread_id === rec.thread_id || entry.session_name === rec.name) : null;
+  const pending = typeof ctx.pending.listForUser === "function" ? ctx.pending.listForUser(user).filter((entry) => entry.session_name === rec.name) : null;
   const pendingApprovals = pending ? pending.filter((entry) => entry.kind.startsWith("approval.")).length : rec.pending_approvals ?? 0;
   const pendingUserInputs = pending ? pending.filter((entry) => entry.kind === "user_input.request").length : rec.pending_user_inputs ?? 0;
   return {
@@ -8158,52 +8110,6 @@ function asPositionalOptional(req, idx) {
 function asString5(v) {
   if (Array.isArray(v)) return v[v.length - 1] ?? null;
   return typeof v === "string" ? v : null;
-}
-function parseSessionListLimit(flags) {
-  if (!hasFlag(flags, "limit")) return DEFAULT_SESSION_LIST_LIMIT;
-  const raw = asString5(flags["limit"]);
-  if (!raw) throw invalidParams("--limit requires a positive integer");
-  const value = Number(raw);
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
-    throw invalidParams("--limit must be a positive integer");
-  }
-  return value;
-}
-function parseSessionListCursor(flags) {
-  if (!hasFlag(flags, "cursor")) return null;
-  const cursor = asString5(flags["cursor"]);
-  if (!cursor) throw invalidParams("--cursor requires a value");
-  return cursor;
-}
-function parseArchivedMode(flags) {
-  if (!hasFlag(flags, "archived")) return "exclude";
-  const mode = asString5(flags["archived"]);
-  if (mode === "only" || mode === "exclude" || mode === "include") return mode;
-  throw invalidParams(`--archived must be one of: only / exclude / include`);
-}
-function parseSessionStateFilter(flags) {
-  if (!hasFlag(flags, "state")) return null;
-  const raw = asString5(flags["state"]);
-  if (!raw) throw invalidParams("--state requires a comma-separated value");
-  const entries = raw.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
-  if (entries.length === 0) throw invalidParams("--state requires at least one value");
-  const out = /* @__PURE__ */ new Set();
-  for (const entry of entries) {
-    if (entry === "live" || entry === "crashed" || entry === "closed" || entry === "archived") {
-      out.add(entry);
-      continue;
-    }
-    throw invalidParams(`--state values must be drawn from: live, crashed, closed, archived`);
-  }
-  return out;
-}
-function parseOwnerFilter(flags) {
-  if (!hasFlag(flags, "owner")) return { kind: "self" };
-  const raw = asString5(flags["owner"]);
-  if (!raw) throw invalidParams("--owner requires a value");
-  if (raw === "self") return { kind: "self" };
-  if (raw === "any") return { kind: "any" };
-  return { kind: "token", token: raw };
 }
 function isTrue2(v) {
   return v === true || v === "true" || v === "1";
@@ -8317,7 +8223,7 @@ async function readInstructionFile(value, flag) {
   const filePath = asString5(value);
   if (!filePath) return null;
   try {
-    return await import_node_fs14.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs15.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     throw invalidParams(`${flag} not readable: ${e.message}`);
   }
@@ -8340,9 +8246,9 @@ async function seizeFromOtherUser(ctx, fromUser, toUser, rec) {
     }
   }
   ctx.pool.release(sessionKey);
+  ctx.queues.dispose(sessionKey);
   await cancelPendingWithEvent(ctx, fromUser, rec.name, rec.thread_id, "session_seized");
   ctx.sessions.remove(fromUser, rec.name);
-  ctx.queues.finalDispose(sessionKey);
   await ctx.events.append(fromUser, {
     type: "session.seized",
     session: rec.name,
@@ -8363,153 +8269,21 @@ async function appendSessionClosed(ctx, user, rec, reason) {
     }
   });
 }
-function sortSessionRows(rows, field) {
-  const canonical = (/* @__PURE__ */ new Set(["name", "last_active", "turn_count", "created_at"])).has(field) ? field : "last_active";
-  const key = canonical === "last_active" ? "last_active_at" : canonical === "created_at" ? "created_at" : canonical;
+function sortSessions(rows, field) {
+  const f = (/* @__PURE__ */ new Set(["name", "last_active", "turn_count", "created_at"])).has(field) ? field : "last_active";
   const copy = [...rows];
-  copy.sort((a, b) => compareSessionListValues(b[key], a[key]));
+  copy.sort((a, b) => {
+    const av = a[f === "last_active" ? "last_active_at" : f === "created_at" ? "created_at" : f];
+    const bv = b[f === "last_active" ? "last_active_at" : f === "created_at" ? "created_at" : f];
+    if (typeof av === "string" && typeof bv === "string") return bv.localeCompare(av);
+    if (typeof av === "number" && typeof bv === "number") return bv - av;
+    return 0;
+  });
   return copy;
-}
-function compareSessionListValues(left, right) {
-  if (typeof left === "string" && typeof right === "string") return left.localeCompare(right);
-  if (typeof left === "number" && typeof right === "number") return left - right;
-  if (left === void 0 && right !== void 0) return -1;
-  if (left !== void 0 && right === void 0) return 1;
-  return 0;
-}
-function listRegistrySessions(ctx, currentUser, ownerFilter) {
-  const users = resolveRegistryUsers(ctx, currentUser, ownerFilter);
-  const rows = [];
-  for (const user of users) {
-    for (const rec of ctx.sessions.listLive(user)) {
-      rows.push(decorateLiveSession(ctx, user, rec));
-    }
-  }
-  return rows;
-}
-function resolveRegistryUsers(ctx, currentUser, ownerFilter) {
-  if (ownerFilter.kind === "self") return [currentUser];
-  if (ownerFilter.kind === "token") return [ownerFilter.token];
-  if (typeof ctx.users.list === "function") {
-    return ctx.users.list().map((entry) => entry.token);
-  }
-  return [currentUser];
-}
-function decorateLiveSession(ctx, owner, rec) {
-  const busyInfo = deriveBusyInfo(ctx, owner, rec);
-  return {
-    ...rec,
-    busy: busyInfo.busy,
-    current_turn_id: busyInfo.currentTurnId,
-    model: rec.model ?? null
-  };
-}
-function decorateThreadSession(ctx, currentUser, thread) {
-  const threadId = typeof thread.id === "string" ? thread.id : null;
-  const live = threadId ? ctx.sessions.findLiveAnywhere(threadId) : null;
-  const rec = live?.record ?? null;
-  const owner = live?.user ?? null;
-  const busyInfo = rec && owner ? deriveBusyInfo(ctx, owner, rec) : { busy: false, currentTurnId: null };
-  const state = deriveThreadState(rec, thread);
-  const name = rec?.name ?? (typeof thread.name === "string" && thread.name.length > 0 ? thread.name : threadId ?? "unknown");
-  const model = rec?.model ?? (typeof thread.model === "string" ? thread.model : null) ?? (typeof thread.model_provider === "string" ? thread.model_provider : null);
-  const out = {
-    ...thread,
-    name,
-    thread_id: threadId,
-    state,
-    model,
-    busy: busyInfo.busy
-  };
-  if (rec) {
-    out.turn_count = rec.turn_count;
-    out.current_turn_id = busyInfo.currentTurnId;
-    out.last_active_at = rec.last_active_at;
-    out.created_at = out.created_at ?? rec.created_at;
-    out.sandbox = out.sandbox ?? rec.sandbox;
-    out.approval = out.approval ?? rec.approval;
-    out.effort = out.effort ?? rec.effort;
-    out.profile = out.profile ?? rec.profile;
-    out.crash_reason = out.crash_reason ?? rec.crash_reason;
-  } else {
-    out.current_turn_id = null;
-  }
-  if (owner) out.owner = owner;
-  return out;
-}
-function deriveBusyInfo(ctx, owner, rec) {
-  const sessionKey = keyFor(owner, rec.name);
-  const currentTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
-  const busy = rec.state === "live" && isClientAlive(ctx.pool.clientForSession(sessionKey)) && currentTurnId !== null;
-  return { busy, currentTurnId };
-}
-function deriveThreadState(rec, thread) {
-  if (isArchivedThread(thread)) return "archived";
-  if (rec?.state === "crashed") return "crashed";
-  if (rec?.state === "live") return "live";
-  return "closed";
-}
-function isArchivedThread(thread) {
-  const record = thread;
-  if (record.archived === true || record.isArchived === true) return true;
-  const status2 = record.status;
-  if (typeof status2 === "string") return status2 === "archived";
-  if (status2 && typeof status2 === "object" && !Array.isArray(status2)) {
-    const type = status2.type;
-    return typeof type === "string" && type === "archived";
-  }
-  return false;
-}
-function matchesStateFilter(session, filter) {
-  if (!filter) return true;
-  const state = session.state;
-  return typeof state === "string" && filter.has(state);
-}
-function matchesArchivedMode(session, archivedMode) {
-  const archived = session.state === "archived";
-  if (archivedMode === "include") return true;
-  if (archivedMode === "only") return archived;
-  return !archived;
-}
-function matchesOwnerFilter(session, ownerFilter, currentUser) {
-  const owner = typeof session.owner === "string" ? session.owner : null;
-  if (ownerFilter.kind === "any") return true;
-  if (ownerFilter.kind === "self") {
-    return owner === null || owner === currentUser;
-  }
-  return ownerFilter.token === currentUser ? owner === null || owner === currentUser : owner === ownerFilter.token;
-}
-function paginateLocalSessionRows(rows, limit, cursor) {
-  const start = decodeLocalSessionListCursor(cursor);
-  const sessions = rows.slice(start, start + limit);
-  const nextOffset = start + sessions.length;
-  return {
-    sessions,
-    nextCursor: nextOffset < rows.length ? encodeLocalSessionListCursor(nextOffset) : null
-  };
-}
-function decodeLocalSessionListCursor(cursor) {
-  if (!cursor) return 0;
-  if (!cursor.startsWith(LOCAL_SESSION_LIST_CURSOR_PREFIX)) {
-    throw invalidParams("invalid --cursor for local session list");
-  }
-  const raw = cursor.slice(LOCAL_SESSION_LIST_CURSOR_PREFIX.length);
-  const value = Number(raw);
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
-    throw invalidParams("invalid --cursor for local session list");
-  }
-  return value;
-}
-function encodeLocalSessionListCursor(offset) {
-  return `${LOCAL_SESSION_LIST_CURSOR_PREFIX}${offset}`;
-}
-function stripInternalSessionMetadata(session) {
-  const { owner: _owner, ...rest } = session;
-  return rest;
 }
 
 // src/daemon/handlers/message.ts
-var import_node_fs15 = __toESM(require("fs"));
+var import_node_fs16 = __toESM(require("fs"));
 var messageSend = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const prompt = await readPromptInput(req);
@@ -8889,7 +8663,7 @@ async function readPromptInput(req) {
   if (positional) return positional;
   if (fromFile) {
     try {
-      return await import_node_fs15.default.promises.readFile(fromFile, "utf8");
+      return await import_node_fs16.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -8909,7 +8683,7 @@ async function readJsonInput(req) {
   if (jsonRaw) raw = jsonRaw;
   else if (fromFile) {
     try {
-      raw = await import_node_fs15.default.promises.readFile(fromFile, "utf8");
+      raw = await import_node_fs16.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -8926,9 +8700,9 @@ async function readJsonInput(req) {
 }
 async function buildUserInput(text, attachments) {
   const items = [{ type: "text", text }];
-  for (const path16 of attachments) {
-    await assertAttachable(path16);
-    items.push({ type: "localImage", path: path16 });
+  for (const path17 of attachments) {
+    await assertAttachable(path17);
+    items.push({ type: "localImage", path: path17 });
   }
   return items;
 }
@@ -9118,7 +8892,7 @@ function pickDefined(source, keys) {
 async function assertAttachable(filePath) {
   let stat;
   try {
-    stat = await import_node_fs15.default.promises.stat(filePath);
+    stat = await import_node_fs16.default.promises.stat(filePath);
   } catch (e) {
     throw invalidParams(`--attach not readable: ${filePath}: ${e.message}`);
   }
@@ -9130,8 +8904,8 @@ async function assertAttachable(filePath) {
   }
 }
 async function listTurnsFromRelativeOffset(client, threadId, relativeSince, limit, retry) {
-  const skip = Math.max(0, relativeSince - 1);
-  let remainingSkip = skip;
+  const skip2 = Math.max(0, relativeSince - 1);
+  let remainingSkip = skip2;
   let cursor;
   const data = [];
   let nextCursor = null;
@@ -9238,12 +9012,10 @@ function asString7(value) {
 }
 
 // src/daemon/handlers/monitor.ts
-var import_node_child_process5 = require("child_process");
+var import_node_child_process6 = require("child_process");
 var MAX_INTERVAL_QUEUE_EVENTS = 512;
 var MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
 var MAX_FLUSH_EVENTS_PER_TICK = 64;
-var DEFAULT_CURSOR_PERSIST_DEBOUNCE_MS = 200;
-var ACKABLE_EVENT_ID_RE = /^evt-\d+$/;
 var monitorEvents = async (ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor events requires streaming");
   const user = req.bearer;
@@ -9262,14 +9034,15 @@ var monitorEvents = async (ctx, req, stream) => {
   const summaryMode = isTrue4(flags["summary"]);
   const filterTypes = parseTypeList(flags["filter"]);
   const excludeTypes = parseTypeList(flags["exclude"]);
-  const cursorPersistDebounceMs = numConfig(ctx, "monitor.cursor_persist_debounce_ms", DEFAULT_CURSOR_PERSIST_DEBOUNCE_MS);
   const sinceId = asString8(flags["since"]);
   const cursorName = asString8(flags["cursor"]);
   if (sinceId && cursorName) throw invalidParams("--since and --cursor are mutually exclusive");
   const sessionFilter = asString8(flags["session"]);
   let effectiveSinceId = sinceId;
-  let queuedCursorEventId = null;
+  let persistedCursorEventId = null;
+  let lastObservedEventId = null;
   let lastAckedEventId = null;
+  let cursorWriteChain = Promise.resolve();
   if (cursorName) {
     const cursor = await ctx.cursors.ensure(user, {
       name: cursorName,
@@ -9277,37 +9050,29 @@ var monitorEvents = async (ctx, req, stream) => {
       auto_update: true
     });
     effectiveSinceId = cursor.event_id;
-    queuedCursorEventId = cursor.event_id;
+    persistedCursorEventId = cursor.event_id;
+    lastObservedEventId = cursor.event_id;
     lastAckedEventId = cursor.event_id;
   }
-  const emit = (event, ackable = isAckableMonitorEventId(event.id)) => {
-    stream.chunk(summaryMode ? summarizeEvent(event, ackable) : withAckableState(event, ackable));
+  const emit = (event) => {
+    stream.chunk(summaryMode ? summarizeEvent(event) : event);
   };
   const scheduleCursorPersist = () => {
     if (!cursorName) return;
     const nextEventId = lastAckedEventId;
-    if (!nextEventId || nextEventId === queuedCursorEventId) return;
-    ctx.cursors.saveBestEffortDebounced(user, {
-      name: cursorName,
-      event_id: nextEventId,
-      auto_update: true
-    }, cursorPersistDebounceMs);
-    queuedCursorEventId = nextEventId;
-  };
-  const flushCursorPersist = async () => {
-    if (!cursorName) return;
-    await ctx.cursors.flushUser(user);
+    if (!nextEventId || nextEventId === persistedCursorEventId) return;
+    cursorWriteChain = cursorWriteChain.catch(() => void 0).then(async () => {
+      if (!nextEventId || nextEventId === persistedCursorEventId) return;
+      await ctx.cursors.saveBestEffort(user, {
+        name: cursorName,
+        event_id: nextEventId,
+        auto_update: true
+      });
+      persistedCursorEventId = nextEventId;
+    });
   };
   stream.onAck((ack) => {
     if (!ack.event_id) return;
-    if (!isAckableMonitorEventId(ack.event_id)) {
-      logger.warn("ignoring non-event monitor ack for cursor update", {
-        user,
-        cursor: cursorName,
-        event_id: ack.event_id
-      });
-      return;
-    }
     lastAckedEventId = ack.event_id;
     scheduleCursorPersist();
   });
@@ -9331,6 +9096,9 @@ var monitorEvents = async (ctx, req, stream) => {
       stream.end(invalidParams(`event '${effectiveSinceId}' not found`));
     }
     return { streaming: true };
+  }
+  if (backlog.events.length > 0) {
+    lastObservedEventId = backlog.events[backlog.events.length - 1]?.id ?? lastObservedEventId;
   }
   const initialEvents = backlog.events.filter(accept);
   const queue = streamMode ? [...initialEvents] : [];
@@ -9376,15 +9144,16 @@ var monitorEvents = async (ctx, req, stream) => {
     for (const e of queue) emit(e);
     queue.length = 0;
     const sub2 = ctx.events.subscribe(user, (e) => {
+      lastObservedEventId = e.id;
       if (accept(e)) emit(e);
     });
-    stream.onClose(async () => {
+    stream.onClose(() => {
       sub2.dispose();
-      await flushCursorPersist();
     });
     return { streaming: true };
   }
   const sub = ctx.events.subscribe(user, (e) => {
+    lastObservedEventId = e.id;
     if (accept(e)) enqueueIntervalEvent(e);
   });
   let closed = false;
@@ -9402,7 +9171,7 @@ var monitorEvents = async (ctx, req, stream) => {
     if (closed || draining) return;
     draining = true;
     const overflowEvent = takeOverflowEvent();
-    if (overflowEvent) emit(overflowEvent, false);
+    if (overflowEvent) emit(overflowEvent);
     const batch = queue.splice(0, MAX_FLUSH_EVENTS_PER_TICK);
     for (const event of batch) {
       queueBytes = Math.max(0, queueBytes - eventSize(event));
@@ -9418,12 +9187,11 @@ var monitorEvents = async (ctx, req, stream) => {
   if (overflowDropped > 0 || queue.length > 0) {
     scheduleDrain(0);
   }
-  stream.onClose(async () => {
+  stream.onClose(() => {
     closed = true;
     clearInterval(timer);
     if (drainTimer) clearTimeout(drainTimer);
     sub.dispose();
-    await flushCursorPersist();
   });
   return { streaming: true };
 };
@@ -9456,7 +9224,7 @@ var monitorAlarm = async (_ctx, req, stream) => {
     try {
       await new Promise((resolve) => {
         const { file, args } = shellCommand(command);
-        const child = (0, import_node_child_process5.spawn)(file, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+        const child = (0, import_node_child_process6.spawn)(file, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         activeChild = child;
         activeTimedOut = false;
         let stdoutBuf = "";
@@ -9609,31 +9377,14 @@ function numConfig(ctx, key, fallback) {
 function eventSize(event) {
   return Buffer.byteLength(JSON.stringify(event));
 }
-function summarizeEvent(event, ackable) {
-  return stripUndefined2({
+function summarizeEvent(event) {
+  return {
     id: event.id,
     ts: event.ts,
     type: event.type,
     session: event.session,
-    key: summarizeEventKey2(event),
-    ackable: ackable ? void 0 : false
-  });
-}
-function withAckableState(event, ackable) {
-  if (ackable) return event;
-  return {
-    ...event,
-    ackable: false
+    key: summarizeEventKey2(event)
   };
-}
-function isAckableMonitorEventId(eventId) {
-  return ACKABLE_EVENT_ID_RE.test(eventId);
-}
-function stripUndefined2(value) {
-  for (const [key, entry] of Object.entries(value)) {
-    if (entry === void 0) delete value[key];
-  }
-  return value;
 }
 function summarizeEventKey2(event) {
   const payload = event.payload;
@@ -10280,34 +10031,15 @@ async function handleNotification2(ctx, e) {
     }
   }
   if (norm.type === "turn.error" && sessionName && rec) {
-    const turnId = norm.payload.turn_id ?? rec.last_turn_id ?? null;
-    const willRetry = Boolean(norm.payload.will_retry);
     ctx.sessions.update(e.user, sessionName, {
-      last_turn_id: turnId,
-      current_turn_id: willRetry ? rec.current_turn_id ?? turnId : null,
-      current_turn_started_at: willRetry ? rec.current_turn_started_at ?? null : null,
+      last_turn_id: norm.payload.turn_id ?? rec.last_turn_id ?? null,
+      current_turn_id: null,
+      current_turn_started_at: null,
       current_item_type: null,
-      items_in_turn: willRetry ? rec.items_in_turn ?? 0 : 0
-    });
-    const client = ctx.pool.clientForSession(keyFor3(e.user, sessionName));
-    void ctx.queues.onTurnErrored(
-      keyFor3(e.user, sessionName),
-      turnId,
-      { willRetry },
-      client,
-      norm.threadId ?? rec.thread_id,
-      ctx.retryOptions()
-    ).then(async (next) => {
-      await appendQueueDrainEvents(ctx, e.user, sessionName, norm.threadId ?? rec.thread_id, next, false);
-    }).catch((err2) => {
-      logger.warn("turn error queue drain failed", {
-        session: sessionName,
-        err: err2.message
-      });
+      items_in_turn: 0
     });
   }
   if (norm.type === "turn.completed" && sessionName && norm.threadId) {
-    const threadId = norm.threadId;
     if (rec) {
       ctx.sessions.update(e.user, sessionName, {
         last_turn_id: norm.payload.turn_id ?? rec.last_turn_id ?? null,
@@ -10319,8 +10051,38 @@ async function handleNotification2(ctx, e) {
       });
     }
     const client = ctx.pool.clientForSession(keyFor3(e.user, sessionName));
-    void ctx.queues.onTurnCompleted(keyFor3(e.user, sessionName), client, threadId, ctx.retryOptions()).then(async (next) => {
-      await appendQueueDrainEvents(ctx, e.user, sessionName, threadId, next, true);
+    void ctx.queues.onTurnCompleted(keyFor3(e.user, sessionName), client, norm.threadId, ctx.retryOptions()).then(async (next) => {
+      if (next.turn_id) {
+        logger.debug("drained queued turn", { session: sessionName, turn_id: next.turn_id, queue_id: next.queue_id });
+        await ctx.events.append(e.user, {
+          type: "turn.queued_started",
+          session: sessionName,
+          thread_id: norm.threadId,
+          payload: {
+            turn_id: next.turn_id,
+            queue_id: next.queue_id
+          }
+        });
+        return;
+      }
+      if (next.failed && next.queue_id) {
+        logger.warn("queued turn remains enqueued after dispatch failure", {
+          session: sessionName,
+          queue_id: next.queue_id,
+          err: next.error_message
+        });
+        await ctx.events.append(e.user, {
+          type: "turn.queued_failed",
+          session: sessionName,
+          thread_id: norm.threadId,
+          payload: {
+            queue_id: next.queue_id,
+            error: {
+              message: next.error_message
+            }
+          }
+        });
+      }
     }).catch((err2) => {
       logger.warn("turn completion queue drain failed", {
         session: sessionName,
@@ -10371,13 +10133,8 @@ async function handleServerRequest(ctx, e) {
     e.respondError(-32e3, "session detached");
     return;
   }
-  const rec = ctx.sessions.get(e.user, sessionName);
-  if (!rec || rec.state !== "live" || rec.thread_id !== norm.threadId) {
-    e.respondError(-32e3, "session torn down");
-    return;
-  }
   if (ctx.queues.isTeardown(keyFor3(e.user, sessionName))) {
-    e.respondError(-32e3, "session torn down");
+    e.respondError(-32e3, "session detached");
     return;
   }
   const effectiveClient = ctx.pool.clientById(e.clientId);
@@ -10535,7 +10292,6 @@ async function closeSession(ctx, user, sessionName, reason, unsubscribe) {
   const rec = ctx.sessions.get(user, sessionName);
   if (!rec) return;
   const sessionKey = keyFor3(user, sessionName);
-  ctx.queues.markTeardown(sessionKey);
   const client = ctx.pool.clientForSession(sessionKey);
   if (unsubscribe && client) {
     try {
@@ -10544,63 +10300,10 @@ async function closeSession(ctx, user, sessionName, reason, unsubscribe) {
     }
   }
   ctx.pool.release(sessionKey);
+  ctx.queues.dispose(sessionKey);
   await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, reason);
   ctx.sessions.remove(user, sessionName);
-  ctx.queues.finalDispose(sessionKey);
   await appendSessionClosed2(ctx, user, rec.name, rec.thread_id, reason);
-}
-async function appendQueueDrainEvents(ctx, user, sessionName, threadId, result, emitQueuedStarted) {
-  for (const dropped of result.dropped) {
-    logger.warn("dropping queued turn after repeated dispatch failures", {
-      session: sessionName,
-      queue_id: dropped.queue_id,
-      err: dropped.error_message,
-      failure_count: dropped.failure_count
-    });
-    await ctx.events.append(user, {
-      type: "turn.queued_dropped",
-      session: sessionName,
-      thread_id: threadId,
-      payload: {
-        queue_id: dropped.queue_id,
-        error: {
-          message: dropped.error_message
-        },
-        failure_count: dropped.failure_count
-      }
-    });
-  }
-  if (result.turn_id && emitQueuedStarted) {
-    logger.debug("drained queued turn", { session: sessionName, turn_id: result.turn_id, queue_id: result.queue_id });
-    await ctx.events.append(user, {
-      type: "turn.queued_started",
-      session: sessionName,
-      thread_id: threadId,
-      payload: {
-        turn_id: result.turn_id,
-        queue_id: result.queue_id
-      }
-    });
-    return;
-  }
-  if (result.failed && result.queue_id) {
-    logger.warn("queued turn remains enqueued after dispatch failure", {
-      session: sessionName,
-      queue_id: result.queue_id,
-      err: result.error_message
-    });
-    await ctx.events.append(user, {
-      type: "turn.queued_failed",
-      session: sessionName,
-      thread_id: threadId,
-      payload: {
-        queue_id: result.queue_id,
-        error: {
-          message: result.error_message
-        }
-      }
-    });
-  }
 }
 async function appendSessionClosed2(ctx, user, session, threadId, reason) {
   await ctx.events.append(user, {
@@ -10651,7 +10354,7 @@ async function runDaemon() {
   const cleanup = () => {
     unlinkSockIfStale(ctx.sockPath);
     try {
-      import_node_fs16.default.unlinkSync(pidPath);
+      import_node_fs17.default.unlinkSync(pidPath);
     } catch {
     }
   };
@@ -10671,10 +10374,10 @@ async function runDaemon() {
   } catch (e) {
     logger.error("failed to start server", { err: e.message });
     try {
-      import_node_fs16.default.unlinkSync(pidPath);
+      import_node_fs17.default.unlinkSync(pidPath);
     } catch {
     }
-    return 1;
+    throw translateBootstrapError(e, ctx.sockPath);
   }
   scheduleIdleShutdown(ctx);
   return await new Promise(() => {
@@ -10744,15 +10447,15 @@ async function reconcileLoadedSessionsAfterRestart(ctx) {
 }
 function acquirePid(pidPath) {
   try {
-    import_node_fs16.default.mkdirSync(import_node_path14.default.dirname(pidPath), { recursive: true });
-    const fd = import_node_fs16.default.openSync(pidPath, "wx");
+    import_node_fs17.default.mkdirSync(import_node_path15.default.dirname(pidPath), { recursive: true });
+    const fd = import_node_fs17.default.openSync(pidPath, "wx");
     try {
-      import_node_fs16.default.writeFileSync(fd, JSON.stringify({
+      import_node_fs17.default.writeFileSync(fd, JSON.stringify({
         pid: process.pid,
         created_at: (/* @__PURE__ */ new Date()).toISOString()
       }));
     } finally {
-      import_node_fs16.default.closeSync(fd);
+      import_node_fs17.default.closeSync(fd);
     }
     return true;
   } catch (e) {
@@ -10798,10 +10501,10 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
   const legacyPidPath = legacyWindowsPidFilePath(pidPath);
   for (; ; ) {
     const sockReachable = await probeSock(sockPath, 200);
-    const pidRecord = readPidFile2(pidPath);
+    const pidRecord = readPidFile3(pidPath);
     const pid = pidRecord?.pid ?? null;
     const pidAlive = pid !== null && isDaemonPidAlive(pid);
-    const legacyPidRecord = legacyPidPath ? readPidFile2(legacyPidPath) : null;
+    const legacyPidRecord = legacyPidPath ? readPidFile3(legacyPidPath) : null;
     const legacyPid = legacyPidRecord?.pid ?? null;
     const legacyPidAlive = legacyPid !== null && isDaemonPidAlive(legacyPid);
     if (sockReachable) {
@@ -10839,13 +10542,13 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
     }
     if (pid !== null && !pidAlive) {
       try {
-        import_node_fs16.default.unlinkSync(pidPath);
+        import_node_fs17.default.unlinkSync(pidPath);
       } catch {
       }
     }
     if (legacyPidPath && legacyPid !== null && !legacyPidAlive) {
       try {
-        import_node_fs16.default.unlinkSync(legacyPidPath);
+        import_node_fs17.default.unlinkSync(legacyPidPath);
       } catch {
       }
     }
@@ -10863,9 +10566,9 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
     await sleep5(150);
   }
 }
-function readPidFile2(pidPath) {
+function readPidFile3(pidPath) {
   try {
-    const raw = import_node_fs16.default.readFileSync(pidPath, "utf8");
+    const raw = import_node_fs17.default.readFileSync(pidPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
     return {
@@ -10888,7 +10591,7 @@ function legacyWindowsPidFilePath(currentPidPath) {
   if (process.platform !== "win32") return null;
   const legacyHome = process.env.HOME;
   if (!legacyHome) return null;
-  const legacyPath = import_node_path14.default.join(legacyHome, `.${APP}`, "daemon.pid");
+  const legacyPath = import_node_path15.default.join(legacyHome, `.${APP}`, "daemon.pid");
   if (legacyPath === currentPidPath) return null;
   if (legacyHome === homeDir()) return null;
   return legacyPath;
@@ -10898,6 +10601,23 @@ function sleep5(ms) {
     const timer = setTimeout(resolve, ms);
     timer.unref();
   });
+}
+function translateBootstrapError(error, sockPath) {
+  if (error instanceof CodexTeamError) return error;
+  const err2 = error;
+  if (err2?.code === "EPERM" || err2?.code === "EACCES") {
+    return new CodexTeamError(
+      "socket_bind_denied",
+      `local Unix socket bind denied by environment (error: ${err2.code}). codex-team requires socket bind for daemon IPC - likely running in a restricted sandbox.`,
+      {
+        error: err2.code,
+        sock_path: sockPath,
+        suggested_action: "run `codex-team doctor` to diagnose"
+      }
+    );
+  }
+  if (error instanceof Error) return error;
+  return new Error(String(error));
 }
 
 // src/main.ts
@@ -10909,7 +10629,7 @@ async function main() {
   if (daemonIdx >= 0) {
     argv.splice(daemonIdx, 1);
     if (stderrPath) redirectProcessStderr(stderrPath);
-    const code2 = await runDaemon();
+    const code2 = await runDaemonWithBootstrapReporting();
     process.exit(code2);
   }
   const code = await runCli(argv);
@@ -10920,6 +10640,22 @@ main().catch((e) => {
 `);
   process.exit(1);
 });
+async function runDaemonWithBootstrapReporting() {
+  try {
+    return await runDaemon();
+  } catch (e) {
+    writeDaemonBootstrapError(e);
+    return 1;
+  }
+}
+function writeDaemonBootstrapError(error) {
+  const payload = error instanceof CodexTeamError ? { code: error.code, message: error.message, ...error.data !== void 0 ? { data: error.data } : {} } : {
+    code: "internal",
+    message: error instanceof Error ? error.message : String(error)
+  };
+  process.stderr.write(`[codex-team-daemon-bootstrap] ${JSON.stringify(payload)}
+`);
+}
 function takeOptionValue(argv, flag) {
   const idx = argv.indexOf(flag);
   if (idx < 0) return null;
@@ -10931,8 +10667,8 @@ function takeOptionValue(argv, flag) {
   return value;
 }
 function redirectProcessStderr(stderrPath) {
-  import_node_fs17.default.mkdirSync(import_node_path15.default.dirname(stderrPath), { recursive: true });
-  const stream = import_node_fs17.default.createWriteStream(stderrPath, { flags: "a" });
+  import_node_fs18.default.mkdirSync(import_node_path16.default.dirname(stderrPath), { recursive: true });
+  const stream = import_node_fs18.default.createWriteStream(stderrPath, { flags: "a" });
   stream.on("error", () => void 0);
   const write = stream.write.bind(stream);
   process.stderr.write = ((chunk, encoding, cb) => {

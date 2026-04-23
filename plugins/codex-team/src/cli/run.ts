@@ -6,7 +6,7 @@ import type net from "node:net";
 
 import { connectSock, probeSock, writeMessage, onMessages } from "../ipc/sock";
 import type { IpcMessage, IpcRequest } from "../ipc/protocol";
-import { defaultDataDir, defaultSockPath, warnLegacyWindowsDataDir } from "../paths";
+import { defaultSockPath, isFilesystemSockPath, normalizeSockPath, pidFilePath, warnLegacyWindowsDataDir } from "../paths";
 import { parseArgs, commandKey, supportsShort, type ParsedArgs } from "./args";
 import { renderHelp } from "./help";
 import { err, ok } from "../result";
@@ -15,6 +15,7 @@ import { validateApprovalAction } from "./approval-validation";
 import { VERSION } from "../version";
 import { formatShort } from "../format/short";
 import { formatCompact } from "../format/compact";
+import { runDoctor } from "./doctor";
 
 const DAEMON_POLL_INTERVAL_MS = 100;
 const DEFAULT_DAEMON_READY_TIMEOUT_MS = 15000;
@@ -46,15 +47,20 @@ export async function runCli(argv: string[]): Promise<number> {
     return 0;
   }
 
-  warnLegacyWindowsDataDir((warning) => {
-    process.stderr.write(warning.message + "\n");
-  });
-
   const method = commandKey(parsed.commandPath);
+  if (method !== "doctor") {
+    warnLegacyWindowsDataDir((warning) => {
+      process.stderr.write(warning.message + "\n");
+    });
+  }
   const short = truthy(parsed.flags.short);
   const format = flagString(parsed.flags.format);
   if (short && !supportsShort(method)) {
     process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
+    return 1;
+  }
+  if (method === "doctor" && truthy(parsed.flags.full)) {
+    process.stdout.write(JSON.stringify(err("invalid_params", `--full is not supported for '${method}'`)) + "\n");
     return 1;
   }
   if (short && (format === "markdown" || format === "table")) {
@@ -62,6 +68,10 @@ export async function runCli(argv: string[]): Promise<number> {
     return 1;
   }
   const sockPath = parsed.daemonSock || defaultSockPath();
+
+  if (method === "doctor") {
+    return await runDoctor({ short, sockPath });
+  }
 
   if (method === "version") {
     return await runVersion(sockPath);
@@ -89,7 +99,7 @@ export async function runCli(argv: string[]): Promise<number> {
 
   const ready = await ensureDaemon(sockPath);
   if (!ready.ok) {
-    process.stdout.write(JSON.stringify(err("daemon_unreachable", ready.message)) + "\n");
+    process.stdout.write(JSON.stringify(err(ready.code, ready.message, ready.data)) + "\n");
     return 1;
   }
 
@@ -394,43 +404,88 @@ async function requestOnceWithRetry(
 
 interface EnsureDaemonResult {
   ok: boolean;
+  code: string;
   message: string;
+  data?: unknown;
 }
 
 async function ensureDaemon(sockPath: string): Promise<EnsureDaemonResult> {
   const cliConfig = readCliConfig();
+  const config = new ConfigStore();
+  const dataDir = config.resolvedDataDir();
+  const pidPath = pidFilePath(dataDir);
+  const stderrPath = daemonSpawnStderrPath(dataDir);
   if (await probeSock(sockPath, 200)) {
-    return { ok: true, message: "" };
+    return { ok: true, code: "", message: "" };
+  }
+
+  const staleState = detectStaleDaemonArtifacts(sockPath, pidPath);
+  if (staleState) {
+    return {
+      ok: false,
+      code: "daemon_unreachable",
+      message: `stale daemon.pid + daemon.sock (pid ${staleState.pid} is not running); remove them and retry`,
+      data: {
+        pid_path: pidPath,
+        sock_path: staleState.sockPath,
+        pid: staleState.pid,
+      },
+    };
   }
 
   try {
-    spawnDaemon();
-    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
-      return { ok: true, message: "" };
+    const child = spawnDaemon();
+    const firstAttempt = await waitForDaemonReady(sockPath, child, cliConfig.readyTimeoutMs);
+    if (firstAttempt.ready) {
+      return { ok: true, code: "", message: "" };
     }
   } catch (e) {
     return {
       ok: false,
+      code: "daemon_unreachable",
       message: `failed to spawn daemon: ${(e as Error).message}`,
     };
   }
 
-  const stderrPath = daemonSpawnStderrPath();
   try {
-    spawnDaemon(stderrPath);
-    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
-      return { ok: true, message: "" };
+    const child = spawnDaemon(stderrPath);
+    const secondAttempt = await waitForDaemonReady(sockPath, child, cliConfig.readyTimeoutMs);
+    if (secondAttempt.ready) {
+      return { ok: true, code: "", message: "" };
+    }
+    if (secondAttempt.exited) {
+      return buildEarlyExitFailure(stderrPath, secondAttempt);
     }
   } catch (e) {
     return {
       ok: false,
+      code: "daemon_unreachable",
       message: `failed to spawn daemon with stderr capture: ${(e as Error).message}`,
+    };
+  }
+
+  const stderrTail = readTail(stderrPath, 4096);
+  const parsedBootstrap = parseBootstrapStderr(stderrTail);
+  if (parsedBootstrap?.code === "socket_bind_denied") {
+    return {
+      ok: false,
+      code: parsedBootstrap.code,
+      message: parsedBootstrap.message,
+      data: {
+        ...(parsedBootstrap.data ?? {}),
+        ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
+      },
     };
   }
 
   return {
     ok: false,
+    code: "daemon_unreachable",
     message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`,
+    data: {
+      stderr_path: stderrPath,
+      ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
+    },
   };
 }
 
@@ -456,16 +511,43 @@ async function connectSockWithRetry(
   throw lastError ?? new Error("connect failed");
 }
 
-async function waitForDaemonReady(sockPath: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await sleep(DAEMON_POLL_INTERVAL_MS);
-    if (await probeSock(sockPath, 200)) return true;
-  }
-  return false;
+interface WaitForDaemonReadyResult {
+  ready: boolean;
+  exited: boolean;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
 }
 
-function spawnDaemon(stderrPath?: string): void {
+async function waitForDaemonReady(
+  sockPath: string,
+  child: ReturnType<typeof spawn>,
+  timeoutMs: number,
+): Promise<WaitForDaemonReadyResult> {
+  let exited = false;
+  let exitCode: number | null = null;
+  let signal: NodeJS.Signals | null = null;
+  const onExit = (code: number | null, nextSignal: NodeJS.Signals | null) => {
+    exited = true;
+    exitCode = code;
+    signal = nextSignal;
+  };
+
+  child.once("exit", onExit);
+  const deadline = Date.now() + timeoutMs;
+  try {
+    while (Date.now() < deadline) {
+      await sleep(DAEMON_POLL_INTERVAL_MS);
+      if (await probeSock(sockPath, 200)) return { ready: true, exited, exitCode, signal };
+      if (exited) return { ready: false, exited, exitCode, signal };
+    }
+  } finally {
+    if (typeof child.off === "function") child.off("exit", onExit);
+    else if (typeof child.removeListener === "function") child.removeListener("exit", onExit);
+  }
+  return { ready: false, exited, exitCode, signal };
+}
+
+function spawnDaemon(stderrPath?: string): ReturnType<typeof spawn> {
   const args = [process.argv[1], "--daemon-internal"];
   let stderrFd: number | null = null;
 
@@ -483,6 +565,7 @@ function spawnDaemon(stderrPath?: string): void {
       windowsHide: true,
     });
     child.unref();
+    return child;
   } finally {
     if (stderrFd !== null) fs.closeSync(stderrFd);
   }
@@ -496,8 +579,113 @@ function randomId(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
-function daemonSpawnStderrPath(): string {
-  return path.join(defaultDataDir(), "daemon-spawn.stderr");
+function daemonSpawnStderrPath(dataDir: string): string {
+  return path.join(dataDir, "daemon-spawn.stderr");
+}
+
+function detectStaleDaemonArtifacts(sockPath: string, pidPath: string): { pid: number; sockPath: string } | null {
+  const pidRecord = readPidFile(pidPath);
+  if (!pidRecord) return null;
+  if (isPidAlive(pidRecord.pid)) return null;
+  if (!isFilesystemSockPath(sockPath)) return null;
+
+  const normalizedSockPath = normalizeSockPath(sockPath);
+  if (!fs.existsSync(normalizedSockPath)) return null;
+  return {
+    pid: pidRecord.pid,
+    sockPath: normalizedSockPath,
+  };
+}
+
+function readPidFile(targetPath: string): { pid: number } | null {
+  try {
+    const raw = fs.readFileSync(targetPath, "utf8");
+    const parsed = JSON.parse(raw) as { pid?: unknown };
+    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
+    return { pid: Math.floor(parsed.pid) };
+  } catch {
+    return null;
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface BootstrapPayload {
+  code: string;
+  message: string;
+  data?: Record<string, unknown>;
+}
+
+function buildEarlyExitFailure(stderrPath: string, result: WaitForDaemonReadyResult): EnsureDaemonResult {
+  const stderrTail = readTail(stderrPath, 4096);
+  const parsedBootstrap = parseBootstrapStderr(stderrTail);
+  if (parsedBootstrap?.code === "socket_bind_denied") {
+    return {
+      ok: false,
+      code: parsedBootstrap.code,
+      message: parsedBootstrap.message,
+      data: {
+        ...(parsedBootstrap.data ?? {}),
+        ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    code: "daemon_unreachable",
+    message: parsedBootstrap?.message ?? "daemon exited before becoming ready",
+    data: {
+      stderr_path: stderrPath,
+      ...(typeof result.exitCode === "number" ? { exit_code: result.exitCode } : {}),
+      ...(result.signal ? { signal: result.signal } : {}),
+      ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
+    },
+  };
+}
+
+function readTail(filePath: string, maxBytes: number): string | null {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    if (raw.length <= maxBytes) return raw.trim();
+    return raw.slice(-maxBytes).trim();
+  } catch {
+    return null;
+  }
+}
+
+function parseBootstrapStderr(stderrTail: string | null): BootstrapPayload | null {
+  if (!stderrTail) return null;
+  const prefix = "[codex-team-daemon-bootstrap] ";
+  const lines = stderrTail.split(/\r?\n/).reverse();
+  for (const line of lines) {
+    if (!line.startsWith(prefix)) continue;
+    try {
+      const parsed = JSON.parse(line.slice(prefix.length)) as {
+        code?: unknown;
+        message?: unknown;
+        data?: unknown;
+      };
+      if (typeof parsed.code !== "string" || typeof parsed.message !== "string") continue;
+      return {
+        code: parsed.code,
+        message: parsed.message,
+        data: parsed.data && typeof parsed.data === "object" && !Array.isArray(parsed.data)
+          ? parsed.data as Record<string, unknown>
+          : undefined,
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 function truthy(v: unknown): boolean {

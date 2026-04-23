@@ -7,6 +7,7 @@ describe("renderHelp", () => {
     const help = renderHelp([]);
 
     expect(help).toContain("version");
+    expect(help).toContain("doctor");
     expect(help).toContain("status");
     expect(help).toContain("daemon");
     expect(help).toContain("session");
@@ -63,6 +64,21 @@ describe("renderHelp", () => {
     expect(renderHelp(["session", "new"])).toContain("--full");
     expect(renderHelp(["message", "send"])).toContain("--full");
     expect(renderHelp(["cursor", "save"])).toContain("--full");
+  });
+
+  it("renders doctor help with all diagnostic checks", () => {
+    const help = renderHelp(["doctor"]);
+
+    expect(help).toContain("codex-team doctor");
+    expect(help).toContain("--short");
+    expect(help).toContain("node version");
+    expect(help).toContain("codex binary");
+    expect(help).toContain("plugin launcher");
+    expect(help).toContain("daemon.data_dir writable");
+    expect(help).toContain("local socket bind");
+    expect(help).toContain("daemon process state");
+    expect(help).toContain("daemon socket reachability");
+    expect(help).toContain("dist freshness");
   });
 
   it("marks monitor events stream and interval flags as mutually exclusive", () => {

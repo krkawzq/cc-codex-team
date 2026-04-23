@@ -10,7 +10,11 @@ const sockMocks = vi.hoisted(() => ({
 const processMocks = vi.hoisted(() => ({
   spawn: vi.fn(() => ({
     unref: vi.fn(),
+    once: vi.fn(),
+    off: vi.fn(),
+    removeListener: vi.fn(),
   })),
+  spawnSync: vi.fn(),
 }));
 
 vi.mock("../src/ipc/sock", () => sockMocks);
@@ -23,6 +27,10 @@ vi.mock("../src/daemon/config", () => ({
       if (key === "daemon.connect_retry_attempts") return 3;
       if (key === "daemon.connect_retry_delay_seconds") return 0.25;
       return null;
+    }
+
+    resolvedDataDir() {
+      return "/tmp/.codex-team";
     }
   },
 }));

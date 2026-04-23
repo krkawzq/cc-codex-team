@@ -1268,6 +1268,31 @@ const HELP_TREE: HelpNode = {
       ],
       needs_bearer: false,
     }),
+    {
+      name: "doctor",
+      summary: "Run local environment and daemon bootstrap diagnostics.",
+      usage: "codex-team doctor [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one summary line with verdict, failed checks, and warnings.",
+        },
+      ],
+      examples: [
+        "codex-team doctor",
+        "codex-team doctor --short",
+      ],
+      notes: [
+        "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
+        "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness.",
+      ],
+      subcommands: [],
+      needs_bearer: false,
+    },
     leaf({
       name: "status",
       summary: "Show live sessions, pending events, and recent activity.",
