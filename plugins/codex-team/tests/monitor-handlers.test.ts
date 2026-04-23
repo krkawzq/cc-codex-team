@@ -225,4 +225,55 @@ describe("monitorAlarm", () => {
     expect(child.kill).toHaveBeenCalledWith();
     expect(stream.chunks).toContainEqual(expect.objectContaining({ __alarm_event: "timeout" }));
   });
+
+  it("caps alarm stdout/stderr capture and keeps head and tail slices", async () => {
+    const child = makeChild();
+    monitorMocks.spawn.mockReturnValue(child);
+    const stream = new FakeStream();
+
+    const promise = monitorAlarm({
+      config: {
+        getEffective(key: string) {
+          if (key === "monitor.alarm_output_cap_bytes") return 16;
+          return null;
+        },
+      },
+    } as never, makeReq(["1", "echo hi"], { once: true }) as never, stream as never);
+
+    child.stdout.emit("data", "1234567890ABCDEFGHIJklmnopqrst");
+    child.stderr.emit("data", "abcdefghij0123456789uvwxyz");
+    child.emit("exit", 0, null);
+    await promise;
+
+    expect(stream.chunks).toContainEqual({
+      stdout: "12345678[... 14 bytes truncated ...]mnopqrst",
+    });
+    expect(stream.chunks).toContainEqual({
+      stderr: "abcdefgh[... 10 bytes truncated ...]89uvwxyz",
+    });
+  });
+
+  it("marks capped alarm runs with output_truncated", async () => {
+    const child = makeChild();
+    monitorMocks.spawn.mockReturnValue(child);
+    const stream = new FakeStream();
+
+    const promise = monitorAlarm({
+      config: {
+        getEffective(key: string) {
+          if (key === "monitor.alarm_output_cap_bytes") return 16;
+          return null;
+        },
+      },
+    } as never, makeReq(["1", "echo hi"], { once: true }) as never, stream as never);
+
+    child.stdout.emit("data", "1234567890ABCDEFGHIJklmnopqrst");
+    child.emit("exit", 0, null);
+    await promise;
+
+    expect(stream.chunks).toContainEqual(expect.objectContaining({
+      __alarm_event: "exit",
+      output_truncated: true,
+    }));
+  });
 });

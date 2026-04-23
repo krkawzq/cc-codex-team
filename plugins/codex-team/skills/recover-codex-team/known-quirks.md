@@ -40,7 +40,7 @@ with `turnKind: "Review"` or `"Compact"`.
 
 ## 6. Turn completed notifications arrive with `turn.items = []`
 
-The wire-level `turn.completed` notification does include a `Turn` object, but its `items` field is always empty (per protocol spec). Turn content arrives through separate `item.completed` notifications during the turn. codex-team normalizes `turn.completed`'s payload to a summary (`turn_id`, `status`, `started_at`, `completed_at`, `duration_ms`, `item_count`, and the raw `turn`) and drops the empty `items`.
+The wire-level `turn.completed` notification does include a `Turn` object, but its `items` field is always empty (per protocol spec). Turn content arrives through separate `item.completed` notifications during the turn. codex-team normalizes `turn.completed`'s payload to a compact summary in 0.5.2: `{turn_id, status, duration_ms, items_count, token_usage, ended_at, turn_items_included: false}`. The raw `Turn` object and its empty `items` array are intentionally dropped to keep the event log small.
 
 **Mitigation**: collect items via `item.completed` events during the turn; `turn.completed` is a boundary marker, not a content source.
 

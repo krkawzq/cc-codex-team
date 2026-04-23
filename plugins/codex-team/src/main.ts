@@ -3,6 +3,9 @@ import path from "node:path";
 
 import { runCli } from "./cli/run";
 import { runDaemon } from "./daemon/run";
+import { CodexTeamError } from "./errors";
+
+const DAEMON_STDERR_PATH_ENV = "CODEX_TEAM_DAEMON_STDERR_PATH";
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -12,8 +15,13 @@ async function main(): Promise<void> {
   const daemonIdx = argv.indexOf("--daemon-internal");
   if (daemonIdx >= 0) {
     argv.splice(daemonIdx, 1);
-    if (stderrPath) redirectProcessStderr(stderrPath);
-    const code = await runDaemon();
+    if (stderrPath) {
+      process.env[DAEMON_STDERR_PATH_ENV] = stderrPath;
+      redirectProcessStderr(stderrPath);
+    } else {
+      delete process.env[DAEMON_STDERR_PATH_ENV];
+    }
+    const code = await runDaemonWithBootstrapReporting();
     process.exit(code);
   }
 
@@ -25,6 +33,25 @@ main().catch((e) => {
   process.stderr.write(`fatal: ${(e as Error).message ?? e}\n`);
   process.exit(1);
 });
+
+async function runDaemonWithBootstrapReporting(): Promise<number> {
+  try {
+    return await runDaemon();
+  } catch (e) {
+    writeDaemonBootstrapError(e);
+    return 1;
+  }
+}
+
+function writeDaemonBootstrapError(error: unknown): void {
+  const payload = error instanceof CodexTeamError
+    ? { code: error.code, message: error.message, ...(error.data !== undefined ? { data: error.data } : {}) }
+    : {
+        code: "internal",
+        message: error instanceof Error ? error.message : String(error),
+      };
+  process.stderr.write(`[codex-team-daemon-bootstrap] ${JSON.stringify(payload)}\n`);
+}
 
 function takeOptionValue(argv: string[], flag: string): string | null {
   const idx = argv.indexOf(flag);

@@ -10,7 +10,11 @@ const sockMocks = vi.hoisted(() => ({
 const processMocks = vi.hoisted(() => ({
   spawn: vi.fn(() => ({
     unref: vi.fn(),
+    once: vi.fn(),
+    off: vi.fn(),
+    removeListener: vi.fn(),
   })),
+  spawnSync: vi.fn(),
 }));
 
 vi.mock("../src/ipc/sock", () => sockMocks);
@@ -23,6 +27,10 @@ vi.mock("../src/daemon/config", () => ({
       if (key === "daemon.connect_retry_attempts") return 3;
       if (key === "daemon.connect_retry_delay_seconds") return 0.25;
       return null;
+    }
+
+    resolvedDataDir() {
+      return "/tmp/.codex-team";
     }
   },
 }));
@@ -193,6 +201,106 @@ describe("runCli", () => {
     expect(code).toBe(0);
     expect(stdoutSpy).toHaveBeenCalledWith("evt-9\n");
     expect(stdoutSpy).not.toHaveBeenCalledWith(expect.stringContaining("\"ok\":true"));
+  });
+
+  it("emits concise JSON by default for successful responses", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            token: "token-1",
+            created_at: "2026-04-23T00:00:00.000Z",
+            last_active_at: "2026-04-23T00:01:00.000Z",
+            live_sessions: 2,
+            retained_events: 4,
+            retained_limit: 10,
+            pending_requests: 1,
+            app_server_count: 3,
+            daemon: {
+              pid: 77,
+              started_at: "2026-04-23T00:59:00.000Z",
+              data_dir: "/tmp/data",
+            },
+          },
+        });
+      }, 0);
+    });
+
+    const code = await runCli(["-b", "token-1", "status"]);
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      "{\"ok\":true,\"data\":{\"token\":\"token-1\",\"live_sessions\":2,\"retained_events\":4,\"retained_limit\":10,\"pending_requests\":1,\"app_server_count\":3}}\n",
+    );
+  });
+
+  it("restores the full JSON body with --full", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            token: "token-1",
+            created_at: "2026-04-23T00:00:00.000Z",
+            last_active_at: "2026-04-23T00:01:00.000Z",
+            live_sessions: 2,
+            retained_events: 4,
+            retained_limit: 10,
+            pending_requests: 1,
+            app_server_count: 3,
+            daemon: {
+              pid: 77,
+              started_at: "2026-04-23T00:59:00.000Z",
+              data_dir: "/tmp/data",
+            },
+          },
+        });
+      }, 0);
+    });
+
+    const code = await runCli(["-b", "token-1", "status", "--full"]);
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      "{\"ok\":true,\"data\":{\"token\":\"token-1\",\"created_at\":\"2026-04-23T00:00:00.000Z\",\"last_active_at\":\"2026-04-23T00:01:00.000Z\",\"live_sessions\":2,\"retained_events\":4,\"retained_limit\":10,\"pending_requests\":1,\"app_server_count\":3,\"daemon\":{\"pid\":77,\"started_at\":\"2026-04-23T00:59:00.000Z\",\"data_dir\":\"/tmp/data\"}}}\n",
+    );
+  });
+
+  it("rejects --short and --full together before contacting the daemon", async () => {
+    const code = await runCli(["-b", "token-1", "status", "--short", "--full"]);
+
+    expect(code).toBe(1);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("--short and --full are mutually exclusive"));
+    expect(sockMocks.probeSock).not.toHaveBeenCalled();
   });
 
   it("emits one compact line for successful --short responses", async () => {
@@ -553,6 +661,44 @@ describe("runCli", () => {
     });
   });
 
+  it("does not ack monitor chunks marked non-ackable", async () => {
+    let streamHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+      destroyed: false,
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      streamHandler = handler;
+    });
+
+    const pending = runCli(["-b", "token-1", "monitor", "events", "--stream"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const reqId = sockMocks.writeMessage.mock.calls[0]?.[1]?.id;
+
+    streamHandler?.({
+      kind: "stream_chunk",
+      id: reqId,
+      data: { id: "monitor-overflow-1", type: "monitor.overflow", ackable: false },
+    });
+    streamHandler?.({
+      kind: "stream_end",
+      id: reqId,
+    });
+
+    const code = await pending;
+
+    expect(code).toBe(0);
+    expect(sockMocks.writeMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("emits raw markdown stream chunks for message tail --follow --format markdown", async () => {
     let streamHandler: ((msg: Record<string, unknown>) => void) | undefined;
     const socket = {
@@ -600,6 +746,121 @@ describe("runCli", () => {
     expect(stdoutSpy).not.toHaveBeenCalledWith(
       expect.stringContaining("\"markdown\""),
     );
+  });
+
+  it("renders session logs follow chunks in short mode", async () => {
+    let streamHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      streamHandler = handler;
+    });
+
+    const pending = runCli(["-b", "token-1", "session", "logs", "audit", "--follow", "--short"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const reqId = sockMocks.writeMessage.mock.calls[0]?.[1]?.id;
+
+    streamHandler?.({
+      kind: "stream_chunk",
+      id: reqId,
+      data: {
+        session: "audit",
+        lines: [{ ts: "2026-04-23T12:00:00.000Z", stream: "stderr", line: "boom" }],
+      },
+    });
+    streamHandler?.({
+      kind: "stream_end",
+      id: reqId,
+    });
+
+    const code = await pending;
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith("2026-04-23T12:00:00.000Z stderr boom\n");
+    expect(stdoutSpy).not.toHaveBeenCalledWith(expect.stringContaining("\"lines\""));
+  });
+
+  it("routes session health --all to the fleet RPC shape", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementationOnce((_sock, req: { id: string; method: string }) => {
+      expect(req.method).toBe("session:health:all");
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            summary: { total: 1, healthy: 1, crashed: 0, closed: 0, busy: 0, pending_total: 0 },
+            sessions: [{ session: "audit", thread_id: "th-1", state: "live", busy: false, app_server_alive: true }],
+          },
+        });
+      }, 0);
+    });
+
+    const code = await runCli(["-b", "token-1", "session", "health", "--all"]);
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      "{\"ok\":true,\"data\":{\"summary\":{\"total\":1,\"healthy\":1,\"crashed\":0,\"closed\":0,\"busy\":0,\"pending_total\":0},\"sessions\":[{\"session\":\"audit\",\"thread_id\":\"th-1\",\"state\":\"live\",\"busy\":false,\"app_server_alive\":true}]}}\n",
+    );
+  });
+
+  it("streams session events even without --follow", async () => {
+    let streamHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      streamHandler = handler;
+    });
+
+    const pending = runCli(["-b", "token-1", "session", "events", "audit", "--limit", "1"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sockMocks.writeMessage.mock.calls[0]?.[1]?.method).toBe("session:events");
+    const reqId = sockMocks.writeMessage.mock.calls[0]?.[1]?.id;
+
+    streamHandler?.({
+      kind: "stream_chunk",
+      id: reqId,
+      data: { id: "evt-2", type: "turn.completed", session: "audit" },
+    });
+    streamHandler?.({
+      kind: "stream_end",
+      id: reqId,
+    });
+
+    const code = await pending;
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith("{\"id\":\"evt-2\",\"type\":\"turn.completed\",\"session\":\"audit\"}\n");
   });
 
   it("maps message wait outcomes to CLI exit codes", async () => {

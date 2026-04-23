@@ -5,26 +5,35 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/codex/rpc", () => ({
+  threadArchive: vi.fn(),
   threadFork: vi.fn(),
   threadIdOf: vi.fn((resp: { thread: { id: string } }) => resp.thread.id),
+  threadLoadedList: vi.fn(),
   threadList: vi.fn(),
+  threadRename: vi.fn(),
   threadRead: vi.fn(),
-    threadResume: vi.fn(),
+  threadResume: vi.fn(),
   threadSetName: vi.fn(),
   threadStart: vi.fn(),
+  threadTurnsList: vi.fn(),
+  threadUnarchive: vi.fn(),
   threadUnsubscribe: vi.fn(),
   turnInterrupt: vi.fn(),
 }));
 
-import { sessionAttach, sessionDetach, sessionFork, sessionNew } from "../src/daemon/handlers/session";
+import { sessionAttach, sessionDetach, sessionFork, sessionList, sessionNew, sessionRename } from "../src/daemon/handlers/session";
 import {
   threadFork,
+  threadList,
   threadResume,
   threadStart,
   threadSetName,
   threadUnsubscribe,
   turnInterrupt,
 } from "../src/codex/rpc";
+import { PendingRegistry } from "../src/daemon/pending";
+import { TurnQueues } from "../src/daemon/queues";
+import { SessionRegistry } from "../src/daemon/sessions";
 
 function makeReq(method: string, positionals: string[], flags: Record<string, unknown> = {}) {
   return {
@@ -55,8 +64,10 @@ describe("session handlers", () => {
   it("maps session:new flags into supported thread/start params", async () => {
     const basePath = path.join(tmpRoot, "base.md");
     const devPath = path.join(tmpRoot, "dev.md");
+    const projectDir = path.join(tmpRoot, "project");
     fs.writeFileSync(basePath, "base instructions");
     fs.writeFileSync(devPath, "developer instructions");
+    fs.mkdirSync(projectDir);
 
     vi.mocked(threadStart).mockResolvedValue({
       thread: { id: "th-1" },
@@ -85,7 +96,7 @@ describe("session handlers", () => {
 
     await sessionNew(ctx as never, makeReq("session:new", ["sess-1"], {
       model: "gpt-5.4",
-      cwd: "/tmp/project",
+      cwd: projectDir,
       sandbox: "workspace-write",
       approval: "on-request",
       effort: "high",
@@ -99,7 +110,7 @@ describe("session handlers", () => {
     const params = vi.mocked(threadStart).mock.calls[0]?.[1] as Record<string, unknown>;
     expect(params).toMatchObject({
       model: "gpt-5.4",
-      cwd: "/tmp/project",
+      cwd: projectDir,
       sandbox: "workspace-write",
       approvalPolicy: "on-request",
       baseInstructions: "base instructions",
@@ -263,7 +274,7 @@ describe("session handlers", () => {
       queues: {
         beginTeardown: vi.fn().mockResolvedValue({ currentTurnId: "turn-1" }),
         waitForIdle: vi.fn().mockResolvedValue(undefined),
-        dispose: vi.fn(),
+        finalDispose: vi.fn(),
       },
       pending: {
         listForUser: vi.fn().mockReturnValue([pendingEntry]),
@@ -279,7 +290,7 @@ describe("session handlers", () => {
 
     expect(vi.mocked(turnInterrupt)).toHaveBeenCalledWith({}, "th-1", "turn-1", {});
     expect(vi.mocked(threadUnsubscribe)).toHaveBeenCalledWith({}, "th-1", {});
-    expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
+    expect(ctx.queues.finalDispose).toHaveBeenCalledWith("user-1::sess-1");
     expect(pendingClient.respondError).toHaveBeenCalledWith(42, -32000, "session detached");
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
       type: "approval.request_cancelled",
@@ -319,7 +330,7 @@ describe("session handlers", () => {
       queues: {
         beginTeardown: vi.fn().mockResolvedValue({ currentTurnId: "turn-1" }),
         waitForIdle: vi.fn().mockImplementation(() => idlePromise),
-        dispose: vi.fn(),
+        finalDispose: vi.fn(),
       },
       pending: {
         removeForSession: vi.fn().mockReturnValue([]),
@@ -340,6 +351,68 @@ describe("session handlers", () => {
     await detachPromise;
 
     expect(vi.mocked(threadUnsubscribe)).toHaveBeenCalledWith({}, "th-1", {});
+  });
+
+  it("rekeys queue and pending runtime state on rename", async () => {
+    vi.mocked(threadSetName).mockResolvedValue(undefined as never);
+    const dataDir = path.join(tmpRoot, "rename-state");
+    const sessions = new SessionRegistry(dataDir, { persistDebounceMs: 0 });
+    const queues = new TurnQueues();
+    const pending = new PendingRegistry();
+
+    sessions.add("user-1", {
+      name: "foo",
+      thread_id: "th-1",
+      state: "live",
+      autoApprovePatterns: [],
+      created_at: "2025-01-01T00:00:00.000Z",
+      last_active_at: "2025-01-01T00:00:00.000Z",
+      turn_count: 0,
+    });
+    queues.setCurrentTurn("user-1::foo", "turn-1");
+    pending.add({
+      kind: "approval.permissions",
+      client: {} as never,
+      jsonrpc_id: 7,
+      user: "user-1",
+      session_name: "foo",
+      thread_id: "th-1",
+      turn_id: "turn-1",
+      raw: {},
+    });
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions,
+      pool: {
+        clientForSession: vi.fn().mockReturnValue({}),
+        rekeySession: vi.fn(),
+      },
+      queues,
+      pending,
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    const result = await sessionRename(ctx as never, makeReq("session:rename", ["foo", "bar"]) as never);
+
+    expect(result).toMatchObject({
+      session: {
+        name: "bar",
+        thread_id: "th-1",
+      },
+    });
+    expect(queues.getCurrentTurn("user-1::foo")).toBeNull();
+    expect(queues.getCurrentTurn("user-1::bar")).toBe("turn-1");
+    expect(pending.listForUser("user-1")).toEqual([
+      expect.objectContaining({
+        session_name: "bar",
+        thread_id: "th-1",
+      }),
+    ]);
+
+    await sessions.flush();
   });
 
   it("rejects ambiguous cross-user session names", async () => {
@@ -411,7 +484,7 @@ describe("session handlers", () => {
       },
       queues: {
         beginTeardown: vi.fn().mockResolvedValue({ currentTurnId: null }),
-        dispose: vi.fn(),
+        finalDispose: vi.fn(),
       },
       pending: {
         removeForSession: vi.fn().mockReturnValue([]),
@@ -479,6 +552,125 @@ describe("session handlers", () => {
     expect(ctx.sessions.add).not.toHaveBeenCalled();
   });
 
+  it("passes pagination flags through session list --all", async () => {
+    vi.mocked(threadList).mockResolvedValue({
+      data: [],
+      nextCursor: "cursor-2",
+    } as never);
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions: {
+        findLiveAnywhere: vi.fn().mockReturnValue(null),
+      },
+      pool: {
+        acquireForAdhoc: vi.fn().mockResolvedValue({}),
+        clientForSession: vi.fn().mockReturnValue(null),
+      },
+      queues: {
+        getCurrentTurn: vi.fn().mockReturnValue(null),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    const result = await sessionList(ctx as never, makeReq("session:list", [], {
+      all: true,
+      cursor: "cursor-1",
+      limit: "10",
+    }) as never);
+
+    expect(vi.mocked(threadList)).toHaveBeenCalledWith({}, {
+      cursor: "cursor-1",
+      pageSize: 10,
+      includeArchived: false,
+    }, {});
+    expect(result).toMatchObject({
+      next_cursor: "cursor-2",
+      all: true,
+    });
+  });
+
+  it("filters mixed thread states for session list --all", async () => {
+    vi.mocked(threadList).mockResolvedValue({
+      data: [
+        { id: "th-live", name: "live-thread" },
+        { id: "th-crashed", name: "crashed-thread" },
+        { id: "th-closed", name: "closed-thread" },
+        { id: "th-archived", name: "archived-thread", status: "archived" },
+        { id: "th-closed-2", name: "closed-thread-2" },
+      ],
+      nextCursor: null,
+    } as never);
+
+    const liveByThread = new Map([
+      ["th-live", {
+        user: "user-1",
+        record: {
+          name: "live",
+          thread_id: "th-live",
+          state: "live",
+          model: "gpt-5.4",
+          turn_count: 3,
+          current_turn_id: "turn-1",
+          last_active_at: "2025-01-01T00:00:05.000Z",
+        },
+      }],
+      ["th-crashed", {
+        user: "user-1",
+        record: {
+          name: "crashed",
+          thread_id: "th-crashed",
+          state: "crashed",
+          model: "gpt-5.4-mini",
+          turn_count: 1,
+          current_turn_id: null,
+          last_active_at: "2025-01-01T00:00:04.000Z",
+        },
+      }],
+    ]);
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions: {
+        findLiveAnywhere: vi.fn((threadId: string) => liveByThread.get(threadId) ?? null),
+      },
+      pool: {
+        acquireForAdhoc: vi.fn().mockResolvedValue({}),
+        clientForSession: vi.fn().mockReturnValue({ isAlive: () => true }),
+      },
+      queues: {
+        getCurrentTurn: vi.fn().mockReturnValue(null),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    const result = await sessionList(ctx as never, makeReq("session:list", [], {
+      all: true,
+      state: "live,crashed",
+      archived: "include",
+      owner: "any",
+    }) as never) as { sessions: Array<Record<string, unknown>> };
+
+    expect(result.sessions).toEqual([
+      expect.objectContaining({
+        name: "live",
+        thread_id: "th-live",
+        state: "live",
+        busy: true,
+      }),
+      expect.objectContaining({
+        name: "crashed",
+        thread_id: "th-crashed",
+        state: "crashed",
+        busy: false,
+      }),
+    ]);
+  });
+
   it("releases the acquired client if attach loses the registry add race after resume", async () => {
     vi.mocked(threadResume).mockResolvedValue(undefined as never);
 
@@ -509,7 +701,7 @@ describe("session handlers", () => {
       },
       queues: {
         beginTeardown: vi.fn().mockResolvedValue({ currentTurnId: null }),
-        dispose: vi.fn(),
+        finalDispose: vi.fn(),
       },
       pending: {
         removeForSession: vi.fn().mockReturnValue([]),

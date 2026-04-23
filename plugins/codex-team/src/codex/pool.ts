@@ -1,6 +1,12 @@
 import { EventEmitter } from "node:events";
 
-import { AppServerClient, type AppServerOptions, type ServerNotification, type ServerRequest } from "./appServerClient";
+import {
+  AppServerClient,
+  type AppServerLogLine,
+  type AppServerOptions,
+  type ServerNotification,
+  type ServerRequest,
+} from "./appServerClient";
 import { logger } from "../logger";
 
 export interface PoolOptions {
@@ -57,11 +63,23 @@ interface Managed {
   closeReason: PoolClientClose["reason"] | null;
 }
 
+export interface SessionClientBinding {
+  appServerId: string;
+  pid: number | null;
+}
+
+export interface ClosedSessionLogs extends SessionClientBinding {
+  closedAt: string;
+  stderrTail: AppServerLogLine[];
+  stdoutTail: AppServerLogLine[];
+}
+
 export class AppServerPool extends EventEmitter {
   private readonly options: PoolOptions;
   private readonly byUser = new Map<string, Managed[]>();
   private readonly byClient = new Map<string, Managed>();
   private readonly bySession = new Map<string, Managed>();
+  private readonly closedLogsBySession = new Map<string, ClosedSessionLogs>();
   private readonly inFlightAcquireBySession = new Map<string, Promise<AppServerClient>>();
   private nextClientId = 1;
   private shuttingDown = false;
@@ -109,12 +127,14 @@ export class AppServerPool extends EventEmitter {
     if (managed) {
       managed.sessions.add(sessionKey);
       this.bySession.set(sessionKey, managed);
+      this.closedLogsBySession.delete(sessionKey);
       return managed.client;
     }
 
     const fresh = await this.spawn(user, clientOptions);
     fresh.sessions.add(sessionKey);
     this.bySession.set(sessionKey, fresh);
+    this.closedLogsBySession.delete(sessionKey);
     return fresh.client;
   }
 
@@ -123,6 +143,7 @@ export class AppServerPool extends EventEmitter {
     if (!m) return;
     m.sessions.delete(sessionKey);
     this.bySession.delete(sessionKey);
+    this.closedLogsBySession.delete(sessionKey);
   }
 
   rekeySession(oldKey: string, newKey: string): void {
@@ -133,6 +154,11 @@ export class AppServerPool extends EventEmitter {
     m.sessions.add(newKey);
     this.bySession.delete(oldKey);
     this.bySession.set(newKey, m);
+    const closed = this.closedLogsBySession.get(oldKey);
+    if (closed) {
+      this.closedLogsBySession.delete(oldKey);
+      this.closedLogsBySession.set(newKey, cloneClosedSessionLogs(closed));
+    }
   }
 
   async acquireForAdhoc(user: string, clientOptions?: AppServerOptions): Promise<AppServerClient> {
@@ -154,8 +180,18 @@ export class AppServerPool extends EventEmitter {
     return m ? m.client : null;
   }
 
+  sessionBinding(sessionKey: string): SessionClientBinding | null {
+    const m = this.bySession.get(sessionKey);
+    return m ? { appServerId: m.id, pid: m.client.pid() } : null;
+  }
+
   clientById(clientId: string): AppServerClient | null {
     return this.byClient.get(clientId)?.client ?? null;
+  }
+
+  closedLogsForSession(sessionKey: string): ClosedSessionLogs | null {
+    const snapshot = this.closedLogsBySession.get(sessionKey);
+    return snapshot ? cloneClosedSessionLogs(snapshot) : null;
   }
 
   listClients(): ClientTag[] {
@@ -181,6 +217,7 @@ export class AppServerPool extends EventEmitter {
     this.byUser.clear();
     this.byClient.clear();
     this.bySession.clear();
+    this.closedLogsBySession.clear();
   }
 
   async closeUser(user: string): Promise<void> {
@@ -224,8 +261,22 @@ export class AppServerPool extends EventEmitter {
       const sessions = Array.from(managed.sessions);
       const reason = managed.closeReason ?? (this.shuttingDown ? "shutdown" : "unexpected");
       managed.closeReason = null;
+      const closedLogs = {
+        appServerId: id,
+        pid: client.pid(),
+        closedAt: new Date().toISOString(),
+        stderrTail: client.stderrTail(),
+        stdoutTail: client.stdoutTail(),
+      };
       for (const s of sessions) this.bySession.delete(s);
       managed.sessions.clear();
+      if (reason === "unexpected") {
+        for (const sessionKey of sessions) {
+          this.closedLogsBySession.set(sessionKey, cloneClosedSessionLogs(closedLogs));
+        }
+      } else {
+        for (const sessionKey of sessions) this.closedLogsBySession.delete(sessionKey);
+      }
       const list = this.byUser.get(user);
       if (list) {
         const idx = list.indexOf(managed);
@@ -256,4 +307,14 @@ export class AppServerPool extends EventEmitter {
     this.byClient.set(id, managed);
     return managed;
   }
+}
+
+function cloneClosedSessionLogs(value: ClosedSessionLogs): ClosedSessionLogs {
+  return {
+    appServerId: value.appServerId,
+    pid: value.pid,
+    closedAt: value.closedAt,
+    stderrTail: value.stderrTail.map((entry) => ({ ...entry })),
+    stdoutTail: value.stdoutTail.map((entry) => ({ ...entry })),
+  };
 }

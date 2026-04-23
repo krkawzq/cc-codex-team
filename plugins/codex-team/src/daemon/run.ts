@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { CodexTeamError } from "../errors";
 import type { DaemonContext } from "./context";
 import { buildContext } from "./context";
 import { ConfigStore } from "./config";
@@ -11,6 +12,7 @@ import {
 } from "./events";
 import { cancelPendingWithEvent, pendingRequestsForSession } from "./pending-cancel";
 import { startServer } from "./server";
+import { probeSocketBind } from "../ipc/socket-bind-probe";
 import { probeSock, unlinkSockIfStale } from "../ipc/sock";
 import { logger } from "../logger";
 import { APP, homeDir, pidFilePath, warnLegacyWindowsDataDir } from "../paths";
@@ -20,6 +22,7 @@ import { reapOrphans } from "./orphans";
 import { isLikelyCodexTeamDaemonProcess } from "./processes";
 
 const APP_SERVER_CRASHED_ON_RESTART_REASON = "app_server_crashed_on_restart";
+const DAEMON_STDERR_PATH_ENV = "CODEX_TEAM_DAEMON_STDERR_PATH";
 
 export async function runDaemon(): Promise<number> {
   const config = new ConfigStore();
@@ -27,6 +30,13 @@ export async function runDaemon(): Promise<number> {
     config,
     cursors: new CursorStore(config.resolvedDataDir()),
   });
+
+  const socketBindPreflight = await probeSocketBind(ctx.sockPath);
+  if (!socketBindPreflight.ok) {
+    writeSocketBindPreflightFailure(socketBindPreflight.error, socketBindPreflight.probedPath);
+    return 1;
+  }
+
   warnLegacyWindowsDataDir((warning) => {
     logger.warn(warning.message);
   });
@@ -65,7 +75,7 @@ export async function runDaemon(): Promise<number> {
   } catch (e) {
     logger.error("failed to start server", { err: (e as Error).message });
     try { fs.unlinkSync(pidPath); } catch { /* ignore */ }
-    return 1;
+    throw translateBootstrapError(e, ctx.sockPath);
   }
 
   scheduleIdleShutdown(ctx);
@@ -314,4 +324,85 @@ function sleep(ms: number): Promise<void> {
     const timer = setTimeout(resolve, ms);
     timer.unref();
   });
+}
+
+function translateBootstrapError(error: unknown, sockPath: string): Error {
+  if (error instanceof CodexTeamError) return error;
+
+  const err = error as NodeJS.ErrnoException;
+  if (err?.code === "EPERM" || err?.code === "EACCES") {
+    return new CodexTeamError(
+      "socket_bind_denied",
+      `local Unix socket bind denied by environment (error: ${err.code}). codex-team requires socket bind for daemon IPC - likely running in a restricted sandbox.`,
+      {
+        error: err.code,
+        sock_path: sockPath,
+        suggested_action: "run `codex-team doctor` to diagnose",
+      },
+    );
+  }
+
+  if (error instanceof Error) return error;
+  return new Error(String(error));
+}
+
+interface SocketBindPreflightPayload {
+  ts: string;
+  level: "error";
+  msg: string;
+  kind: "socket_bind_denied" | "socket_bind_error";
+  errno: string;
+  probed_path: string;
+}
+
+function writeSocketBindPreflightFailure(error: NodeJS.ErrnoException | undefined, probedPath: string): void {
+  const line = JSON.stringify(buildSocketBindPreflightPayload(error, probedPath)) + "\n";
+  const stderrPath = process.env[DAEMON_STDERR_PATH_ENV];
+
+  if (stderrPath) {
+    try {
+      fs.mkdirSync(path.dirname(stderrPath), { recursive: true });
+      fs.appendFileSync(stderrPath, line, "utf8");
+      return;
+    } catch {
+      // Fall through to stderr if the capture file is unavailable.
+    }
+  }
+
+  if (typeof process.stderr.fd === "number") {
+    try {
+      fs.writeSync(process.stderr.fd, line);
+      return;
+    } catch {
+      // Fall through to the standard stream wrapper.
+    }
+  }
+
+  process.stderr.write(line);
+}
+
+function buildSocketBindPreflightPayload(
+  error: NodeJS.ErrnoException | undefined,
+  probedPath: string,
+): SocketBindPreflightPayload {
+  const errno = error?.code ?? "UNKNOWN";
+  if (errno === "EPERM" || errno === "EACCES") {
+    return {
+      ts: new Date().toISOString(),
+      level: "error",
+      msg: "socket bind denied",
+      kind: "socket_bind_denied",
+      errno,
+      probed_path: probedPath,
+    };
+  }
+
+  return {
+    ts: new Date().toISOString(),
+    level: "error",
+    msg: error?.message ?? "socket bind probe failed",
+    kind: "socket_bind_error",
+    errno,
+    probed_path: probedPath,
+  };
 }

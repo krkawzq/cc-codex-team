@@ -7,12 +7,14 @@ describe("renderHelp", () => {
     const help = renderHelp([]);
 
     expect(help).toContain("version");
+    expect(help).toContain("doctor");
     expect(help).toContain("status");
     expect(help).toContain("daemon");
     expect(help).toContain("session");
     expect(help).toContain("message");
     expect(help).toContain("monitor");
     expect(help).toContain("cursor");
+    expect(help).toContain("Default JSON output is concise.");
   });
 
   it("renders session new flags from the schema", () => {
@@ -43,10 +45,44 @@ describe("renderHelp", () => {
   it("documents --short for compact status commands", () => {
     expect(renderHelp(["status"])).toContain("--short");
     expect(renderHelp(["daemon", "status"])).toContain("--short");
+    expect(renderHelp(["daemon", "fleet", "status"])).toContain("--users");
     expect(renderHelp(["daemon", "user", "list"])).toContain("--short");
     expect(renderHelp(["session", "info"])).toContain("--short");
+    const sessionList = renderHelp(["session", "list"]);
+    expect(sessionList).toContain("cannot be used with --format table");
+    expect(sessionList).toContain("--cursor");
+    expect(sessionList).toContain("--limit");
+    expect(sessionList).toContain("--archived");
+    expect(sessionList).toContain("--state");
+    expect(sessionList).toContain("--owner");
+    expect(sessionList).toContain("--loaded-only");
+    expect(renderHelp(["session", "health"])).toContain("--only-unhealthy");
     expect(renderHelp(["session", "list"])).toContain("cannot be used with --format table");
     expect(renderHelp(["message", "history"])).toContain("cannot be used with --format markdown");
+    expect(renderHelp(["session", "logs"])).toContain("--short");
+  });
+
+  it("documents --full on leaf commands", () => {
+    expect(renderHelp(["status"])).toContain("--full");
+    expect(renderHelp(["daemon", "config", "get"])).toContain("--full");
+    expect(renderHelp(["session", "new"])).toContain("--full");
+    expect(renderHelp(["message", "send"])).toContain("--full");
+    expect(renderHelp(["cursor", "save"])).toContain("--full");
+  });
+
+  it("renders doctor help with all diagnostic checks", () => {
+    const help = renderHelp(["doctor"]);
+
+    expect(help).toContain("codex-team doctor");
+    expect(help).toContain("--short");
+    expect(help).toContain("node version");
+    expect(help).toContain("codex binary");
+    expect(help).toContain("plugin launcher");
+    expect(help).toContain("daemon.data_dir writable");
+    expect(help).toContain("local socket bind");
+    expect(help).toContain("daemon process state");
+    expect(help).toContain("daemon socket reachability");
+    expect(help).toContain("dist freshness");
   });
 
   it("marks monitor events stream and interval flags as mutually exclusive", () => {
@@ -75,6 +111,8 @@ describe("renderHelp", () => {
     const health = renderHelp(["session", "health"]);
     expect(health).toContain("codex-team session health");
     expect(health).toContain("session heal");
+    expect(health).toContain("--all");
+    expect(health).toContain("--state");
 
     const heal = renderHelp(["session", "heal"]);
     expect(heal).toContain("codex-team session heal");
@@ -86,6 +124,45 @@ describe("renderHelp", () => {
     expect(wait).toContain("--for");
     expect(wait).toContain("--timeout");
     expect(wait).toContain("If the session is idle, waits for the next turn");
+  });
+
+  it("renders the lifecycle session archive, unarchive, rename, and rollback commands", () => {
+    const archive = renderHelp(["session", "archive"]);
+    expect(archive).toContain("codex-team session archive");
+    expect(archive).toContain("--and-detach");
+
+    const unarchive = renderHelp(["session", "unarchive"]);
+    expect(unarchive).toContain("codex-team session unarchive");
+    expect(unarchive).toContain("Fails if the thread is currently live.");
+
+    const rename = renderHelp(["session", "rename"]);
+    expect(rename).toContain("--detached-ok");
+
+    const rollback = renderHelp(["session", "rollback"]);
+    expect(rollback).toContain("codex-team session rollback");
+    expect(rollback).toContain("--to-turn");
+    expect(rollback).toContain("--detach-after");
+  });
+
+  it("renders daemon fleet and session events help entries", () => {
+    const fleet = renderHelp(["daemon", "fleet", "status"]);
+    expect(fleet).toContain("codex-team daemon fleet status");
+    expect(fleet).toContain("--users");
+    expect(fleet).toContain("--short");
+
+    const events = renderHelp(["session", "events"]);
+    expect(events).toContain("codex-team session events");
+    expect(events).toContain("--type");
+    expect(events).toContain("--since");
+    expect(events).toContain("--follow");
+    expect(events).toContain("--by-tool");
+    expect(events).toContain("--by-item-kind");
+
+    const logs = renderHelp(["session", "logs"]);
+    expect(logs).toContain("codex-team session logs");
+    expect(logs).toContain("--stream");
+    expect(logs).toContain("--truncate");
+    expect(logs).toContain("state=crashed");
   });
 
   it("renders cursor subcommands and the explicit event-id flag", () => {

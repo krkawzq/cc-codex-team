@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CursorStore } from "../src/daemon/cursors";
+import { CursorStore, readCursorLock, reclaimStaleCursorLock, verifyCursorLockOwnership } from "../src/daemon/cursors";
 import { cursorDelete, cursorGet, cursorList, cursorSave } from "../src/daemon/handlers/cursor";
 
 function makeReq(method: string, positionals: string[] = [], flags: Record<string, unknown> = {}, bearer = "user-1") {
@@ -155,6 +155,83 @@ describe("CursorStore and cursor handlers", () => {
       event_id: "evt-9",
     }));
     expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it("allows only one concurrent stale-lock reclaim to succeed", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-cursors-"));
+    dirs.push(dir);
+    const userPath = path.join(dir, "users", "dXNlci0x");
+    const lockPath = path.join(userPath, "cursors.json.lock");
+
+    fs.mkdirSync(userPath, { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999999,
+      started_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      host: "stale-host",
+    }));
+
+    const [first, second] = await Promise.all([
+      reclaimStaleCursorLock(lockPath),
+      reclaimStaleCursorLock(lockPath),
+    ]);
+    const heldLocks = [first, second].filter((lease): lease is NonNullable<typeof lease> => lease !== null);
+
+    expect(heldLocks).toHaveLength(1);
+    expect(first === null || second === null).toBe(true);
+    expect(await verifyCursorLockOwnership(lockPath, heldLocks[0]!.record)).toBe(true);
+
+    await heldLocks[0]!.release();
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it("verifies reclaimed lock ownership and aborts when another record wins the path", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-cursors-"));
+    dirs.push(dir);
+    const userPath = path.join(dir, "users", "dXNlci0x");
+    const lockPath = path.join(userPath, "cursors.json.lock");
+
+    fs.mkdirSync(userPath, { recursive: true });
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999999,
+      started_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      host: "stale-host",
+    }));
+
+    const lease = await reclaimStaleCursorLock(lockPath);
+    expect(lease).not.toBeNull();
+    expect(await readCursorLock(lockPath)).toEqual(expect.objectContaining({
+      pid: process.pid,
+      nonce: lease!.record.nonce,
+    }));
+    expect(await verifyCursorLockOwnership(lockPath, lease!.record)).toBe(true);
+    await lease!.release();
+
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: 999999,
+      started_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      host: "stale-host",
+    }));
+    const otherRecord = {
+      pid: process.pid,
+      started_at: new Date().toISOString(),
+      host: "other-host",
+      nonce: "other-nonce",
+    };
+    const originalReadFile = fs.promises.readFile.bind(fs.promises);
+    let lockReadCount = 0;
+    vi.spyOn(fs.promises, "readFile").mockImplementation((async (...args: Parameters<typeof fs.promises.readFile>) => {
+      if (args[0] === lockPath) {
+        lockReadCount += 1;
+        if (lockReadCount === 2) {
+          fs.writeFileSync(lockPath, JSON.stringify(otherRecord));
+          return JSON.stringify(otherRecord);
+        }
+      }
+      return await originalReadFile(...args);
+    }) as typeof fs.promises.readFile);
+
+    await expect(reclaimStaleCursorLock(lockPath)).resolves.toBeNull();
+    expect(await readCursorLock(lockPath)).toEqual(expect.objectContaining(otherRecord));
   });
 
   it("rejects save when the final rename fails", async () => {

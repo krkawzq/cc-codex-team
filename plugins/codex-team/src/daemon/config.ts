@@ -20,6 +20,12 @@ function enumSpec(values: string[], def: string, needsRestart: boolean, desc: st
   return { type: "enum", enumValues: values, default: def, needsRestart, description: desc };
 }
 
+function positiveIntValidator(value: ConfigValue): string | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? null
+    : "expected positive integer";
+}
+
 export const CONFIG_KEYS: Record<string, ConfigSpec> = {
   "daemon.idle_shutdown_hours": { type: "int", default: 6, needsRestart: false, description: "idle auto-shutdown threshold (hours)" },
   "daemon.log_level": enumSpec(["error", "warn", "info", "debug", "trace"], "info", false, "log verbosity"),
@@ -32,7 +38,10 @@ export const CONFIG_KEYS: Record<string, ConfigSpec> = {
   "daemon.connect_retry_delay_seconds": { type: "float", default: 0.25, needsRestart: false, description: "delay between transient daemon connect retries" },
 
   "monitor.default_interval_seconds": { type: "int", default: 30, needsRestart: false, description: "default --interval for `monitor events`" },
+  "monitor.cursor_persist_debounce_ms": { type: "int", default: 200, needsRestart: false, description: "debounce for cursor auto-updates from `monitor events` (milliseconds)" },
   "monitor.event_log_retention": { type: "int", default: 10000, needsRestart: false, description: "per-user ring-buffer event retention" },
+  "monitor.alarm_output_cap_bytes": { type: "int", default: 16384, needsRestart: false, description: "per-stream capture cap for `monitor alarm` stdout/stderr", validate: positiveIntValidator },
+  "session.persist_debounce_ms": { type: "int", default: 50, needsRestart: false, description: "debounce for persisting coarse session metadata" },
   "session.auto_approve_command_patterns": {
     type: "string",
     default: "",

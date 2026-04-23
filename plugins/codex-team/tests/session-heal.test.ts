@@ -5,13 +5,17 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/codex/rpc", () => ({
+  threadArchive: vi.fn(),
   threadFork: vi.fn(),
   threadIdOf: vi.fn((resp: { thread: { id: string } }) => resp.thread.id),
   threadList: vi.fn(),
+  threadRename: vi.fn(),
   threadRead: vi.fn(),
   threadResume: vi.fn(),
   threadSetName: vi.fn(),
   threadStart: vi.fn(),
+  threadTurnsList: vi.fn(),
+  threadUnarchive: vi.fn(),
   threadUnsubscribe: vi.fn(),
   turnInterrupt: vi.fn(),
 }));
@@ -234,6 +238,54 @@ describe("sessionHeal", () => {
       pending_approvals: 0,
       pending_user_inputs: 0,
     });
+  });
+
+  it("rejects heal before respawn when the persisted cwd is no longer a directory", async () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const sessionRoot = path.join(dir, "session-root");
+    fs.mkdirSync(sessionRoot);
+    fs.rmSync(sessionRoot, { recursive: true, force: true });
+    fs.writeFileSync(sessionRoot, "replaced");
+
+    const sessions = new SessionRegistry(dir);
+    sessions.add("user-1", {
+      name: "sess-1",
+      thread_id: "th-1",
+      state: "crashed",
+      cwd: sessionRoot,
+      created_at: "2025-01-01T00:00:00.000Z",
+      last_active_at: "2025-01-01T00:00:00.000Z",
+      turn_count: 2,
+      crash_reason: "app-server process exited unexpectedly",
+      ...sessionRuntimeDefaults(),
+    });
+    await sessions.flush();
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+        touch: vi.fn(),
+      },
+      sessions,
+      pool: {
+        clientForSession: vi.fn().mockReturnValue(null),
+        release: vi.fn(),
+        acquire: vi.fn(),
+      },
+      queues: {
+        dispose: vi.fn(),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    await expect(sessionHeal(ctx as never, makeReq() as never)).rejects.toMatchObject({
+      code: "invalid_params",
+      message: `session's cwd '${sessionRoot}' is not a directory (it is a file)`,
+    });
+    expect(ctx.pool.release).not.toHaveBeenCalled();
+    expect(ctx.pool.acquire).not.toHaveBeenCalled();
+    expect(vi.mocked(threadResume)).not.toHaveBeenCalled();
   });
 
   it("rejects unexpected persisted session states", async () => {

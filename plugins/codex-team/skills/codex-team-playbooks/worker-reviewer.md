@@ -30,9 +30,12 @@ cd /repo
 mkdir -p .codex-team
 echo "$BRIEF" > .codex-team/brief.md
 
-codex-team -b $TOK session new worker   --profile fixer    --cwd "$(pwd)" \
+# fixer + reviewer profiles (see configure-codex-team/profiles-library.md)
+codex-team -b $TOK session new worker --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high \
   --auto-approve 'git*,npm test,vitest*'
-codex-team -b $TOK session new reviewer --profile reviewer --cwd "$(pwd)"
+codex-team -b $TOK session new reviewer --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
 
 # Arm events Monitor
 codex-team -b $TOK monitor events --stream --summary --cursor wr-tail

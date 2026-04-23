@@ -11,7 +11,7 @@ import { monitorEvents } from "../src/daemon/handlers/monitor";
 class FakeStream {
   chunks: unknown[] = [];
   endedWith: unknown = null;
-  private closeCb: (() => void) | null = null;
+  private closeCb: (() => void | Promise<void>) | null = null;
   private ackCb: ((ack: { event_id: string | null }) => void) | null = null;
 
   chunk(data: unknown): void {
@@ -22,7 +22,7 @@ class FakeStream {
     this.endedWith = error ?? "ended";
   }
 
-  onClose(cb: () => void): void {
+  onClose(cb: () => void | Promise<void>): void {
     this.closeCb = cb;
   }
 
@@ -30,8 +30,8 @@ class FakeStream {
     this.ackCb = cb;
   }
 
-  close(): void {
-    this.closeCb?.();
+  async close(): Promise<void> {
+    await this.closeCb?.();
   }
 
   ack(eventId: string): void {
@@ -47,6 +47,17 @@ function makeReq(flags: Record<string, unknown> = {}, bearer = "user-1") {
     bearer,
     params: {
       flags,
+    },
+  };
+}
+
+function makeConfig(values: Record<string, unknown> = {}) {
+  return {
+    getEffective(key: string): unknown {
+      if (key in values) return values[key];
+      if (key === "monitor.default_interval_seconds") return 30;
+      if (key === "monitor.cursor_persist_debounce_ms") return 200;
+      return null;
     },
   };
 }
@@ -84,7 +95,7 @@ describe("monitor events --cursor", () => {
 
     await monitorEvents({
       users: { has: () => true },
-      config: { getEffective: () => 30 },
+      config: makeConfig(),
       events,
       cursors,
     } as never, makeReq({ stream: true, cursor: "audit-tail" }) as never, stream as never);
@@ -145,7 +156,9 @@ describe("monitor events --cursor", () => {
 
     await monitorEvents({
       users: { has: () => true },
-      config: { getEffective: () => 1 },
+      config: makeConfig({
+        "monitor.default_interval_seconds": 1,
+      }),
       events,
       cursors,
     } as never, makeReq({ interval: "1", cursor: "audit-tail" }) as never, stream as never);
@@ -161,6 +174,132 @@ describe("monitor events --cursor", () => {
     expect(new CursorStore(dir).get("user-1", "audit-tail")).toEqual(expect.objectContaining({
       name: "audit-tail",
       event_id: "evt-2",
+      auto_update: true,
+    }));
+  });
+
+  it("does not persist synthetic overflow ids and marks them non-ackable", async () => {
+    vi.useFakeTimers();
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-monitor-cursor-"));
+    dirs.push(dir);
+    const cursors = new CursorStore(dir);
+    const stream = new FakeStream();
+    let subscriber: ((event: Record<string, unknown>) => void) | null = null;
+
+    await monitorEvents({
+      users: { has: () => true },
+      config: makeConfig({
+        "monitor.default_interval_seconds": 1,
+      }),
+      events: {
+        listSince: () => ({ ok: true, events: [] }),
+        subscribe: (_user: string, cb: (event: Record<string, unknown>) => void) => {
+          subscriber = cb;
+          return { dispose() {} };
+        },
+      },
+      cursors,
+    } as never, makeReq({ interval: "1", cursor: "audit-tail", "include-delta": true }) as never, stream as never);
+
+    for (let i = 0; i < 600; i++) {
+      subscriber?.({
+        id: `evt-${i + 1}`,
+        ts: "2025-01-01T00:00:00.000Z",
+        type: "turn.completed",
+        session: "sess-1",
+        thread_id: "th-1",
+        payload: { i },
+      });
+    }
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersToNextTimerAsync();
+
+    const overflow = stream.chunks[0] as { id: string; type: string; ackable?: boolean };
+    expect(overflow).toMatchObject({
+      type: "monitor.overflow",
+      ackable: false,
+    });
+
+    stream.ack(overflow.id);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(250);
+    await cursors.clearUser("user-1");
+
+    expect(new CursorStore(dir).get("user-1", "audit-tail")).toEqual(expect.objectContaining({
+      name: "audit-tail",
+      event_id: null,
+      auto_update: true,
+    }));
+  });
+
+  it("coalesces bursts of acked cursor updates into at most two rewrites", async () => {
+    vi.useFakeTimers();
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-monitor-cursor-"));
+    dirs.push(dir);
+    const cursors = new CursorStore(dir);
+    const stream = new FakeStream();
+
+    await monitorEvents({
+      users: { has: () => true },
+      config: makeConfig({
+        "monitor.cursor_persist_debounce_ms": 200,
+      }),
+      events: {
+        listSince: () => ({ ok: true, events: [] }),
+        subscribe: () => ({ dispose() {} }),
+      },
+      cursors,
+    } as never, makeReq({ stream: true, cursor: "audit-tail" }) as never, stream as never);
+
+    const renameSpy = vi.spyOn(fs.promises, "rename");
+    for (let i = 1; i <= 100; i++) {
+      stream.ack(`evt-${i}`);
+    }
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(renameSpy).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(200);
+    await stream.close();
+    await cursors.clearUser("user-1");
+
+    expect(renameSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(renameSpy.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(new CursorStore(dir).get("user-1", "audit-tail")).toEqual(expect.objectContaining({
+      event_id: "evt-100",
+    }));
+  });
+
+  it("flushes a pending cursor update when the stream closes", async () => {
+    vi.useFakeTimers();
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-monitor-cursor-"));
+    dirs.push(dir);
+    const cursors = new CursorStore(dir);
+    const stream = new FakeStream();
+
+    await monitorEvents({
+      users: { has: () => true },
+      config: makeConfig({
+        "monitor.cursor_persist_debounce_ms": 500,
+      }),
+      events: {
+        listSince: () => ({ ok: true, events: [] }),
+        subscribe: () => ({ dispose() {} }),
+      },
+      cursors,
+    } as never, makeReq({ stream: true, cursor: "audit-tail" }) as never, stream as never);
+
+    stream.ack("evt-42");
+    await stream.close();
+    await cursors.clearUser("user-1");
+
+    expect(new CursorStore(dir).get("user-1", "audit-tail")).toEqual(expect.objectContaining({
+      name: "audit-tail",
+      event_id: "evt-42",
       auto_update: true,
     }));
   });
@@ -186,7 +325,7 @@ describe("monitor events --cursor", () => {
 
     await monitorEvents({
       users: { has: () => true },
-      config: { getEffective: () => 30 },
+      config: makeConfig(),
       events,
       cursors,
     } as never, makeReq({ stream: true, cursor: "audit-tail" }) as never, stream as never);
@@ -199,7 +338,7 @@ describe("monitor events --cursor", () => {
     });
     await Promise.resolve();
 
-    stream.close();
+    await stream.close();
     await cursors.clearUser("user-1");
 
     expect(new CursorStore(dir).get("user-1", "audit-tail")).toEqual(expect.objectContaining({

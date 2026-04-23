@@ -43,11 +43,15 @@ cat > .codex-team/partition.json <<'EOF'
 EOF
 
 N=$(jq length .codex-team/partition.json)
+# mappers use fixer profile; reducer uses reviewer profile
+# (see configure-codex-team/profiles-library.md for the full library)
 for i in $(seq 0 $((N-1))); do
-  codex-team -b $TOK session new "mapper-$i" --profile fixer --cwd "$(pwd)" \
+  codex-team -b $TOK session new "mapper-$i" --cwd "$(pwd)" \
+    --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high \
     --auto-approve 'git*,npm test,vitest*'
 done
-codex-team -b $TOK session new reducer --profile reviewer --cwd "$(pwd)"
+codex-team -b $TOK session new reducer --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
 codex-team -b $TOK monitor events --stream --summary --cursor mapreduce-tail
 ```
 

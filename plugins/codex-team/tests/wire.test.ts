@@ -16,9 +16,11 @@ class FakePool extends EventEmitter {
   acquire = vi.fn();
 }
 
+const idleDrainResult = { turn_id: null, queue_id: null, failed: false, dropped: [] };
+
 function makeContext(pool: FakePool, overrides: Record<string, unknown> = {}) {
   let eventSeq = 0;
-  return {
+  const base = {
     pool,
     sessions: {
       get: vi.fn().mockReturnValue({
@@ -43,11 +45,14 @@ function makeContext(pool: FakePool, overrides: Record<string, unknown> = {}) {
     },
     queues: {
       setCurrentTurn: vi.fn(),
-      onTurnCompleted: vi.fn().mockResolvedValue({ turn_id: null, queue_id: null, failed: false }),
+      onTurnCompleted: vi.fn().mockResolvedValue(idleDrainResult),
+      onTurnErrored: vi.fn().mockResolvedValue(idleDrainResult),
       isTeardown: vi.fn().mockReturnValue(false),
+      markTeardown: vi.fn(),
       onClientClosed: vi.fn(),
       getCurrentTurn: vi.fn().mockReturnValue(null),
       depth: vi.fn().mockReturnValue(0),
+      finalDispose: vi.fn(),
       dispose: vi.fn(),
     },
     pending: {
@@ -59,7 +64,22 @@ function makeContext(pool: FakePool, overrides: Record<string, unknown> = {}) {
       add: vi.fn(),
     },
     retryOptions: vi.fn().mockReturnValue({}),
+  };
+
+  const typedOverrides = overrides as {
+    sessions?: Record<string, unknown>;
+    events?: Record<string, unknown>;
+    queues?: Record<string, unknown>;
+    pending?: Record<string, unknown>;
+  };
+
+  return {
+    ...base,
     ...overrides,
+    sessions: { ...base.sessions, ...(typedOverrides.sessions ?? {}) },
+    events: { ...base.events, ...(typedOverrides.events ?? {}) },
+    queues: { ...base.queues, ...(typedOverrides.queues ?? {}) },
+    pending: { ...base.pending, ...(typedOverrides.pending ?? {}) },
   };
 }
 
@@ -99,11 +119,7 @@ describe("wireDaemonEvents", () => {
     pool.clientForSession.mockReturnValue({});
     const ctx = makeContext(pool, {
       queues: {
-        setCurrentTurn: vi.fn(),
-        onTurnCompleted: vi.fn().mockResolvedValue({ turn_id: "turn-2", queue_id: "q-1", failed: false }),
-        isTeardown: vi.fn().mockReturnValue(false),
-        onClientClosed: vi.fn(),
-        dispose: vi.fn(),
+        onTurnCompleted: vi.fn().mockResolvedValue({ turn_id: "turn-2", queue_id: "q-1", failed: false, dropped: [] }),
       },
     });
 
@@ -140,16 +156,13 @@ describe("wireDaemonEvents", () => {
     pool.clientForSession.mockReturnValue({});
     const ctx = makeContext(pool, {
       queues: {
-        setCurrentTurn: vi.fn(),
         onTurnCompleted: vi.fn().mockResolvedValue({
           turn_id: null,
           queue_id: "q-1",
           failed: true,
           error_message: "overloaded",
+          dropped: [],
         }),
-        isTeardown: vi.fn().mockReturnValue(false),
-        onClientClosed: vi.fn(),
-        dispose: vi.fn(),
       },
     });
 
@@ -180,6 +193,186 @@ describe("wireDaemonEvents", () => {
           message: "overloaded",
         },
       },
+    }));
+  });
+
+  it("emits turn.queued_dropped before resuming the next queued turn", async () => {
+    const pool = new FakePool();
+    pool.clientForSession.mockReturnValue({});
+    const ctx = makeContext(pool, {
+      queues: {
+        onTurnCompleted: vi.fn().mockResolvedValue({
+          turn_id: "turn-3",
+          queue_id: "q-2",
+          failed: false,
+          dropped: [
+            {
+              queue_id: "q-1",
+              error_message: "overloaded",
+              failure_count: 3,
+            },
+          ],
+        }),
+      },
+    });
+
+    wireDaemonEvents(ctx as never);
+
+    pool.emit("notification", {
+      user: "user-1",
+      clientId: "client-1",
+      notification: {
+        method: "turn/completed",
+        params: {
+          threadId: "th-1",
+          turn: { id: "turn-1", status: "completed", items: [] },
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+        type: "turn.queued_dropped",
+        session: "sess-1",
+        thread_id: "th-1",
+        payload: {
+          queue_id: "q-1",
+          error: {
+            message: "overloaded",
+          },
+          failure_count: 3,
+        },
+      }));
+      expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+        type: "turn.queued_started",
+        session: "sess-1",
+        thread_id: "th-1",
+        payload: {
+          turn_id: "turn-3",
+          queue_id: "q-2",
+        },
+      }));
+    });
+  });
+
+  it("passes willRetry=false turn errors into the queue error handler", async () => {
+    const pool = new FakePool();
+    pool.clientForSession.mockReturnValue({});
+    const ctx = makeContext(pool, {
+      sessions: {
+        get: vi.fn().mockReturnValue({
+          name: "sess-1",
+          thread_id: "th-1",
+          state: "live",
+          turn_count: 0,
+          current_turn_id: "turn-1",
+          current_turn_started_at: "2025-01-01T00:00:00.000Z",
+          items_in_turn: 1,
+          pending_approvals: 0,
+          pending_user_inputs: 0,
+          experimental_tools: ["ask-user-question"],
+        }),
+      },
+      queues: {
+        onTurnErrored: vi.fn().mockResolvedValue(idleDrainResult),
+      },
+    });
+
+    wireDaemonEvents(ctx as never);
+
+    pool.emit("notification", {
+      user: "user-1",
+      clientId: "client-1",
+      notification: {
+        method: "turn/error",
+        params: {
+          threadId: "th-1",
+          turnId: "turn-1",
+          willRetry: false,
+          error: {
+            message: "failed",
+          },
+        },
+      },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ctx.queues.onTurnErrored).toHaveBeenCalledWith(
+      "user-1::sess-1",
+      "turn-1",
+      { willRetry: false },
+      {},
+      "th-1",
+      {},
+    );
+    expect(ctx.sessions.update).toHaveBeenCalledWith("user-1", "sess-1", expect.objectContaining({
+      current_turn_id: null,
+      current_turn_started_at: null,
+      items_in_turn: 0,
+    }));
+  });
+
+  it("passes willRetry=true turn errors into the queue error handler without clearing the active turn", async () => {
+    const pool = new FakePool();
+    pool.clientForSession.mockReturnValue({});
+    const ctx = makeContext(pool, {
+      sessions: {
+        get: vi.fn().mockReturnValue({
+          name: "sess-1",
+          thread_id: "th-1",
+          state: "live",
+          turn_count: 0,
+          current_turn_id: "turn-1",
+          current_turn_started_at: "2025-01-01T00:00:00.000Z",
+          items_in_turn: 2,
+          pending_approvals: 0,
+          pending_user_inputs: 0,
+          experimental_tools: ["ask-user-question"],
+        }),
+      },
+      queues: {
+        onTurnErrored: vi.fn().mockResolvedValue({ turn_id: "turn-2", queue_id: "q-1", failed: false, dropped: [] }),
+      },
+    });
+
+    wireDaemonEvents(ctx as never);
+
+    pool.emit("notification", {
+      user: "user-1",
+      clientId: "client-1",
+      notification: {
+        method: "turn/error",
+        params: {
+          threadId: "th-1",
+          turnId: "turn-1",
+          willRetry: true,
+          error: {
+            message: "retrying",
+          },
+        },
+      },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ctx.queues.onTurnErrored).toHaveBeenCalledWith(
+      "user-1::sess-1",
+      "turn-1",
+      { willRetry: true },
+      {},
+      "th-1",
+      {},
+    );
+    expect(ctx.sessions.update).toHaveBeenCalledWith("user-1", "sess-1", expect.objectContaining({
+      current_turn_id: "turn-1",
+      current_turn_started_at: "2025-01-01T00:00:00.000Z",
+      items_in_turn: 2,
+    }));
+    expect(ctx.events.append).not.toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "turn.queued_started",
     }));
   });
 
@@ -319,11 +512,7 @@ describe("wireDaemonEvents", () => {
     const respondError = vi.fn();
     const ctx = makeContext(pool, {
       queues: {
-        setCurrentTurn: vi.fn(),
-        onTurnCompleted: vi.fn().mockResolvedValue({ turn_id: null, queue_id: null, failed: false }),
         isTeardown: vi.fn().mockReturnValue(true),
-        onClientClosed: vi.fn(),
-        dispose: vi.fn(),
       },
     });
 
@@ -349,7 +538,7 @@ describe("wireDaemonEvents", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(respondError).toHaveBeenCalledWith(-32000, "session detached");
+    expect(respondError).toHaveBeenCalledWith(-32000, "session torn down");
     expect(ctx.pending.add).not.toHaveBeenCalled();
   });
 
@@ -370,13 +559,9 @@ describe("wireDaemonEvents", () => {
     };
     const ctx = makeContext(pool, {
       queues: {
-        setCurrentTurn: vi.fn(),
-        onTurnCompleted: vi.fn().mockResolvedValue({ turn_id: null, queue_id: null, failed: false }),
-        isTeardown: vi.fn().mockReturnValue(false),
-        onClientClosed: vi.fn(),
+        onTurnCompleted: vi.fn().mockResolvedValue(idleDrainResult),
         getCurrentTurn: vi.fn().mockReturnValue("turn-1"),
         depth: vi.fn().mockReturnValue(0),
-        dispose: vi.fn(),
       },
       pending: {
         removeForSession: vi.fn().mockReturnValue([]),
@@ -473,7 +658,8 @@ describe("wireDaemonEvents", () => {
 
     expect(vi.mocked(threadUnsubscribe)).toHaveBeenCalledWith({}, "th-1", {});
     expect(pool.release).toHaveBeenCalledWith("user-1::sess-1");
-    expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
+    expect(ctx.queues.markTeardown).toHaveBeenCalledWith("user-1::sess-1");
+    expect(ctx.queues.finalDispose).toHaveBeenCalledWith("user-1::sess-1");
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
       type: "session.closed",
       session: "sess-1",

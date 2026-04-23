@@ -7,11 +7,21 @@ export function formatShort(method: string, data: unknown): string {
     case "status":
       body = formatStatus(data);
       break;
+    case "daemon:fleet:status":
+      body = formatDaemonFleetStatus(data);
+      break;
     case "daemon:status":
       body = formatDaemonStatus(data);
       break;
     case "daemon:user:list":
       body = formatDaemonUserList(data);
+      break;
+    case "session:health":
+    case "session:health:all":
+      body = formatSessionHealth(data);
+      break;
+    case "session:logs":
+      body = formatSessionLogs(data);
       break;
     case "session:info":
       body = formatSessionInfo(data);
@@ -63,6 +73,27 @@ function formatDaemonStatus(data: unknown): string {
   ].join(" ");
 }
 
+function formatDaemonFleetStatus(data: unknown): string {
+  const value = asObject(data);
+  const users = Array.isArray(value.per_user) ? value.per_user : [];
+  if (users.length === 0) return "(no users)";
+
+  return users
+    .map((entry) => {
+      const user = asObject(entry);
+      return [
+        `user=${formatScalar(user.token)}`,
+        `live=${formatCount(user.live)}`,
+        `busy=${formatCount(user.busy)}`,
+        `pending=${formatCount(user.pending)}`,
+        `crashed=${formatCount(user.crashed)}`,
+        `last_event=${formatNullableScalar(asString(user.last_event_id))}`,
+        `last_seen=${formatFleetAge(user)}`,
+      ].join(" ");
+    })
+    .join("\n");
+}
+
 function formatDaemonAge(data: Record<string, unknown>): string {
   if (typeof data.uptime_s === "number" && Number.isFinite(data.uptime_s)) {
     return humanizeMs(data.uptime_s * 1000);
@@ -91,6 +122,16 @@ function formatSessionInfo(data: unknown): string {
   ].join(" ");
 }
 
+function formatSessionHealth(data: unknown): string {
+  const value = asObject(data);
+  const sessions = Array.isArray(value.sessions) ? value.sessions : null;
+  if (sessions) {
+    if (sessions.length === 0) return "(no sessions)";
+    return sessions.map((entry) => formatSessionHealthEntry(asObject(entry))).join("\n");
+  }
+  return formatSessionHealthEntry(value);
+}
+
 function formatSessionList(data: unknown): string {
   const value = asObject(data);
   const sessions = Array.isArray(value.sessions) ? value.sessions : [];
@@ -108,6 +149,22 @@ function formatSessionList(data: unknown): string {
         formatScalar(session.model ?? session.model_provider),
         `busy=${busyFlag(session.busy, turnId, turn, turnIdKnown)}`,
       ].join("  ");
+    })
+    .join("\n");
+}
+
+function formatSessionLogs(data: unknown): string {
+  const value = asObject(data);
+  const lines = Array.isArray(value.lines) ? value.lines : [];
+  if (lines.length === 0) return "(no logs)";
+  return lines
+    .map((entry) => {
+      const line = asObject(entry);
+      return [
+        formatScalar(line.ts),
+        formatScalar(line.stream),
+        formatScalar(line.line),
+      ].join(" ");
     })
     .join("\n");
 }
@@ -149,10 +206,27 @@ function formatMessageHistory(data: unknown): string {
     .join("\n");
 }
 
+function formatSessionHealthEntry(session: Record<string, unknown>): string {
+  return [
+    formatScalar(session.session ?? session.name),
+    `state=${formatScalar(session.state)}`,
+    `busy=${busyFlag(session.busy, asString(session.current_turn_id), null, hasOwn(session, "current_turn_id"))}`,
+    `pending=${formatCount(numericValue(session.pending_approval_requests) + numericValue(session.pending_user_input_requests))}`,
+    `app_server=${booleanFlag(session.app_server_alive)}`,
+    `turn=${formatNullableScalar(asString(session.current_turn_id))}`,
+  ].join(" ");
+}
+
 function formatAgeFromDateish(value: unknown): string {
   const date = parseDate(value);
   if (!date) return "unknown";
   return humanizeMs(Math.max(0, Date.now() - date.getTime()));
+}
+
+function formatFleetAge(value: Record<string, unknown>): string {
+  const ageSeconds = asFiniteNumber(value.last_activity_age_s);
+  if (ageSeconds !== null) return humanizeMs(ageSeconds * 1000);
+  return formatAgeFromDateish(value.last_active_at ?? value.created_at);
 }
 
 function humanizeMs(ms: number): string {
@@ -334,6 +408,16 @@ function formatScalar(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (typeof value === "boolean") return value ? "true" : "false";
   return "unknown";
+}
+
+function booleanFlag(value: unknown): string {
+  if (value === true) return "y";
+  if (value === false) return "n";
+  return "unknown";
+}
+
+function numericValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 export function shortTokenPrefix(token: unknown): string {

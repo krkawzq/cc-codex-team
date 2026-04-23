@@ -6,7 +6,7 @@ import type net from "node:net";
 
 import { connectSock, probeSock, writeMessage, onMessages } from "../ipc/sock";
 import type { IpcMessage, IpcRequest } from "../ipc/protocol";
-import { defaultDataDir, defaultSockPath, warnLegacyWindowsDataDir } from "../paths";
+import { defaultSockPath, isFilesystemSockPath, normalizeSockPath, pidFilePath, warnLegacyWindowsDataDir } from "../paths";
 import { parseArgs, commandKey, supportsShort, type ParsedArgs } from "./args";
 import { renderHelp } from "./help";
 import { err, ok } from "../result";
@@ -14,13 +14,19 @@ import { ConfigStore } from "../daemon/config";
 import { validateApprovalAction } from "./approval-validation";
 import { VERSION } from "../version";
 import { formatShort } from "../format/short";
+import { formatCompact } from "../format/compact";
+import { runDoctor } from "./doctor";
 
 const DAEMON_POLL_INTERVAL_MS = 100;
 const DEFAULT_DAEMON_READY_TIMEOUT_MS = 15000;
 const DEFAULT_DAEMON_CONNECT_TIMEOUT_MS = 5000;
 const DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS = 3;
 const DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS = 250;
+const DEFAULT_CLI_STDOUT_MAX_BYTES = 4 * 1024 * 1024;
 const DAEMON_STDERR_FLAG = "--stderr-to";
+const DOCTOR_SUGGESTED_ACTION = "run `codex-team doctor` to diagnose";
+const SOCKET_BIND_DENIED_SUGGESTED_ACTION =
+  "codex-team cannot bind a local IPC socket here — run `codex-team doctor` for details";
 
 export async function readStdinAll(): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
@@ -45,15 +51,21 @@ export async function runCli(argv: string[]): Promise<number> {
     return 0;
   }
 
-  warnLegacyWindowsDataDir((warning) => {
-    process.stderr.write(warning.message + "\n");
-  });
-
   const method = commandKey(parsed.commandPath);
+  if (method !== "doctor") {
+    warnLegacyWindowsDataDir((warning) => {
+      process.stderr.write(warning.message + "\n");
+    });
+  }
+  const effectiveMethod = resolveMethod(method, parsed);
   const short = truthy(parsed.flags.short);
   const format = flagString(parsed.flags.format);
-  if (short && !supportsShort(method)) {
+  if (short && !supportsShort(effectiveMethod)) {
     process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
+    return 1;
+  }
+  if (method === "doctor" && truthy(parsed.flags.full)) {
+    process.stdout.write(JSON.stringify(err("invalid_params", `--full is not supported for '${method}'`)) + "\n");
     return 1;
   }
   if (short && (format === "markdown" || format === "table")) {
@@ -62,11 +74,15 @@ export async function runCli(argv: string[]): Promise<number> {
   }
   const sockPath = parsed.daemonSock || defaultSockPath();
 
+  if (method === "doctor") {
+    return await runDoctor({ short, sockPath });
+  }
+
   if (method === "version") {
     return await runVersion(sockPath);
   }
 
-  const needsBearer = !isDaemonLevel(method);
+  const needsBearer = !isDaemonLevel(effectiveMethod);
   if (needsBearer && !parsed.bearer) {
     process.stdout.write(
       JSON.stringify(err("invalid_params", `bearer token required for '${method}'; pass -b <token>`)) + "\n",
@@ -74,7 +90,7 @@ export async function runCli(argv: string[]): Promise<number> {
     return 1;
   }
 
-  const cliValidationError = validateCliFlags(parsed, method);
+  const cliValidationError = validateCliFlags(parsed, method, effectiveMethod);
   if (cliValidationError) {
     process.stdout.write(JSON.stringify(err("invalid_params", cliValidationError)) + "\n");
     return 1;
@@ -88,11 +104,11 @@ export async function runCli(argv: string[]): Promise<number> {
 
   const ready = await ensureDaemon(sockPath);
   if (!ready.ok) {
-    process.stdout.write(JSON.stringify(err("daemon_unreachable", ready.message)) + "\n");
+    process.stdout.write(JSON.stringify(err(ready.code, ready.message, ready.data)) + "\n");
     return 1;
   }
 
-  return await dispatchCommand(sockPath, parsed, method);
+  return await dispatchCommand(sockPath, parsed, effectiveMethod);
 }
 
 function isDaemonLevel(method: string): boolean {
@@ -134,8 +150,10 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
   const cliConfig = readCliConfig();
   const needsStreaming =
     method === "monitor:events" ||
+    method === "session:events" ||
     method === "monitor:alarm" ||
     method === "daemon:logs" ||
+    (method === "session:logs" && truthy(parsed.flags["follow"] ?? parsed.flags["f"])) ||
     (method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]));
 
   // Forward stdin if caller used --stdin
@@ -185,7 +203,8 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
       process.stdout.write(markdown + "\n");
       return exitCodeForResult(method, resp.result);
     }
-    process.stdout.write(JSON.stringify({ ok: true, data: resp.result }) + "\n");
+    const rendered = truthy(parsed.flags.full) ? resp.result : formatCompact(method, resp.result);
+    process.stdout.write(JSON.stringify({ ok: true, data: rendered }) + "\n");
     return exitCodeForResult(method, resp.result);
   } catch (e) {
     process.stdout.write(
@@ -196,9 +215,31 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
 }
 
 function exitCodeForResult(method: string, result: unknown): number {
-  if (method !== "message:wait" || !result || typeof result !== "object") return 0;
-  const outcome = (result as Record<string, unknown>).outcome;
-  if (outcome === "error") return 1;
+  if (!result || typeof result !== "object") return 0;
+
+  if (method === "message:send-many" || method === "session:detach") {
+    const results = (result as Record<string, unknown>).results;
+    if (Array.isArray(results) && results.some((entry) => entry && typeof entry === "object" && (entry as Record<string, unknown>).ok === false)) {
+      return 1;
+    }
+    return 0;
+  }
+
+  if (method !== "message:wait") return 0;
+  const value = result as Record<string, unknown>;
+  const outcomes = Array.isArray(value.outcomes)
+    ? value.outcomes
+        .map((entry) => entry && typeof entry === "object" ? (entry as Record<string, unknown>).outcome : null)
+        .filter((entry): entry is string => typeof entry === "string")
+    : [];
+  if (outcomes.length > 0) {
+    if (outcomes.includes("error") || outcomes.includes("interrupted")) return 1;
+    if (outcomes.includes("timeout")) return 124;
+    return 0;
+  }
+
+  const outcome = value.outcome;
+  if (outcome === "error" || outcome === "interrupted") return 1;
   if (outcome === "timeout") return 124;
   return 0;
 }
@@ -206,10 +247,15 @@ function exitCodeForResult(method: string, result: unknown): number {
 async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): Promise<number> {
   return await new Promise<number>((resolve) => {
     let finished = false;
-    const stdoutQueue: Array<{ line: string; afterWrite?: () => void }> = [];
+    const stdoutQueue: Array<{ line: string; bytes: number; afterWrite?: () => void }> = [];
     const pendingFinalizers: Array<() => void> = [];
+    const stdoutMaxBytes = readCliStdoutMaxBytes();
+    const stdoutResumeBytes = Math.max(1, Math.floor(stdoutMaxBytes / 2));
     let stdoutBlocked = false;
     let socketPaused = false;
+    let queuePaused = false;
+    let stdoutQueueBytes = 0;
+    let parserControl: { resume(): void } | null = null;
     const finish = (code: number) => {
       if (finished) return;
       finished = true;
@@ -218,10 +264,21 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
       process.off("SIGBREAK", onInterrupt);
       resolve(code);
     };
+    const pauseSocket = () => {
+      if (socketPaused || typeof sock.pause !== "function") return;
+      socketPaused = true;
+      sock.pause();
+    };
     const maybeResumeSocket = () => {
-      if (!socketPaused) return;
+      if (!socketPaused || stdoutBlocked || queuePaused) return;
       socketPaused = false;
       if (typeof sock.resume === "function") sock.resume();
+    };
+    const maybeResumeParser = () => {
+      if (!queuePaused || stdoutBlocked || stdoutQueueBytes >= stdoutResumeBytes) return;
+      queuePaused = false;
+      maybeResumeSocket();
+      parserControl?.resume();
     };
     const flushFinalizers = () => {
       if (stdoutBlocked || stdoutQueue.length > 0) return;
@@ -234,29 +291,41 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
         const ok = process.stdout.write(next.line);
         if (!ok) {
           stdoutBlocked = true;
-          if (!socketPaused && typeof sock.pause === "function") {
-            socketPaused = true;
-            sock.pause();
-          }
+          pauseSocket();
           process.stdout.once("drain", () => {
             stdoutBlocked = false;
             const flushed = stdoutQueue.shift();
+            stdoutQueueBytes = Math.max(0, stdoutQueueBytes - (flushed?.bytes ?? 0));
             flushed?.afterWrite?.();
-            maybeResumeSocket();
+            maybeResumeParser();
             flushStdout();
             flushFinalizers();
           });
           return;
         }
         stdoutQueue.shift();
+        stdoutQueueBytes = Math.max(0, stdoutQueueBytes - next.bytes);
         next.afterWrite?.();
       }
+      maybeResumeParser();
       maybeResumeSocket();
       flushFinalizers();
     };
-    const writeStdout = (line: string, afterWrite?: () => void) => {
-      stdoutQueue.push({ line, afterWrite });
+    const writeStdout = (line: string, afterWrite?: () => void): boolean => {
+      const bytes = Buffer.byteLength(line);
+      stdoutQueue.push({ line, bytes, afterWrite });
+      stdoutQueueBytes += bytes;
+      let shouldContinueParsing = true;
+      if (stdoutQueueBytes > stdoutMaxBytes) {
+        queuePaused = true;
+        shouldContinueParsing = false;
+        pauseSocket();
+        queueMicrotask(() => {
+          maybeResumeParser();
+        });
+      }
       flushStdout();
+      return shouldContinueParsing;
     };
     const afterStdout = (cb: () => void) => {
       pendingFinalizers.push(cb);
@@ -278,14 +347,17 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
       params,
     };
 
-    onMessages(sock, (msg) => {
+    parserControl = onMessages(sock, (msg) => {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
         const ackAfterWrite = createStreamAckCallback(method, sock, reqId, msg.data);
         const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
-        if (markdown !== null) {
-          writeStdout(markdown + "\n", ackAfterWrite);
+        if (truthy(parsed.flags.short)) {
+          return writeStdout(formatShort(method, msg.data) + "\n", ackAfterWrite);
+        } else if (markdown !== null) {
+          return writeStdout(markdown + "\n", ackAfterWrite);
         } else {
-          writeStdout(JSON.stringify(msg.data) + "\n", ackAfterWrite);
+          const rendered = truthy(parsed.flags.full) ? msg.data : formatCompact(method, msg.data);
+          return writeStdout(JSON.stringify(rendered) + "\n", ackAfterWrite);
         }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
@@ -391,43 +463,77 @@ async function requestOnceWithRetry(
 
 interface EnsureDaemonResult {
   ok: boolean;
+  code: string;
   message: string;
+  data?: unknown;
 }
 
 async function ensureDaemon(sockPath: string): Promise<EnsureDaemonResult> {
   const cliConfig = readCliConfig();
+  const config = new ConfigStore();
+  const dataDir = config.resolvedDataDir();
+  const pidPath = pidFilePath(dataDir);
+  const stderrPath = daemonSpawnStderrPath(dataDir);
   if (await probeSock(sockPath, 200)) {
-    return { ok: true, message: "" };
+    return { ok: true, code: "", message: "" };
+  }
+
+  const staleState = detectStaleDaemonArtifacts(sockPath, pidPath);
+  if (staleState) {
+    return {
+      ok: false,
+      code: "daemon_unreachable",
+      message: `stale daemon.pid + daemon.sock (pid ${staleState.pid} is not running); remove them and retry`,
+      data: {
+        pid_path: pidPath,
+        sock_path: staleState.sockPath,
+        pid: staleState.pid,
+      },
+    };
   }
 
   try {
-    spawnDaemon();
-    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
-      return { ok: true, message: "" };
+    const child = spawnDaemon();
+    const firstAttempt = await waitForDaemonReady(sockPath, child, cliConfig.readyTimeoutMs);
+    if (firstAttempt.ready) {
+      return { ok: true, code: "", message: "" };
     }
   } catch (e) {
     return {
       ok: false,
+      code: "daemon_unreachable",
       message: `failed to spawn daemon: ${(e as Error).message}`,
     };
   }
 
-  const stderrPath = daemonSpawnStderrPath();
   try {
-    spawnDaemon(stderrPath);
-    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
-      return { ok: true, message: "" };
+    const child = spawnDaemon(stderrPath);
+    const secondAttempt = await waitForDaemonReady(sockPath, child, cliConfig.readyTimeoutMs);
+    if (secondAttempt.ready) {
+      return { ok: true, code: "", message: "" };
+    }
+    if (secondAttempt.exited) {
+      return buildEarlyExitFailure(stderrPath, secondAttempt);
     }
   } catch (e) {
     return {
       ok: false,
+      code: "daemon_unreachable",
       message: `failed to spawn daemon with stderr capture: ${(e as Error).message}`,
     };
   }
 
+  const stderrTail = readTail(stderrPath, 4096);
+  const parsedBootstrap = parseBootstrapStderr(stderrTail);
+  if (parsedBootstrap?.code === "socket_bind_denied") {
+    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
+  }
+
   return {
     ok: false,
+    code: "daemon_unreachable",
     message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`,
+    data: buildDaemonUnreachableData(stderrPath, stderrTail),
   };
 }
 
@@ -453,16 +559,43 @@ async function connectSockWithRetry(
   throw lastError ?? new Error("connect failed");
 }
 
-async function waitForDaemonReady(sockPath: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await sleep(DAEMON_POLL_INTERVAL_MS);
-    if (await probeSock(sockPath, 200)) return true;
-  }
-  return false;
+interface WaitForDaemonReadyResult {
+  ready: boolean;
+  exited: boolean;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
 }
 
-function spawnDaemon(stderrPath?: string): void {
+async function waitForDaemonReady(
+  sockPath: string,
+  child: ReturnType<typeof spawn>,
+  timeoutMs: number,
+): Promise<WaitForDaemonReadyResult> {
+  let exited = false;
+  let exitCode: number | null = null;
+  let signal: NodeJS.Signals | null = null;
+  const onExit = (code: number | null, nextSignal: NodeJS.Signals | null) => {
+    exited = true;
+    exitCode = code;
+    signal = nextSignal;
+  };
+
+  child.once("exit", onExit);
+  const deadline = Date.now() + timeoutMs;
+  try {
+    while (Date.now() < deadline) {
+      await sleep(DAEMON_POLL_INTERVAL_MS);
+      if (await probeSock(sockPath, 200)) return { ready: true, exited, exitCode, signal };
+      if (exited) return { ready: false, exited, exitCode, signal };
+    }
+  } finally {
+    if (typeof child.off === "function") child.off("exit", onExit);
+    else if (typeof child.removeListener === "function") child.removeListener("exit", onExit);
+  }
+  return { ready: false, exited, exitCode, signal };
+}
+
+function spawnDaemon(stderrPath?: string): ReturnType<typeof spawn> {
   const args = [process.argv[1], "--daemon-internal"];
   let stderrFd: number | null = null;
 
@@ -480,6 +613,7 @@ function spawnDaemon(stderrPath?: string): void {
       windowsHide: true,
     });
     child.unref();
+    return child;
   } finally {
     if (stderrFd !== null) fs.closeSync(stderrFd);
   }
@@ -493,8 +627,158 @@ function randomId(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
-function daemonSpawnStderrPath(): string {
-  return path.join(defaultDataDir(), "daemon-spawn.stderr");
+function daemonSpawnStderrPath(dataDir: string): string {
+  return path.join(dataDir, "daemon-spawn.stderr");
+}
+
+function detectStaleDaemonArtifacts(sockPath: string, pidPath: string): { pid: number; sockPath: string } | null {
+  const pidRecord = readPidFile(pidPath);
+  if (!pidRecord) return null;
+  if (isPidAlive(pidRecord.pid)) return null;
+  if (!isFilesystemSockPath(sockPath)) return null;
+
+  const normalizedSockPath = normalizeSockPath(sockPath);
+  if (!fs.existsSync(normalizedSockPath)) return null;
+  return {
+    pid: pidRecord.pid,
+    sockPath: normalizedSockPath,
+  };
+}
+
+function readPidFile(targetPath: string): { pid: number } | null {
+  try {
+    const raw = fs.readFileSync(targetPath, "utf8");
+    const parsed = JSON.parse(raw) as { pid?: unknown };
+    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
+    return { pid: Math.floor(parsed.pid) };
+  } catch {
+    return null;
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface BootstrapPayload {
+  code: string;
+  message: string;
+  data?: Record<string, unknown>;
+}
+
+function buildSocketBindDeniedFailure(
+  parsedBootstrap: BootstrapPayload,
+  stderrTail: string | null,
+): EnsureDaemonResult {
+  return {
+    ok: false,
+    code: parsedBootstrap.code,
+    message: parsedBootstrap.message,
+    data: {
+      ...(parsedBootstrap.data ?? {}),
+      ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
+    },
+  };
+}
+
+function buildDaemonUnreachableData(
+  stderrPath: string,
+  stderrTail: string | null,
+  result?: WaitForDaemonReadyResult,
+): Record<string, unknown> {
+  return {
+    stderr_path: stderrPath,
+    ...(typeof result?.exitCode === "number" ? { exit_code: result.exitCode } : {}),
+    ...(result?.signal ? { signal: result.signal } : {}),
+    ...(stderrTail ? { bootstrap_stderr: stderrTail } : { suggested_action: DOCTOR_SUGGESTED_ACTION }),
+  };
+}
+
+function buildEarlyExitFailure(stderrPath: string, result: WaitForDaemonReadyResult): EnsureDaemonResult {
+  const stderrTail = readTail(stderrPath, 4096);
+  const parsedBootstrap = parseBootstrapStderr(stderrTail);
+  if (parsedBootstrap?.code === "socket_bind_denied") {
+    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
+  }
+
+  return {
+    ok: false,
+    code: "daemon_unreachable",
+    message: parsedBootstrap?.message ?? "daemon exited before becoming ready",
+    data: buildDaemonUnreachableData(stderrPath, stderrTail, result),
+  };
+}
+
+function readTail(filePath: string, maxBytes: number): string | null {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    if (raw.length <= maxBytes) return raw.trim();
+    return raw.slice(-maxBytes).trim();
+  } catch {
+    return null;
+  }
+}
+
+function parseBootstrapStderr(stderrTail: string | null): BootstrapPayload | null {
+  if (!stderrTail) return null;
+  const prefix = "[codex-team-daemon-bootstrap] ";
+  const lines = stderrTail.split(/\r?\n/).reverse();
+  for (const line of lines) {
+    const socketBindDenied = parseSocketBindDeniedLine(line);
+    if (socketBindDenied) return socketBindDenied;
+    if (!line.startsWith(prefix)) continue;
+    try {
+      const parsed = JSON.parse(line.slice(prefix.length)) as {
+        code?: unknown;
+        message?: unknown;
+        data?: unknown;
+      };
+      if (typeof parsed.code !== "string" || typeof parsed.message !== "string") continue;
+      return {
+        code: parsed.code,
+        message: parsed.message,
+        data: parsed.data && typeof parsed.data === "object" && !Array.isArray(parsed.data)
+          ? parsed.data as Record<string, unknown>
+          : undefined,
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function parseSocketBindDeniedLine(line: string): BootstrapPayload | null {
+  try {
+    const parsed = JSON.parse(line) as {
+      kind?: unknown;
+      errno?: unknown;
+      probed_path?: unknown;
+    };
+    if (parsed.kind !== "socket_bind_denied") return null;
+
+    const errno = typeof parsed.errno === "string" && parsed.errno.length > 0
+      ? parsed.errno
+      : "UNKNOWN";
+    return {
+      code: "socket_bind_denied",
+      message: `local socket bind denied by environment (${errno})`,
+      data: {
+        suggested_action: SOCKET_BIND_DENIED_SUGGESTED_ACTION,
+        errno,
+        ...(typeof parsed.probed_path === "string" && parsed.probed_path.length > 0
+          ? { probed_path: parsed.probed_path }
+          : {}),
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 function truthy(v: unknown): boolean {
@@ -528,6 +812,7 @@ function createStreamAckCallback(
   data: unknown,
 ): (() => void) | undefined {
   if (method !== "monitor:events") return undefined;
+  if (!isStreamChunkAckable(data)) return undefined;
   const eventId = extractStreamEventId(data);
   if (!eventId) return undefined;
   return () => sendStreamAck(sock, reqId, eventId);
@@ -537,6 +822,12 @@ function extractStreamEventId(data: unknown): string | null {
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;
   const id = (data as { id?: unknown }).id;
   return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+function isStreamChunkAckable(data: unknown): boolean {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  const ackable = (data as { ackable?: unknown }).ackable;
+  return ackable !== false;
 }
 
 function sendStreamAck(sock: net.Socket, reqId: string, eventId: string): void {
@@ -555,13 +846,65 @@ function forwardDaemonError(error: { code: string; message: string; data?: unkno
   return JSON.stringify(err(error.code, error.message, error.data)) + "\n";
 }
 
-function validateCliFlags(parsed: ParsedArgs, method: string): string | null {
-  if (method !== "monitor:events") return null;
-  if (parsed.flags.cursor === true) return "--cursor requires a value";
-  if (parsed.flags.since !== undefined && parsed.flags.cursor !== undefined) {
-    return "--since and --cursor are mutually exclusive";
+function validateCliFlags(parsed: ParsedArgs, method: string, effectiveMethod: string): string | null {
+  if (method === "monitor:events") {
+    if (parsed.flags.cursor === true) return "--cursor requires a value";
+    if (parsed.flags.since !== undefined && parsed.flags.cursor !== undefined) {
+      return "--since and --cursor are mutually exclusive";
+    }
+    return null;
+  }
+  if (method === "message:wait") {
+    if ((truthy(parsed.flags.all) || truthy(parsed.flags.any)) && parsed.flags.for !== undefined) {
+      return "--for is only supported when waiting on a single session";
+    }
+    return null;
+  }
+  if (method === "session:detach") {
+    if (parsed.flags.match !== undefined && !truthy(parsed.flags.all)) {
+      return "--match requires --all";
+    }
+    return null;
+  }
+
+  if (method === "session:health" && effectiveMethod === "session:health") {
+    if (parsed.flags["only-unhealthy"] !== undefined || parsed.flags.state !== undefined) {
+      return "--only-unhealthy and --state require --all";
+    }
+  }
+
+  if (effectiveMethod === "daemon:fleet:status" && parsed.flags.users === true) {
+    return "--users requires a value";
+  }
+
+  if (effectiveMethod === "session:events") {
+    if (parsed.flags.type === true) return "--type requires a value";
+    if (parsed.flags.turn === true) return "--turn requires a value";
+    if (parsed.flags.since === true) return "--since requires a value";
+    if (parsed.flags.limit === true) return "--limit requires a value";
+    if (truthy(parsed.flags["by-tool"]) && truthy(parsed.flags["by-item-kind"])) {
+      return "--by-tool and --by-item-kind are mutually exclusive";
+    }
+    if (truthy(parsed.flags.follow) && (truthy(parsed.flags["by-tool"]) || truthy(parsed.flags["by-item-kind"]))) {
+      return "--follow cannot be used with --by-tool or --by-item-kind";
+    }
+    if (truthy(parsed.flags.summary) && (truthy(parsed.flags["by-tool"]) || truthy(parsed.flags["by-item-kind"]))) {
+      return "--summary cannot be used with --by-tool or --by-item-kind";
+    }
+  }
+  if (effectiveMethod === "session:logs") {
+    if (parsed.flags.n === true) return "-n requires a value";
+    if (parsed.flags.stream === true) return "--stream requires a value";
+    if (parsed.flags.truncate === true) return "--truncate requires a value";
   }
   return null;
+}
+
+function resolveMethod(method: string, parsed: ParsedArgs): string {
+  if (method === "session:health" && truthy(parsed.flags.all)) {
+    return "session:health:all";
+  }
+  return method;
 }
 
 function asStringFlag(value: string | boolean | string[] | undefined): string | null {
@@ -587,12 +930,17 @@ function isTransientRequestError(err: Error & { code?: string }): boolean {
 function isReadOnlyMethod(method: string): boolean {
   return method === "version" ||
     method === "status" ||
+    method === "daemon:fleet:status" ||
     method === "daemon:status" ||
     method === "daemon:user:list" ||
     method === "daemon:config:get" ||
     method === "daemon:config:list" ||
     method === "cursor:list" ||
     method === "cursor:get" ||
+    method === "session:health" ||
+    method === "session:health:all" ||
+    method === "session:logs" ||
+    method === "session:events" ||
     method === "session:info" ||
     method === "session:context" ||
     method === "session:list" ||
@@ -612,6 +960,14 @@ function readCliConfig(): {
     connectRetryAttempts: toInt(config.getEffective("daemon.connect_retry_attempts"), DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS),
     connectRetryDelayMs: toMs(config.getEffective("daemon.connect_retry_delay_seconds"), DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS),
   };
+}
+
+function readCliStdoutMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CODEX_TEAM_CLI_STDOUT_MAX_BYTES;
+  if (typeof raw !== "string" || raw.trim().length === 0) return DEFAULT_CLI_STDOUT_MAX_BYTES;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_CLI_STDOUT_MAX_BYTES;
+  return Math.max(1, Math.floor(parsed));
 }
 
 function toInt(v: unknown, fallback: number): number {

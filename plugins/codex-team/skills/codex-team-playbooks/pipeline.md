@@ -40,12 +40,21 @@ cd /repo
 mkdir -p .codex-team
 echo "$BRIEF" > .codex-team/brief.md
 
-stages=(explorer designer implementer tester reviewer)
-profiles=(explorer planner fixer tester reviewer)
+# Each stage uses its own profile bundle (see configure-codex-team/profiles-library.md).
+# We spell them out here because the same flag pattern shows up verbatim in every playbook.
 
-for i in "${!stages[@]}"; do
-  codex-team -b $TOK session new "${stages[$i]}" --profile "${profiles[$i]}" --cwd "$(pwd)"
-done
+codex-team -b $TOK session new explorer    --cwd "$(pwd)" \
+  --model gpt-5.4-mini --sandbox read-only --approval never --effort medium
+codex-team -b $TOK session new designer    --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
+codex-team -b $TOK session new implementer --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high \
+  --auto-approve 'git*,npm test,vitest*'
+codex-team -b $TOK session new tester      --cwd "$(pwd)" \
+  --model gpt-5.4-mini --sandbox workspace-write --approval never --effort medium \
+  --auto-approve 'npm test,vitest*,pytest*'
+codex-team -b $TOK session new reviewer    --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
 codex-team -b $TOK monitor events --stream --summary --cursor pipeline-tail
 ```
 

@@ -215,4 +215,77 @@ describe("parseArgs", () => {
     expect(wait.flags.for).toBe("turn-1");
     expect(wait.flags.timeout).toBe("30");
   });
+
+  it("parses session list pagination and filtering flags", () => {
+    const parsed = parseArgs([
+      "-b", "token-1",
+      "session", "list",
+      "--all",
+      "--cursor", "cursor-1",
+      "--limit", "25",
+      "--archived", "include",
+      "--state", "live,crashed",
+      "--owner", "any",
+      "--loaded-only",
+    ]);
+
+    expect(parsed.commandPath).toEqual(["session", "list"]);
+    expect(parsed.flags.all).toBe(true);
+    expect(parsed.flags.cursor).toBe("cursor-1");
+    expect(parsed.flags.limit).toBe("25");
+    expect(parsed.flags.archived).toBe("include");
+    expect(parsed.flags.state).toBe("live,crashed");
+    expect(parsed.flags.owner).toBe("any");
+    expect(parsed.flags["loaded-only"]).toBe(true);
+  });
+
+  it("parses the session archive, unarchive, rename, and rollback lifecycle commands", () => {
+    const archive = parseArgs(["-b", "token-1", "session", "archive", "sess-1", "--and-detach"]);
+    expect(archive.commandPath).toEqual(["session", "archive"]);
+    expect(archive.positionals).toEqual(["sess-1"]);
+    expect(archive.flags["and-detach"]).toBe(true);
+
+    const unarchive = parseArgs(["-b", "token-1", "session", "unarchive", "th-1"]);
+    expect(unarchive.commandPath).toEqual(["session", "unarchive"]);
+    expect(unarchive.positionals).toEqual(["th-1"]);
+
+    const rename = parseArgs(["-b", "token-1", "session", "rename", "th-1", "audit", "--detached-ok"]);
+    expect(rename.commandPath).toEqual(["session", "rename"]);
+    expect(rename.positionals).toEqual(["th-1", "audit"]);
+    expect(rename.flags["detached-ok"]).toBe(true);
+
+    const rollback = parseArgs(["-b", "token-1", "session", "rollback", "audit", "--to-turn", "turn-1", "--detach-after"]);
+    expect(rollback.commandPath).toEqual(["session", "rollback"]);
+    expect(rollback.positionals).toEqual(["audit"]);
+    expect(rollback.flags["to-turn"]).toBe("turn-1");
+    expect(rollback.flags["detach-after"]).toBe(true);
+  });
+
+  it("parses daemon fleet status and session events commands", () => {
+    const fleet = parseArgs(["daemon", "fleet", "status", "--users", "claude-a,claude-b"]);
+    expect(fleet.commandPath).toEqual(["daemon", "fleet", "status"]);
+    expect(fleet.flags.users).toBe("claude-a,claude-b");
+
+    const events = parseArgs([
+      "-b", "token-1",
+      "session", "events", "audit",
+      "--type", "turn.completed,item.completed",
+      "--since", "evt-10",
+      "--limit", "25",
+      "--follow",
+    ]);
+    expect(events.commandPath).toEqual(["session", "events"]);
+    expect(events.positionals).toEqual(["audit"]);
+    expect(events.flags.type).toBe("turn.completed,item.completed");
+    expect(events.flags.since).toBe("evt-10");
+    expect(events.flags.limit).toBe("25");
+    expect(events.flags.follow).toBe(true);
+  });
+
+  it("treats --short and --full as mutually exclusive output modes", () => {
+    const parsed = parseArgs(["-b", "token-1", "status", "--short", "--full"]);
+
+    expect(parsed.commandPath).toEqual(["status"]);
+    expect(parsed.unknown).toBe("--short and --full are mutually exclusive");
+  });
 });

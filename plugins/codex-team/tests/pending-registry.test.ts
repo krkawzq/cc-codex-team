@@ -116,4 +116,42 @@ describe("PendingRegistry", () => {
     expect(reg.removeForSession("user-1", "sess-1")).toEqual([]);
     expect(reg.get(responded.request_id)).toBeNull();
   });
+
+  it("renames pending entries for one user without touching others", () => {
+    const reg = new PendingRegistry();
+    const client = {};
+
+    reg.add({
+      client: client as never,
+      jsonrpc_id: 1,
+      kind: "approval.command_execution",
+      user: "user-1",
+      session_name: "sess-1",
+      thread_id: "th-1",
+      turn_id: "turn-1",
+      raw: {},
+    });
+    reg.add({
+      client: client as never,
+      jsonrpc_id: 2,
+      kind: "approval.command_execution",
+      user: "user-2",
+      session_name: "sess-1",
+      thread_id: "th-2",
+      turn_id: "turn-2",
+      raw: {},
+    });
+
+    expect(reg.renameSession("user-1", "sess-1", "renamed")).toBe(1);
+    expect(reg.listForUser("user-1")).toEqual([
+      expect.objectContaining({
+        session_name: "renamed",
+      }),
+    ]);
+    expect(reg.listForUser("user-2")).toEqual([
+      expect.objectContaining({
+        session_name: "sess-1",
+      }),
+    ]);
+  });
 });

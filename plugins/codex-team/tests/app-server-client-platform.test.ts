@@ -80,6 +80,7 @@ describe("AppServerClient platform launch", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.resetModules();
+    delete process.env.CODEX_TEAM_MAX_FRAME_BYTES;
   });
 
   it("wraps JS entrypoints with the current Node executable", async () => {
@@ -157,6 +158,36 @@ describe("AppServerClient platform launch", () => {
     expect(fakeProc.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
+  it("closes the client when the app-server emits an oversized frame", async () => {
+    const fakeProc = createFakeProc();
+    const spawn = vi.fn().mockReturnValue(fakeProc);
+    vi.doMock("node:child_process", () => ({
+      default: {
+        spawn,
+        execFileSync: vi.fn(),
+      },
+      spawn,
+      execFileSync: vi.fn(),
+    }));
+
+    process.env.CODEX_TEAM_MAX_FRAME_BYTES = "100";
+    const { AppServerClient } = await import("../src/codex/appServerClient");
+    const client = new AppServerClient();
+    const onError = vi.fn();
+    client.on("error", onError);
+
+    await client.start();
+    fakeProc.stdout.emit("data", "x".repeat(101));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({
+      frameBytes: 101,
+      maxFrameBytes: 100,
+    });
+    expect(fakeProc.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
   it("waits for stdin-driven shutdown before killing on Windows", async () => {
     vi.useFakeTimers();
     const fakeProc = createFakeProc();
@@ -221,5 +252,46 @@ describe("AppServerClient platform launch", () => {
     pendingWriteCb?.(null);
 
     await expect(pendingAck).resolves.toEqual({ backpressured: true });
+  });
+
+  it("retains stdout and stderr log tails with per-line events", async () => {
+    const fakeProc = createFakeProc();
+    const spawn = vi.fn().mockReturnValue(fakeProc);
+    vi.doMock("node:child_process", () => ({
+      default: {
+        spawn,
+        execFileSync: vi.fn(),
+      },
+      spawn,
+      execFileSync: vi.fn(),
+    }));
+
+    const { AppServerClient } = await import("../src/codex/appServerClient");
+    const client = new AppServerClient();
+    const stdoutLines: Array<{ stream: string; line: string }> = [];
+    const stderrLines: Array<{ stream: string; line: string }> = [];
+
+    await client.start();
+    client.on("stdout_line", (line) => stdoutLines.push({ stream: line.stream, line: line.line }));
+    client.on("stderr_line", (line) => stderrLines.push({ stream: line.stream, line: line.line }));
+
+    fakeProc.stdout.emit("data", JSON.stringify({ jsonrpc: "2.0", method: "thread.updated" }) + "\n");
+    fakeProc.stderr.emit("data", "warn 1\nwarn");
+    fakeProc.stderr.emit("data", " 2\n");
+
+    expect(stdoutLines).toEqual([
+      { stream: "stdout", line: "{\"jsonrpc\":\"2.0\",\"method\":\"thread.updated\"}" },
+    ]);
+    expect(stderrLines).toEqual([
+      { stream: "stderr", line: "warn 1" },
+      { stream: "stderr", line: "warn 2" },
+    ]);
+    expect(client.stdoutTail()).toHaveLength(2);
+    expect(client.stdoutTail().at(-1)).toMatchObject({
+      stream: "stdout",
+      line: "{\"jsonrpc\":\"2.0\",\"method\":\"thread.updated\"}",
+    });
+    expect(client.stderrTail()).toHaveLength(2);
+    expect(client.stderrTailText()).toBe("warn 1\nwarn 2");
   });
 });

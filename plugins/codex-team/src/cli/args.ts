@@ -11,7 +11,9 @@ export interface ParsedArgs {
 
 const COMMANDS: Set<string> = new Set([
   "version",
+  "doctor",
   "status",
+  "daemon:fleet:status",
   "daemon:status",
   "daemon:start",
   "daemon:stop",
@@ -28,12 +30,18 @@ const COMMANDS: Set<string> = new Set([
   "session:new",
   "session:attach",
   "session:detach",
+  "session:archive",
+  "session:unarchive",
   "session:fork",
   "session:rename",
+  "session:rollback",
   "session:info",
   "session:context",
   "session:list",
+  "session:events",
+  "session:logs",
   "message:send",
+  "message:send-many",
   "message:peer",
   "message:interrupt",
   "message:approval",
@@ -54,6 +62,7 @@ const COMMANDS: Set<string> = new Set([
 const HELP_PATHS: Set<string> = new Set([
   ...COMMANDS,
   "daemon",
+  "daemon:fleet",
   "daemon:user",
   "daemon:config",
   "session",
@@ -76,6 +85,32 @@ const GLOBAL_FLAGS: Record<string, GlobalSpec> = {
   "--help": { name: "help", takesValue: false },
   "--daemon-sock": { name: "daemonSock", takesValue: true },
 };
+
+const BOOLEAN_LONG_FLAGS: Set<string> = new Set([
+  "all",
+  "any",
+  "explicit-only",
+  "follow",
+  "force",
+  "full",
+  "graceful",
+  "help",
+  "include-delta",
+  "once",
+  "short",
+  "stdin",
+  "stream",
+  "summary",
+  "takeover",
+  "verbose",
+  "yes",
+]);
+
+const BOOLEAN_SHORT_FLAGS: Set<string> = new Set([
+  "f",
+  "h",
+  "v",
+]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = {
@@ -139,27 +174,41 @@ export function parseArgs(argv: string[]): ParsedArgs {
         value = a.slice(eqIdx + 1);
       } else {
         key = a.slice(2);
-        const next = tail[i + 1];
-        if (next !== undefined && !isFlagLike(next)) {
-          value = next;
-          i++;
-        } else {
+        if (BOOLEAN_LONG_FLAGS.has(key)) {
           value = null;
+        } else {
+          const next = tail[i + 1];
+          if (next !== undefined && !isFlagLike(next)) {
+            value = next;
+            i++;
+          } else {
+            value = null;
+          }
         }
       }
       setFlag(result.flags, key, value);
     } else if (a.length > 1 && a.startsWith("-") && !isNegativeNumber(a)) {
       const key = a.slice(1);
-      const next = tail[i + 1];
-      if (next !== undefined && !isFlagLike(next)) {
-        setFlag(result.flags, key, next);
-        i++;
-      } else {
+      if (BOOLEAN_SHORT_FLAGS.has(key)) {
         setFlag(result.flags, key, null);
+      } else {
+        const next = tail[i + 1];
+        if (next !== undefined && !isFlagLike(next)) {
+          setFlag(result.flags, key, next);
+          i++;
+        } else {
+          setFlag(result.flags, key, null);
+        }
       }
     } else {
       result.positionals.push(a);
     }
+  }
+
+  if (truthyFlag(result.flags.short) && truthyFlag(result.flags.full)) {
+    result.unknown = "--short and --full are mutually exclusive";
+  } else if (commandKey(result.commandPath) === "message:wait" && truthyFlag(result.flags.all) && truthyFlag(result.flags.any)) {
+    result.unknown = "--all and --any are mutually exclusive";
   }
 
   return result;
@@ -216,14 +265,24 @@ export function commandKey(path: string[]): string {
 }
 
 const SHORT_COMMANDS: Set<string> = new Set([
+  "doctor",
   "status",
+  "daemon:fleet:status",
   "daemon:status",
   "daemon:user:list",
   "session:info",
+  "session:health",
+  "session:health:all",
+  "session:logs",
   "session:list",
   "message:history",
 ]);
 
 export function supportsShort(method: string): boolean {
   return SHORT_COMMANDS.has(method);
+}
+
+function truthyFlag(value: unknown): boolean {
+  if (Array.isArray(value)) return truthyFlag(value[value.length - 1]);
+  return value === true || value === "true" || value === "1";
 }

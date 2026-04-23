@@ -88,6 +88,16 @@ export class PendingRegistry {
     return this.removeMatching((rec) => rec.user === user && rec.session_name === sessionName);
   }
 
+  renameSession(user: string, oldSessionName: string, newSessionName: string): number {
+    let renamed = 0;
+    for (const rec of this.allRequests()) {
+      if (rec.user !== user || rec.session_name !== oldSessionName) continue;
+      rec.session_name = newSessionName;
+      renamed += 1;
+    }
+    return renamed;
+  }
+
   removeForUser(user: string): PendingRequest[] {
     return this.removeMatching((rec) => rec.user === user);
   }

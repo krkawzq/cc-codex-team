@@ -25,8 +25,19 @@ export interface HelpNode {
   needs_bearer: boolean;
 }
 
+const FULL_FLAG: HelpFlag = {
+  long: "--full",
+  type: "bool",
+  default: "false",
+  required: false,
+  description: "Print the full JSON response body instead of the default concise projection.",
+};
+
 function leaf(node: Omit<HelpNode, "subcommands">): HelpNode {
-  return { ...node, subcommands: [] };
+  const flags = node.flags.some((flag) => flag.long === "--full")
+    ? [...node.flags]
+    : [...node.flags, { ...FULL_FLAG }];
+  return { ...node, flags, subcommands: [] };
 }
 
 const PROMPT_SOURCE_FLAGS: HelpFlag[] = [
@@ -83,6 +94,12 @@ const LIVE_SESSION_TARGET: HelpPositional = {
   name: "name|thread_id",
   required: true,
   description: "Target live session name or thread ID.",
+};
+
+const LIVE_SESSION_TARGETS: HelpPositional = {
+  name: "name|thread_id...",
+  required: true,
+  description: "One or more live session names or thread IDs.",
 };
 
 const REQUEST_ID: HelpPositional = {
@@ -275,6 +292,47 @@ const daemonConfigGroup: HelpNode = {
   needs_bearer: false,
 };
 
+const daemonFleetGroup: HelpNode = {
+  name: "fleet",
+  summary: "Inspect daemon-wide user and session health at a glance.",
+  usage: "codex-team daemon fleet <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team daemon fleet status",
+  ],
+  subcommands: [
+    leaf({
+      name: "status",
+      summary: "Show a cross-user live-session fleet snapshot.",
+      usage: "codex-team daemon fleet status [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--users",
+          type: "csv|all",
+          default: "all known users",
+          required: false,
+          description: "Limit the snapshot to 'all' or a comma-separated token list.",
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per user to stdout.",
+        },
+      ],
+      examples: [
+        "codex-team daemon fleet status",
+        "codex-team daemon fleet status --users claude-alice,claude-bob",
+      ],
+      needs_bearer: false,
+    }),
+  ],
+  needs_bearer: false,
+};
+
 const daemonGroup: HelpNode = {
   name: "daemon",
   summary: "Manage the shared daemon and daemon-owned resources.",
@@ -283,6 +341,7 @@ const daemonGroup: HelpNode = {
   flags: [],
   examples: [
     "codex-team daemon status",
+    "codex-team daemon fleet status",
     "codex-team daemon logs -f --level warn",
   ],
   subcommands: [
@@ -379,6 +438,7 @@ const daemonGroup: HelpNode = {
       ],
       needs_bearer: false,
     }),
+    daemonFleetGroup,
     daemonUserGroup,
     daemonConfigGroup,
   ],
@@ -520,11 +580,24 @@ const sessionGroup: HelpNode = {
     leaf({
       name: "detach",
       summary: "Stop tracking a live session and release its runtime.",
-      usage: "codex-team -b <token> session detach <name|thread_id> [flags]",
+      usage: "codex-team -b <token> session detach [<name|thread_id>|--all] [flags]",
       positionals: [
-        { ...SESSION_TARGET },
+        { ...SESSION_TARGET, required: false, description: "Target session unless using --all." },
       ],
       flags: [
+        {
+          long: "--all",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Detach every live session for the current bearer.",
+        },
+        {
+          long: "--match",
+          type: "glob",
+          required: false,
+          description: "Filter --all targets by session name using * and ? wildcards.",
+        },
         {
           long: "--graceful",
           type: "bool",
@@ -535,6 +608,52 @@ const sessionGroup: HelpNode = {
       ],
       examples: [
         "codex-team -b $TOKEN session detach audit --graceful",
+        "codex-team -b $TOKEN session detach --all --match 'mapper-*'",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "archive",
+      summary: "Archive a detached thread, or detach and archive a live session.",
+      usage: "codex-team -b <token> session archive <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET },
+      ],
+      flags: [
+        {
+          long: "--and-detach",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Hard-detach a live session before archiving it.",
+        },
+      ],
+      notes: [
+        "Live sessions refuse without --and-detach.",
+      ],
+      examples: [
+        "codex-team -b $TOKEN session archive audit --and-detach",
+        "codex-team -b $TOKEN session archive th-abc123",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "unarchive",
+      summary: "Restore an archived detached thread.",
+      usage: "codex-team -b <token> session unarchive <thread_id>",
+      positionals: [
+        {
+          name: "thread_id",
+          required: true,
+          description: "Detached archived thread ID.",
+        },
+      ],
+      flags: [],
+      notes: [
+        "Fails if the thread is currently live.",
+      ],
+      examples: [
+        "codex-team -b $TOKEN session unarchive th-abc123",
       ],
       needs_bearer: true,
     }),
@@ -566,8 +685,8 @@ const sessionGroup: HelpNode = {
     }),
     leaf({
       name: "rename",
-      summary: "Rename a session without attaching it.",
-      usage: "codex-team -b <token> session rename <name|thread_id> <new_name>",
+      summary: "Rename a live session or, with --detached-ok, a detached thread.",
+      usage: "codex-team -b <token> session rename <name|thread_id> <new_name> [flags]",
       positionals: [
         { ...SESSION_TARGET, description: "Current session name or thread ID." },
         {
@@ -576,9 +695,49 @@ const sessionGroup: HelpNode = {
           description: "New session name.",
         },
       ],
-      flags: [],
+      flags: [
+        {
+          long: "--detached-ok",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Allow renaming a detached thread via persisted thread metadata.",
+        },
+      ],
       examples: [
         "codex-team -b $TOKEN session rename audit audit-review",
+        "codex-team -b $TOKEN session rename th-abc123 audit-review --detached-ok",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "rollback",
+      summary: "Fork a thread at an earlier turn, archive the old thread, and move the session name forward.",
+      usage: "codex-team -b <token> session rollback <name|thread_id> --to-turn <turn_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET, description: "Source live session or detached thread." },
+      ],
+      flags: [
+        {
+          long: "--to-turn",
+          type: "string",
+          required: true,
+          description: "Turn ID to fork from.",
+        },
+        {
+          long: "--detach-after",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Leave the forked thread detached instead of resuming it live.",
+        },
+      ],
+      notes: [
+        "The original thread is renamed to <name>-pre-rollback-<iso8601> and archived.",
+      ],
+      examples: [
+        "codex-team -b $TOKEN session rollback audit --to-turn turn-42",
+        "codex-team -b $TOKEN session rollback th-abc123 --to-turn turn-42 --detach-after",
       ],
       needs_bearer: true,
     }),
@@ -638,6 +797,48 @@ const sessionGroup: HelpNode = {
           description: "List every known session, not only live ones.",
         },
         {
+          long: "--cursor",
+          type: "string",
+          default: "",
+          required: false,
+          description: "Pagination cursor from a previous session list page.",
+        },
+        {
+          long: "--limit",
+          type: "int",
+          default: "50",
+          required: false,
+          description: "Maximum number of sessions to return.",
+        },
+        {
+          long: "--archived",
+          type: "enum",
+          default: "exclude",
+          required: false,
+          description: "Include archived sessions, exclude them, or return only archived sessions.",
+        },
+        {
+          long: "--state",
+          type: "string",
+          default: "",
+          required: false,
+          description: "Comma-separated session states to keep: live, crashed, closed, archived.",
+        },
+        {
+          long: "--owner",
+          type: "string",
+          default: "self",
+          required: false,
+          description: "Best-effort owner filter: self, any, or an explicit bearer token.",
+        },
+        {
+          long: "--loaded-only",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "List threads currently loaded in app-server memory instead of persisted thread/list results.",
+        },
+        {
           long: "--sort",
           type: "enum",
           default: "last_active",
@@ -661,22 +862,190 @@ const sessionGroup: HelpNode = {
       ],
       examples: [
         "codex-team -b $TOKEN session list --all --format table",
+        "codex-team -b $TOKEN session list --all --limit 25 --cursor abc123",
+        "codex-team -b $TOKEN session list --loaded-only --owner any",
       ],
       needs_bearer: true,
     }),
     leaf({
       name: "health",
-      summary: "Show a compact live health snapshot for one session.",
-      usage: "codex-team -b <token> session health <name|thread_id>",
+      summary: "Show a live health snapshot for one session or every tracked session.",
+      usage: "codex-team -b <token> session health [<name|thread_id>] [flags]",
+      positionals: [
+        {
+          ...SESSION_TARGET,
+          required: false,
+          description: "Session name or thread ID when not using --all.",
+        },
+      ],
+      flags: [
+        {
+          long: "--all",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Return one health snapshot per tracked session instead of a single target.",
+        },
+        {
+          long: "--only-unhealthy",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "With --all, hide idle live sessions whose app-server is healthy.",
+        },
+        {
+          long: "--state",
+          type: "csv",
+          required: false,
+          description: "With --all, limit results to live, crashed, and/or closed states.",
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per returned session to stdout.",
+        },
+      ],
+      examples: [
+        "codex-team -b $TOKEN session health audit",
+        "codex-team -b $TOKEN session health --all --only-unhealthy",
+        "codex-team -b $TOKEN session health --all --state live,crashed",
+      ],
+      notes: [
+        "Without --all, current single-session behavior stays in place.",
+        "If the session is crashed or the app-server is dead, run 'codex-team -b <token> session heal <name|thread_id>'.",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "events",
+      summary: "Replay retained normalized events for one session, with optional follow mode.",
+      usage: "codex-team -b <token> session events <name|thread_id> [flags]",
       positionals: [
         { ...SESSION_TARGET },
       ],
-      flags: [],
+      flags: [
+        {
+          long: "--type",
+          type: "csv",
+          required: false,
+          description: "Only include matching event types such as turn.completed,item.completed.",
+        },
+        {
+          long: "--turn",
+          type: "string",
+          required: false,
+          description: "Only include events associated with one turn ID.",
+        },
+        {
+          long: "--since",
+          type: "event_id",
+          required: false,
+          description: "Start after this retained event ID.",
+        },
+        {
+          long: "--limit",
+          type: "int",
+          default: "50",
+          required: false,
+          description: "Cap the initial backlog size; when --since is absent, uses the most recent N events.",
+        },
+        {
+          long: "--follow",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Keep streaming future matching events after the initial backlog.",
+        },
+        {
+          long: "--summary",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Emit the same compact event summaries as monitor events --summary.",
+        },
+        {
+          long: "--by-tool",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Count item.completed events by rendered tool bucket; cannot be used with --follow or --summary.",
+        },
+        {
+          long: "--by-item-kind",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Count item.completed events by normalized item kind; cannot be used with --follow or --summary.",
+        },
+      ],
       examples: [
-        "codex-team -b $TOKEN session health audit",
+        "codex-team -b $TOKEN session events audit --limit 10",
+        "codex-team -b $TOKEN session events audit --type turn.completed,item.completed",
+        "codex-team -b $TOKEN session events audit --turn turn-42",
+        "codex-team -b $TOKEN session events audit --follow --summary",
+        "codex-team -b $TOKEN session events audit --by-tool",
       ],
       notes: [
-        "If the session is crashed or the app-server is dead, run 'codex-team -b <token> session heal <name|thread_id>'.",
+        "Default output is chronological oldest-to-newest NDJSON for the retained event window.",
+        "Use --since to page forward from a prior event ID.",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "logs",
+      summary: "Show the recent app-server stdout/stderr tail for one session.",
+      usage: "codex-team -b <token> session logs <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET },
+      ],
+      flags: [
+        {
+          long: "-n",
+          type: "int",
+          default: "100",
+          required: false,
+          description: "Return the last N captured log lines.",
+        },
+        {
+          long: "--follow",
+          short: "-f",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Keep streaming new log lines until the CLI exits.",
+        },
+        {
+          long: "--stream",
+          type: "enum",
+          default: "stderr",
+          required: false,
+          description: "Choose stderr, stdout, or all captured streams.",
+        },
+        {
+          long: "--truncate",
+          type: "int",
+          default: "2048",
+          required: false,
+          description: "Clip each log line to this many bytes; use 0 to disable clipping.",
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print '<ts> <stream> <line>' per log line.",
+        },
+      ],
+      examples: [
+        "codex-team -b $TOKEN session logs audit -n 50",
+        "codex-team -b $TOKEN session logs audit --stream all",
+        "codex-team -b $TOKEN session logs audit --follow --short",
+      ],
+      notes: [
+        "Detached sessions return session_not_live; re-attach them first.",
+        "Crashed sessions return the last captured tail with state=crashed.",
       ],
       needs_bearer: true,
     }),
@@ -736,6 +1105,42 @@ const messageGroup: HelpNode = {
       examples: [
         "codex-team -b $TOKEN message send audit \"Summarize the failing tests.\"",
         "codex-team -b $TOKEN message send audit --file prompt.md --attach screenshot.png",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "send-many",
+      summary: "Broadcast one prompt to multiple live sessions.",
+      usage: "codex-team -b <token> message send-many <name|thread_id> <name|thread_id> [...name|thread_id] [prompt] [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGETS, description: "Two or more live sessions to broadcast to." },
+        {
+          name: "prompt",
+          required: false,
+          description: "Prompt text when not using --stdin or --file.",
+        },
+      ],
+      flags: [
+        {
+          long: "--stdin",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Read the prompt from stdin.",
+        },
+        {
+          long: "--file",
+          type: "path",
+          required: false,
+          description: "Read the prompt from a file.",
+        },
+      ],
+      notes: [
+        "Requires at least two explicit targets.",
+      ],
+      examples: [
+        "codex-team -b $TOKEN message send-many audit lint typecheck \"Run all pending checks.\"",
+        "codex-team -b $TOKEN message send-many audit lint typecheck --file prompt.md",
       ],
       needs_bearer: true,
     }),
@@ -920,11 +1325,25 @@ const messageGroup: HelpNode = {
     leaf({
       name: "wait",
       summary: "Block until a turn completes, errors, or times out.",
-      usage: "codex-team -b <token> message wait <name|thread_id> [flags]",
+      usage: "codex-team -b <token> message wait <name|thread_id>... [flags]",
       positionals: [
-        { ...LIVE_SESSION_TARGET, description: "Session to watch." },
+        { ...LIVE_SESSION_TARGETS, description: "One session by default, or multiple with --all/--any." },
       ],
       flags: [
+        {
+          long: "--all",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Wait until every listed session reaches a terminal outcome.",
+        },
+        {
+          long: "--any",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Return when the first listed session reaches a terminal outcome.",
+        },
         {
           long: "--for",
           type: "string",
@@ -941,10 +1360,13 @@ const messageGroup: HelpNode = {
       ],
       notes: [
         "Without --for, waits for the current in-flight turn. If the session is idle, waits for the next turn that starts after this call.",
+        "--all and --any are mutually exclusive. --for only applies to single-session waits.",
       ],
       examples: [
         "codex-team -b $TOKEN message wait audit",
         "codex-team -b $TOKEN message wait audit --for turn-42 --timeout 30",
+        "codex-team -b $TOKEN message wait --all audit lint typecheck --timeout 300",
+        "codex-team -b $TOKEN message wait --any audit lint typecheck --timeout 60",
       ],
       needs_bearer: true,
     }),
@@ -1198,6 +1620,9 @@ const HELP_TREE: HelpNode = {
     "codex-team --help",
     "codex-team -b $TOKEN session new audit --model gpt-5.4",
   ],
+  notes: [
+    "Default JSON output is concise. Pass --full on any leaf command to restore the complete response body.",
+  ],
   subcommands: [
     leaf({
       name: "version",
@@ -1210,6 +1635,31 @@ const HELP_TREE: HelpNode = {
       ],
       needs_bearer: false,
     }),
+    {
+      name: "doctor",
+      summary: "Run local environment and daemon bootstrap diagnostics.",
+      usage: "codex-team doctor [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one summary line with verdict, failed checks, and warnings.",
+        },
+      ],
+      examples: [
+        "codex-team doctor",
+        "codex-team doctor --short",
+      ],
+      notes: [
+        "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
+        "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness.",
+      ],
+      subcommands: [],
+      needs_bearer: false,
+    },
     leaf({
       name: "status",
       summary: "Show live sessions, pending events, and recent activity.",
@@ -1355,8 +1805,8 @@ export function renderHelp(path: string[]): string {
   } else {
     sections.push(renderPositionals(node));
     sections.push(renderFlags(node));
-    if (node.notes && node.notes.length > 0) sections.push(renderNotes(node));
   }
+  if (node.notes && node.notes.length > 0) sections.push(renderNotes(node));
 
   sections.push(renderExamples(node));
 

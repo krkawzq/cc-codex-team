@@ -35,7 +35,9 @@ cd /repo
 mkdir -p .codex-team
 echo "$BRIEF" > .codex-team/brief.md
 
-codex-team -b $TOK session new manager --profile planner --cwd "$(pwd)"
+# planner profile (see configure-codex-team/profiles-library.md)
+codex-team -b $TOK session new manager --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
 
 # Kick off the manager
 codex-team -b $TOK message send manager "Read .codex-team/brief.md.
@@ -82,7 +84,10 @@ while task not complete:
     append {ts, id, role, brief} to .codex-team/delegations.jsonl
 
     # Spawn a worker
-    codex-team -b $TOK session new worker-$id --profile $role --cwd $PWD
+    # Look up flag bundle for $role in configure-codex-team/profiles-library.md
+    # then expand to --model/--sandbox/--approval/--effort explicitly
+    codex-team -b $TOK session new worker-$id --cwd $PWD <role-specific flags>
+
 
     # Issue the subtask
     codex-team -b $TOK message send worker-$id \
