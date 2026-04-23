@@ -15,6 +15,7 @@ const MAX_INTERVAL_QUEUE_EVENTS = 512;
 const MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
 const MAX_FLUSH_EVENTS_PER_TICK = 64;
 const DEFAULT_CURSOR_PERSIST_DEBOUNCE_MS = 200;
+const DEFAULT_ALARM_OUTPUT_CAP_BYTES = 16 * 1024;
 const ACKABLE_EVENT_ID_RE = /^evt-\d+$/;
 
 interface MonitorEventSummary {
@@ -226,7 +227,7 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   return { streaming: true };
 };
 
-export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
+export const monitorAlarm: HandlerFn = async (ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor alarm requires streaming");
   const positionals = asPositionals(req);
   const intervalS = toInt(positionals[0], 0);
@@ -236,6 +237,7 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
   const flags = asFlags(req);
   const once = isTrue(flags["once"]);
   const timeoutS = toInt(flags["timeout"], 60);
+  const outputCapBytes = numConfig(ctx, "monitor.alarm_output_cap_bytes", DEFAULT_ALARM_OUTPUT_CAP_BYTES);
 
   let cancelled = false;
   let running = false;
@@ -261,8 +263,8 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
         const child = spawn(file, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         activeChild = child;
         activeTimedOut = false;
-        let stdoutBuf = "";
-        let stderrBuf = "";
+        const stdoutBuf = new CappedOutputBuffer(outputCapBytes);
+        const stderrBuf = new CappedOutputBuffer(outputCapBytes);
         const timeoutTimer = setTimeout(() => {
           activeTimedOut = true;
           clearActiveTimeoutTimer();
@@ -270,10 +272,8 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
         }, timeoutS * 1000);
         timeoutTimer.unref();
         activeTimeoutTimer = timeoutTimer;
-        child.stdout.setEncoding("utf8");
-        child.stdout.on("data", (c) => { stdoutBuf += c; });
-        child.stderr.setEncoding("utf8");
-        child.stderr.on("data", (c) => { stderrBuf += c; });
+        child.stdout.on("data", (c) => { stdoutBuf.append(c); });
+        child.stderr.on("data", (c) => { stderrBuf.append(c); });
         child.on("error", (err) => {
           clearActiveKillTimers();
           if (activeChild === child) activeChild = null;
@@ -284,13 +284,17 @@ export const monitorAlarm: HandlerFn = async (_ctx, req, stream) => {
           clearActiveKillTimers();
           if (activeChild === child) activeChild = null;
           if (!cancelled) {
-            if (stdoutBuf) stream.chunk({ stdout: stdoutBuf });
-            if (stderrBuf) stream.chunk({ stderr: stderrBuf });
+            const stdout = stdoutBuf.render();
+            const stderr = stderrBuf.render();
+            const outputTruncated = stdoutBuf.truncated() || stderrBuf.truncated();
+            if (stdout) stream.chunk({ stdout });
+            if (stderr) stream.chunk({ stderr });
             stream.chunk({
               __alarm_event: activeTimedOut ? "timeout" : "exit",
               exit_code: code,
               signal,
               duration_ms: Date.now() - start,
+              ...(outputTruncated ? { output_truncated: true } : {}),
             });
           }
           resolve();
@@ -374,6 +378,63 @@ function shellCommand(command: string): { file: string; args: string[] } {
   };
 }
 
+class CappedOutputBuffer {
+  private readonly headBytes: number;
+  private readonly tailBytes: number;
+  private readonly capBytes: number;
+  private totalBytes = 0;
+  private head: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  private tail: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  private full: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  private wasTruncated = false;
+
+  constructor(capBytes: number) {
+    this.capBytes = Math.max(1, Math.floor(capBytes));
+    this.headBytes = Math.floor(this.capBytes / 2);
+    this.tailBytes = this.capBytes - this.headBytes;
+  }
+
+  append(chunk: Buffer | string): void {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+    if (buf.length === 0) return;
+    this.totalBytes += buf.length;
+
+    if (!this.wasTruncated) {
+      const next = this.full.length === 0 ? buf : Buffer.concat([this.full, buf]);
+      if (next.length <= this.capBytes) {
+        this.full = next;
+        return;
+      }
+      this.wasTruncated = true;
+      this.head = next.subarray(0, this.headBytes);
+      this.tail = this.tailBytes > 0 ? next.subarray(Math.max(0, next.length - this.tailBytes)) : Buffer.alloc(0);
+      this.full = Buffer.alloc(0);
+      return;
+    }
+
+    if (this.tailBytes === 0) return;
+    if (buf.length >= this.tailBytes) {
+      this.tail = buf.subarray(buf.length - this.tailBytes);
+      return;
+    }
+    const merged = this.tail.length === 0 ? buf : Buffer.concat([this.tail, buf]);
+    this.tail = merged.length <= this.tailBytes
+      ? merged
+      : merged.subarray(merged.length - this.tailBytes);
+  }
+
+  render(): string {
+    if (!this.wasTruncated) return this.full.toString("utf8");
+    const truncatedBytes = Math.max(0, this.totalBytes - this.head.length - this.tail.length);
+    const marker = Buffer.from(`[... ${truncatedBytes} bytes truncated ...]`, "utf8");
+    return Buffer.concat([this.head, marker, this.tail]).toString("utf8");
+  }
+
+  truncated(): boolean {
+    return this.wasTruncated;
+  }
+}
+
 function asFlags(req: { params: Record<string, unknown> }): Record<string, unknown> {
   const f = req.params.flags;
   return f && typeof f === "object" ? (f as Record<string, unknown>) : {};
@@ -411,8 +472,8 @@ function parseTypeList(v: unknown): string[] | null {
   return s.split(",").map((x) => x.trim()).filter(Boolean);
 }
 
-function numConfig(ctx: { config: { getEffective(k: string): unknown } }, key: string, fallback: number): number {
-  const v = ctx.config.getEffective(key);
+function numConfig(ctx: { config?: { getEffective?(k: string): unknown } }, key: string, fallback: number): number {
+  const v = ctx.config?.getEffective?.(key);
   return typeof v === "number" ? v : fallback;
 }
 

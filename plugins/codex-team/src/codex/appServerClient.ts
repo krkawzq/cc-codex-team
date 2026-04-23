@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
+import { createLineParser, readMaxFrameBytes } from "../ipc/frameParser";
 import { logger } from "../logger";
 import {
   JsonValue,
@@ -63,13 +64,13 @@ export declare interface AppServerClient {
 
 export class AppServerClient extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams | null = null;
-  private buf = "";
   private pending = new Map<string, PendingRequest>();
   private stderrTail: string[] = [];
   private lastPid: number | null = null;
   private readonly options: Required<Omit<AppServerOptions, "env" | "cwd" | "clientInfo">> &
     Pick<AppServerOptions, "env" | "cwd" | "clientInfo">;
   private initialized = false;
+  private stdoutParser = this.createStdoutParser("app_server:unknown");
 
   constructor(options: AppServerOptions = {}) {
     super();
@@ -116,6 +117,7 @@ export class AppServerClient extends EventEmitter {
       windowsHide: true,
     });
     this.lastPid = this.proc.pid ?? null;
+    this.stdoutParser = this.createStdoutParser(this.peerLabel());
 
     this.proc.on("error", (err) => {
       logger.error("app-server spawn error", { err: err.message });
@@ -263,21 +265,7 @@ export class AppServerClient extends EventEmitter {
   }
 
   private onStdout(chunk: string): void {
-    this.buf += chunk;
-    let idx: number;
-    while ((idx = this.buf.indexOf("\n")) >= 0) {
-      const line = this.buf.slice(0, idx);
-      this.buf = this.buf.slice(idx + 1);
-      if (!line.trim()) continue;
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(line) as Record<string, unknown>;
-      } catch {
-        logger.warn("malformed line from app-server", { snippet: line.slice(0, 200) });
-        continue;
-      }
-      this.dispatchIncoming(parsed);
-    }
+    this.stdoutParser.push(chunk);
   }
 
   private onStderr(chunk: string): void {
@@ -334,6 +322,32 @@ export class AppServerClient extends EventEmitter {
       p.reject(err);
     }
     this.pending.clear();
+  }
+
+  private createStdoutParser(peer: string) {
+    return createLineParser({
+      maxFrameBytes: readMaxFrameBytes(),
+      peer,
+      onError: (error) => {
+        this.failAllPending(error);
+        this.emit("error", error);
+        void this.close().catch(() => undefined);
+      },
+      onLine: (line) => {
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          logger.warn("malformed line from app-server", { snippet: line.slice(0, 200) });
+          return;
+        }
+        this.dispatchIncoming(parsed);
+      },
+    });
+  }
+
+  private peerLabel(): string {
+    return this.lastPid ? `app_server:${this.lastPid}` : "app_server:unknown";
   }
 }
 
