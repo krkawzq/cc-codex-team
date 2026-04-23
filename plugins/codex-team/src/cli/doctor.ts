@@ -339,17 +339,14 @@ export async function runDoctor(options: RunDoctorOptions = {}, deps: DoctorDeps
 
   if (options.json) {
     write(`${JSON.stringify({
-      ok: true,
-      data: {
-        verdict,
-        checks: results.map((result) => ({
-          name: result.name,
-          status: renderStatus(result.status),
-          detail: result.detail,
-          ...(result.hint ? { hint: result.hint } : {}),
-        })),
-        exit_code: exitCodeForVerdict(verdict),
-      },
+      verdict,
+      checks: results.map((result) => ({
+        name: result.name,
+        status: renderStatus(result.status),
+        detail: result.detail,
+        ...(result.hint ? { hint: result.hint } : {}),
+      })),
+      exit_code: exitCodeForVerdict(verdict),
     })}\n`);
     return exitCodeForVerdict(verdict);
   }
@@ -460,14 +457,17 @@ function skip(
 }
 
 function resolveBundledPluginLauncher(ctx: DoctorContext): string | null {
-  if (!ctx.pluginRoot || !ctx.invokedAs) return null;
-  const pluginRoot = path.resolve(ctx.pluginRoot, "plugins", "codex-team");
+  if (!ctx.invokedAs) return null;
   const invokedAs = path.resolve(ctx.invokedAs);
-  const relative = path.relative(pluginRoot, invokedAs);
-  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
-    return invokedAs;
+  const candidates = new Set<string>();
+  candidates.add(path.join(path.resolve(ctx.packageRoot), "bin", "codex-team"));
+  if (ctx.pluginRoot) {
+    const pluginRoot = path.resolve(ctx.pluginRoot);
+    candidates.add(path.join(pluginRoot, "bin", "codex-team"));
+    candidates.add(path.join(pluginRoot, "plugins", "codex-team", "bin", "codex-team"));
   }
-  return null;
+
+  return candidates.has(invokedAs) ? invokedAs : null;
 }
 
 function shouldSuggestWritableTmpDir(code: string | undefined): boolean {

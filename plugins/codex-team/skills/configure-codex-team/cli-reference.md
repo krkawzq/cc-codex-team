@@ -4,13 +4,13 @@ Every command in `codex-team`. Successful non-streaming commands return one JSON
 
 ## Output modes (0.5.3+)
 
-Most commands accept the same three output modes — pick based on what you're going to do with the result, not which command you're running. `doctor` is the carve-out: human-readable by default, `--short` for a one-line summary.
+Most leaf commands accept the same three output modes — pick based on what you're going to do with the result, not which command you're running. `doctor` is the carve-out: human-readable by default, `--short` for a one-line summary, `--json` for the structured result body.
 
 | Mode | Flag | What you get |
 |---|---|---|
 | **Concise (default)** | _none_ | Single-line JSONL with only the fields Claude needs to decide what to do next (correlation ids, flow-control flags, outcome). ~2–6× smaller than `--full`. |
 | **Verbose** | `--full` | Multi-line pretty-printed JSON with the complete record including timestamps, config echo, nested objects. Use when you need a field the concise form omits. |
-| **Plain-text** | `--short` | One-line `key=value` for dashboards / `grep`. Not JSON. Available on state-heavy commands only (`status`, `profiles list`, `profiles show`, `session list`, `session info`, `session health`, `daemon status`, `daemon user list`, `message history`, `cursor list`, `daemon config list/get`, and the new action-command subset), plus `doctor` as a verdict summary line. |
+| **Plain-text** | `--short` | One-line `key=value` for dashboards / `grep`. Not JSON. Available on state-heavy commands only (`status`, `profiles list`, `profiles show`, `session list`, `session info`, `session health`, `daemon status`, `daemon user list`, `message history`, `cursor list`, and the new action-command subset), plus `doctor` as a verdict summary line. |
 
 **Rules**:
 - `--short` and `--full` are mutually exclusive (→ `invalid_params`).
@@ -29,27 +29,27 @@ codex-team [global-flags] <command> [args] [flags]
 | `-b, --bearer <token>` | string | Yes (except `daemon` group + `version`) | — | User identity |
 | `-v, --verbose` | bool | No | false | cli-side debug to stderr |
 | `--daemon-sock <path>` | path | No | from config | Override sock for debug/test |
-| `--full` | bool | No | false | Restore pre-0.5.3 full response body (opt-out of concise default) |
 | `-h, --help` | bool | No | false | Print help |
 
 Top-level convenience: `codex-team version` (no `-b`), `codex-team doctor` (no `-b`).
+`--full` is not a global flag; it appears on leaf commands that support JSON projection.
 Per-command help works too: `codex-team session --help`, `codex-team session new --help`, `codex-team daemon config set --help`, etc.
 `--help` is a parse terminator: `codex-team daemon --help user create` prints help for `daemon` and ignores the trailing `user create`.
 
 ## doctor (no `-b` required)
 
 ```
-codex-team doctor [--short]
+codex-team doctor [--short|--json]
 ```
 
-Runs eight ordered environment checks and exits `0` (HEALTHY) / `1` (DEGRADED) / `2` (BROKEN). Default output is human-readable with inline remediation hints when a check fails. `--short` emits a single plain-text summary line. Checks: Node version, `codex` binary on PATH, `codex-team` launcher on PATH, `data_dir` writable, local socket bind permitted, daemon pid/sock consistency, daemon socket reachable, dist freshness. First thing to run if any `codex-team` command hangs or returns `daemon_unreachable` / `socket_bind_denied`.
+Runs eight ordered environment checks and exits `0` (HEALTHY) / `1` (DEGRADED) / `2` (BROKEN). Default output is human-readable with inline remediation hints when a check fails. `--short` emits a single plain-text summary line. `--json` emits `{verdict, checks, exit_code}` directly with no outer `{ok,data}` wrapper. Checks: Node version, `codex` binary on PATH, `codex-team` launcher on PATH, `data_dir` writable, local socket bind permitted, daemon pid/sock consistency, daemon socket reachable, dist freshness. First thing to run if any `codex-team` command hangs or returns `daemon_unreachable` / `socket_bind_denied`.
 
 ## profiles (no `-b` required)
 
 | Command | Purpose |
 |---|---|
 | `profiles list` | List the bundled canonical profiles and their `session new` flag bundles |
-| `profiles show <name>` | Show one bundled profile plus a copy-ready `session new` command |
+| `profiles show <name>` | Show one bundled profile plus a paste-safe `session new` command |
 
 ## daemon group (no `-b` required)
 
@@ -173,7 +173,7 @@ Re-attach a crashed or dead live session to a fresh `codex app-server`. Healthy 
 | `--file <path>` | path | — | Read prompt from file |
 | `--attach <path>` | repeatable | — | Attach local image file(s) only (`png/jpg/jpeg/gif/webp/bmp/svg`) |
 
-Non-blocking. Returns `{ started, turn_id, queue_id, queued_depth }`. `queue_id` is `null` when the turn starts immediately.
+Non-blocking. Returns `{"status":"started","turn_id":"..."}` when the turn starts immediately, or `{"status":"queued","queue_id":"...","queued_depth":N}` when it queues.
 
 ### `message peer <session> [prompt]`
 

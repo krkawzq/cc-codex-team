@@ -50,7 +50,7 @@ export const BUILTIN_PROFILES: BuiltinProfile[] = [
       sandbox: "workspace-write",
       approval: "never",
       effort: "medium",
-      auto_approve: "npm test,vitest*,pytest*,cargo test*,go test*,make test*",
+      auto_approve: "npm test,npm run test*,vitest*,pytest*,cargo test*,go test*,make test*",
     },
   },
   {
@@ -71,8 +71,8 @@ export function findProfile(name: string): BuiltinProfile | undefined {
 
 export function renderSessionNewCommand(
   profile: BuiltinProfile,
-  sessionName = "<name>",
-  cwd = "<repo>",
+  sessionName = "SESSION_NAME",
+  cwd = "/abs/path/to/repo",
 ): string {
   const args = [
     "codex-team",

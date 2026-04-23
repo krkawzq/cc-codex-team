@@ -1699,6 +1699,13 @@ const HELP_TREE: HelpNode = {
       positionals: [],
       flags: [
         {
+          long: "--json",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print the structured doctor result body as JSON.",
+        },
+        {
           long: "--short",
           type: "bool",
           default: "false",
@@ -1709,9 +1716,11 @@ const HELP_TREE: HelpNode = {
       examples: [
         "codex-team doctor",
         "codex-team doctor --short",
+        "codex-team doctor --json",
       ],
       notes: [
         "Human-readable by default. Use --short for a one-line verdict summary.",
+        "Use --json for the same verdict/check payload in machine-readable form.",
         "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
         "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness.",
       ],

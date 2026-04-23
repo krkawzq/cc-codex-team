@@ -131,6 +131,54 @@ describe("CLI cwd preflight", () => {
     expect(stdoutSpy).toHaveBeenCalledWith("{\"name\":\"demo\",\"thread_id\":\"th-1\"}\n");
   });
 
+  it("canonicalizes relative --cwd before dispatching session:new", async () => {
+    const callerCwd = mkTmpDir();
+    const target = path.join(callerCwd, "repo");
+    fs.mkdirSync(target);
+    const previousCwd = process.cwd();
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string; method: string; params: { flags?: Record<string, unknown> } }) => {
+      expect(req.method).toBe("session:new");
+      expect(req.params.flags?.cwd).toBe(target);
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            session: {
+              name: "demo",
+              thread_id: "th-1",
+              state: "live",
+              cwd: target,
+            },
+          },
+        });
+      }, 0);
+    });
+
+    try {
+      process.chdir(callerCwd);
+      const code = await runCli(["-b", "token-1", "session", "new", "demo", "--cwd", "repo"]);
+
+      expect(code).toBe(0);
+      expect(stdoutSpy).toHaveBeenCalledWith("{\"name\":\"demo\",\"thread_id\":\"th-1\"}\n");
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
   it("rejects session:fork before daemon bootstrap when --cwd does not exist", async () => {
     const missing = path.join(os.tmpdir(), "codex-team-cli-cwd-missing-fork");
 

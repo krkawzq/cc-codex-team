@@ -2,7 +2,7 @@
 
 These are the canonical role profiles referenced by every playbook in `skills/codex-team-playbooks/`. They ship **with the plugin** — you do NOT need to pre-configure anything in `~/.codex/config.toml`. Claude reads the definitions here and passes the fields to `session new` directly as explicit flags.
 
-Quick inspection shortcut: `codex-team profiles list` shows all bundled recipes, and `codex-team profiles show <name>` prints one profile plus a ready-to-copy `session new` command.
+Quick inspection shortcut: `codex-team profiles list` shows all bundled recipes, and `codex-team profiles show <name>` prints one profile plus a paste-safe `session new` command.
 
 > **Why this lives in the skill, not in `~/.codex/config.toml`:** those playbooks used to depend on user-local Codex profiles that fresh agents had no way to know about. Dogfood testing showed `--profile fixer` silently falling back to defaults when the profile wasn't defined. Now the profile IS the skill content — every agent that loads this skill gets the definitions, regardless of user-local Codex config.
 
@@ -15,8 +15,8 @@ Pass the `session new` flag bundle directly; the `--profile` flag is NOT used fo
 Writes code in the workspace. Asks before risky ops. High reasoning effort.
 
 ```bash
-codex-team -b $TOK session new <name> \
-  --cwd <repo> \
+codex-team -b $TOK session new SESSION_NAME \
+  --cwd /abs/path/to/repo \
   --model gpt-5.4 \
   --sandbox workspace-write \
   --approval on-request \
@@ -31,8 +31,8 @@ codex-team -b $TOK session new <name> \
 Never writes. Reads everything. Maximum reasoning effort. No approval pauses since it can't touch anything.
 
 ```bash
-codex-team -b $TOK session new <name> \
-  --cwd <repo> \
+codex-team -b $TOK session new SESSION_NAME \
+  --cwd /abs/path/to/repo \
   --model gpt-5.4 \
   --sandbox read-only \
   --approval never \
@@ -46,8 +46,8 @@ codex-team -b $TOK session new <name> \
 Same safety envelope as reviewer but used when the role is about producing plans, not auditing work. Same defaults but the naming keeps playbooks readable.
 
 ```bash
-codex-team -b $TOK session new <name> \
-  --cwd <repo> \
+codex-team -b $TOK session new SESSION_NAME \
+  --cwd /abs/path/to/repo \
   --model gpt-5.4 \
   --sandbox read-only \
   --approval never \
@@ -61,8 +61,8 @@ codex-team -b $TOK session new <name> \
 Writable workspace so tests can create caches and fixtures. Never pauses for approval — trusted automation. Medium effort is enough for running a known test command and reporting pass/fail.
 
 ```bash
-codex-team -b $TOK session new <name> \
-  --cwd <repo> \
+codex-team -b $TOK session new SESSION_NAME \
+  --cwd /abs/path/to/repo \
   --model gpt-5.4-mini \
   --sandbox workspace-write \
   --approval never \
@@ -77,8 +77,8 @@ codex-team -b $TOK session new <name> \
 Small model, medium effort, read-only. Cheapest role — pick this when the job is "survey N files and summarize", not "audit for correctness".
 
 ```bash
-codex-team -b $TOK session new <name> \
-  --cwd <repo> \
+codex-team -b $TOK session new SESSION_NAME \
+  --cwd /abs/path/to/repo \
   --model gpt-5.4-mini \
   --sandbox read-only \
   --approval never \
@@ -114,7 +114,7 @@ If a field appears on every `session new` you run, consider a daemon-wide defaul
 ```bash
 codex-team daemon config set codex.default_model gpt-5.4
 codex-team daemon config set codex.default_sandbox workspace-write
-codex-team daemon config set session.auto_approve_command_patterns 'git*,npm test,vitest*'
+codex-team daemon config set session.auto_approve_command_patterns 'git*,npm test,npm run test*,vitest*'
 ```
 
 Then a profile's explicit flags only apply the *differences* from the daemon default. See `config-keys.md` for the full list of `codex.default_*` keys.
@@ -135,7 +135,7 @@ codex-team daemon user create $TOK
 
 codex-team -b $TOK session new worker \
   --cwd /repo --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high \
-  --auto-approve 'git*,npm test,vitest*'
+  --auto-approve 'git*,npm test,npm run test*,vitest*'
 
 codex-team -b $TOK session new reviewer \
   --cwd /repo --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
@@ -145,6 +145,6 @@ Spin up a plan-execute-verify trio:
 
 ```bash
 codex-team -b $TOK session new planner  --cwd /repo --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
-codex-team -b $TOK session new executor --cwd /repo --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high --auto-approve 'git*,npm test,vitest*'
+codex-team -b $TOK session new executor --cwd /repo --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high --auto-approve 'git*,npm test,npm run test*,vitest*'
 codex-team -b $TOK session new verifier --cwd /repo --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
 ```

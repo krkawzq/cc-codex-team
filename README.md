@@ -210,7 +210,7 @@ claude --plugin-dir /abs/path/to/cc-codex-team/plugins/codex-team
 Bump version (updates `package.json` + `.claude-plugin/plugin.json` + rebuilds dist):
 
 ```bash
-npm run bump-version 0.5.3
+npm run bump-version 0.5.5
 ```
 
 Rebuild and `/reload-plugins` after editing TypeScript.

@@ -137,7 +137,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
     if (spec.takesValue) {
-      const v = inlineValue ?? argv[++i];
+      const taken = takeOptionValue(inlineValue, argv, i, globalToken);
+      if (!taken.ok) {
+        result.unknown = taken.message;
+        return result;
+      }
+      i = taken.nextIndex;
+      const v = taken.value;
       if (v === undefined) {
         result.unknown = `flag ${globalToken} requires a value`;
         return result;
@@ -233,6 +239,35 @@ function splitLongFlagAssignment(token: string): [string, string | null] {
   const eqIdx = token.indexOf("=");
   if (eqIdx < 0) return [token, null];
   return [token.slice(0, eqIdx), token.slice(eqIdx + 1)];
+}
+
+function takeOptionValue(
+  inlineValue: string | null,
+  argv: string[],
+  index: number,
+  token: string,
+): { ok: true; value: string; nextIndex: number } | { ok: false; message: string } {
+  if (inlineValue !== null) {
+    return {
+      ok: true,
+      value: inlineValue,
+      nextIndex: index,
+    };
+  }
+
+  const value = argv[index + 1];
+  if (value === undefined || isFlagLike(value)) {
+    return {
+      ok: false,
+      message: `flag ${token} requires a value`,
+    };
+  }
+
+  return {
+    ok: true,
+    value,
+    nextIndex: index + 1,
+  };
 }
 
 function setFlag(flags: Record<string, string | boolean | string[]>, key: string, value: string | null): void {

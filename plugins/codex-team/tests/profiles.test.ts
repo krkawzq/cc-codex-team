@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const sockMocks = vi.hoisted(() => ({
@@ -9,6 +11,7 @@ const sockMocks = vi.hoisted(() => ({
 
 vi.mock("../src/ipc/sock", () => sockMocks);
 
+import { BUILTIN_PROFILES } from "../src/profiles/builtin";
 import { runCli } from "../src/cli/run";
 
 describe("profiles commands", () => {
@@ -64,7 +67,7 @@ describe("profiles commands", () => {
             sandbox: "workspace-write",
             approval: "never",
             effort: "medium",
-            auto_approve: "npm test,vitest*,pytest*,cargo test*,go test*,make test*",
+            auto_approve: "npm test,npm run test*,vitest*,pytest*,cargo test*,go test*,make test*",
           },
         },
         {
@@ -108,7 +111,7 @@ describe("profiles commands", () => {
         effort: "high",
         auto_approve: "git*,npm test,npm run test*,vitest*,pytest*,cargo test*",
       },
-      command: "codex-team -b $TOK session new <name> --cwd <repo> --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high --auto-approve 'git*,npm test,npm run test*,vitest*,pytest*,cargo test*'",
+      command: "codex-team -b $TOK session new SESSION_NAME --cwd /abs/path/to/repo --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high --auto-approve 'git*,npm test,npm run test*,vitest*,pytest*,cargo test*'",
     }) + "\n");
     expect(sockMocks.probeSock).not.toHaveBeenCalled();
   });
@@ -128,9 +131,31 @@ describe("profiles commands", () => {
 
     expect(code).toBe(0);
     expect(readStdout(stdoutSpy)).toBe(
-      "codex-team -b $TOK session new <name> --cwd <repo> --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high --auto-approve 'git*,npm test,npm run test*,vitest*,pytest*,cargo test*'\n",
+      "codex-team -b $TOK session new SESSION_NAME --cwd /abs/path/to/repo --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high --auto-approve 'git*,npm test,npm run test*,vitest*,pytest*,cargo test*'\n",
     );
     expect(sockMocks.probeSock).not.toHaveBeenCalled();
+  });
+
+  it("profiles show --short renders shell-safe commands for every bundled profile", async () => {
+    for (const profile of BUILTIN_PROFILES) {
+      stdoutSpy.mockClear();
+
+      const code = await runCli(["profiles", "show", profile.name, "--short"]);
+
+      expect(code).toBe(0);
+      const command = readStdout(stdoutSpy).trim();
+      const parsed = parseShellCommand(command);
+      expect(parsed.slice(0, 7)).toEqual([
+        "codex-team",
+        "-b",
+        "token-1",
+        "session",
+        "new",
+        "SESSION_NAME",
+        "--cwd",
+      ]);
+      expect(parsed[7]).toBe("/abs/path/to/repo");
+    }
   });
 
   it("profiles with no subcommand prints group help", async () => {
@@ -147,4 +172,25 @@ describe("profiles commands", () => {
 
 function readStdout(stdoutSpy: ReturnType<typeof vi.spyOn>): string {
   return stdoutSpy.mock.calls.map(([chunk]) => String(chunk)).join("");
+}
+
+function parseShellCommand(command: string): string[] {
+  const parsed = spawnSync(
+    "bash",
+    [
+      "-lc",
+      "set -euo pipefail; eval \"set -- $CMD\"; printf '%s\\n' \"$@\"",
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CMD: command,
+        TOK: "token-1",
+      },
+    },
+  );
+
+  expect(parsed.status).toBe(0);
+  return parsed.stdout.trim().split("\n");
 }
