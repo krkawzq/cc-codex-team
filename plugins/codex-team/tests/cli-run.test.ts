@@ -653,6 +653,44 @@ describe("runCli", () => {
     });
   });
 
+  it("does not ack monitor chunks marked non-ackable", async () => {
+    let streamHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+      destroyed: false,
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      streamHandler = handler;
+    });
+
+    const pending = runCli(["-b", "token-1", "monitor", "events", "--stream"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const reqId = sockMocks.writeMessage.mock.calls[0]?.[1]?.id;
+
+    streamHandler?.({
+      kind: "stream_chunk",
+      id: reqId,
+      data: { id: "monitor-overflow-1", type: "monitor.overflow", ackable: false },
+    });
+    streamHandler?.({
+      kind: "stream_end",
+      id: reqId,
+    });
+
+    const code = await pending;
+
+    expect(code).toBe(0);
+    expect(sockMocks.writeMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("emits raw markdown stream chunks for message tail --follow --format markdown", async () => {
     let streamHandler: ((msg: Record<string, unknown>) => void) | undefined;
     const socket = {

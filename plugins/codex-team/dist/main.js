@@ -1952,6 +1952,7 @@ var CONFIG_KEYS = {
   "daemon.connect_retry_attempts": { type: "int", default: 3, needsRestart: false, description: "CLI retries for transient daemon connect errors" },
   "daemon.connect_retry_delay_seconds": { type: "float", default: 0.25, needsRestart: false, description: "delay between transient daemon connect retries" },
   "monitor.default_interval_seconds": { type: "int", default: 30, needsRestart: false, description: "default --interval for `monitor events`" },
+  "monitor.cursor_persist_debounce_ms": { type: "int", default: 200, needsRestart: false, description: "debounce for cursor auto-updates from `monitor events` (milliseconds)" },
   "monitor.event_log_retention": { type: "int", default: 1e4, needsRestart: false, description: "per-user ring-buffer event retention" },
   "session.auto_approve_command_patterns": {
     type: "string",
@@ -3292,6 +3293,7 @@ function extractCursorEventId(result) {
 }
 function createStreamAckCallback(method, sock, reqId, data) {
   if (method !== "monitor:events") return void 0;
+  if (!isStreamChunkAckable(data)) return void 0;
   const eventId = extractStreamEventId(data);
   if (!eventId) return void 0;
   return () => sendStreamAck(sock, reqId, eventId);
@@ -3300,6 +3302,11 @@ function extractStreamEventId(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;
   const id = data.id;
   return typeof id === "string" && id.length > 0 ? id : null;
+}
+function isStreamChunkAckable(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  const ackable = data.ackable;
+  return ackable !== false;
 }
 function sendStreamAck(sock, reqId, eventId) {
   if (sock.destroyed) return;
@@ -4530,6 +4537,7 @@ var CursorStore = class {
   users = /* @__PURE__ */ new Map();
   loaded = /* @__PURE__ */ new Set();
   writeChains = /* @__PURE__ */ new Map();
+  pendingPersists = /* @__PURE__ */ new Map();
   constructor(dataDir) {
     this.dataDir = dataDir;
   }
@@ -4558,6 +4566,7 @@ var CursorStore = class {
       auto_update: input.auto_update ?? existing?.auto_update ?? true
     };
     bucket.set(cursor.name, cursor);
+    this.discardPendingPersist(user, cursor.name);
     try {
       await this.enqueuePersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) });
     } catch (error) {
@@ -4581,11 +4590,26 @@ var CursorStore = class {
       auto_update: input.auto_update ?? existing?.auto_update ?? true
     };
     bucket.set(cursor.name, cursor);
+    this.discardPendingPersist(user, cursor.name);
     try {
       await this.enqueuePersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) });
     } catch (error) {
       logger.warn("failed to persist cursors.json", { user, err: error.message });
     }
+    return cloneCursor(cursor);
+  }
+  saveBestEffortDebounced(user, input, debounceMs) {
+    validateCursorName(input.name);
+    const bucket = this.bucket(user);
+    const existing = bucket.get(input.name);
+    const cursor = {
+      name: input.name,
+      event_id: input.event_id ?? null,
+      updated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      auto_update: input.auto_update ?? existing?.auto_update ?? true
+    };
+    bucket.set(cursor.name, cursor);
+    this.scheduleBestEffortPersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) }, debounceMs);
     return cloneCursor(cursor);
   }
   async delete(user, name) {
@@ -4594,6 +4618,7 @@ var CursorStore = class {
     const existing = bucket.get(name);
     const deleted = bucket.delete(name);
     if (!deleted) return false;
+    this.discardPendingPersist(user, name);
     try {
       await this.enqueuePersist(user, { type: "delete", name });
     } catch (error) {
@@ -4603,10 +4628,56 @@ var CursorStore = class {
     return true;
   }
   async clearUser(user) {
+    await this.flushUser(user);
     await (this.writeChains.get(user)?.catch(() => void 0) ?? Promise.resolve());
     this.writeChains.delete(user);
+    this.clearPendingPersistState(user);
     this.users.delete(user);
     this.loaded.delete(user);
+  }
+  async flushUser(user) {
+    while (true) {
+      const state = this.pendingPersists.get(user);
+      if (!state) {
+        await (this.writeChains.get(user)?.catch(() => void 0) ?? Promise.resolve());
+        return;
+      }
+      if (state.timer) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      }
+      if (state.flushing) {
+        await state.flushing;
+        continue;
+      }
+      if (state.ops.size === 0) {
+        this.clearPendingPersistState(user);
+        await (this.writeChains.get(user)?.catch(() => void 0) ?? Promise.resolve());
+        return;
+      }
+      const ops = Array.from(state.ops.values(), clonePersistOp);
+      state.ops.clear();
+      const flushPromise = this.enqueuePersist(user, ops).catch((error) => {
+        logger.warn("failed to persist cursors.json", { user, err: error.message });
+      }).finally(() => {
+        if (this.pendingPersists.get(user) !== state) return;
+        state.flushing = null;
+        if (!state.timer && state.ops.size === 0) {
+          this.pendingPersists.delete(user);
+        }
+      });
+      state.flushing = flushPromise;
+      await flushPromise;
+    }
+  }
+  async flush() {
+    const users = /* @__PURE__ */ new Set([
+      ...this.pendingPersists.keys(),
+      ...this.writeChains.keys()
+    ]);
+    for (const user of users) {
+      await this.flushUser(user);
+    }
   }
   bucket(user) {
     this.loadForUser(user);
@@ -4634,20 +4705,21 @@ var CursorStore = class {
     this.loaded.add(user);
   }
   enqueuePersist(user, op) {
+    const ops = Array.isArray(op) ? op.map(clonePersistOp) : [clonePersistOp(op)];
     const previous = this.writeChains.get(user) ?? Promise.resolve();
-    const next = previous.catch(() => void 0).then(() => this.persistAsync(user, op));
+    const next = previous.catch(() => void 0).then(() => this.persistAsync(user, ops));
     this.writeChains.set(user, next);
     return next;
   }
-  async persistAsync(user, op) {
+  async persistAsync(user, ops) {
     const dir = userDir(user, this.dataDir);
     await import_node_fs9.default.promises.mkdir(dir, { recursive: true });
     const filePath = cursorFilePath(user, this.dataDir);
-    const releaseLock = await acquireCursorLock(filePath);
+    const lock = await acquireCursorLock(filePath);
     const tmpPath = makeTempPath(filePath);
     try {
       const persisted = await loadEnvelopeFromFile(filePath);
-      applyPersistOp(persisted, op);
+      for (const op of ops) applyPersistOp(persisted, op);
       const payload = {
         schema_version: SCHEMA_VERSION4,
         cursors: sorted(persisted)
@@ -4656,8 +4728,44 @@ var CursorStore = class {
       await import_node_fs9.default.promises.rename(tmpPath, filePath);
     } finally {
       await import_node_fs9.default.promises.unlink(tmpPath).catch(() => void 0);
-      await releaseLock();
+      await lock.release();
     }
+  }
+  scheduleBestEffortPersist(user, op, debounceMs) {
+    const state = this.getPendingPersistState(user);
+    state.ops.set(persistKey(op), clonePersistOp(op));
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      void this.flushUser(user);
+    }, Math.max(0, debounceMs));
+    state.timer.unref();
+  }
+  discardPendingPersist(user, cursorName) {
+    const state = this.pendingPersists.get(user);
+    if (!state) return;
+    state.ops.delete(cursorName);
+    if (!state.timer && !state.flushing && state.ops.size === 0) {
+      this.pendingPersists.delete(user);
+    }
+  }
+  getPendingPersistState(user) {
+    let state = this.pendingPersists.get(user);
+    if (!state) {
+      state = {
+        timer: null,
+        ops: /* @__PURE__ */ new Map(),
+        flushing: null
+      };
+      this.pendingPersists.set(user, state);
+    }
+    return state;
+  }
+  clearPendingPersistState(user) {
+    const state = this.pendingPersists.get(user);
+    if (!state) return;
+    if (state.timer) clearTimeout(state.timer);
+    this.pendingPersists.delete(user);
   }
 };
 function cursorFilePath(user, dataDir) {
@@ -4668,48 +4776,36 @@ async function acquireCursorLock(filePath) {
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (true) {
     try {
-      const handle = await import_node_fs9.default.promises.open(lockPath, "wx");
-      try {
-        await handle.writeFile(JSON.stringify(makeCursorLockRecord()));
-      } finally {
-        await handle.close();
-      }
-      return async () => {
-        await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
-      };
+      const created = await tryCreateCursorLock(lockPath);
+      if (created) return created;
     } catch (error) {
       const err2 = error;
       if (err2.code !== "EEXIST") throw error;
-      if (await reclaimStaleCursorLock(lockPath)) {
-        return async () => {
-          await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
-        };
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`timed out waiting for cursor lock '${lockPath}'`);
-      }
-      await (0, import_promises2.setTimeout)(LOCK_RETRY_MS);
+      const reclaimed = await reclaimStaleCursorLock(lockPath);
+      if (reclaimed) return reclaimed;
     }
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for cursor lock '${lockPath}'`);
+    }
+    await (0, import_promises2.setTimeout)(LOCK_RETRY_MS);
   }
 }
 async function reclaimStaleCursorLock(lockPath) {
   const lock = await readCursorLock(lockPath);
-  if (!lock || !isStaleCursorLock(lock)) return false;
-  const tmpPath = `${lockPath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
-  await import_node_fs9.default.promises.writeFile(tmpPath, JSON.stringify(makeCursorLockRecord()));
+  if (!lock || !isStaleCursorLock(lock)) return null;
   try {
-    await import_node_fs9.default.promises.rename(tmpPath, lockPath);
-    return true;
+    await import_node_fs9.default.promises.unlink(lockPath);
   } catch (error) {
     const err2 = error;
-    if (err2.code === "EEXIST" || err2.code === "EPERM") {
-      await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
-      await import_node_fs9.default.promises.rename(tmpPath, lockPath);
-      return true;
-    }
-    return false;
-  } finally {
-    await import_node_fs9.default.promises.unlink(tmpPath).catch(() => void 0);
+    if (err2.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    return await tryCreateCursorLock(lockPath);
+  } catch (error) {
+    const err2 = error;
+    if (err2.code === "EEXIST") return null;
+    throw error;
   }
 }
 function makeTempPath(filePath) {
@@ -4719,7 +4815,8 @@ function makeCursorLockRecord() {
   return {
     pid: process.pid,
     started_at: (/* @__PURE__ */ new Date()).toISOString(),
-    host: import_node_os2.default.hostname()
+    host: import_node_os2.default.hostname(),
+    nonce: Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
   };
 }
 async function loadEnvelopeFromFile(filePath) {
@@ -4754,11 +4851,16 @@ async function readCursorLock(lockPath) {
     return {
       pid: parsed.pid,
       started_at: parsed.started_at,
-      host: parsed.host
+      host: parsed.host,
+      ...typeof parsed.nonce === "string" && parsed.nonce.length > 0 ? { nonce: parsed.nonce } : {}
     };
   } catch {
     return null;
   }
+}
+async function verifyCursorLockOwnership(lockPath, expected) {
+  const current = await readCursorLock(lockPath);
+  return current?.pid === expected.pid && current.started_at === expected.started_at && current.host === expected.host && current.nonce === expected.nonce;
 }
 function isStaleCursorLock(lock) {
   if (!isPidAlive(lock.pid)) return true;
@@ -4781,6 +4883,13 @@ function applyPersistOp(bucket, op) {
   }
   bucket.set(op.cursor.name, cloneCursorRecord(op.cursor));
 }
+function clonePersistOp(op) {
+  if (op.type === "delete") return { type: "delete", name: op.name };
+  return { type: "upsert", cursor: cloneCursorRecord(op.cursor) };
+}
+function persistKey(op) {
+  return op.type === "delete" ? op.name : op.cursor.name;
+}
 function validateCursorName(name) {
   if (!CURSOR_NAME_RE.test(name)) {
     throw invalidParams("cursor name must match /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/");
@@ -4800,6 +4909,32 @@ function cloneCursorRecord(cursor) {
     updated_at: cursor.updated_at,
     auto_update: cursor.auto_update
   };
+}
+async function tryCreateCursorLock(lockPath) {
+  const handle = await import_node_fs9.default.promises.open(lockPath, "wx");
+  const record = makeCursorLockRecord();
+  try {
+    await handle.writeFile(JSON.stringify(record));
+    await handle.sync();
+    if (!await verifyCursorLockOwnership(lockPath, record)) {
+      await handle.close().catch(() => void 0);
+      return null;
+    }
+    return {
+      lockPath,
+      record,
+      release: async () => {
+        const owned = await verifyCursorLockOwnership(lockPath, record);
+        await handle.close().catch(() => void 0);
+        if (owned) {
+          await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
+        }
+      }
+    };
+  } catch (error) {
+    await handle.close().catch(() => void 0);
+    throw error;
+  }
 }
 function isPersistedCursor(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -6455,6 +6590,11 @@ async function shutdownDaemon(ctx, reason, exitCode = 0) {
     await ctx.events.flush();
   } catch (e) {
     logger.error("event log flush error", { err: e.message });
+  }
+  try {
+    await ctx.cursors.flush();
+  } catch (e) {
+    logger.error("cursor flush error", { err: e.message });
   }
   unlinkSockIfStale(ctx.sockPath);
   try {
@@ -8710,6 +8850,8 @@ var import_node_child_process5 = require("child_process");
 var MAX_INTERVAL_QUEUE_EVENTS = 512;
 var MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
 var MAX_FLUSH_EVENTS_PER_TICK = 64;
+var DEFAULT_CURSOR_PERSIST_DEBOUNCE_MS = 200;
+var ACKABLE_EVENT_ID_RE = /^evt-\d+$/;
 var monitorEvents = async (ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor events requires streaming");
   const user = req.bearer;
@@ -8728,15 +8870,14 @@ var monitorEvents = async (ctx, req, stream) => {
   const summaryMode = isTrue4(flags["summary"]);
   const filterTypes = parseTypeList(flags["filter"]);
   const excludeTypes = parseTypeList(flags["exclude"]);
+  const cursorPersistDebounceMs = numConfig(ctx, "monitor.cursor_persist_debounce_ms", DEFAULT_CURSOR_PERSIST_DEBOUNCE_MS);
   const sinceId = asString8(flags["since"]);
   const cursorName = asString8(flags["cursor"]);
   if (sinceId && cursorName) throw invalidParams("--since and --cursor are mutually exclusive");
   const sessionFilter = asString8(flags["session"]);
   let effectiveSinceId = sinceId;
-  let persistedCursorEventId = null;
-  let lastObservedEventId = null;
+  let queuedCursorEventId = null;
   let lastAckedEventId = null;
-  let cursorWriteChain = Promise.resolve();
   if (cursorName) {
     const cursor = await ctx.cursors.ensure(user, {
       name: cursorName,
@@ -8744,29 +8885,37 @@ var monitorEvents = async (ctx, req, stream) => {
       auto_update: true
     });
     effectiveSinceId = cursor.event_id;
-    persistedCursorEventId = cursor.event_id;
-    lastObservedEventId = cursor.event_id;
+    queuedCursorEventId = cursor.event_id;
     lastAckedEventId = cursor.event_id;
   }
-  const emit = (event) => {
-    stream.chunk(summaryMode ? summarizeEvent(event) : event);
+  const emit = (event, ackable = isAckableMonitorEventId(event.id)) => {
+    stream.chunk(summaryMode ? summarizeEvent(event, ackable) : withAckableState(event, ackable));
   };
   const scheduleCursorPersist = () => {
     if (!cursorName) return;
     const nextEventId = lastAckedEventId;
-    if (!nextEventId || nextEventId === persistedCursorEventId) return;
-    cursorWriteChain = cursorWriteChain.catch(() => void 0).then(async () => {
-      if (!nextEventId || nextEventId === persistedCursorEventId) return;
-      await ctx.cursors.saveBestEffort(user, {
-        name: cursorName,
-        event_id: nextEventId,
-        auto_update: true
-      });
-      persistedCursorEventId = nextEventId;
-    });
+    if (!nextEventId || nextEventId === queuedCursorEventId) return;
+    ctx.cursors.saveBestEffortDebounced(user, {
+      name: cursorName,
+      event_id: nextEventId,
+      auto_update: true
+    }, cursorPersistDebounceMs);
+    queuedCursorEventId = nextEventId;
+  };
+  const flushCursorPersist = async () => {
+    if (!cursorName) return;
+    await ctx.cursors.flushUser(user);
   };
   stream.onAck((ack) => {
     if (!ack.event_id) return;
+    if (!isAckableMonitorEventId(ack.event_id)) {
+      logger.warn("ignoring non-event monitor ack for cursor update", {
+        user,
+        cursor: cursorName,
+        event_id: ack.event_id
+      });
+      return;
+    }
     lastAckedEventId = ack.event_id;
     scheduleCursorPersist();
   });
@@ -8790,9 +8939,6 @@ var monitorEvents = async (ctx, req, stream) => {
       stream.end(invalidParams(`event '${effectiveSinceId}' not found`));
     }
     return { streaming: true };
-  }
-  if (backlog.events.length > 0) {
-    lastObservedEventId = backlog.events[backlog.events.length - 1]?.id ?? lastObservedEventId;
   }
   const initialEvents = backlog.events.filter(accept);
   const queue = streamMode ? [...initialEvents] : [];
@@ -8838,16 +8984,15 @@ var monitorEvents = async (ctx, req, stream) => {
     for (const e of queue) emit(e);
     queue.length = 0;
     const sub2 = ctx.events.subscribe(user, (e) => {
-      lastObservedEventId = e.id;
       if (accept(e)) emit(e);
     });
-    stream.onClose(() => {
+    stream.onClose(async () => {
       sub2.dispose();
+      await flushCursorPersist();
     });
     return { streaming: true };
   }
   const sub = ctx.events.subscribe(user, (e) => {
-    lastObservedEventId = e.id;
     if (accept(e)) enqueueIntervalEvent(e);
   });
   let closed = false;
@@ -8865,7 +9010,7 @@ var monitorEvents = async (ctx, req, stream) => {
     if (closed || draining) return;
     draining = true;
     const overflowEvent = takeOverflowEvent();
-    if (overflowEvent) emit(overflowEvent);
+    if (overflowEvent) emit(overflowEvent, false);
     const batch = queue.splice(0, MAX_FLUSH_EVENTS_PER_TICK);
     for (const event of batch) {
       queueBytes = Math.max(0, queueBytes - eventSize(event));
@@ -8881,11 +9026,12 @@ var monitorEvents = async (ctx, req, stream) => {
   if (overflowDropped > 0 || queue.length > 0) {
     scheduleDrain(0);
   }
-  stream.onClose(() => {
+  stream.onClose(async () => {
     closed = true;
     clearInterval(timer);
     if (drainTimer) clearTimeout(drainTimer);
     sub.dispose();
+    await flushCursorPersist();
   });
   return { streaming: true };
 };
@@ -9071,14 +9217,31 @@ function numConfig(ctx, key, fallback) {
 function eventSize(event) {
   return Buffer.byteLength(JSON.stringify(event));
 }
-function summarizeEvent(event) {
-  return {
+function summarizeEvent(event, ackable) {
+  return stripUndefined2({
     id: event.id,
     ts: event.ts,
     type: event.type,
     session: event.session,
-    key: summarizeEventKey2(event)
+    key: summarizeEventKey2(event),
+    ackable: ackable ? void 0 : false
+  });
+}
+function withAckableState(event, ackable) {
+  if (ackable) return event;
+  return {
+    ...event,
+    ackable: false
   };
+}
+function isAckableMonitorEventId(eventId) {
+  return ACKABLE_EVENT_ID_RE.test(eventId);
+}
+function stripUndefined2(value) {
+  for (const [key, entry] of Object.entries(value)) {
+    if (entry === void 0) delete value[key];
+  }
+  return value;
 }
 function summarizeEventKey2(event) {
   const payload = event.payload;

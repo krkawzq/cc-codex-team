@@ -531,6 +531,7 @@ function createStreamAckCallback(
   data: unknown,
 ): (() => void) | undefined {
   if (method !== "monitor:events") return undefined;
+  if (!isStreamChunkAckable(data)) return undefined;
   const eventId = extractStreamEventId(data);
   if (!eventId) return undefined;
   return () => sendStreamAck(sock, reqId, eventId);
@@ -540,6 +541,12 @@ function extractStreamEventId(data: unknown): string | null {
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;
   const id = (data as { id?: unknown }).id;
   return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+function isStreamChunkAckable(data: unknown): boolean {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  const ackable = (data as { ackable?: unknown }).ackable;
+  return ackable !== false;
 }
 
 function sendStreamAck(sock: net.Socket, reqId: string, eventId: string): void {
