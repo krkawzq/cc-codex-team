@@ -23,13 +23,13 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/main.ts
-var import_node_fs17 = __toESM(require("fs"));
-var import_node_path15 = __toESM(require("path"));
+var import_node_fs18 = __toESM(require("fs"));
+var import_node_path16 = __toESM(require("path"));
 
 // src/cli/run.ts
-var import_node_fs5 = __toESM(require("fs"));
-var import_node_path6 = __toESM(require("path"));
-var import_node_child_process = require("child_process");
+var import_node_fs7 = __toESM(require("fs"));
+var import_node_path7 = __toESM(require("path"));
+var import_node_child_process3 = require("child_process");
 var import_promises = require("timers/promises");
 
 // src/ipc/sock.ts
@@ -266,6 +266,7 @@ function unlinkSockIfStale(sockPath) {
 // src/cli/args.ts
 var COMMANDS = /* @__PURE__ */ new Set([
   "version",
+  "doctor",
   "status",
   "daemon:status",
   "daemon:start",
@@ -450,10 +451,11 @@ function matchCommand(tokens, available) {
   }
   return null;
 }
-function commandKey(path16) {
-  return path16.join(":");
+function commandKey(path17) {
+  return path17.join(":");
 }
 var SHORT_COMMANDS = /* @__PURE__ */ new Set([
+  "doctor",
   "status",
   "daemon:status",
   "daemon:user:list",
@@ -1653,6 +1655,31 @@ var HELP_TREE = {
       ],
       needs_bearer: false
     }),
+    {
+      name: "doctor",
+      summary: "Run local environment and daemon bootstrap diagnostics.",
+      usage: "codex-team doctor [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one summary line with verdict, failed checks, and warnings."
+        }
+      ],
+      examples: [
+        "codex-team doctor",
+        "codex-team doctor --short"
+      ],
+      notes: [
+        "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
+        "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness."
+      ],
+      subcommands: [],
+      needs_bearer: false
+    },
     leaf({
       name: "status",
       summary: "Show live sessions, pending events, and recent activity.",
@@ -1680,15 +1707,15 @@ var HELP_TREE = {
   ],
   needs_bearer: false
 };
-function findNode(path16, node = HELP_TREE) {
-  if (path16.length === 0) return node;
-  const [head, ...rest] = path16;
+function findNode(path17, node = HELP_TREE) {
+  if (path17.length === 0) return node;
+  const [head, ...rest] = path17;
   const child = node.subcommands.find((entry) => entry.name === head);
   if (!child) return null;
   return findNode(rest, child);
 }
-function formatCommandPath(path16) {
-  return path16.length === 0 ? "codex-team" : `codex-team ${path16.join(" ")}`;
+function formatCommandPath(path17) {
+  return path17.length === 0 ? "codex-team" : `codex-team ${path17.join(" ")}`;
 }
 function formatPositional(positional) {
   return positional.required ? `<${positional.name}>` : `[${positional.name}]`;
@@ -1768,9 +1795,9 @@ function renderExamples(node) {
     ...node.examples.map((example) => `  ${example}`)
   ];
 }
-function renderHelp(path16) {
-  const node = findNode(path16) ?? HELP_TREE;
-  const resolvedPath = findNode(path16) ? path16 : [];
+function renderHelp(path17) {
+  const node = findNode(path17) ?? HELP_TREE;
+  const resolvedPath = findNode(path17) ? path17 : [];
   const sections = [
     [formatCommandPath(resolvedPath), node.summary],
     ["USAGE", `  ${node.usage}`]
@@ -2850,6 +2877,498 @@ function hasOwn2(record, key) {
   return Object.prototype.hasOwnProperty.call(record, key);
 }
 
+// src/cli/doctor.ts
+var import_node_fs6 = __toESM(require("fs"));
+var import_node_net2 = __toESM(require("net"));
+var import_node_os2 = __toESM(require("os"));
+var import_node_path6 = __toESM(require("path"));
+var import_node_child_process2 = require("child_process");
+
+// src/daemon/processes.ts
+var import_node_fs5 = __toESM(require("fs"));
+var import_node_child_process = require("child_process");
+function readLinuxCmdline(pid) {
+  try {
+    const raw = import_node_fs5.default.readFileSync(`/proc/${pid}/cmdline`);
+    const commandLine = raw.toString("utf8").replace(/\0/g, " ").trim() || null;
+    return { commandLine, source: "proc", reliable: true };
+  } catch {
+    return { commandLine: null, source: null, reliable: false };
+  }
+}
+function readLinuxStartTime(pid) {
+  try {
+    const raw = import_node_fs5.default.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const lastParen = raw.lastIndexOf(")");
+    if (lastParen < 0) return null;
+    const rest = raw.slice(lastParen + 2).trim().split(/\s+/);
+    const startTime = rest[19];
+    return typeof startTime === "string" && startTime.length > 0 ? startTime : null;
+  } catch {
+    return null;
+  }
+}
+function readPsCommand(pid) {
+  try {
+    const raw = (0, import_node_child_process.execFileSync)("ps", ["-p", String(pid), "-o", "command="], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const commandLine = raw.trim();
+    return { commandLine: commandLine.length > 0 ? commandLine : null, source: "ps", reliable: true };
+  } catch {
+    return { commandLine: null, source: null, reliable: false };
+  }
+}
+function readPsStartTime(pid) {
+  try {
+    const raw = (0, import_node_child_process.execFileSync)("ps", ["-p", String(pid), "-o", "lstart="], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const startTime = raw.trim();
+    return startTime.length > 0 ? startTime : null;
+  } catch {
+    return null;
+  }
+}
+function readWindowsCommand(pid) {
+  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CommandLine) { [Console]::Out.Write($p.CommandLine) }`;
+  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
+    try {
+      const raw = (0, import_node_child_process.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8"
+      });
+      const commandLine = raw.trim();
+      if (commandLine.length > 0) return { commandLine, source: "powershell", reliable: true };
+    } catch {
+    }
+  }
+  try {
+    const raw = (0, import_node_child_process.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CommandLine", "/value"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CommandLine="));
+    const commandLine = line?.slice("CommandLine=".length).trim() ?? "";
+    if (commandLine.length > 0) return { commandLine, source: "wmic", reliable: true };
+  } catch {
+  }
+  try {
+    const raw = (0, import_node_child_process.execFileSync)("tasklist", ["/FO", "LIST", "/NH", "/FI", `PID eq ${pid}`], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => /^Image Name:/i.test(entry));
+    const commandLine = line?.replace(/^Image Name:\s*/i, "").trim() ?? "";
+    if (commandLine.length > 0) return { commandLine, source: "tasklist", reliable: false };
+  } catch {
+  }
+  return { commandLine: null, source: null, reliable: false };
+}
+function readWindowsStartTime(pid) {
+  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CreationDate) { [Console]::Out.Write($p.CreationDate) }`;
+  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
+    try {
+      const raw = (0, import_node_child_process.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8"
+      });
+      const startTime = raw.trim();
+      if (startTime.length > 0) return startTime;
+    } catch {
+    }
+  }
+  try {
+    const raw = (0, import_node_child_process.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CreationDate", "/value"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CreationDate="));
+    const startTime = line?.slice("CreationDate=".length).trim() ?? "";
+    return startTime.length > 0 ? startTime : null;
+  } catch {
+    return null;
+  }
+}
+function inspectProcessCommandLine(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return { commandLine: null, source: null, reliable: false };
+  if (process.platform === "linux") return readLinuxCmdline(pid);
+  if (process.platform === "darwin" || process.platform === "freebsd") return readPsCommand(pid);
+  if (process.platform === "win32") return readWindowsCommand(pid);
+  return { commandLine: null, source: null, reliable: false };
+}
+function readProcessStartTime(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  if (process.platform === "linux") return readLinuxStartTime(pid);
+  if (process.platform === "darwin" || process.platform === "freebsd") return readPsStartTime(pid);
+  if (process.platform === "win32") return readWindowsStartTime(pid);
+  return null;
+}
+function inspectCodexAppServerProcess(pid) {
+  const inspection = inspectProcessCommandLine(pid);
+  if (!inspection.commandLine) return "unknown";
+  if (looksLikeCodexAppServerCommand(inspection.commandLine)) return "match";
+  if (!inspection.reliable) return "unknown";
+  return "mismatch";
+}
+function isLikelyCodexTeamDaemonProcess(pid) {
+  const inspection = inspectProcessCommandLine(pid);
+  return inspection.commandLine !== null && inspection.commandLine.includes("--daemon-internal");
+}
+function looksLikeCodexAppServerCommand(commandLine) {
+  return commandLine.includes("app-server") && (commandLine.includes("codex") || commandLine.includes("codex-cli-bin"));
+}
+
+// src/cli/doctor.ts
+var DEFAULT_DEPS = {
+  fs: import_node_fs6.default,
+  spawnSync: import_node_child_process2.spawnSync,
+  createServer: import_node_net2.default.createServer,
+  createConnection: import_node_net2.default.createConnection,
+  kill: process.kill.bind(process),
+  isLikelyCodexTeamDaemonProcess
+};
+function buildDoctorContext(options = {}) {
+  const config = new ConfigStore();
+  const dataDir = options.dataDir ?? config.resolvedDataDir();
+  const sockPath = options.sockPath ?? (options.dataDir ? defaultSockPath(dataDir) : config.resolvedSockPath());
+  return {
+    packageRoot: options.packageRoot ?? PACKAGE_ROOT,
+    dataDir,
+    sockPath,
+    pidPath: pidFilePath(dataDir),
+    launcherPath: import_node_path6.default.join(options.packageRoot ?? PACKAGE_ROOT, "bin", "codex-team"),
+    pathEnv: options.pathEnv ?? process.env.PATH
+  };
+}
+function checkNode() {
+  const version2 = process.versions.node || "unknown";
+  const major = Number.parseInt(version2.split(".")[0] ?? "", 10);
+  if (!Number.isFinite(major) || major < 18) {
+    return fail("node", `node version ${version2}, need >=18`);
+  }
+  return ok2("node", `node=${version2}`);
+}
+function checkCodexBin(_ctx, deps = DEFAULT_DEPS) {
+  const result = deps.spawnSync("codex", ["--version"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  if (result.error) {
+    const err2 = result.error;
+    if (err2.code === "ENOENT") return fail("codex", "codex binary not found on PATH");
+    return fail("codex", `codex --version errored: ${err2.message}`);
+  }
+  if (result.status !== 0) {
+    return fail("codex", `codex --version errored: ${formatSpawnFailure(result)}`);
+  }
+  const version2 = firstLine(result.stdout) || firstLine(result.stderr) || "unknown";
+  return ok2("codex", `codex=${version2}`);
+}
+function checkLauncherOnPath(ctx, deps = DEFAULT_DEPS) {
+  const resolved = resolveOnPath("codex-team", ctx.pathEnv, deps.fs);
+  if (resolved) {
+    return ok2("path", `codex-team=${resolved}`);
+  }
+  return warn("path", `codex-team not on PATH; use ${ctx.launcherPath}`);
+}
+function checkDataDirWritable(ctx, deps = DEFAULT_DEPS) {
+  const testPath = import_node_path6.default.join(ctx.dataDir, ".doctor-write-test");
+  try {
+    deps.fs.mkdirSync(ctx.dataDir, { recursive: true });
+    deps.fs.writeFileSync(testPath, "ok");
+    deps.fs.unlinkSync(testPath);
+    return ok2("data_dir", `data_dir=${ctx.dataDir} writable`);
+  } catch (e) {
+    try {
+      deps.fs.unlinkSync(testPath);
+    } catch {
+    }
+    return fail("data_dir", `data_dir not writable: ${ctx.dataDir}`);
+  }
+}
+async function checkSocketBind(_ctx, deps = DEFAULT_DEPS) {
+  const sockPath = import_node_path6.default.join(import_node_os2.default.tmpdir(), `ct-doctor-${process.pid}-${Date.now()}.sock`);
+  const endpoint = normalizeSockPath(sockPath);
+  const server = deps.createServer();
+  const cleanup = async () => {
+    await new Promise((resolve) => {
+      try {
+        server.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+    if (isFilesystemSockPath(sockPath)) {
+      try {
+        deps.fs.unlinkSync(endpoint);
+      } catch {
+      }
+    }
+  };
+  if (isFilesystemSockPath(sockPath)) {
+    try {
+      deps.fs.unlinkSync(endpoint);
+    } catch {
+    }
+  }
+  const listenResult = await new Promise((resolve) => {
+    const onError = (error) => {
+      server.off("listening", onListening);
+      resolve({ ok: false, error });
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve({ ok: true });
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(endpoint);
+  });
+  if (!listenResult.ok) {
+    await cleanup();
+    const code = listenResult.error.code ?? "UNKNOWN";
+    if (code === "EPERM" || code === "EACCES") {
+      return fail("socket_bind", `socket_bind ${code} - sandbox forbids listen(); codex-team won't work here`);
+    }
+    return fail("socket_bind", `socket_bind ${code} - listen() failed: ${listenResult.error.message}`);
+  }
+  await cleanup();
+  return ok2("socket_bind", "socket_bind permitted");
+}
+function checkDaemonPid(ctx, deps = DEFAULT_DEPS) {
+  const record = readPidRecord(ctx.pidPath, deps.fs);
+  if (!record) {
+    return {
+      ...ok2("daemon_pid", "daemon not running (will auto-spawn on first `-b` call)"),
+      daemonState: "not_running",
+      pid: null
+    };
+  }
+  const alive = isPidReachable(record.pid, deps.kill);
+  const isDaemon = alive && deps.isLikelyCodexTeamDaemonProcess(record.pid);
+  if (isDaemon) {
+    return {
+      ...ok2("daemon_pid", `daemon running, pid=${record.pid}`),
+      daemonState: "running",
+      pid: record.pid
+    };
+  }
+  const reason = alive ? `pid ${record.pid} is not a codex-team daemon` : `pid ${record.pid} is not running`;
+  return {
+    ...warn("daemon_pid", `stale pidfile: ${reason}. Safe to remove manually: \`rm ${ctx.pidPath}\``),
+    daemonState: "not_running",
+    pid: record.pid
+  };
+}
+async function checkDaemonSocket(ctx, pidResult, deps = DEFAULT_DEPS) {
+  if (pidResult.daemonState !== "running") {
+    return skip("daemon_socket", "daemon_socket (daemon not running)");
+  }
+  const result = await connectSockOnce(ctx.sockPath, 2e3, deps.createConnection);
+  if (result.ok) {
+    return ok2("daemon_socket", "daemon_socket reachable");
+  }
+  const code = result.code ?? "UNKNOWN";
+  return fail("daemon_socket", `daemon_socket ${code} - ${interpretSocketConnectError(code, result.message)}`);
+}
+function checkDistFreshness(ctx, deps = DEFAULT_DEPS) {
+  const distPath = import_node_path6.default.join(ctx.packageRoot, "dist", "main.js");
+  const distStat = statIfExists(distPath, deps.fs);
+  if (!distStat) {
+    return warn("dist", "dist missing; run `npm run build` in plugins/codex-team");
+  }
+  const sourceNewest = newestMtime(import_node_path6.default.join(ctx.packageRoot, "src"), deps.fs);
+  if (sourceNewest !== null && sourceNewest > distStat.mtimeMs) {
+    return warn("dist", "source newer than dist; run `npm run build` in plugins/codex-team");
+  }
+  return ok2("dist", "dist current");
+}
+async function runDoctor(options = {}, deps = DEFAULT_DEPS) {
+  const ctx = buildDoctorContext(options);
+  const write = options.write ?? ((line) => process.stdout.write(line));
+  const results = [];
+  results.push(checkNode());
+  results.push(checkCodexBin(ctx, deps));
+  results.push(checkLauncherOnPath(ctx, deps));
+  results.push(checkDataDirWritable(ctx, deps));
+  results.push(await checkSocketBind(ctx, deps));
+  const daemonPid = checkDaemonPid(ctx, deps);
+  results.push(daemonPid);
+  results.push(await checkDaemonSocket(ctx, daemonPid, deps));
+  results.push(checkDistFreshness(ctx, deps));
+  const verdict = summarizeVerdict(results);
+  if (options.short) {
+    const failed = summarizeIds(results, "fail");
+    const warned = summarizeIds(results, "warn");
+    write(`doctor=${verdict} failed=${failed} warned=${warned}
+`);
+    return exitCodeForVerdict(verdict);
+  }
+  for (const result of results) {
+    write(`[${renderStatus(result.status)}] ${result.message}
+`);
+  }
+  write(`=== ${verdict} ===
+`);
+  return exitCodeForVerdict(verdict);
+}
+function summarizeVerdict(results) {
+  if (results.some((result) => result.status === "fail")) return "BROKEN";
+  if (results.some((result) => result.status === "warn")) return "DEGRADED";
+  return "HEALTHY";
+}
+function summarizeIds(results, status2) {
+  const ids = results.filter((result) => result.status === status2).map((result) => result.id);
+  return ids.length > 0 ? ids.join(",") : "none";
+}
+function exitCodeForVerdict(verdict) {
+  if (verdict === "BROKEN") return 2;
+  if (verdict === "DEGRADED") return 1;
+  return 0;
+}
+function renderStatus(status2) {
+  switch (status2) {
+    case "warn":
+      return "WARN";
+    case "fail":
+      return "FAIL";
+    case "skip":
+      return "SKIP";
+    case "ok":
+    default:
+      return "OK";
+  }
+}
+function ok2(id, message) {
+  return { id, status: "ok", message };
+}
+function warn(id, message) {
+  return { id, status: "warn", message };
+}
+function fail(id, message) {
+  return { id, status: "fail", message };
+}
+function skip(id, message) {
+  return { id, status: "skip", message };
+}
+function resolveOnPath(command, pathEnv, doctorFs) {
+  const segments = (pathEnv ?? "").split(import_node_path6.default.delimiter).filter(Boolean);
+  const candidates = process.platform === "win32" ? windowsExecutableCandidates(command) : [command];
+  for (const segment of segments) {
+    for (const candidate of candidates) {
+      const target = import_node_path6.default.join(segment, candidate);
+      try {
+        const stat = doctorFs.statSync(target);
+        if (!stat.isFile()) continue;
+        if (process.platform === "win32" || (stat.mode & 73) !== 0) return target;
+      } catch {
+      }
+    }
+  }
+  return null;
+}
+function windowsExecutableCandidates(command) {
+  const pathext = (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").map((entry) => entry.trim()).filter(Boolean);
+  if (/\.[^./\\]+$/.test(command)) return [command];
+  return [command, ...pathext.map((ext) => `${command}${ext.toLowerCase()}`), ...pathext.map((ext) => `${command}${ext.toUpperCase()}`)];
+}
+function readPidRecord(pidPath, doctorFs) {
+  try {
+    const raw = doctorFs.readFileSync(pidPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
+    return { pid: Math.floor(parsed.pid) };
+  } catch {
+    return null;
+  }
+}
+function isPidReachable(pid, kill) {
+  try {
+    kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function statIfExists(target, doctorFs) {
+  try {
+    return doctorFs.statSync(target);
+  } catch {
+    return null;
+  }
+}
+function newestMtime(target, doctorFs) {
+  const stat = statIfExists(target, doctorFs);
+  if (!stat) return null;
+  if (!stat.isDirectory()) return stat.mtimeMs;
+  let newest = null;
+  let entries;
+  try {
+    entries = doctorFs.readdirSync(target, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    const childNewest = newestMtime(import_node_path6.default.join(target, entry.name), doctorFs);
+    if (childNewest !== null && (newest === null || childNewest > newest)) {
+      newest = childNewest;
+    }
+  }
+  return newest;
+}
+function firstLine(value) {
+  const text = typeof value === "string" ? value : value ? value.toString("utf8") : "";
+  return text.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+}
+function formatSpawnFailure(result) {
+  const signal = result.signal ? `signal ${result.signal}` : null;
+  const status2 = typeof result.status === "number" ? `exit ${result.status}` : null;
+  const detail = firstLine(result.stderr) || firstLine(result.stdout);
+  return [status2 ?? signal ?? "unknown failure", detail].filter(Boolean).join(": ");
+}
+function connectSockOnce(sockPath, timeoutMs, createConnection) {
+  return new Promise((resolve) => {
+    const sock = createConnection(normalizeSockPath(sockPath));
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        sock.destroy();
+      } catch {
+      }
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      finish({ ok: false, code: "ETIMEDOUT", message: `connect timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    timer.unref();
+    sock.once("connect", () => finish({ ok: true }));
+    sock.once("error", (error) => {
+      finish({ ok: false, code: error.code, message: error.message });
+    });
+  });
+}
+function interpretSocketConnectError(code, message) {
+  switch (code) {
+    case "ENOENT":
+      return "sock file missing";
+    case "ECONNREFUSED":
+      return "sock exists but nothing is accepting connections";
+    case "EACCES":
+    case "EPERM":
+      return "permission denied while connecting";
+    case "ETIMEDOUT":
+      return message;
+    default:
+      return message || "connect failed";
+  }
+}
+
 // src/cli/run.ts
 var DAEMON_POLL_INTERVAL_MS = 100;
 var DEFAULT_DAEMON_READY_TIMEOUT_MS = 15e3;
@@ -2878,14 +3397,20 @@ async function runCli(argv) {
     process.stdout.write(renderHelp(parsed.commandPath));
     return 0;
   }
-  warnLegacyWindowsDataDir((warning) => {
-    process.stderr.write(warning.message + "\n");
-  });
   const method = commandKey(parsed.commandPath);
+  if (method !== "doctor") {
+    warnLegacyWindowsDataDir((warning) => {
+      process.stderr.write(warning.message + "\n");
+    });
+  }
   const short = truthy(parsed.flags.short);
   const format = flagString(parsed.flags.format);
   if (short && !supportsShort(method)) {
     process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
+    return 1;
+  }
+  if (method === "doctor" && truthy(parsed.flags.full)) {
+    process.stdout.write(JSON.stringify(err("invalid_params", `--full is not supported for '${method}'`)) + "\n");
     return 1;
   }
   if (short && (format === "markdown" || format === "table")) {
@@ -2893,6 +3418,9 @@ async function runCli(argv) {
     return 1;
   }
   const sockPath = parsed.daemonSock || defaultSockPath();
+  if (method === "doctor") {
+    return await runDoctor({ short, sockPath });
+  }
   if (method === "version") {
     return await runVersion(sockPath);
   }
@@ -2915,7 +3443,7 @@ async function runCli(argv) {
   }
   const ready = await ensureDaemon(sockPath);
   if (!ready.ok) {
-    process.stdout.write(JSON.stringify(err("daemon_unreachable", ready.message)) + "\n");
+    process.stdout.write(JSON.stringify(err(ready.code, ready.message, ready.data)) + "\n");
     return 1;
   }
   return await dispatchCommand(sockPath, parsed, method);
@@ -3043,8 +3571,8 @@ async function runStream(sock, parsed, method) {
       if (stdoutBlocked) return;
       while (stdoutQueue.length > 0) {
         const next = stdoutQueue[0];
-        const ok2 = process.stdout.write(next.line);
-        if (!ok2) {
+        const ok3 = process.stdout.write(next.line);
+        if (!ok3) {
           stdoutBlocked = true;
           if (!socketPaused && typeof sock.pause === "function") {
             socketPaused = true;
@@ -3187,35 +3715,76 @@ async function requestOnceWithRetry(sockPath, opts, cliConfig, allowRetry) {
 }
 async function ensureDaemon(sockPath) {
   const cliConfig = readCliConfig();
+  const config = new ConfigStore();
+  const dataDir = config.resolvedDataDir();
+  const pidPath = pidFilePath(dataDir);
+  const stderrPath = daemonSpawnStderrPath(dataDir);
   if (await probeSock(sockPath, 200)) {
-    return { ok: true, message: "" };
+    return { ok: true, code: "", message: "" };
+  }
+  const staleState = detectStaleDaemonArtifacts(sockPath, pidPath);
+  if (staleState) {
+    return {
+      ok: false,
+      code: "daemon_unreachable",
+      message: `stale daemon.pid + daemon.sock (pid ${staleState.pid} is not running); remove them and retry`,
+      data: {
+        pid_path: pidPath,
+        sock_path: staleState.sockPath,
+        pid: staleState.pid
+      }
+    };
   }
   try {
-    spawnDaemon();
-    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
-      return { ok: true, message: "" };
+    const child = spawnDaemon();
+    const firstAttempt = await waitForDaemonReady(sockPath, child, cliConfig.readyTimeoutMs);
+    if (firstAttempt.ready) {
+      return { ok: true, code: "", message: "" };
     }
   } catch (e) {
     return {
       ok: false,
+      code: "daemon_unreachable",
       message: `failed to spawn daemon: ${e.message}`
     };
   }
-  const stderrPath = daemonSpawnStderrPath();
   try {
-    spawnDaemon(stderrPath);
-    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
-      return { ok: true, message: "" };
+    const child = spawnDaemon(stderrPath);
+    const secondAttempt = await waitForDaemonReady(sockPath, child, cliConfig.readyTimeoutMs);
+    if (secondAttempt.ready) {
+      return { ok: true, code: "", message: "" };
+    }
+    if (secondAttempt.exited) {
+      return buildEarlyExitFailure(stderrPath, secondAttempt);
     }
   } catch (e) {
     return {
       ok: false,
+      code: "daemon_unreachable",
       message: `failed to spawn daemon with stderr capture: ${e.message}`
+    };
+  }
+  const stderrTail = readTail(stderrPath, 4096);
+  const parsedBootstrap = parseBootstrapStderr(stderrTail);
+  if (parsedBootstrap?.code === "socket_bind_denied") {
+    return {
+      ok: false,
+      code: parsedBootstrap.code,
+      message: parsedBootstrap.message,
+      data: {
+        ...parsedBootstrap.data ?? {},
+        ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
+      }
     };
   }
   return {
     ok: false,
-    message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`
+    code: "daemon_unreachable",
+    message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`,
+    data: {
+      stderr_path: stderrPath,
+      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
+    }
   };
 }
 async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDelayMs) {
@@ -3234,32 +3803,48 @@ async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDel
   }
   throw lastError ?? new Error("connect failed");
 }
-async function waitForDaemonReady(sockPath, timeoutMs) {
+async function waitForDaemonReady(sockPath, child, timeoutMs) {
+  let exited = false;
+  let exitCode = null;
+  let signal = null;
+  const onExit = (code, nextSignal) => {
+    exited = true;
+    exitCode = code;
+    signal = nextSignal;
+  };
+  child.once("exit", onExit);
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await (0, import_promises.setTimeout)(DAEMON_POLL_INTERVAL_MS);
-    if (await probeSock(sockPath, 200)) return true;
+  try {
+    while (Date.now() < deadline) {
+      await (0, import_promises.setTimeout)(DAEMON_POLL_INTERVAL_MS);
+      if (await probeSock(sockPath, 200)) return { ready: true, exited, exitCode, signal };
+      if (exited) return { ready: false, exited, exitCode, signal };
+    }
+  } finally {
+    if (typeof child.off === "function") child.off("exit", onExit);
+    else if (typeof child.removeListener === "function") child.removeListener("exit", onExit);
   }
-  return false;
+  return { ready: false, exited, exitCode, signal };
 }
 function spawnDaemon(stderrPath) {
   const args = [process.argv[1], "--daemon-internal"];
   let stderrFd = null;
   try {
     if (stderrPath) {
-      import_node_fs5.default.mkdirSync(import_node_path6.default.dirname(stderrPath), { recursive: true });
-      stderrFd = import_node_fs5.default.openSync(stderrPath, "w");
+      import_node_fs7.default.mkdirSync(import_node_path7.default.dirname(stderrPath), { recursive: true });
+      stderrFd = import_node_fs7.default.openSync(stderrPath, "w");
       args.push(DAEMON_STDERR_FLAG, stderrPath);
     }
-    const child = (0, import_node_child_process.spawn)(process.execPath, args, {
+    const child = (0, import_node_child_process3.spawn)(process.execPath, args, {
       detached: true,
       stdio: stderrFd === null ? "ignore" : ["ignore", "ignore", stderrFd],
       env: process.env,
       windowsHide: true
     });
     child.unref();
+    return child;
   } finally {
-    if (stderrFd !== null) import_node_fs5.default.closeSync(stderrFd);
+    if (stderrFd !== null) import_node_fs7.default.closeSync(stderrFd);
   }
 }
 function getCliVersion() {
@@ -3268,8 +3853,93 @@ function getCliVersion() {
 function randomId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
-function daemonSpawnStderrPath() {
-  return import_node_path6.default.join(defaultDataDir(), "daemon-spawn.stderr");
+function daemonSpawnStderrPath(dataDir) {
+  return import_node_path7.default.join(dataDir, "daemon-spawn.stderr");
+}
+function detectStaleDaemonArtifacts(sockPath, pidPath) {
+  const pidRecord = readPidFile(pidPath);
+  if (!pidRecord) return null;
+  if (isPidAlive(pidRecord.pid)) return null;
+  if (!isFilesystemSockPath(sockPath)) return null;
+  const normalizedSockPath = normalizeSockPath(sockPath);
+  if (!import_node_fs7.default.existsSync(normalizedSockPath)) return null;
+  return {
+    pid: pidRecord.pid,
+    sockPath: normalizedSockPath
+  };
+}
+function readPidFile(targetPath) {
+  try {
+    const raw = import_node_fs7.default.readFileSync(targetPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
+    return { pid: Math.floor(parsed.pid) };
+  } catch {
+    return null;
+  }
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function buildEarlyExitFailure(stderrPath, result) {
+  const stderrTail = readTail(stderrPath, 4096);
+  const parsedBootstrap = parseBootstrapStderr(stderrTail);
+  if (parsedBootstrap?.code === "socket_bind_denied") {
+    return {
+      ok: false,
+      code: parsedBootstrap.code,
+      message: parsedBootstrap.message,
+      data: {
+        ...parsedBootstrap.data ?? {},
+        ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
+      }
+    };
+  }
+  return {
+    ok: false,
+    code: "daemon_unreachable",
+    message: parsedBootstrap?.message ?? "daemon exited before becoming ready",
+    data: {
+      stderr_path: stderrPath,
+      ...typeof result.exitCode === "number" ? { exit_code: result.exitCode } : {},
+      ...result.signal ? { signal: result.signal } : {},
+      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
+    }
+  };
+}
+function readTail(filePath, maxBytes) {
+  try {
+    const raw = import_node_fs7.default.readFileSync(filePath, "utf8");
+    if (raw.length <= maxBytes) return raw.trim();
+    return raw.slice(-maxBytes).trim();
+  } catch {
+    return null;
+  }
+}
+function parseBootstrapStderr(stderrTail) {
+  if (!stderrTail) return null;
+  const prefix = "[codex-team-daemon-bootstrap] ";
+  const lines = stderrTail.split(/\r?\n/).reverse();
+  for (const line of lines) {
+    if (!line.startsWith(prefix)) continue;
+    try {
+      const parsed = JSON.parse(line.slice(prefix.length));
+      if (typeof parsed.code !== "string" || typeof parsed.message !== "string") continue;
+      return {
+        code: parsed.code,
+        message: parsed.message,
+        data: parsed.data && typeof parsed.data === "object" && !Array.isArray(parsed.data) ? parsed.data : void 0
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 function truthy(v) {
   return v === true || v === "true" || v === "1";
@@ -3360,12 +4030,8 @@ function formatDuration(ms) {
 }
 
 // src/daemon/run.ts
-var import_node_fs16 = __toESM(require("fs"));
-var import_node_path14 = __toESM(require("path"));
-
-// src/daemon/users.ts
-var import_node_fs6 = __toESM(require("fs"));
-var import_node_path7 = __toESM(require("path"));
+var import_node_fs17 = __toESM(require("fs"));
+var import_node_path15 = __toESM(require("path"));
 
 // src/errors.ts
 var CodexTeamError = class extends Error {
@@ -3386,6 +4052,8 @@ function methodNotFound(method) {
 }
 
 // src/daemon/users.ts
+var import_node_fs8 = __toESM(require("fs"));
+var import_node_path8 = __toESM(require("path"));
 var SCHEMA_VERSION = 1;
 var UserRegistry = class {
   users = /* @__PURE__ */ new Map();
@@ -3396,12 +4064,12 @@ var UserRegistry = class {
   }
   loadFromDisk() {
     const root = usersDir(this.dataDir);
-    if (!import_node_fs6.default.existsSync(root)) return;
-    for (const dirname of import_node_fs6.default.readdirSync(root)) {
-      const metaPath = import_node_path7.default.join(root, dirname, "metadata.json");
-      if (import_node_fs6.default.existsSync(metaPath)) {
+    if (!import_node_fs8.default.existsSync(root)) return;
+    for (const dirname of import_node_fs8.default.readdirSync(root)) {
+      const metaPath = import_node_path8.default.join(root, dirname, "metadata.json");
+      if (import_node_fs8.default.existsSync(metaPath)) {
         try {
-          const raw = import_node_fs6.default.readFileSync(metaPath, "utf8");
+          const raw = import_node_fs8.default.readFileSync(metaPath, "utf8");
           const parsed = JSON.parse(raw);
           const user = normalizePersistedUser(parsed);
           if (user && typeof user.token === "string") {
@@ -3456,7 +4124,7 @@ var UserRegistry = class {
     this.users.delete(token);
     const dir = userDir(token, this.dataDir);
     try {
-      import_node_fs6.default.rmSync(dir, { recursive: true, force: true });
+      import_node_fs8.default.rmSync(dir, { recursive: true, force: true });
     } catch {
     }
   }
@@ -3468,14 +4136,14 @@ var UserRegistry = class {
   }
   persist(user) {
     const dir = userDir(user.token, this.dataDir);
-    import_node_fs6.default.mkdirSync(dir, { recursive: true });
+    import_node_fs8.default.mkdirSync(dir, { recursive: true });
     const metaPath = userMetadataPath(user.token, this.dataDir);
     const tmp = metaPath + ".tmp";
-    import_node_fs6.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs8.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION,
       user
     }, null, 2));
-    import_node_fs6.default.renameSync(tmp, metaPath);
+    import_node_fs8.default.renameSync(tmp, metaPath);
   }
 };
 function validateToken(token) {
@@ -3507,8 +4175,8 @@ function isCanonicalUserDir(dirname) {
 
 // src/daemon/sessions.ts
 var import_node_crypto2 = __toESM(require("crypto"));
-var import_node_fs7 = __toESM(require("fs"));
-var import_node_path8 = __toESM(require("path"));
+var import_node_fs9 = __toESM(require("fs"));
+var import_node_path9 = __toESM(require("path"));
 var NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var SCHEMA_VERSION2 = 1;
@@ -3525,12 +4193,12 @@ var SessionRegistry = class {
     if (this.users.has(user)) return;
     const bucket = this.emptyBucket();
     const p = userSessionsPath(user, this.dataDir);
-    if (!import_node_fs7.default.existsSync(p)) {
+    if (!import_node_fs9.default.existsSync(p)) {
       this.users.set(user, bucket);
       return;
     }
     try {
-      const raw = import_node_fs7.default.readFileSync(p, "utf8");
+      const raw = import_node_fs9.default.readFileSync(p, "utf8");
       const parsed = JSON.parse(raw);
       if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION2) {
         throw new Error(`sessions.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION2}`);
@@ -3689,7 +4357,7 @@ var SessionRegistry = class {
   }
   async persistAsync(user) {
     const dir = userDir(user, this.dataDir);
-    await import_node_fs7.default.promises.mkdir(dir, { recursive: true });
+    await import_node_fs9.default.promises.mkdir(dir, { recursive: true });
     const p = userSessionsPath(user, this.dataDir);
     const bucket = this.users.get(user);
     const payload = {
@@ -3697,8 +4365,8 @@ var SessionRegistry = class {
       sessions: bucket ? Array.from(bucket.byName.values()) : []
     };
     const tmp = p + ".tmp";
-    await import_node_fs7.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
-    await import_node_fs7.default.promises.rename(tmp, p);
+    await import_node_fs9.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
+    await import_node_fs9.default.promises.rename(tmp, p);
   }
   schedulePersist(user, delayMs) {
     const existing = this.touchTimers.get(user);
@@ -3850,8 +4518,8 @@ function normalizeOptionalNumber(value) {
 }
 
 // src/daemon/events.ts
-var import_node_fs8 = __toESM(require("fs"));
-var import_node_path9 = __toESM(require("path"));
+var import_node_fs10 = __toESM(require("fs"));
+var import_node_path10 = __toESM(require("path"));
 var DELTA_SUFFIX = "_delta";
 var SCHEMA_VERSION3 = 1;
 var DEFAULT_FLUSH_DELAY_MS = 25;
@@ -3894,13 +4562,13 @@ var EventLog = class {
       return;
     }
     const filePath = userEventLogPath(user, this.dataDir);
-    if (!import_node_fs8.default.existsSync(filePath)) {
+    if (!import_node_fs10.default.existsSync(filePath)) {
       this.ensureUserState(user);
       this.loaded.add(user);
       this.loadPromises.delete(user);
       return;
     }
-    const raw = import_node_fs8.default.readFileSync(filePath, "utf8");
+    const raw = import_node_fs10.default.readFileSync(filePath, "utf8");
     const lines = raw.split("\n").filter(Boolean);
     const { events, totalLines } = parsePersistedEvents(lines);
     const buf = events.slice(Math.max(0, events.length - this.retention));
@@ -4058,7 +4726,7 @@ var EventLog = class {
         return;
       }
       const filePath = userEventLogPath(user, this.dataDir);
-      const raw = await import_node_fs8.default.promises.readFile(filePath, "utf8");
+      const raw = await import_node_fs10.default.promises.readFile(filePath, "utf8");
       const lines = raw.split("\n").filter(Boolean);
       const { events, totalLines } = parsePersistedEvents(lines);
       const buf = events.slice(Math.max(0, events.length - this.retention));
@@ -4189,11 +4857,11 @@ var EventLog = class {
     const filePath = userEventLogPath(user, this.dataDir);
     void this.enqueueFsOp(user, async () => {
       try {
-        await import_node_fs8.default.promises.mkdir(import_node_path9.default.dirname(filePath), { recursive: true });
-        await import_node_fs8.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+        await import_node_fs10.default.promises.mkdir(import_node_path10.default.dirname(filePath), { recursive: true });
+        await import_node_fs10.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
         const tmp = filePath + ".tmp";
-        await import_node_fs8.default.promises.writeFile(tmp, serializeEventFile(buf));
-        await import_node_fs8.default.promises.rename(tmp, filePath);
+        await import_node_fs10.default.promises.writeFile(tmp, serializeEventFile(buf));
+        await import_node_fs10.default.promises.rename(tmp, filePath);
         this.rotatedSinceCompact.set(user, 0);
       } catch (e) {
         logger.warn("event log compaction failed", { user, err: e.message });
@@ -4232,14 +4900,14 @@ var EventLog = class {
     });
     if (!snapshot) return;
     const filePath = userEventLogPath(user, this.dataDir);
-    const ok2 = await this.enqueueFsOp(user, async () => {
+    const ok3 = await this.enqueueFsOp(user, async () => {
       try {
-        await import_node_fs8.default.promises.mkdir(import_node_path9.default.dirname(filePath), { recursive: true });
-        await import_node_fs8.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
-        if (!import_node_fs8.default.existsSync(filePath)) {
-          await import_node_fs8.default.promises.writeFile(filePath, serializeHeaderLine() + snapshot.lines.join(""));
+        await import_node_fs10.default.promises.mkdir(import_node_path10.default.dirname(filePath), { recursive: true });
+        await import_node_fs10.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+        if (!import_node_fs10.default.existsSync(filePath)) {
+          await import_node_fs10.default.promises.writeFile(filePath, serializeHeaderLine() + snapshot.lines.join(""));
         } else {
-          await import_node_fs8.default.promises.appendFile(filePath, snapshot.lines.join(""));
+          await import_node_fs10.default.promises.appendFile(filePath, snapshot.lines.join(""));
         }
         return true;
       } catch (e) {
@@ -4247,7 +4915,7 @@ var EventLog = class {
         return false;
       }
     });
-    if (!ok2) {
+    if (!ok3) {
       await this.withUserLock(user, async () => {
         const pending = this.pendingLines.get(user) ?? [];
         this.pendingLines.set(user, [...snapshot.lines, ...pending]);
@@ -4345,9 +5013,9 @@ function serializeEventFile(buf) {
 }
 
 // src/daemon/cursors.ts
-var import_node_fs9 = __toESM(require("fs"));
-var import_node_os2 = __toESM(require("os"));
-var import_node_path10 = __toESM(require("path"));
+var import_node_fs11 = __toESM(require("fs"));
+var import_node_os3 = __toESM(require("os"));
+var import_node_path11 = __toESM(require("path"));
 var import_promises2 = require("timers/promises");
 var CURSOR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 var SCHEMA_VERSION4 = 1;
@@ -4450,9 +5118,9 @@ var CursorStore = class {
     if (this.loaded.has(user)) return;
     const bucket = /* @__PURE__ */ new Map();
     const filePath = cursorFilePath(user, this.dataDir);
-    if (import_node_fs9.default.existsSync(filePath)) {
+    if (import_node_fs11.default.existsSync(filePath)) {
       try {
-        for (const cursor of loadEnvelopeFromText(import_node_fs9.default.readFileSync(filePath, "utf8")).cursors.values()) {
+        for (const cursor of loadEnvelopeFromText(import_node_fs11.default.readFileSync(filePath, "utf8")).cursors.values()) {
           bucket.set(cursor.name, cloneCursor(cursor));
         }
       } catch (error) {
@@ -4470,7 +5138,7 @@ var CursorStore = class {
   }
   async persistAsync(user, op) {
     const dir = userDir(user, this.dataDir);
-    await import_node_fs9.default.promises.mkdir(dir, { recursive: true });
+    await import_node_fs11.default.promises.mkdir(dir, { recursive: true });
     const filePath = cursorFilePath(user, this.dataDir);
     const releaseLock = await acquireCursorLock(filePath);
     const tmpPath = makeTempPath(filePath);
@@ -4481,37 +5149,37 @@ var CursorStore = class {
         schema_version: SCHEMA_VERSION4,
         cursors: sorted(persisted)
       };
-      await import_node_fs9.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
-      await import_node_fs9.default.promises.rename(tmpPath, filePath);
+      await import_node_fs11.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
+      await import_node_fs11.default.promises.rename(tmpPath, filePath);
     } finally {
-      await import_node_fs9.default.promises.unlink(tmpPath).catch(() => void 0);
+      await import_node_fs11.default.promises.unlink(tmpPath).catch(() => void 0);
       await releaseLock();
     }
   }
 };
 function cursorFilePath(user, dataDir) {
-  return import_node_path10.default.join(userDir(user, dataDir), "cursors.json");
+  return import_node_path11.default.join(userDir(user, dataDir), "cursors.json");
 }
 async function acquireCursorLock(filePath) {
   const lockPath = `${filePath}.lock`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (true) {
     try {
-      const handle = await import_node_fs9.default.promises.open(lockPath, "wx");
+      const handle = await import_node_fs11.default.promises.open(lockPath, "wx");
       try {
         await handle.writeFile(JSON.stringify(makeCursorLockRecord()));
       } finally {
         await handle.close();
       }
       return async () => {
-        await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
+        await import_node_fs11.default.promises.unlink(lockPath).catch(() => void 0);
       };
     } catch (error) {
       const err2 = error;
       if (err2.code !== "EEXIST") throw error;
       if (await reclaimStaleCursorLock(lockPath)) {
         return async () => {
-          await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
+          await import_node_fs11.default.promises.unlink(lockPath).catch(() => void 0);
         };
       }
       if (Date.now() >= deadline) {
@@ -4525,20 +5193,20 @@ async function reclaimStaleCursorLock(lockPath) {
   const lock = await readCursorLock(lockPath);
   if (!lock || !isStaleCursorLock(lock)) return false;
   const tmpPath = `${lockPath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
-  await import_node_fs9.default.promises.writeFile(tmpPath, JSON.stringify(makeCursorLockRecord()));
+  await import_node_fs11.default.promises.writeFile(tmpPath, JSON.stringify(makeCursorLockRecord()));
   try {
-    await import_node_fs9.default.promises.rename(tmpPath, lockPath);
+    await import_node_fs11.default.promises.rename(tmpPath, lockPath);
     return true;
   } catch (error) {
     const err2 = error;
     if (err2.code === "EEXIST" || err2.code === "EPERM") {
-      await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
-      await import_node_fs9.default.promises.rename(tmpPath, lockPath);
+      await import_node_fs11.default.promises.unlink(lockPath).catch(() => void 0);
+      await import_node_fs11.default.promises.rename(tmpPath, lockPath);
       return true;
     }
     return false;
   } finally {
-    await import_node_fs9.default.promises.unlink(tmpPath).catch(() => void 0);
+    await import_node_fs11.default.promises.unlink(tmpPath).catch(() => void 0);
   }
 }
 function makeTempPath(filePath) {
@@ -4548,12 +5216,12 @@ function makeCursorLockRecord() {
   return {
     pid: process.pid,
     started_at: (/* @__PURE__ */ new Date()).toISOString(),
-    host: import_node_os2.default.hostname()
+    host: import_node_os3.default.hostname()
   };
 }
 async function loadEnvelopeFromFile(filePath) {
   try {
-    const raw = await import_node_fs9.default.promises.readFile(filePath, "utf8");
+    const raw = await import_node_fs11.default.promises.readFile(filePath, "utf8");
     return loadEnvelopeFromText(raw).cursors;
   } catch (error) {
     const err2 = error;
@@ -4575,7 +5243,7 @@ function loadEnvelopeFromText(raw) {
 }
 async function readCursorLock(lockPath) {
   try {
-    const raw = await import_node_fs9.default.promises.readFile(lockPath, "utf8");
+    const raw = await import_node_fs11.default.promises.readFile(lockPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || typeof parsed.started_at !== "string" || typeof parsed.host !== "string") {
       return null;
@@ -4590,12 +5258,12 @@ async function readCursorLock(lockPath) {
   }
 }
 function isStaleCursorLock(lock) {
-  if (!isPidAlive(lock.pid)) return true;
+  if (!isPidAlive2(lock.pid)) return true;
   if (lock.pid === process.pid) return false;
   const startedAt = Date.parse(lock.started_at);
   return Number.isFinite(startedAt) && Date.now() - startedAt > LOCK_STALE_MS;
 }
-function isPidAlive(pid) {
+function isPidAlive2(pid) {
   try {
     process.kill(pid, 0);
     return true;
@@ -5197,160 +5865,21 @@ function isStateUsable(state, generation) {
 
 // src/daemon/orphans.ts
 var import_node_crypto5 = __toESM(require("crypto"));
-var import_node_fs11 = __toESM(require("fs"));
-var import_node_path11 = __toESM(require("path"));
+var import_node_fs12 = __toESM(require("fs"));
+var import_node_path12 = __toESM(require("path"));
 var import_promises4 = require("timers/promises");
-
-// src/daemon/processes.ts
-var import_node_fs10 = __toESM(require("fs"));
-var import_node_child_process2 = require("child_process");
-function readLinuxCmdline(pid) {
-  try {
-    const raw = import_node_fs10.default.readFileSync(`/proc/${pid}/cmdline`);
-    const commandLine = raw.toString("utf8").replace(/\0/g, " ").trim() || null;
-    return { commandLine, source: "proc", reliable: true };
-  } catch {
-    return { commandLine: null, source: null, reliable: false };
-  }
-}
-function readLinuxStartTime(pid) {
-  try {
-    const raw = import_node_fs10.default.readFileSync(`/proc/${pid}/stat`, "utf8");
-    const lastParen = raw.lastIndexOf(")");
-    if (lastParen < 0) return null;
-    const rest = raw.slice(lastParen + 2).trim().split(/\s+/);
-    const startTime = rest[19];
-    return typeof startTime === "string" && startTime.length > 0 ? startTime : null;
-  } catch {
-    return null;
-  }
-}
-function readPsCommand(pid) {
-  try {
-    const raw = (0, import_node_child_process2.execFileSync)("ps", ["-p", String(pid), "-o", "command="], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const commandLine = raw.trim();
-    return { commandLine: commandLine.length > 0 ? commandLine : null, source: "ps", reliable: true };
-  } catch {
-    return { commandLine: null, source: null, reliable: false };
-  }
-}
-function readPsStartTime(pid) {
-  try {
-    const raw = (0, import_node_child_process2.execFileSync)("ps", ["-p", String(pid), "-o", "lstart="], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const startTime = raw.trim();
-    return startTime.length > 0 ? startTime : null;
-  } catch {
-    return null;
-  }
-}
-function readWindowsCommand(pid) {
-  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CommandLine) { [Console]::Out.Write($p.CommandLine) }`;
-  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
-    try {
-      const raw = (0, import_node_child_process2.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
-        stdio: ["ignore", "pipe", "ignore"],
-        encoding: "utf8"
-      });
-      const commandLine = raw.trim();
-      if (commandLine.length > 0) return { commandLine, source: "powershell", reliable: true };
-    } catch {
-    }
-  }
-  try {
-    const raw = (0, import_node_child_process2.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CommandLine", "/value"], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CommandLine="));
-    const commandLine = line?.slice("CommandLine=".length).trim() ?? "";
-    if (commandLine.length > 0) return { commandLine, source: "wmic", reliable: true };
-  } catch {
-  }
-  try {
-    const raw = (0, import_node_child_process2.execFileSync)("tasklist", ["/FO", "LIST", "/NH", "/FI", `PID eq ${pid}`], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => /^Image Name:/i.test(entry));
-    const commandLine = line?.replace(/^Image Name:\s*/i, "").trim() ?? "";
-    if (commandLine.length > 0) return { commandLine, source: "tasklist", reliable: false };
-  } catch {
-  }
-  return { commandLine: null, source: null, reliable: false };
-}
-function readWindowsStartTime(pid) {
-  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CreationDate) { [Console]::Out.Write($p.CreationDate) }`;
-  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
-    try {
-      const raw = (0, import_node_child_process2.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
-        stdio: ["ignore", "pipe", "ignore"],
-        encoding: "utf8"
-      });
-      const startTime = raw.trim();
-      if (startTime.length > 0) return startTime;
-    } catch {
-    }
-  }
-  try {
-    const raw = (0, import_node_child_process2.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CreationDate", "/value"], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CreationDate="));
-    const startTime = line?.slice("CreationDate=".length).trim() ?? "";
-    return startTime.length > 0 ? startTime : null;
-  } catch {
-    return null;
-  }
-}
-function inspectProcessCommandLine(pid) {
-  if (!Number.isFinite(pid) || pid <= 0) return { commandLine: null, source: null, reliable: false };
-  if (process.platform === "linux") return readLinuxCmdline(pid);
-  if (process.platform === "darwin" || process.platform === "freebsd") return readPsCommand(pid);
-  if (process.platform === "win32") return readWindowsCommand(pid);
-  return { commandLine: null, source: null, reliable: false };
-}
-function readProcessStartTime(pid) {
-  if (!Number.isFinite(pid) || pid <= 0) return null;
-  if (process.platform === "linux") return readLinuxStartTime(pid);
-  if (process.platform === "darwin" || process.platform === "freebsd") return readPsStartTime(pid);
-  if (process.platform === "win32") return readWindowsStartTime(pid);
-  return null;
-}
-function inspectCodexAppServerProcess(pid) {
-  const inspection = inspectProcessCommandLine(pid);
-  if (!inspection.commandLine) return "unknown";
-  if (looksLikeCodexAppServerCommand(inspection.commandLine)) return "match";
-  if (!inspection.reliable) return "unknown";
-  return "mismatch";
-}
-function isLikelyCodexTeamDaemonProcess(pid) {
-  const inspection = inspectProcessCommandLine(pid);
-  return inspection.commandLine !== null && inspection.commandLine.includes("--daemon-internal");
-}
-function looksLikeCodexAppServerCommand(commandLine) {
-  return commandLine.includes("app-server") && (commandLine.includes("codex") || commandLine.includes("codex-cli-bin"));
-}
-
-// src/daemon/orphans.ts
 var SCHEMA_VERSION5 = 2;
 var TERM_GRACE_MS = 2e3;
 var KILL_GRACE_MS = 500;
 var POLL_MS = 100;
 function orphanPidsPath(dataDir) {
-  return import_node_path11.default.join(dataDir, "codex-pids.json");
+  return import_node_path12.default.join(dataDir, "codex-pids.json");
 }
-function readPidFile(dataDir) {
+function readPidFile2(dataDir) {
   const p = orphanPidsPath(dataDir);
-  if (!import_node_fs11.default.existsSync(p)) return [];
+  if (!import_node_fs12.default.existsSync(p)) return [];
   try {
-    const raw = import_node_fs11.default.readFileSync(p, "utf8");
+    const raw = import_node_fs12.default.readFileSync(p, "utf8");
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
       return parsed.filter((x) => typeof x === "number" && Number.isFinite(x)).map((pid) => ({
@@ -5375,19 +5904,19 @@ function readPidFile(dataDir) {
 function writePidFile(dataDir, pids) {
   const p = orphanPidsPath(dataDir);
   try {
-    import_node_fs11.default.mkdirSync(import_node_path11.default.dirname(p), { recursive: true });
+    import_node_fs12.default.mkdirSync(import_node_path12.default.dirname(p), { recursive: true });
     const tmp = p + ".tmp";
-    import_node_fs11.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs12.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION5,
       processes: pids
     }));
-    import_node_fs11.default.renameSync(tmp, p);
+    import_node_fs12.default.renameSync(tmp, p);
   } catch (e) {
     logger.warn("failed to persist codex pid file", { err: e.message });
   }
 }
 async function reapOrphans(dataDir) {
-  const pids = readPidFile(dataDir);
+  const pids = readPidFile2(dataDir);
   let killed = 0;
   const retryPids = [];
   for (const tracked of pids) {
@@ -5515,10 +6044,10 @@ async function waitForTrackedExit(tracked, timeoutMs) {
 var import_node_events2 = require("events");
 
 // src/codex/appServerClient.ts
-var import_node_child_process3 = require("child_process");
+var import_node_child_process4 = require("child_process");
 var import_node_events = require("events");
 var import_node_crypto6 = require("crypto");
-var import_node_path12 = __toESM(require("path"));
+var import_node_path13 = __toESM(require("path"));
 var STDERR_TAIL_LINES = 400;
 var DEFAULT_REQUEST_TIMEOUT_MS = 12e4;
 var AppServerClient = class extends import_node_events.EventEmitter {
@@ -5560,7 +6089,7 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     const launch = resolveLaunch(this.options.bin, args);
     const env = { ...process.env, ...this.options.env ?? {} };
     logger.debug("spawning app-server", { bin: launch.command, args: launch.args });
-    this.proc = (0, import_node_child_process3.spawn)(launch.command, launch.args, {
+    this.proc = (0, import_node_child_process4.spawn)(launch.command, launch.args, {
       cwd: this.options.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -5780,9 +6309,9 @@ function resolveLaunch(bin, args) {
   return { command: resolved, args };
 }
 function resolveWindowsCommand(bin) {
-  if (bin.includes("\\") || bin.includes("/") || import_node_path12.default.extname(bin).length > 0) return bin;
+  if (bin.includes("\\") || bin.includes("/") || import_node_path13.default.extname(bin).length > 0) return bin;
   try {
-    const raw = (0, import_node_child_process3.execFileSync)("where", [bin], {
+    const raw = (0, import_node_child_process4.execFileSync)("where", [bin], {
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf8"
     });
@@ -6188,12 +6717,12 @@ var status = async (ctx, req) => {
 };
 
 // src/daemon/handlers/daemon.ts
-var import_node_fs13 = __toESM(require("fs"));
-var import_node_path13 = __toESM(require("path"));
-var import_node_child_process4 = require("child_process");
+var import_node_fs14 = __toESM(require("fs"));
+var import_node_path14 = __toESM(require("path"));
+var import_node_child_process5 = require("child_process");
 
 // src/daemon/shutdown.ts
-var import_node_fs12 = __toESM(require("fs"));
+var import_node_fs13 = __toESM(require("fs"));
 var shuttingDown = false;
 async function shutdownDaemon(ctx, reason, exitCode = 0) {
   if (shuttingDown) return;
@@ -6235,7 +6764,7 @@ async function shutdownDaemon(ctx, reason, exitCode = 0) {
   }
   unlinkSockIfStale(ctx.sockPath);
   try {
-    import_node_fs12.default.unlinkSync(pidFilePath(ctx.dataDir));
+    import_node_fs13.default.unlinkSync(pidFilePath(ctx.dataDir));
   } catch {
   }
   setTimeout(() => process.exit(exitCode), 10);
@@ -6278,7 +6807,7 @@ var daemonStop = async (ctx, req) => {
 };
 var daemonRestart = async (ctx) => {
   const entry = process.argv[1];
-  (0, import_node_child_process4.spawn)(process.execPath, [entry, "--daemon-internal"], {
+  (0, import_node_child_process5.spawn)(process.execPath, [entry, "--daemon-internal"], {
     detached: true,
     stdio: "ignore",
     env: process.env,
@@ -6440,7 +6969,7 @@ var daemonLogsStream = async (ctx, req, stream) => {
   }
   const syncAppended = async () => {
     try {
-      const stat = await import_node_fs13.default.promises.stat(logPath);
+      const stat = await import_node_fs14.default.promises.stat(logPath);
       if (stat.size < offset) offset = 0;
       if (stat.size === offset) return;
       const chunk = await readBytes(logPath, offset, stat.size - offset);
@@ -6462,8 +6991,8 @@ var daemonLogsStream = async (ctx, req, stream) => {
     }, 50);
     debounceTimer.unref();
   };
-  const watcher = import_node_fs13.default.watch(import_node_path13.default.dirname(logPath), { persistent: true }, (_event, filename) => {
-    if (!filename || filename.toString() === import_node_path13.default.basename(logPath)) scheduleSync();
+  const watcher = import_node_fs14.default.watch(import_node_path14.default.dirname(logPath), { persistent: true }, (_event, filename) => {
+    if (!filename || filename.toString() === import_node_path14.default.basename(logPath)) scheduleSync();
   });
   stream.onClose(() => {
     closed = true;
@@ -6516,7 +7045,7 @@ function safeParseOr(line, fallback) {
 }
 async function readTextIfExists(filePath) {
   try {
-    return await import_node_fs13.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs14.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw e;
@@ -6524,7 +7053,7 @@ async function readTextIfExists(filePath) {
 }
 async function readBytes(filePath, start, length) {
   if (length <= 0) return "";
-  const handle = await import_node_fs13.default.promises.open(filePath, "r");
+  const handle = await import_node_fs14.default.promises.open(filePath, "r");
   try {
     const buffer = Buffer.alloc(length);
     const { bytesRead } = await handle.read(buffer, 0, length, start);
@@ -6537,8 +7066,8 @@ function getPkgVersion() {
   return VERSION;
 }
 async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
-  const distPath = import_node_path13.default.join(packageRoot, "dist", "main.js");
-  const distStat = await statIfExists(distPath);
+  const distPath = import_node_path14.default.join(packageRoot, "dist", "main.js");
+  const distStat = await statIfExists2(distPath);
   if (!distStat) {
     return {
       dist_built_at: null,
@@ -6547,16 +7076,16 @@ async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
     };
   }
   const builtAt = new Date(distStat.mtimeMs).toISOString();
-  const sourceNewestMtime = await getNewestMtime(import_node_path13.default.join(packageRoot, "src"));
+  const sourceNewestMtime = await getNewestMtime(import_node_path14.default.join(packageRoot, "src"));
   return {
     dist_built_at: builtAt,
     dist_age_seconds: Math.max(0, Math.floor((Date.now() - distStat.mtimeMs) / 1e3)),
     source_newer_than_dist: sourceNewestMtime === null ? null : sourceNewestMtime > distStat.mtimeMs
   };
 }
-async function statIfExists(filePath) {
+async function statIfExists2(filePath) {
   try {
-    return await import_node_fs13.default.promises.stat(filePath);
+    return await import_node_fs14.default.promises.stat(filePath);
   } catch (e) {
     if (e.code === "ENOENT") return null;
     return null;
@@ -6565,27 +7094,27 @@ async function statIfExists(filePath) {
 async function getNewestMtime(dirPath) {
   let entries;
   try {
-    entries = await import_node_fs13.default.promises.readdir(dirPath, { withFileTypes: true });
+    entries = await import_node_fs14.default.promises.readdir(dirPath, { withFileTypes: true });
   } catch (e) {
     if (e.code === "ENOENT") return null;
     return null;
   }
   let newest = null;
   for (const entry of entries) {
-    const entryPath = import_node_path13.default.join(dirPath, entry.name);
+    const entryPath = import_node_path14.default.join(dirPath, entry.name);
     if (entry.isDirectory()) {
       const childNewest = await getNewestMtime(entryPath);
       if (childNewest !== null && (newest === null || childNewest > newest)) newest = childNewest;
       continue;
     }
-    const stat = await statIfExists(entryPath);
+    const stat = await statIfExists2(entryPath);
     if (stat && (newest === null || stat.mtimeMs > newest)) newest = stat.mtimeMs;
   }
   return newest;
 }
 
 // src/daemon/handlers/session.ts
-var import_node_fs14 = __toESM(require("fs"));
+var import_node_fs15 = __toESM(require("fs"));
 
 // src/daemon/experimentalTools.ts
 var TOOL_SPECS = [
@@ -6846,8 +7375,8 @@ function renderCommandExecution(item, ctx) {
 }
 function renderFileChange(item, ctx) {
   const attrs = baseItemAttrs(item, { includeType: false });
-  const path16 = asString4(item.path);
-  if (path16) attrs.path = path16;
+  const path17 = asString4(item.path);
+  if (path17) attrs.path = path17;
   if (item.status !== void 0) attrs.status = item.status;
   const diffBody = extractDiff(item) ?? "";
   return renderBodyTag("file-patch", attrs, diffBody, ctx);
@@ -7694,7 +8223,7 @@ async function readInstructionFile(value, flag) {
   const filePath = asString5(value);
   if (!filePath) return null;
   try {
-    return await import_node_fs14.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs15.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     throw invalidParams(`${flag} not readable: ${e.message}`);
   }
@@ -7754,7 +8283,7 @@ function sortSessions(rows, field) {
 }
 
 // src/daemon/handlers/message.ts
-var import_node_fs15 = __toESM(require("fs"));
+var import_node_fs16 = __toESM(require("fs"));
 var messageSend = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const prompt = await readPromptInput(req);
@@ -8134,7 +8663,7 @@ async function readPromptInput(req) {
   if (positional) return positional;
   if (fromFile) {
     try {
-      return await import_node_fs15.default.promises.readFile(fromFile, "utf8");
+      return await import_node_fs16.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -8154,7 +8683,7 @@ async function readJsonInput(req) {
   if (jsonRaw) raw = jsonRaw;
   else if (fromFile) {
     try {
-      raw = await import_node_fs15.default.promises.readFile(fromFile, "utf8");
+      raw = await import_node_fs16.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -8171,9 +8700,9 @@ async function readJsonInput(req) {
 }
 async function buildUserInput(text, attachments) {
   const items = [{ type: "text", text }];
-  for (const path16 of attachments) {
-    await assertAttachable(path16);
-    items.push({ type: "localImage", path: path16 });
+  for (const path17 of attachments) {
+    await assertAttachable(path17);
+    items.push({ type: "localImage", path: path17 });
   }
   return items;
 }
@@ -8363,7 +8892,7 @@ function pickDefined(source, keys) {
 async function assertAttachable(filePath) {
   let stat;
   try {
-    stat = await import_node_fs15.default.promises.stat(filePath);
+    stat = await import_node_fs16.default.promises.stat(filePath);
   } catch (e) {
     throw invalidParams(`--attach not readable: ${filePath}: ${e.message}`);
   }
@@ -8375,8 +8904,8 @@ async function assertAttachable(filePath) {
   }
 }
 async function listTurnsFromRelativeOffset(client, threadId, relativeSince, limit, retry) {
-  const skip = Math.max(0, relativeSince - 1);
-  let remainingSkip = skip;
+  const skip2 = Math.max(0, relativeSince - 1);
+  let remainingSkip = skip2;
   let cursor;
   const data = [];
   let nextCursor = null;
@@ -8483,7 +9012,7 @@ function asString7(value) {
 }
 
 // src/daemon/handlers/monitor.ts
-var import_node_child_process5 = require("child_process");
+var import_node_child_process6 = require("child_process");
 var MAX_INTERVAL_QUEUE_EVENTS = 512;
 var MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
 var MAX_FLUSH_EVENTS_PER_TICK = 64;
@@ -8695,7 +9224,7 @@ var monitorAlarm = async (_ctx, req, stream) => {
     try {
       await new Promise((resolve) => {
         const { file, args } = shellCommand(command);
-        const child = (0, import_node_child_process5.spawn)(file, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+        const child = (0, import_node_child_process6.spawn)(file, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         activeChild = child;
         activeTimedOut = false;
         let stdoutBuf = "";
@@ -9825,7 +10354,7 @@ async function runDaemon() {
   const cleanup = () => {
     unlinkSockIfStale(ctx.sockPath);
     try {
-      import_node_fs16.default.unlinkSync(pidPath);
+      import_node_fs17.default.unlinkSync(pidPath);
     } catch {
     }
   };
@@ -9845,10 +10374,10 @@ async function runDaemon() {
   } catch (e) {
     logger.error("failed to start server", { err: e.message });
     try {
-      import_node_fs16.default.unlinkSync(pidPath);
+      import_node_fs17.default.unlinkSync(pidPath);
     } catch {
     }
-    return 1;
+    throw translateBootstrapError(e, ctx.sockPath);
   }
   scheduleIdleShutdown(ctx);
   return await new Promise(() => {
@@ -9918,15 +10447,15 @@ async function reconcileLoadedSessionsAfterRestart(ctx) {
 }
 function acquirePid(pidPath) {
   try {
-    import_node_fs16.default.mkdirSync(import_node_path14.default.dirname(pidPath), { recursive: true });
-    const fd = import_node_fs16.default.openSync(pidPath, "wx");
+    import_node_fs17.default.mkdirSync(import_node_path15.default.dirname(pidPath), { recursive: true });
+    const fd = import_node_fs17.default.openSync(pidPath, "wx");
     try {
-      import_node_fs16.default.writeFileSync(fd, JSON.stringify({
+      import_node_fs17.default.writeFileSync(fd, JSON.stringify({
         pid: process.pid,
         created_at: (/* @__PURE__ */ new Date()).toISOString()
       }));
     } finally {
-      import_node_fs16.default.closeSync(fd);
+      import_node_fs17.default.closeSync(fd);
     }
     return true;
   } catch (e) {
@@ -9972,10 +10501,10 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
   const legacyPidPath = legacyWindowsPidFilePath(pidPath);
   for (; ; ) {
     const sockReachable = await probeSock(sockPath, 200);
-    const pidRecord = readPidFile2(pidPath);
+    const pidRecord = readPidFile3(pidPath);
     const pid = pidRecord?.pid ?? null;
     const pidAlive = pid !== null && isDaemonPidAlive(pid);
-    const legacyPidRecord = legacyPidPath ? readPidFile2(legacyPidPath) : null;
+    const legacyPidRecord = legacyPidPath ? readPidFile3(legacyPidPath) : null;
     const legacyPid = legacyPidRecord?.pid ?? null;
     const legacyPidAlive = legacyPid !== null && isDaemonPidAlive(legacyPid);
     if (sockReachable) {
@@ -10013,13 +10542,13 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
     }
     if (pid !== null && !pidAlive) {
       try {
-        import_node_fs16.default.unlinkSync(pidPath);
+        import_node_fs17.default.unlinkSync(pidPath);
       } catch {
       }
     }
     if (legacyPidPath && legacyPid !== null && !legacyPidAlive) {
       try {
-        import_node_fs16.default.unlinkSync(legacyPidPath);
+        import_node_fs17.default.unlinkSync(legacyPidPath);
       } catch {
       }
     }
@@ -10037,9 +10566,9 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
     await sleep5(150);
   }
 }
-function readPidFile2(pidPath) {
+function readPidFile3(pidPath) {
   try {
-    const raw = import_node_fs16.default.readFileSync(pidPath, "utf8");
+    const raw = import_node_fs17.default.readFileSync(pidPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
     return {
@@ -10062,7 +10591,7 @@ function legacyWindowsPidFilePath(currentPidPath) {
   if (process.platform !== "win32") return null;
   const legacyHome = process.env.HOME;
   if (!legacyHome) return null;
-  const legacyPath = import_node_path14.default.join(legacyHome, `.${APP}`, "daemon.pid");
+  const legacyPath = import_node_path15.default.join(legacyHome, `.${APP}`, "daemon.pid");
   if (legacyPath === currentPidPath) return null;
   if (legacyHome === homeDir()) return null;
   return legacyPath;
@@ -10072,6 +10601,23 @@ function sleep5(ms) {
     const timer = setTimeout(resolve, ms);
     timer.unref();
   });
+}
+function translateBootstrapError(error, sockPath) {
+  if (error instanceof CodexTeamError) return error;
+  const err2 = error;
+  if (err2?.code === "EPERM" || err2?.code === "EACCES") {
+    return new CodexTeamError(
+      "socket_bind_denied",
+      `local Unix socket bind denied by environment (error: ${err2.code}). codex-team requires socket bind for daemon IPC - likely running in a restricted sandbox.`,
+      {
+        error: err2.code,
+        sock_path: sockPath,
+        suggested_action: "run `codex-team doctor` to diagnose"
+      }
+    );
+  }
+  if (error instanceof Error) return error;
+  return new Error(String(error));
 }
 
 // src/main.ts
@@ -10083,7 +10629,7 @@ async function main() {
   if (daemonIdx >= 0) {
     argv.splice(daemonIdx, 1);
     if (stderrPath) redirectProcessStderr(stderrPath);
-    const code2 = await runDaemon();
+    const code2 = await runDaemonWithBootstrapReporting();
     process.exit(code2);
   }
   const code = await runCli(argv);
@@ -10094,6 +10640,22 @@ main().catch((e) => {
 `);
   process.exit(1);
 });
+async function runDaemonWithBootstrapReporting() {
+  try {
+    return await runDaemon();
+  } catch (e) {
+    writeDaemonBootstrapError(e);
+    return 1;
+  }
+}
+function writeDaemonBootstrapError(error) {
+  const payload = error instanceof CodexTeamError ? { code: error.code, message: error.message, ...error.data !== void 0 ? { data: error.data } : {} } : {
+    code: "internal",
+    message: error instanceof Error ? error.message : String(error)
+  };
+  process.stderr.write(`[codex-team-daemon-bootstrap] ${JSON.stringify(payload)}
+`);
+}
 function takeOptionValue(argv, flag) {
   const idx = argv.indexOf(flag);
   if (idx < 0) return null;
@@ -10105,8 +10667,8 @@ function takeOptionValue(argv, flag) {
   return value;
 }
 function redirectProcessStderr(stderrPath) {
-  import_node_fs17.default.mkdirSync(import_node_path15.default.dirname(stderrPath), { recursive: true });
-  const stream = import_node_fs17.default.createWriteStream(stderrPath, { flags: "a" });
+  import_node_fs18.default.mkdirSync(import_node_path16.default.dirname(stderrPath), { recursive: true });
+  const stream = import_node_fs18.default.createWriteStream(stderrPath, { flags: "a" });
   stream.on("error", () => void 0);
   const write = stream.write.bind(stream);
   process.stderr.write = ((chunk, encoding, cb) => {

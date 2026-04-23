@@ -2,6 +2,8 @@
 
 A zero-to-first-turn walkthrough. All commands assume you're already in the repo you want codex to work on.
 
+First step when stuck: run `codex-team doctor`.
+
 ## 1. Pick a bearer token
 
 Any non-empty string. Reuse it for this whole agent conversation. Conventions:

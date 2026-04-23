@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { CodexTeamError } from "../errors";
 import type { DaemonContext } from "./context";
 import { buildContext } from "./context";
 import { ConfigStore } from "./config";
@@ -65,7 +66,7 @@ export async function runDaemon(): Promise<number> {
   } catch (e) {
     logger.error("failed to start server", { err: (e as Error).message });
     try { fs.unlinkSync(pidPath); } catch { /* ignore */ }
-    return 1;
+    throw translateBootstrapError(e, ctx.sockPath);
   }
 
   scheduleIdleShutdown(ctx);
@@ -314,4 +315,24 @@ function sleep(ms: number): Promise<void> {
     const timer = setTimeout(resolve, ms);
     timer.unref();
   });
+}
+
+function translateBootstrapError(error: unknown, sockPath: string): Error {
+  if (error instanceof CodexTeamError) return error;
+
+  const err = error as NodeJS.ErrnoException;
+  if (err?.code === "EPERM" || err?.code === "EACCES") {
+    return new CodexTeamError(
+      "socket_bind_denied",
+      `local Unix socket bind denied by environment (error: ${err.code}). codex-team requires socket bind for daemon IPC - likely running in a restricted sandbox.`,
+      {
+        error: err.code,
+        sock_path: sockPath,
+        suggested_action: "run `codex-team doctor` to diagnose",
+      },
+    );
+  }
+
+  if (error instanceof Error) return error;
+  return new Error(String(error));
 }

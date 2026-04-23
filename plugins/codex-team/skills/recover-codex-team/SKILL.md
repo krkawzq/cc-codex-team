@@ -7,6 +7,8 @@ description: >-
 # Recover codex-team
 
 > The codex-team daemon auto-recovers from most failures. This skill is for the cases where you need to intervene.
+>
+> First step when stuck: run `codex-team doctor`.
 
 ## What auto-recovers (you don't need to do anything)
 
