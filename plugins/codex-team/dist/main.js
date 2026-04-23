@@ -24,7 +24,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 
 // src/main.ts
 var import_node_fs18 = __toESM(require("fs"));
-var import_node_path16 = __toESM(require("path"));
+var import_node_path17 = __toESM(require("path"));
 
 // src/cli/run.ts
 var import_node_fs7 = __toESM(require("fs"));
@@ -492,8 +492,8 @@ function matchCommand(tokens, available) {
   }
   return null;
 }
-function commandKey(path17) {
-  return path17.join(":");
+function commandKey(path18) {
+  return path18.join(":");
 }
 var SHORT_COMMANDS = /* @__PURE__ */ new Set([
   "doctor",
@@ -2104,15 +2104,15 @@ var HELP_TREE = {
   ],
   needs_bearer: false
 };
-function findNode(path17, node = HELP_TREE) {
-  if (path17.length === 0) return node;
-  const [head, ...rest] = path17;
+function findNode(path18, node = HELP_TREE) {
+  if (path18.length === 0) return node;
+  const [head, ...rest] = path18;
   const child = node.subcommands.find((entry) => entry.name === head);
   if (!child) return null;
   return findNode(rest, child);
 }
-function formatCommandPath(path17) {
-  return path17.length === 0 ? "codex-team" : `codex-team ${path17.join(" ")}`;
+function formatCommandPath(path18) {
+  return path18.length === 0 ? "codex-team" : `codex-team ${path18.join(" ")}`;
 }
 function formatPositional(positional) {
   return positional.required ? `<${positional.name}>` : `[${positional.name}]`;
@@ -2192,9 +2192,9 @@ function renderExamples(node) {
     ...node.examples.map((example) => `  ${example}`)
   ];
 }
-function renderHelp(path17) {
-  const node = findNode(path17) ?? HELP_TREE;
-  const resolvedPath = findNode(path17) ? path17 : [];
+function renderHelp(path18) {
+  const node = findNode(path18) ?? HELP_TREE;
+  const resolvedPath = findNode(path18) ? path18 : [];
   const sections = [
     [formatCommandPath(resolvedPath), node.summary],
     ["USAGE", `  ${node.usage}`]
@@ -4658,7 +4658,7 @@ function formatDuration(ms) {
 
 // src/daemon/run.ts
 var import_node_fs17 = __toESM(require("fs"));
-var import_node_path15 = __toESM(require("path"));
+var import_node_path16 = __toESM(require("path"));
 
 // src/errors.ts
 var CodexTeamError = class extends Error {
@@ -8276,6 +8276,7 @@ async function getNewestMtime(dirPath) {
 
 // src/daemon/handlers/session.ts
 var import_node_fs15 = __toESM(require("fs"));
+var import_node_path15 = __toESM(require("path"));
 
 // src/daemon/experimentalTools.ts
 var TOOL_SPECS = [
@@ -8536,8 +8537,8 @@ function renderCommandExecution(item, ctx) {
 }
 function renderFileChange(item, ctx) {
   const attrs = baseItemAttrs(item, { includeType: false });
-  const path17 = asString4(item.path);
-  if (path17) attrs.path = path17;
+  const path18 = asString4(item.path);
+  if (path18) attrs.path = path18;
   if (item.status !== void 0) attrs.status = item.status;
   const diffBody = extractDiff(item) ?? "";
   return renderBodyTag("file-patch", attrs, diffBody, ctx);
@@ -8874,7 +8875,8 @@ var sessionNew = async (ctx, req) => {
   }
   const experimentalTools = resolveExperimentalToolsForCreate(ctx, flags);
   const autoApprovePatterns = resolveAutoApprovePatternsForCreate(ctx, flags);
-  const startParams = await buildThreadStartParams(ctx, flags, experimentalTools);
+  const cwd = resolveAndValidateRequestedCwd(asString5(flags["cwd"]));
+  const startParams = await buildThreadStartParams(ctx, flags, experimentalTools, cwd);
   const client = await ctx.pool.acquire(user, keyFor(user, name), buildExperimentalToolAppServerOptions(experimentalTools));
   let result;
   try {
@@ -8894,7 +8896,7 @@ var sessionNew = async (ctx, req) => {
     thread_id: threadId,
     state: "live",
     model: asString5(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
-    cwd: asString5(flags["cwd"]) ?? process.cwd(),
+    cwd,
     sandbox: asString5(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
     approval: asString5(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
     effort: asString5(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
@@ -9063,6 +9065,12 @@ var sessionFork = async (ctx, req) => {
   if (newNameRaw) validateSessionName(newNameRaw);
   while (ctx.sessions.get(user, newName)) newName = generateSessionName();
   const autoApprovePatterns = validateSessionAutoApprovePatterns(source.autoApprovePatterns ?? []);
+  const sourceCwd = source.cwd ? resolveAndValidatePersistedCwd(source.cwd, {
+    label: "source session's cwd",
+    missing: (cwd) => `source session's cwd '${cwd}' does not exist`,
+    notDirectory: (cwd) => `source session's cwd '${cwd}' is no longer a directory`,
+    inaccessible: (cwd) => `source session's cwd '${cwd}' is not accessible (permission denied or similar)`
+  }) : void 0;
   const client = await ctx.pool.acquire(
     user,
     keyFor(user, newName),
@@ -9086,7 +9094,7 @@ var sessionFork = async (ctx, req) => {
     thread_id: newThreadId,
     state: "live",
     model: source.model,
-    cwd: source.cwd,
+    cwd: sourceCwd,
     sandbox: source.sandbox,
     approval: source.approval,
     effort: source.effort,
@@ -9280,6 +9288,15 @@ var sessionHeal = async (ctx, req) => {
   if (rec.state === "live" && appServerAlive) {
     return { ok: true, note: "already healthy", session: rec };
   }
+  const sessionCwd = rec.cwd ? resolveAndValidatePersistedCwd(rec.cwd, {
+    label: "session's cwd",
+    missing: (cwd) => `session's cwd '${cwd}' does not exist`,
+    notDirectory: (cwd, kind) => `session's cwd '${cwd}' is not a directory (it is a ${kind})`,
+    inaccessible: (cwd) => `session's cwd '${cwd}' is not accessible (permission denied or similar)`
+  }) : void 0;
+  if (sessionCwd && sessionCwd !== rec.cwd) {
+    ctx.sessions.update(user, rec.name, { cwd: sessionCwd });
+  }
   if (!appServerAlive || force) {
     ctx.pool.release(sessionKey);
   }
@@ -9387,12 +9404,67 @@ function parseOwnerFilter(flags) {
 function isTrue2(v) {
   return v === true || v === "true" || v === "1";
 }
-async function buildThreadStartParams(ctx, flags, experimentalTools) {
+function resolveAndValidateRequestedCwd(rawCwd) {
+  const daemonCwd = resolveDaemonProcessCwd();
+  const resolved = rawCwd === null ? import_node_path15.default.normalize(daemonCwd) : resolveAbsoluteCwd(rawCwd, daemonCwd, "cwd");
+  return validateResolvedCwd(resolved, {
+    missing: (cwd) => `cwd '${cwd}' does not exist`,
+    notDirectory: (cwd, kind) => `cwd '${cwd}' is not a directory (it is a ${kind})`,
+    inaccessible: (cwd) => `cwd '${cwd}' is not accessible (permission denied or similar)`
+  });
+}
+function resolveAndValidatePersistedCwd(rawCwd, messages) {
+  const daemonCwd = resolveDaemonProcessCwd();
+  const resolved = import_node_path15.default.isAbsolute(rawCwd) ? import_node_path15.default.normalize(rawCwd) : resolveAbsoluteCwd(rawCwd, daemonCwd, messages.label);
+  return validateResolvedCwd(resolved, messages);
+}
+function resolveDaemonProcessCwd() {
+  try {
+    return process.cwd();
+  } catch (error) {
+    throw invalidParams(`cwd could not be resolved: ${error.message}`);
+  }
+}
+function resolveAbsoluteCwd(rawCwd, daemonCwd, label) {
+  try {
+    return import_node_path15.default.normalize(import_node_path15.default.resolve(daemonCwd, rawCwd));
+  } catch (error) {
+    throw invalidParams(`${label} '${rawCwd}' could not be resolved: ${error.message}`);
+  }
+}
+function validateResolvedCwd(cwd, messages) {
+  if (!import_node_fs15.default.existsSync(cwd)) {
+    throw invalidParams(messages.missing(cwd));
+  }
+  const stat = import_node_fs15.default.statSync(cwd);
+  if (!stat.isDirectory()) {
+    throw invalidParams(messages.notDirectory(cwd, describeFilesystemEntry(cwd, stat)));
+  }
+  try {
+    import_node_fs15.default.accessSync(cwd, import_node_fs15.default.constants.R_OK | import_node_fs15.default.constants.X_OK);
+  } catch {
+    throw invalidParams(messages.inaccessible(cwd));
+  }
+  return cwd;
+}
+function describeFilesystemEntry(cwd, stat) {
+  try {
+    const entry = import_node_fs15.default.lstatSync(cwd);
+    if (entry.isSymbolicLink()) return "symlink";
+  } catch {
+  }
+  if (stat.isFile()) return "file";
+  if (stat.isBlockDevice()) return "block device";
+  if (stat.isCharacterDevice()) return "character device";
+  if (stat.isFIFO()) return "fifo";
+  if (stat.isSocket()) return "socket";
+  return "other";
+}
+async function buildThreadStartParams(ctx, flags, experimentalTools, cwd) {
   const p = {};
   const config = {};
   const model = asString5(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
   if (model) p.model = model;
-  const cwd = asString5(flags["cwd"]) ?? process.cwd();
   if (cwd) p.cwd = cwd;
   const sandbox = asString5(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
   if (sandbox) p.sandbox = sandbox;
@@ -10658,9 +10730,9 @@ async function readJsonInput(req) {
 }
 async function buildUserInput(text, attachments) {
   const items = [{ type: "text", text }];
-  for (const path17 of attachments) {
-    await assertAttachable(path17);
-    items.push({ type: "localImage", path: path17 });
+  for (const path18 of attachments) {
+    await assertAttachable(path18);
+    items.push({ type: "localImage", path: path18 });
   }
   return items;
 }
@@ -12767,7 +12839,7 @@ async function reconcileLoadedSessionsAfterRestart(ctx) {
 }
 function acquirePid(pidPath) {
   try {
-    import_node_fs17.default.mkdirSync(import_node_path15.default.dirname(pidPath), { recursive: true });
+    import_node_fs17.default.mkdirSync(import_node_path16.default.dirname(pidPath), { recursive: true });
     const fd = import_node_fs17.default.openSync(pidPath, "wx");
     try {
       import_node_fs17.default.writeFileSync(fd, JSON.stringify({
@@ -12911,7 +12983,7 @@ function legacyWindowsPidFilePath(currentPidPath) {
   if (process.platform !== "win32") return null;
   const legacyHome = process.env.HOME;
   if (!legacyHome) return null;
-  const legacyPath = import_node_path15.default.join(legacyHome, `.${APP}`, "daemon.pid");
+  const legacyPath = import_node_path16.default.join(legacyHome, `.${APP}`, "daemon.pid");
   if (legacyPath === currentPidPath) return null;
   if (legacyHome === homeDir()) return null;
   return legacyPath;
@@ -12987,7 +13059,7 @@ function takeOptionValue(argv, flag) {
   return value;
 }
 function redirectProcessStderr(stderrPath) {
-  import_node_fs18.default.mkdirSync(import_node_path16.default.dirname(stderrPath), { recursive: true });
+  import_node_fs18.default.mkdirSync(import_node_path17.default.dirname(stderrPath), { recursive: true });
   const stream = import_node_fs18.default.createWriteStream(stderrPath, { flags: "a" });
   stream.on("error", () => void 0);
   const write = stream.write.bind(stream);

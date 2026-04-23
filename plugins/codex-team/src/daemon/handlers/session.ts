@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 
 import type { AppServerClient } from "../../codex/appServerClient";
 import type { HandlerFn } from "../dispatch";
@@ -69,7 +70,8 @@ export const sessionNew: HandlerFn = async (ctx, req) => {
 
   const experimentalTools = resolveExperimentalToolsForCreate(ctx, flags);
   const autoApprovePatterns = resolveAutoApprovePatternsForCreate(ctx, flags);
-  const startParams = await buildThreadStartParams(ctx, flags, experimentalTools);
+  const cwd = resolveAndValidateRequestedCwd(asString(flags["cwd"]));
+  const startParams = await buildThreadStartParams(ctx, flags, experimentalTools, cwd);
 
   const client = await ctx.pool.acquire(user, keyFor(user, name), buildExperimentalToolAppServerOptions(experimentalTools));
   let result;
@@ -90,7 +92,7 @@ export const sessionNew: HandlerFn = async (ctx, req) => {
     thread_id: threadId,
     state: "live",
     model: asString(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? undefined,
-    cwd: asString(flags["cwd"]) ?? process.cwd(),
+    cwd,
     sandbox: asString(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? undefined,
     approval: asString(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? undefined,
     effort: asString(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? undefined,
@@ -279,6 +281,14 @@ export const sessionFork: HandlerFn = async (ctx, req) => {
   if (newNameRaw) validateSessionName(newNameRaw);
   while (ctx.sessions.get(user, newName)) newName = generateSessionName();
   const autoApprovePatterns = validateSessionAutoApprovePatterns(source.autoApprovePatterns ?? []);
+  const sourceCwd = source.cwd
+    ? resolveAndValidatePersistedCwd(source.cwd, {
+        label: "source session's cwd",
+        missing: (cwd) => `source session's cwd '${cwd}' does not exist`,
+        notDirectory: (cwd) => `source session's cwd '${cwd}' is no longer a directory`,
+        inaccessible: (cwd) => `source session's cwd '${cwd}' is not accessible (permission denied or similar)`,
+      })
+    : undefined;
 
   const client = await ctx.pool.acquire(
     user,
@@ -302,7 +312,7 @@ export const sessionFork: HandlerFn = async (ctx, req) => {
     thread_id: newThreadId,
     state: "live",
     model: source.model,
-    cwd: source.cwd,
+    cwd: sourceCwd,
     sandbox: source.sandbox,
     approval: source.approval,
     effort: source.effort,
@@ -531,6 +541,18 @@ export const sessionHeal: HandlerFn = async (ctx, req) => {
     return { ok: true, note: "already healthy", session: rec };
   }
 
+  const sessionCwd = rec.cwd
+    ? resolveAndValidatePersistedCwd(rec.cwd, {
+        label: "session's cwd",
+        missing: (cwd) => `session's cwd '${cwd}' does not exist`,
+        notDirectory: (cwd, kind) => `session's cwd '${cwd}' is not a directory (it is a ${kind})`,
+        inaccessible: (cwd) => `session's cwd '${cwd}' is not accessible (permission denied or similar)`,
+      })
+    : undefined;
+  if (sessionCwd && sessionCwd !== rec.cwd) {
+    ctx.sessions.update(user, rec.name, { cwd: sessionCwd });
+  }
+
   if (!appServerAlive || force) {
     ctx.pool.release(sessionKey);
   }
@@ -663,16 +685,102 @@ function isTrue(v: unknown): boolean {
   return v === true || v === "true" || v === "1";
 }
 
+function resolveAndValidateRequestedCwd(rawCwd: string | null): string {
+  const daemonCwd = resolveDaemonProcessCwd();
+  const resolved = rawCwd === null
+    ? path.normalize(daemonCwd)
+    : resolveAbsoluteCwd(rawCwd, daemonCwd, "cwd");
+  return validateResolvedCwd(resolved, {
+    missing: (cwd) => `cwd '${cwd}' does not exist`,
+    notDirectory: (cwd, kind) => `cwd '${cwd}' is not a directory (it is a ${kind})`,
+    inaccessible: (cwd) => `cwd '${cwd}' is not accessible (permission denied or similar)`,
+  });
+}
+
+function resolveAndValidatePersistedCwd(
+  rawCwd: string,
+  messages: {
+    label: string;
+    missing: (cwd: string) => string;
+    notDirectory: (cwd: string, kind: string) => string;
+    inaccessible: (cwd: string) => string;
+  },
+): string {
+  const daemonCwd = resolveDaemonProcessCwd();
+  const resolved = path.isAbsolute(rawCwd)
+    ? path.normalize(rawCwd)
+    : resolveAbsoluteCwd(rawCwd, daemonCwd, messages.label);
+  return validateResolvedCwd(resolved, messages);
+}
+
+function resolveDaemonProcessCwd(): string {
+  try {
+    return process.cwd();
+  } catch (error) {
+    throw invalidParams(`cwd could not be resolved: ${(error as Error).message}`);
+  }
+}
+
+function resolveAbsoluteCwd(rawCwd: string, daemonCwd: string, label: string): string {
+  try {
+    return path.normalize(path.resolve(daemonCwd, rawCwd));
+  } catch (error) {
+    throw invalidParams(`${label} '${rawCwd}' could not be resolved: ${(error as Error).message}`);
+  }
+}
+
+function validateResolvedCwd(
+  cwd: string,
+  messages: {
+    missing: (cwd: string) => string;
+    notDirectory: (cwd: string, kind: string) => string;
+    inaccessible: (cwd: string) => string;
+  },
+): string {
+  if (!fs.existsSync(cwd)) {
+    throw invalidParams(messages.missing(cwd));
+  }
+
+  const stat = fs.statSync(cwd);
+  if (!stat.isDirectory()) {
+    throw invalidParams(messages.notDirectory(cwd, describeFilesystemEntry(cwd, stat)));
+  }
+
+  try {
+    fs.accessSync(cwd, fs.constants.R_OK | fs.constants.X_OK);
+  } catch {
+    throw invalidParams(messages.inaccessible(cwd));
+  }
+
+  return cwd;
+}
+
+function describeFilesystemEntry(cwd: string, stat: fs.Stats): string {
+  try {
+    const entry = fs.lstatSync(cwd);
+    if (entry.isSymbolicLink()) return "symlink";
+  } catch {
+    // Fall back to stat-based typing below.
+  }
+
+  if (stat.isFile()) return "file";
+  if (stat.isBlockDevice()) return "block device";
+  if (stat.isCharacterDevice()) return "character device";
+  if (stat.isFIFO()) return "fifo";
+  if (stat.isSocket()) return "socket";
+  return "other";
+}
+
 async function buildThreadStartParams(
   ctx: DaemonContext,
   flags: Record<string, unknown>,
   experimentalTools: string[],
+  cwd: string,
 ): Promise<Record<string, JsonValue>> {
   const p: Record<string, JsonValue> = {};
   const config: Record<string, JsonValue> = {};
   const model = asString(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
   if (model) p.model = model;
-  const cwd = asString(flags["cwd"]) ?? process.cwd();
   if (cwd) p.cwd = cwd;
   const sandbox = asString(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
   if (sandbox) p.sandbox = sandbox;
