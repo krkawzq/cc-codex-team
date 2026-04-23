@@ -35,6 +35,8 @@ const DEFAULT_FLUSH_DELAY_MS = 25;
 const OVERFLOW_FLUSH_DELAY_MS = 250;
 const FLUSH_RETRY_DELAY_MS = 250;
 const MAX_PENDING_WRITE_BYTES = 1024 * 1024;
+const MAX_PENDING_BACKLOG_BYTES = 16 * 1024 * 1024;
+const MAX_PENDING_LINE_MULTIPLIER = 10;
 const EVENT_ID_SOFT_LIMIT = 2 ** 52;
 
 export const AUTO_APPROVED_EVENT_TYPE = "auto_approved";
@@ -44,22 +46,131 @@ export const SESSION_CRASHED_EVENT_TYPE = "session.crashed";
 export const SESSION_PENDING_DROPPED_EVENT_TYPE = "session.pending_dropped";
 export const USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE = "user_input.request_cancelled";
 
+interface ScheduledFlush {
+  dueAt: number;
+  timer: NodeJS.Timeout;
+}
+
+export class EventRingBuffer {
+  private capacity: number;
+  private items: Array<TeamEvent | undefined>;
+  private start = 0;
+  private count = 0;
+  private slotsById = new Map<string, number>();
+
+  constructor(capacity: number, initial: TeamEvent[] = []) {
+    this.capacity = Math.max(1, capacity);
+    this.items = new Array(this.capacity);
+    for (const event of initial) this.push(event);
+  }
+
+  get length(): number {
+    return this.count;
+  }
+
+  setCapacity(capacity: number): number {
+    const nextCapacity = Math.max(1, capacity);
+    if (nextCapacity === this.capacity) return 0;
+
+    const events = this.toArray();
+    const dropped = Math.max(0, events.length - nextCapacity);
+    this.capacity = nextCapacity;
+    this.items = new Array(this.capacity);
+    this.start = 0;
+    this.count = 0;
+    this.slotsById.clear();
+    for (const event of events.slice(-nextCapacity)) this.push(event);
+    return dropped;
+  }
+
+  push(event: TeamEvent): TeamEvent | null {
+    if (this.count === this.capacity) {
+      const slot = this.start;
+      const evicted = this.items[slot] ?? null;
+      if (evicted) this.slotsById.delete(evicted.id);
+      this.items[slot] = event;
+      this.slotsById.set(event.id, slot);
+      this.start = (this.start + 1) % this.capacity;
+      return evicted;
+    }
+
+    const slot = (this.start + this.count) % this.capacity;
+    this.items[slot] = event;
+    this.slotsById.set(event.id, slot);
+    this.count += 1;
+    return null;
+  }
+
+  oldestId(): string | null {
+    return this.count === 0 ? null : this.items[this.start]?.id ?? null;
+  }
+
+  toArray(): TeamEvent[] {
+    const events: TeamEvent[] = [];
+    for (let offset = 0; offset < this.count; offset++) {
+      const event = this.at(offset);
+      if (event) events.push(event);
+    }
+    return events;
+  }
+
+  listSince(sinceId: string | null): ListSinceResult {
+    if (!sinceId) return { ok: true, events: this.toArray() };
+
+    const slot = this.slotsById.get(sinceId);
+    if (slot === undefined) {
+      const oldest = this.oldestId();
+      if (oldest && compareSeq(sinceId, oldest) < 0) {
+        return { ok: false, reason: "id_rotated", oldest_available_id: oldest };
+      }
+      return { ok: false, reason: "invalid_since" };
+    }
+
+    const events: TeamEvent[] = [];
+    for (let offset = this.relativeIndex(slot) + 1; offset < this.count; offset++) {
+      const event = this.at(offset);
+      if (event) events.push(event);
+    }
+    return { ok: true, events };
+  }
+
+  findLast(predicate: (event: TeamEvent) => boolean): TeamEvent | null {
+    for (let offset = this.count - 1; offset >= 0; offset--) {
+      const event = this.at(offset);
+      if (event && predicate(event)) return event;
+    }
+    return null;
+  }
+
+  private at(offset: number): TeamEvent | null {
+    if (offset < 0 || offset >= this.count) return null;
+    const slot = (this.start + offset) % this.capacity;
+    return this.items[slot] ?? null;
+  }
+
+  private relativeIndex(slot: number): number {
+    return slot >= this.start ? slot - this.start : this.capacity - this.start + slot;
+  }
+}
+
 export class EventLog {
   private retention: number;
   private dataDir: string | null;
   private counters = new Map<string, number>();
-  private buffers = new Map<string, TeamEvent[]>();
+  private buffers = new Map<string, EventRingBuffer>();
   private subscribers = new Map<string, Set<EventListener>>();
   private loaded = new Set<string>();
   private loadPromises = new Map<string, Promise<void>>();
   private rotatedSinceCompact = new Map<string, number>();
   private pendingLines = new Map<string, string[]>();
   private pendingBytes = new Map<string, number>();
-  private flushTimers = new Map<string, NodeJS.Timeout>();
+  private flushTimers = new Map<string, ScheduledFlush>();
   private writeChains = new Map<string, Promise<void>>();
   private userOps = new Map<string, Promise<void>>();
   private overflowWarned = new Set<string>();
+  private backlogOverflowWarned = new Set<string>();
   private eventIdOverflowWarned = new Set<string>();
+  private compacting = new Set<string>();
 
   constructor(retention = 10000, dataDir: string | null = null) {
     this.retention = Math.max(100, retention);
@@ -86,28 +197,16 @@ export class EventLog {
     const raw = fs.readFileSync(filePath, "utf8");
     const lines = raw.split("\n").filter(Boolean);
     const { events, totalLines } = parsePersistedEvents(lines);
-    const buf = events.slice(Math.max(0, events.length - this.retention));
-    let maxSeq = 0;
-    for (const ev of buf) {
-      const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
-      if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
-    }
-    this.buffers.set(user, buf);
-    this.counters.set(user, maxSeq);
+    this.hydrateLoadedUser(user, events, totalLines);
     this.loaded.add(user);
     this.loadPromises.delete(user);
-    if (totalLines > this.retention * 1.5) this.compactFile(user, buf);
   }
 
   setRetention(n: number): void {
     this.retention = Math.max(100, n);
     for (const [user, buf] of this.buffers) {
-      let rotated = false;
-      while (buf.length > this.retention) {
-        buf.shift();
-        rotated = true;
-      }
-      if (rotated) this.bumpCompactionDebt(user);
+      const dropped = buf.setCapacity(this.retention);
+      if (dropped > 0) this.bumpCompactionDebt(user, dropped);
     }
   }
 
@@ -134,9 +233,9 @@ export class EventLog {
     ]);
     await Promise.all(Array.from(this.loadPromises.values()).map((p) => p.catch(() => undefined)));
     for (const user of users) {
-      const timer = this.flushTimers.get(user);
-      if (timer) {
-        clearTimeout(timer);
+      const scheduled = this.flushTimers.get(user);
+      if (scheduled) {
+        clearTimeout(scheduled.timer);
         this.flushTimers.delete(user);
       }
       await this.flushUser(user);
@@ -145,9 +244,9 @@ export class EventLog {
   }
 
   async clearUser(user: string): Promise<void> {
-    const timer = this.flushTimers.get(user);
-    if (timer) {
-      clearTimeout(timer);
+    const scheduled = this.flushTimers.get(user);
+    if (scheduled) {
+      clearTimeout(scheduled.timer);
       this.flushTimers.delete(user);
     }
     await (this.loadPromises.get(user)?.catch(() => undefined) ?? Promise.resolve());
@@ -164,7 +263,9 @@ export class EventLog {
     this.loaded.delete(user);
     this.loadPromises.delete(user);
     this.overflowWarned.delete(user);
+    this.backlogOverflowWarned.delete(user);
     this.eventIdOverflowWarned.delete(user);
+    this.compacting.delete(user);
   }
 
   subscribe(user: string, cb: EventListener): EventSubscription {
@@ -195,28 +296,18 @@ export class EventLog {
   ): Promise<ListSinceResult> {
     await this.ensureLoaded(user);
     return await this.withUserLock(user, async () => {
-      const buf = this.buffers.get(user) ?? [];
-      let slice: TeamEvent[];
-      if (!sinceId) {
-        slice = buf.slice();
-      } else {
-        const idx = buf.findIndex((e) => e.id === sinceId);
-        if (idx < 0) {
-          if (buf.length > 0 && compareSeq(sinceId, buf[0].id) < 0) {
-            return { ok: false, reason: "id_rotated", oldest_available_id: buf[0].id } as const;
-          }
-          return { ok: false, reason: "invalid_since" } as const;
-        }
-        slice = buf.slice(idx + 1);
-      }
+      const buf = this.buffers.get(user);
+      if (!buf) return { ok: true, events: [] } as const;
+      const listed = buf.listSince(sinceId);
+      if (!listed.ok) return listed;
+      let slice = listed.events;
       if (!opts.includeDelta) slice = slice.filter((e) => !e.type.endsWith(DELTA_SUFFIX));
       return { ok: true, events: slice } as const;
     });
   }
 
   oldestId(user: string): string | null {
-    const buf = this.buffers.get(user);
-    return buf && buf.length > 0 ? buf[0].id : null;
+    return this.buffers.get(user)?.oldestId() ?? null;
   }
 
   latestEvent(
@@ -224,16 +315,15 @@ export class EventLog {
     filter: { session?: string | null; thread_id?: string | null; types?: string[] } = {},
   ): TeamEvent | null {
     this.loadUser(user);
-    const buf = this.buffers.get(user) ?? [];
+    const buf = this.buffers.get(user);
+    if (!buf) return null;
     const types = filter.types ? new Set(filter.types) : null;
-    for (let i = buf.length - 1; i >= 0; i--) {
-      const event = buf[i]!;
-      if (filter.session !== undefined && event.session !== filter.session) continue;
-      if (filter.thread_id !== undefined && event.thread_id !== filter.thread_id) continue;
-      if (types && !types.has(event.type)) continue;
-      return event;
-    }
-    return null;
+    return buf.findLast((event) => {
+      if (filter.session !== undefined && event.session !== filter.session) return false;
+      if (filter.thread_id !== undefined && event.thread_id !== filter.thread_id) return false;
+      if (types && !types.has(event.type)) return false;
+      return true;
+    });
   }
 
   private async ensureLoaded(user: string): Promise<void> {
@@ -265,15 +355,7 @@ export class EventLog {
       const raw = await fs.promises.readFile(filePath, "utf8");
       const lines = raw.split("\n").filter(Boolean);
       const { events, totalLines } = parsePersistedEvents(lines);
-      const buf = events.slice(Math.max(0, events.length - this.retention));
-      let maxSeq = 0;
-      for (const ev of buf) {
-        const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
-        if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
-      }
-      this.buffers.set(user, buf);
-      this.counters.set(user, maxSeq);
-      if (totalLines > this.retention * 1.5) this.compactFile(user, buf);
+      this.hydrateLoadedUser(user, events, totalLines);
       shouldMarkLoaded = true;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") {
@@ -307,13 +389,8 @@ export class EventLog {
       ...input,
     };
     const buf = this.buffers.get(user)!;
-    buf.push(event);
-    let rotated = false;
-    while (buf.length > this.retention) {
-      buf.shift();
-      rotated = true;
-    }
-    if (rotated) this.bumpCompactionDebt(user);
+    const evicted = buf.push(event);
+    if (evicted) this.bumpCompactionDebt(user);
     this.dispatchSubscribers(user, event);
     if (opts.persist !== false) this.appendToFile(user, event);
     return event;
@@ -373,8 +450,10 @@ export class EventLog {
     this.pendingLines.set(user, pending);
     const totalBytes = (this.pendingBytes.get(user) ?? 0) + bytes;
     this.pendingBytes.set(user, totalBytes);
+    this.enforcePendingBacklogCap(user);
+    const currentBytes = this.pendingBytes.get(user) ?? 0;
 
-    if (totalBytes > MAX_PENDING_WRITE_BYTES) {
+    if (currentBytes > MAX_PENDING_WRITE_BYTES) {
       if (!this.overflowWarned.has(user)) {
         this.overflowWarned.add(user);
         this.appendLoaded(user, {
@@ -384,7 +463,7 @@ export class EventLog {
           payload: {
             message: "event log backlog exceeded 1048576 bytes; writes are being retried more slowly",
             kind: "event_log_backpressure",
-            pending_bytes: totalBytes,
+            pending_bytes: currentBytes,
           },
         }, { persist: false });
       }
@@ -395,86 +474,131 @@ export class EventLog {
     this.scheduleFlush(user, DEFAULT_FLUSH_DELAY_MS);
   }
 
-  private compactFile(user: string, buf: TeamEvent[]): void {
-    if (!this.dataDir) return;
-    const timer = this.flushTimers.get(user);
-    if (timer) {
-      clearTimeout(timer);
-      this.flushTimers.delete(user);
-    }
-    this.pendingLines.delete(user);
-    this.pendingBytes.delete(user);
-    const filePath = userEventLogPath(user, this.dataDir);
-    void this.enqueueFsOp(user, async () => {
-      try {
-        await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-        await fs.promises.mkdir(userDir(user, this.dataDir!), { recursive: true });
-        const tmp = filePath + ".tmp";
-        await fs.promises.writeFile(tmp, serializeEventFile(buf));
-        await fs.promises.rename(tmp, filePath);
-        this.rotatedSinceCompact.set(user, 0);
-      } catch (e) {
-        logger.warn("event log compaction failed", { user, err: (e as Error).message });
+  private requestCompaction(user: string): void {
+    if (!this.dataDir || this.compacting.has(user)) return;
+    this.compacting.add(user);
+    void this.compactFile(user).finally(() => {
+      this.compacting.delete(user);
+      if ((this.rotatedSinceCompact.get(user) ?? 0) >= this.compactionThreshold()) {
+        this.requestCompaction(user);
       }
     });
   }
 
-  private bumpCompactionDebt(user: string): void {
-    const debt = (this.rotatedSinceCompact.get(user) ?? 0) + 1;
-    this.rotatedSinceCompact.set(user, debt);
-    if (debt >= Math.max(100, Math.floor(this.retention / 2))) {
-      this.compactFile(user, this.buffers.get(user) ?? []);
+  private async compactFile(user: string): Promise<void> {
+    if (!this.dataDir) return;
+    const filePath = userEventLogPath(user, this.dataDir);
+    let pendingLines: string[] = [];
+    let pendingBytes = 0;
+    let debtSnapshot = 0;
+    let writePromise: Promise<boolean> | null = null;
+
+    await this.withUserLock(user, async () => {
+      const scheduled = this.flushTimers.get(user);
+      if (scheduled) {
+        clearTimeout(scheduled.timer);
+        this.flushTimers.delete(user);
+      }
+
+      pendingLines = [...(this.pendingLines.get(user) ?? [])];
+      pendingBytes = this.pendingBytes.get(user) ?? 0;
+      this.pendingLines.delete(user);
+      this.pendingBytes.delete(user);
+      debtSnapshot = this.rotatedSinceCompact.get(user) ?? 0;
+
+      const contents = serializeEventFile(this.buffers.get(user)?.toArray() ?? []);
+      writePromise = this.enqueueFsOp(user, async () => {
+        try {
+          await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+          await fs.promises.mkdir(userDir(user, this.dataDir!), { recursive: true });
+          const tmp = filePath + ".tmp";
+          await fs.promises.writeFile(tmp, contents);
+          await fs.promises.rename(tmp, filePath);
+          return true;
+        } catch (e) {
+          logger.warn("event log compaction failed", { user, err: (e as Error).message });
+          return false;
+        }
+      });
+    });
+
+    if (!writePromise) return;
+    const ok = await writePromise;
+    if (!ok) {
+      await this.withUserLock(user, async () => {
+        this.restorePendingLines(user, pendingLines, pendingBytes);
+        this.scheduleFlush(user, FLUSH_RETRY_DELAY_MS, true);
+      });
+      return;
     }
+
+    await this.withUserLock(user, async () => {
+      const currentDebt = this.rotatedSinceCompact.get(user) ?? 0;
+      this.rotatedSinceCompact.set(user, Math.max(0, currentDebt - debtSnapshot));
+    });
+  }
+
+  private bumpCompactionDebt(user: string, amount = 1): void {
+    const debt = (this.rotatedSinceCompact.get(user) ?? 0) + amount;
+    this.rotatedSinceCompact.set(user, debt);
+    if (debt >= this.compactionThreshold()) this.requestCompaction(user);
   }
 
   private scheduleFlush(user: string, delayMs: number, reset = false): void {
     if (!this.dataDir) return;
-    if (this.flushTimers.has(user)) {
-      if (!reset) return;
-      clearTimeout(this.flushTimers.get(user)!);
+    const dueAt = Date.now() + delayMs;
+    const existing = this.flushTimers.get(user);
+    if (existing) {
+      if (!reset || existing.dueAt <= dueAt) return;
+      clearTimeout(existing.timer);
     }
     const timer = setTimeout(() => {
+      const scheduled = this.flushTimers.get(user);
+      if (!scheduled || scheduled.timer !== timer) return;
       this.flushTimers.delete(user);
       void this.flushUser(user);
     }, delayMs);
-    timer.unref();
-    this.flushTimers.set(user, timer);
+    timer.unref?.();
+    this.flushTimers.set(user, { dueAt, timer });
   }
 
   private async flushUser(user: string): Promise<void> {
     if (!this.dataDir) return;
-    const snapshot = await this.withUserLock(user, async () => {
+    const filePath = userEventLogPath(user, this.dataDir);
+    let snapshotLines: string[] | null = null;
+    let snapshotBytes = 0;
+    let writePromise: Promise<boolean> | null = null;
+
+    await this.withUserLock(user, async () => {
       const lines = this.pendingLines.get(user);
-      if (!lines || lines.length === 0) return null;
-      const bytes = this.pendingBytes.get(user) ?? 0;
+      if (!lines || lines.length === 0) return;
+      snapshotLines = [...lines];
+      snapshotBytes = this.pendingBytes.get(user) ?? 0;
       this.pendingLines.delete(user);
       this.pendingBytes.delete(user);
-      return { lines: [...lines], bytes };
-    });
-    if (!snapshot) return;
-
-    const filePath = userEventLogPath(user, this.dataDir);
-    const ok = await this.enqueueFsOp(user, async () => {
-      try {
-        await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-        await fs.promises.mkdir(userDir(user, this.dataDir!), { recursive: true });
-        if (!fs.existsSync(filePath)) {
-          await fs.promises.writeFile(filePath, serializeHeaderLine() + snapshot.lines.join(""));
-        } else {
-          await fs.promises.appendFile(filePath, snapshot.lines.join(""));
+      writePromise = this.enqueueFsOp(user, async () => {
+        try {
+          await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+          await fs.promises.mkdir(userDir(user, this.dataDir!), { recursive: true });
+          if (!fs.existsSync(filePath)) {
+            await fs.promises.writeFile(filePath, serializeHeaderLine() + snapshotLines!.join(""));
+          } else {
+            await fs.promises.appendFile(filePath, snapshotLines!.join(""));
+          }
+          return true;
+        } catch (e) {
+          logger.warn("failed to append event log", { user, err: (e as Error).message });
+          return false;
         }
-        return true;
-      } catch (e) {
-        logger.warn("failed to append event log", { user, err: (e as Error).message });
-        return false;
-      }
+      });
     });
+
+    if (!snapshotLines || !writePromise) return;
+    const ok = await writePromise;
 
     if (!ok) {
       await this.withUserLock(user, async () => {
-        const pending = this.pendingLines.get(user) ?? [];
-        this.pendingLines.set(user, [...snapshot.lines, ...pending]);
-        this.pendingBytes.set(user, (this.pendingBytes.get(user) ?? 0) + snapshot.bytes);
+        this.restorePendingLines(user, snapshotLines!, snapshotBytes);
         this.scheduleFlush(user, FLUSH_RETRY_DELAY_MS, true);
       });
       return;
@@ -483,11 +607,96 @@ export class EventLog {
     if ((this.pendingBytes.get(user) ?? 0) <= Math.floor(MAX_PENDING_WRITE_BYTES / 2)) {
       this.overflowWarned.delete(user);
     }
+    if (this.pendingBacklogRecovered(user)) this.backlogOverflowWarned.delete(user);
   }
 
   private ensureUserState(user: string): void {
-    if (!this.buffers.has(user)) this.buffers.set(user, []);
+    if (!this.buffers.has(user)) this.buffers.set(user, new EventRingBuffer(this.retention));
     if (!this.counters.has(user)) this.counters.set(user, 0);
+  }
+
+  private hydrateLoadedUser(user: string, events: TeamEvent[], totalLines: number): void {
+    const buf = new EventRingBuffer(this.retention, events);
+    let maxSeq = 0;
+    for (const ev of buf.toArray()) {
+      const seq = parseInt(ev.id.replace(/^evt-/, ""), 10);
+      if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
+    }
+    this.buffers.set(user, buf);
+    this.counters.set(user, maxSeq);
+    if (totalLines > this.retention * 1.5) this.requestCompaction(user);
+  }
+
+  private compactionThreshold(): number {
+    return Math.max(100, Math.floor(this.retention / 2));
+  }
+
+  private maxPendingLineCount(): number {
+    return Math.max(1, this.retention * MAX_PENDING_LINE_MULTIPLIER);
+  }
+
+  private restorePendingLines(user: string, lines: string[], bytes: number): void {
+    if (lines.length === 0 || bytes <= 0) return;
+    const pending = this.pendingLines.get(user) ?? [];
+    this.pendingLines.set(user, [...lines, ...pending]);
+    this.pendingBytes.set(user, bytes + (this.pendingBytes.get(user) ?? 0));
+    this.enforcePendingBacklogCap(user);
+  }
+
+  private enforcePendingBacklogCap(user: string): void {
+    const pending = this.pendingLines.get(user);
+    if (!pending || pending.length === 0) {
+      this.pendingLines.delete(user);
+      this.pendingBytes.delete(user);
+      return;
+    }
+
+    const maxLines = this.maxPendingLineCount();
+    let totalBytes = this.pendingBytes.get(user) ?? 0;
+    let droppedLines = 0;
+    let droppedBytes = 0;
+
+    while (pending.length > maxLines || totalBytes > MAX_PENDING_BACKLOG_BYTES) {
+      const dropped = pending.shift();
+      if (!dropped) break;
+      const lineBytes = Buffer.byteLength(dropped);
+      totalBytes -= lineBytes;
+      droppedLines += 1;
+      droppedBytes += lineBytes;
+    }
+
+    if (pending.length === 0) {
+      this.pendingLines.delete(user);
+      this.pendingBytes.delete(user);
+    } else {
+      this.pendingBytes.set(user, totalBytes);
+    }
+
+    if (droppedLines > 0 && !this.backlogOverflowWarned.has(user)) {
+      this.backlogOverflowWarned.add(user);
+      this.appendLoaded(user, {
+        type: "warning",
+        session: null,
+        thread_id: null,
+        payload: {
+          message: `event log backlog exceeded ${maxLines} lines or ${MAX_PENDING_BACKLOG_BYTES} bytes; dropping oldest pending persisted entries`,
+          kind: "event_log_backlog_overflow",
+          dropped_lines: droppedLines,
+          dropped_bytes: droppedBytes,
+          max_pending_lines: maxLines,
+          max_pending_bytes: MAX_PENDING_BACKLOG_BYTES,
+          pending_lines: pending.length,
+          pending_bytes: Math.max(totalBytes, 0),
+        },
+      }, { persist: false });
+    }
+  }
+
+  private pendingBacklogRecovered(user: string): boolean {
+    const pendingLines = this.pendingLines.get(user)?.length ?? 0;
+    const pendingBytes = this.pendingBytes.get(user) ?? 0;
+    return pendingLines <= Math.floor(this.maxPendingLineCount() / 2) &&
+      pendingBytes <= Math.floor(MAX_PENDING_BACKLOG_BYTES / 2);
   }
 
   private async withUserLock<T>(user: string, fn: () => Promise<T>): Promise<T> {
