@@ -290,6 +290,7 @@ var COMMANDS = /* @__PURE__ */ new Set([
   "session:context",
   "session:list",
   "message:send",
+  "message:send-many",
   "message:peer",
   "message:interrupt",
   "message:approval",
@@ -325,6 +326,30 @@ var GLOBAL_FLAGS = {
   "--help": { name: "help", takesValue: false },
   "--daemon-sock": { name: "daemonSock", takesValue: true }
 };
+var BOOLEAN_LONG_FLAGS = /* @__PURE__ */ new Set([
+  "all",
+  "any",
+  "explicit-only",
+  "follow",
+  "force",
+  "full",
+  "graceful",
+  "help",
+  "include-delta",
+  "once",
+  "short",
+  "stdin",
+  "stream",
+  "summary",
+  "takeover",
+  "verbose",
+  "yes"
+]);
+var BOOLEAN_SHORT_FLAGS = /* @__PURE__ */ new Set([
+  "f",
+  "h",
+  "v"
+]);
 function parseArgs(argv) {
   const result = {
     commandPath: [],
@@ -383,23 +408,31 @@ function parseArgs(argv) {
         value = a.slice(eqIdx + 1);
       } else {
         key = a.slice(2);
-        const next = tail[i + 1];
-        if (next !== void 0 && !isFlagLike(next)) {
-          value = next;
-          i++;
-        } else {
+        if (BOOLEAN_LONG_FLAGS.has(key)) {
           value = null;
+        } else {
+          const next = tail[i + 1];
+          if (next !== void 0 && !isFlagLike(next)) {
+            value = next;
+            i++;
+          } else {
+            value = null;
+          }
         }
       }
       setFlag(result.flags, key, value);
     } else if (a.length > 1 && a.startsWith("-") && !isNegativeNumber(a)) {
       const key = a.slice(1);
-      const next = tail[i + 1];
-      if (next !== void 0 && !isFlagLike(next)) {
-        setFlag(result.flags, key, next);
-        i++;
-      } else {
+      if (BOOLEAN_SHORT_FLAGS.has(key)) {
         setFlag(result.flags, key, null);
+      } else {
+        const next = tail[i + 1];
+        if (next !== void 0 && !isFlagLike(next)) {
+          setFlag(result.flags, key, next);
+          i++;
+        } else {
+          setFlag(result.flags, key, null);
+        }
       }
     } else {
       result.positionals.push(a);
@@ -407,6 +440,8 @@ function parseArgs(argv) {
   }
   if (truthyFlag(result.flags.short) && truthyFlag(result.flags.full)) {
     result.unknown = "--short and --full are mutually exclusive";
+  } else if (commandKey(result.commandPath) === "message:wait" && truthyFlag(result.flags.all) && truthyFlag(result.flags.any)) {
+    result.unknown = "--all and --any are mutually exclusive";
   }
   return result;
 }
@@ -534,6 +569,11 @@ var LIVE_SESSION_TARGET = {
   name: "name|thread_id",
   required: true,
   description: "Target live session name or thread ID."
+};
+var LIVE_SESSION_TARGETS = {
+  name: "name|thread_id...",
+  required: true,
+  description: "One or more live session names or thread IDs."
 };
 var REQUEST_ID = {
   name: "request_id",
@@ -966,11 +1006,24 @@ var sessionGroup = {
     leaf({
       name: "detach",
       summary: "Stop tracking a live session and release its runtime.",
-      usage: "codex-team -b <token> session detach <name|thread_id> [flags]",
+      usage: "codex-team -b <token> session detach [<name|thread_id>|--all] [flags]",
       positionals: [
-        { ...SESSION_TARGET }
+        { ...SESSION_TARGET, required: false, description: "Target session unless using --all." }
       ],
       flags: [
+        {
+          long: "--all",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Detach every live session for the current bearer."
+        },
+        {
+          long: "--match",
+          type: "glob",
+          required: false,
+          description: "Filter --all targets by session name using * and ? wildcards."
+        },
         {
           long: "--graceful",
           type: "bool",
@@ -980,7 +1033,8 @@ var sessionGroup = {
         }
       ],
       examples: [
-        "codex-team -b $TOKEN session detach audit --graceful"
+        "codex-team -b $TOKEN session detach audit --graceful",
+        "codex-team -b $TOKEN session detach --all --match 'mapper-*'"
       ],
       needs_bearer: true
     }),
@@ -1185,6 +1239,42 @@ var messageGroup = {
       needs_bearer: true
     }),
     leaf({
+      name: "send-many",
+      summary: "Broadcast one prompt to multiple live sessions.",
+      usage: "codex-team -b <token> message send-many <name|thread_id> <name|thread_id> [...name|thread_id] [prompt] [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGETS, description: "Two or more live sessions to broadcast to." },
+        {
+          name: "prompt",
+          required: false,
+          description: "Prompt text when not using --stdin or --file."
+        }
+      ],
+      flags: [
+        {
+          long: "--stdin",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Read the prompt from stdin."
+        },
+        {
+          long: "--file",
+          type: "path",
+          required: false,
+          description: "Read the prompt from a file."
+        }
+      ],
+      notes: [
+        "Requires at least two explicit targets."
+      ],
+      examples: [
+        'codex-team -b $TOKEN message send-many audit lint typecheck "Run all pending checks."',
+        "codex-team -b $TOKEN message send-many audit lint typecheck --file prompt.md"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
       name: "peer",
       summary: "Soft-interrupt the session, then send a prompt.",
       usage: "codex-team -b <token> message peer <name|thread_id> [prompt] [flags]",
@@ -1365,11 +1455,25 @@ var messageGroup = {
     leaf({
       name: "wait",
       summary: "Block until a turn completes, errors, or times out.",
-      usage: "codex-team -b <token> message wait <name|thread_id> [flags]",
+      usage: "codex-team -b <token> message wait <name|thread_id>... [flags]",
       positionals: [
-        { ...LIVE_SESSION_TARGET, description: "Session to watch." }
+        { ...LIVE_SESSION_TARGETS, description: "One session by default, or multiple with --all/--any." }
       ],
       flags: [
+        {
+          long: "--all",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Wait until every listed session reaches a terminal outcome."
+        },
+        {
+          long: "--any",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Return when the first listed session reaches a terminal outcome."
+        },
         {
           long: "--for",
           type: "string",
@@ -1385,11 +1489,14 @@ var messageGroup = {
         }
       ],
       notes: [
-        "Without --for, waits for the current in-flight turn. If the session is idle, waits for the next turn that starts after this call."
+        "Without --for, waits for the current in-flight turn. If the session is idle, waits for the next turn that starts after this call.",
+        "--all and --any are mutually exclusive. --for only applies to single-session waits."
       ],
       examples: [
         "codex-team -b $TOKEN message wait audit",
-        "codex-team -b $TOKEN message wait audit --for turn-42 --timeout 30"
+        "codex-team -b $TOKEN message wait audit --for turn-42 --timeout 30",
+        "codex-team -b $TOKEN message wait --all audit lint typecheck --timeout 300",
+        "codex-team -b $TOKEN message wait --any audit lint typecheck --timeout 60"
       ],
       needs_bearer: true
     })
@@ -2552,11 +2659,7 @@ function formatCompact(method, data) {
         extraKeys: ["noop"]
       });
     case "session:detach":
-      return compactSessionWithFlags(data, {
-        sessionOptions: {},
-        extraKeys: ["noop", "graceful"],
-        allowNullSession: true
-      });
+      return compactSessionDetach(data);
     case "session:fork":
       return compactSessionWithFlags(data, {
         sessionOptions: {}
@@ -2590,6 +2693,8 @@ function formatCompact(method, data) {
       return compactSessionHeal(data);
     case "message:send":
       return pickFields(data, ["turn_id", "started", "queue_id", "queued_depth"]);
+    case "message:send-many":
+      return compactBatchResults(data, ["turn_id", "started", "queue_id", "queued_depth"]);
     case "message:peer":
       return pickFields(data, ["turn_id", "peered"]);
     case "message:interrupt":
@@ -2602,17 +2707,7 @@ function formatCompact(method, data) {
     case "message:tail":
       return compactMessageTail(data);
     case "message:wait":
-      return pickFields(data, [
-        "thread_id",
-        "turn_id",
-        "outcome",
-        "event_type",
-        "event_id",
-        "error",
-        "duration_ms",
-        "items_count",
-        "timeout_s"
-      ]);
+      return compactMessageWait(data);
     case "monitor:events":
       return compactMonitorEvent(data);
     case "monitor:alarm":
@@ -2683,6 +2778,17 @@ function compactSessionInfo(data) {
     }
   });
 }
+function compactSessionDetach(data) {
+  const value = asObject2(data);
+  if (Array.isArray(value.results)) {
+    return compactBatchResults(data, ["detached", "graceful"]);
+  }
+  return compactSessionWithFlags(data, {
+    sessionOptions: {},
+    extraKeys: ["noop", "graceful"],
+    allowNullSession: true
+  });
+}
 function compactSessionContext(data) {
   const value = asObject2(data);
   const out = pickFields(value, ["thread_id"]);
@@ -2733,6 +2839,47 @@ function compactMessageTail(data) {
   const thread = projectThread(value.thread);
   if (Object.keys(thread).length > 0) out.thread = thread;
   return stripUndefined(out);
+}
+function compactMessageWait(data) {
+  const value = asObject2(data);
+  if (Array.isArray(value.outcomes)) {
+    return stripUndefined({
+      outcomes: asArray(value.outcomes).map((entry) => pickFields(entry, [
+        "session",
+        "outcome",
+        "turn_id",
+        "codex_error_info"
+      ])),
+      overall: value.overall
+    });
+  }
+  if (Array.isArray(value.still_running)) {
+    return stripUndefined({
+      session: value.session,
+      outcome: value.outcome,
+      turn_id: value.turn_id,
+      codex_error_info: value.codex_error_info,
+      timeout_s: value.timeout_s,
+      still_running: asArray(value.still_running)
+    });
+  }
+  return pickFields(data, [
+    "thread_id",
+    "turn_id",
+    "outcome",
+    "event_type",
+    "event_id",
+    "error",
+    "duration_ms",
+    "items_count",
+    "timeout_s"
+  ]);
+}
+function compactBatchResults(data, successKeys) {
+  const value = asObject2(data);
+  return {
+    results: asArray(value.results).map((entry) => projectBatchResultEntry(entry, successKeys))
+  };
 }
 function compactMonitorEvent(data) {
   const value = asObject2(data);
@@ -2806,6 +2953,18 @@ function projectCursor(value, options) {
   if (options.includeUpdatedAt) copyIfPresent(out, cursor, "updated_at");
   if (options.includeAutoUpdate) copyIfPresent(out, cursor, "auto_update");
   return out;
+}
+function projectBatchResultEntry(value, successKeys) {
+  const entry = asObject2(value);
+  if (entry.ok === false) {
+    const error = asObject2(entry.error);
+    return stripUndefined({
+      session: entry.session,
+      ok: false,
+      error: Object.keys(error).length > 0 ? pickFields(error, ["code"]) : void 0
+    });
+  }
+  return pickFields(entry, ["session", ...successKeys]);
 }
 function summarizeEventKey(event) {
   const payload = asObject2(event.payload);
@@ -3537,9 +3696,24 @@ async function dispatchCommand(sockPath, parsed, method) {
   }
 }
 function exitCodeForResult(method, result) {
-  if (method !== "message:wait" || !result || typeof result !== "object") return 0;
-  const outcome = result.outcome;
-  if (outcome === "error") return 1;
+  if (!result || typeof result !== "object") return 0;
+  if (method === "message:send-many" || method === "session:detach") {
+    const results = result.results;
+    if (Array.isArray(results) && results.some((entry) => entry && typeof entry === "object" && entry.ok === false)) {
+      return 1;
+    }
+    return 0;
+  }
+  if (method !== "message:wait") return 0;
+  const value = result;
+  const outcomes = Array.isArray(value.outcomes) ? value.outcomes.map((entry) => entry && typeof entry === "object" ? entry.outcome : null).filter((entry) => typeof entry === "string") : [];
+  if (outcomes.length > 0) {
+    if (outcomes.includes("error") || outcomes.includes("interrupted")) return 1;
+    if (outcomes.includes("timeout")) return 124;
+    return 0;
+  }
+  const outcome = value.outcome;
+  if (outcome === "error" || outcome === "interrupted") return 1;
   if (outcome === "timeout") return 124;
   return 0;
 }
@@ -3986,10 +4160,24 @@ function forwardDaemonError(error) {
   return JSON.stringify(err(error.code, error.message, error.data)) + "\n";
 }
 function validateCliFlags(parsed, method) {
-  if (method !== "monitor:events") return null;
-  if (parsed.flags.cursor === true) return "--cursor requires a value";
-  if (parsed.flags.since !== void 0 && parsed.flags.cursor !== void 0) {
-    return "--since and --cursor are mutually exclusive";
+  if (method === "monitor:events") {
+    if (parsed.flags.cursor === true) return "--cursor requires a value";
+    if (parsed.flags.since !== void 0 && parsed.flags.cursor !== void 0) {
+      return "--since and --cursor are mutually exclusive";
+    }
+    return null;
+  }
+  if (method === "message:wait") {
+    if ((truthy(parsed.flags.all) || truthy(parsed.flags.any)) && parsed.flags.for !== void 0) {
+      return "--for is only supported when waiting on a single session";
+    }
+    return null;
+  }
+  if (method === "session:detach") {
+    if (parsed.flags.match !== void 0 && !truthy(parsed.flags.all)) {
+      return "--match requires --all";
+    }
+    return null;
   }
   return null;
 }
@@ -7678,6 +7866,22 @@ function stringify(v) {
   }
 }
 
+// src/util/glob.ts
+function escapeRegex(text) {
+  return text.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+function globToRegExp(pattern) {
+  const source = Array.from(pattern, (char) => {
+    if (char === "*") return ".*";
+    if (char === "?") return ".";
+    return escapeRegex(char);
+  }).join("");
+  return new RegExp(`^${source}$`);
+}
+function matchesGlob(pattern, value) {
+  return globToRegExp(pattern).test(value);
+}
+
 // src/daemon/handlers/session.ts
 var attachLocks = /* @__PURE__ */ new Map();
 var sessionNew = async (ctx, req) => {
@@ -7807,38 +8011,43 @@ var sessionAttach = async (ctx, req) => {
 var sessionDetach = async (ctx, req) => {
   requireUser(ctx, req);
   const user = req.bearer;
-  const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
+  const detachAll = isTrue2(flags["all"]);
+  const match = asString5(flags["match"]);
   const graceful = isTrue2(flags["graceful"]);
+  if (!detachAll && match !== null) {
+    throw invalidParams("--match requires --all");
+  }
+  if (detachAll) {
+    if (asPositionals(req).length > 0) {
+      throw invalidParams("session detach --all does not accept positional targets");
+    }
+    const live = ctx.sessions.listLive(user).filter((rec2) => match === null || matchesGlob(match, rec2.name));
+    const results = await Promise.all(live.map(async (rec2) => {
+      try {
+        const detached2 = await detachSessionRecord(ctx, user, rec2, graceful);
+        return {
+          session: detached2.name,
+          detached: true,
+          graceful
+        };
+      } catch (error) {
+        return {
+          session: rec2.name,
+          ok: false,
+          error: normalizeDetachError(error)
+        };
+      }
+    }));
+    return { results };
+  }
+  const identifier = asPositional(req, 0, "session");
   const rec = ctx.sessions.get(user, identifier);
   if (!rec) {
     return { session: null, noop: true };
   }
-  const sessionKey = keyFor(user, rec.name);
-  const teardown = await ctx.queues.beginTeardown(sessionKey);
-  const client = ctx.pool.clientForSession(sessionKey);
-  const turnId = teardown.currentTurnId;
-  if (client && !graceful && turnId) {
-    try {
-      await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions());
-    } catch {
-    }
-  }
-  if (graceful) {
-    await ctx.queues.waitForIdle(sessionKey);
-  }
-  if (client) {
-    try {
-      await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions());
-    } catch {
-    }
-  }
-  ctx.pool.release(sessionKey);
-  ctx.queues.dispose(sessionKey);
-  await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
-  ctx.sessions.remove(user, rec.name);
-  await appendSessionClosed(ctx, user, rec, "user_detach");
-  return { session: rec, noop: false, graceful };
+  const detached = await detachSessionRecord(ctx, user, rec, graceful);
+  return { session: detached, noop: false, graceful };
 };
 var sessionRename = async (ctx, req) => {
   requireUser(ctx, req);
@@ -8181,6 +8390,45 @@ function validateSessionAutoApprovePatterns(patterns) {
   if (validationError) throw invalidParams(validationError);
   return [...patterns];
 }
+async function detachSessionRecord(ctx, user, rec, graceful) {
+  const sessionKey = keyFor(user, rec.name);
+  const teardown = await ctx.queues.beginTeardown(sessionKey);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const turnId = teardown.currentTurnId;
+  if (client && !graceful && turnId) {
+    try {
+      await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions());
+    } catch {
+    }
+  }
+  if (graceful) {
+    await ctx.queues.waitForIdle(sessionKey);
+  }
+  if (client) {
+    try {
+      await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions());
+    } catch {
+    }
+  }
+  ctx.pool.release(sessionKey);
+  ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
+  ctx.sessions.remove(user, rec.name);
+  await appendSessionClosed(ctx, user, rec, "user_detach");
+  return rec;
+}
+function normalizeDetachError(error) {
+  if (error instanceof CodexTeamError) {
+    return {
+      code: error.code,
+      message: error.message
+    };
+  }
+  return {
+    code: "internal",
+    message: error instanceof Error ? error.message : String(error)
+  };
+}
 function deriveNameFromThreadId(threadId, ctx, user) {
   const existing = ctx.sessions.get(user, threadId);
   if (existing) return existing.name;
@@ -8300,6 +8548,40 @@ var messageSend = async (ctx, req) => {
     queue_id: result.queue_id,
     queued_depth: result.queued_depth
   };
+};
+var messageSendMany = async (ctx, req) => {
+  const user = requireUser2(ctx, req);
+  const positionals = asPositionals2(req);
+  const promptPositional = hasPromptFlagSource(req) ? null : positionals[positionals.length - 1] ?? null;
+  const identifiers = hasPromptFlagSource(req) ? positionals : positionals.slice(0, -1);
+  if (identifiers.length < 2) {
+    throw invalidParams("message send-many requires at least two target sessions");
+  }
+  const prompt = await readPromptInput(req, promptPositional);
+  const input = await buildUserInput(prompt, []);
+  const retry = ctx.retryOptions();
+  const results = await Promise.all(identifiers.map(async (identifier) => {
+    try {
+      const { rec, client } = await resolveLiveTarget(ctx, user, identifier);
+      const sessionKey = keyFor2(user, rec.name);
+      const result = await ctx.queues.sendOrQueue(sessionKey, client, rec.thread_id, input, retry);
+      ctx.sessions.touch(user, rec.name);
+      return {
+        session: rec.name,
+        turn_id: result.turn_id,
+        started: result.started,
+        queue_id: result.queue_id,
+        queued_depth: result.queued_depth
+      };
+    } catch (error) {
+      return {
+        session: identifier,
+        ok: false,
+        error: normalizeHandlerError(error)
+      };
+    }
+  }));
+  return { results };
 };
 var messagePeer = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
@@ -8487,146 +8769,39 @@ var messageTail = async (ctx, req, stream) => {
   return { streaming: true };
 };
 var messageWait = async (ctx, req) => {
-  const { user, rec } = await resolveSessionRecord(ctx, req);
-  if (rec.state !== "live") {
-    return {
-      session: rec.name,
-      thread_id: rec.thread_id,
-      turn_id: rec.current_turn_id ?? rec.last_turn_id ?? null,
-      outcome: "error",
-      event_type: SESSION_CRASHED_EVENT_TYPE,
-      error: {
-        reason: rec.crash_reason ?? "session_crashed"
-      }
-    };
+  const user = requireUser2(ctx, req);
+  const waitAll = isTrue3(getFlag2(req, "all"));
+  const waitAny = isTrue3(getFlag2(req, "any"));
+  if (waitAll && waitAny) {
+    throw invalidParams("--all and --any are mutually exclusive");
   }
+  const positionals = asPositionals2(req);
   const requestedTurnId = asString6(getFlag2(req, "for"));
   const timeoutSeconds = parseTimeoutSeconds(getFlag2(req, "timeout"));
-  const sessionKey = keyFor2(user, rec.name);
-  const initialTurnId = requestedTurnId ?? rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
-  if (requestedTurnId) {
-    const historical = await findTerminalEvent(ctx, user, rec.name, requestedTurnId);
-    if (historical) return terminalWaitResult(rec.name, rec.thread_id, requestedTurnId, historical);
-  } else if (initialTurnId) {
-    const historical = await findTerminalEvent(ctx, user, rec.name, initialTurnId);
-    if (historical) return terminalWaitResult(rec.name, rec.thread_id, initialTurnId, historical);
+  if (!waitAll && !waitAny) {
+    if (positionals.length !== 1) {
+      throw invalidParams("message wait accepts exactly one session unless --all or --any is set");
+    }
+    const rec = resolveSessionRecordTarget(ctx, user, positionals[0]);
+    return await waitForSingleSession(ctx, user, rec, requestedTurnId, timeoutSeconds);
   }
-  return await new Promise((resolve) => {
-    let settled = false;
-    let targetTurnId = requestedTurnId;
-    let timer = null;
-    const settle = (result) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      sub.dispose();
-      resolve(result);
-    };
-    const sub = ctx.events.subscribe(user, (event) => {
-      if (event.session !== rec.name) return;
-      if (event.thread_id !== rec.thread_id) return;
-      if (!targetTurnId) {
-        targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
-      }
-      if (!targetTurnId) {
-        if (event.type === "turn.started") {
-          const turnId = eventTurnId(event);
-          if (!turnId) return;
-          targetTurnId = turnId;
-        } else if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
-          settle({
-            session: rec.name,
-            thread_id: rec.thread_id,
-            turn_id: null,
-            outcome: "error",
-            event_type: event.type,
-            event_id: event.id,
-            error: event.payload
-          });
-        }
-        return;
-      }
-      if (event.type === "turn.completed" && eventTurnId(event) === targetTurnId) {
-        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
-        return;
-      }
-      if (event.type === "turn.error" && eventTurnId(event) === targetTurnId) {
-        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
-        return;
-      }
-      if (event.type === SESSION_CRASHED_EVENT_TYPE && eventCrashTurnId(event) === targetTurnId) {
-        settle({
-          session: rec.name,
-          thread_id: rec.thread_id,
-          turn_id: targetTurnId,
-          outcome: "error",
-          event_type: event.type,
-          event_id: event.id,
-          error: event.payload
-        });
-        return;
-      }
-      if (event.type === SESSION_CLOSED_EVENT_TYPE) {
-        settle({
-          session: rec.name,
-          thread_id: rec.thread_id,
-          turn_id: targetTurnId,
-          outcome: "error",
-          event_type: event.type,
-          event_id: event.id,
-          error: event.payload
-        });
-      }
-    });
-    if (!targetTurnId && !requestedTurnId) {
-      targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
-    }
-    if (timeoutSeconds > 0) {
-      timer = setTimeout(() => {
-        settle({
-          session: rec.name,
-          thread_id: rec.thread_id,
-          turn_id: targetTurnId ?? null,
-          outcome: "timeout",
-          timeout_s: timeoutSeconds
-        });
-      }, timeoutSeconds * 1e3);
-      timer.unref();
-    }
-  });
+  if (requestedTurnId) {
+    throw invalidParams("--for is only supported when waiting on a single session");
+  }
+  if (positionals.length === 0) {
+    throw invalidParams("message wait requires at least one session");
+  }
+  const records = positionals.map((identifier) => resolveSessionRecordTarget(ctx, user, identifier));
+  if (waitAll) {
+    return await waitForAllSessions(ctx, user, records, timeoutSeconds);
+  }
+  return await waitForAnySession(ctx, user, records, timeoutSeconds);
 };
 async function resolveLive(ctx, req) {
-  const user = req.bearer;
-  if (!user) throw invalidParams("bearer token required");
-  if (!ctx.users.has(user)) {
-    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
-  }
+  const user = requireUser2(ctx, req);
   const identifier = asPositional2(req, 0, "session");
-  const rec = ctx.sessions.get(user, identifier);
-  if (!rec) {
-    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
-  }
-  if (rec.state === "crashed") {
-    throw new CodexTeamError("session_not_live", `session '${rec.name}' is crashed; run 'codex-team -b ${user} session heal ${rec.name}'`);
-  }
-  const client = ctx.pool.clientForSession(keyFor2(user, rec.name));
-  if (!isClientAlive2(client)) {
-    throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
-  }
-  return { user, rec, client };
-}
-async function resolveSessionRecord(ctx, req) {
-  const user = req.bearer;
-  if (!user) throw invalidParams("bearer token required");
-  if (!ctx.users.has(user)) {
-    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
-  }
-  const identifier = asPositional2(req, 0, "session");
-  const rec = ctx.sessions.get(user, identifier);
-  if (!rec) {
-    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
-  }
-  return { user, rec };
+  const resolved = await resolveLiveTarget(ctx, user, identifier);
+  return { user, ...resolved };
 }
 function requirePending(ctx, user, requestId) {
   const p = ctx.pending.get(requestId);
@@ -8649,8 +8824,7 @@ function emitPendingWarning(ctx, user, session, threadId, payload) {
     }).catch(() => void 0);
   });
 }
-async function readPromptInput(req) {
-  const positional = asPositionalOptional2(req, 1);
+async function readPromptInput(req, positional = asPositionalOptional2(req, 1)) {
   const fromFile = asString6(getFlag2(req, "file"));
   const fromStdin = isTrue3(getFlag2(req, "stdin"));
   const sources = [positional, fromFile, fromStdin].filter((v) => v !== null && v !== false).length;
@@ -8784,21 +8958,23 @@ async function buildAnswerResponse(req, pending, inline) {
 function keyFor2(user, name) {
   return `${user}::${name}`;
 }
+function asPositionals2(req) {
+  const positionals = req.params.positionals;
+  return Array.isArray(positionals) ? positionals.filter((value) => typeof value === "string") : [];
+}
 function getFlag2(req, key) {
   const flags = req.params.flags;
   if (flags && typeof flags === "object") return flags[key];
   return void 0;
 }
 function asPositional2(req, idx, name) {
-  const positionals = req.params.positionals;
-  const list = Array.isArray(positionals) ? positionals : [];
+  const list = asPositionals2(req);
   const v = list[idx];
   if (typeof v !== "string" || v.length === 0) throw invalidParams(`missing positional '${name}'`);
   return v;
 }
 function asPositionalOptional2(req, idx) {
-  const positionals = req.params.positionals;
-  const list = Array.isArray(positionals) ? positionals : [];
+  const list = asPositionals2(req);
   const v = list[idx];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
@@ -8829,6 +9005,9 @@ function parseTimeoutSeconds(value) {
 function isTrue3(v) {
   return v === true || v === "true" || v === "1";
 }
+function hasPromptFlagSource(req) {
+  return asString6(getFlag2(req, "file")) !== null || isTrue3(getFlag2(req, "stdin"));
+}
 function eventTurnId(event) {
   const turnId = event.payload.turn_id;
   return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
@@ -8851,7 +9030,7 @@ function terminalWaitResult(session, threadId, turnId, event) {
     session,
     thread_id: threadId,
     turn_id: turnId,
-    outcome: event.type === "turn.completed" && completedStatus === "completed" ? "completed" : "error",
+    outcome: event.type === "turn.interrupted" ? "interrupted" : event.type === "turn.completed" && completedStatus === "completed" ? "completed" : "error",
     event_type: event.type,
     event_id: event.id,
     ...completedFields,
@@ -8864,11 +9043,290 @@ async function findTerminalEvent(ctx, user, session, turnId) {
   for (let i = listed.events.length - 1; i >= 0; i--) {
     const event = listed.events[i];
     if (event.session !== session) continue;
-    if (event.type !== "turn.completed" && event.type !== "turn.error") continue;
+    if (event.type !== "turn.completed" && event.type !== "turn.error" && event.type !== "turn.interrupted") continue;
     if (eventTurnId(event) !== turnId) continue;
     return event;
   }
   return null;
+}
+function requireUser2(ctx, req) {
+  const user = req.bearer;
+  if (!user) throw invalidParams("bearer token required");
+  if (!ctx.users.has(user)) {
+    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
+  }
+  return user;
+}
+async function resolveLiveTarget(ctx, user, identifier) {
+  const rec = resolveSessionRecordTarget(ctx, user, identifier);
+  if (rec.state === "crashed") {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is crashed; run 'codex-team -b ${user} session heal ${rec.name}'`);
+  }
+  const client = ctx.pool.clientForSession(keyFor2(user, rec.name));
+  if (!isClientAlive2(client)) {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
+  }
+  return { rec, client };
+}
+function resolveSessionRecordTarget(ctx, user, identifier) {
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
+  }
+  return rec;
+}
+function normalizeHandlerError(error) {
+  if (error instanceof CodexTeamError) {
+    return {
+      code: error.code,
+      message: error.message
+    };
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    code: "internal",
+    message
+  };
+}
+async function waitForSingleSession(ctx, user, rec, requestedTurnId, timeoutSeconds) {
+  const observer = await createWaitObserver(ctx, user, rec, requestedTurnId);
+  if (observer.immediateResult) return observer.immediateResult;
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      observer.cancel();
+      resolve(result);
+    };
+    void observer.promise.then((result) => {
+      if (!result) return;
+      settle(result);
+    });
+    if (timeoutSeconds > 0) {
+      timer = setTimeout(() => {
+        settle(timeoutWaitResult(rec, observer.currentTurnId(), timeoutSeconds));
+      }, timeoutSeconds * 1e3);
+      timer.unref();
+    }
+  });
+}
+async function waitForAllSessions(ctx, user, records, timeoutSeconds) {
+  const observers = await Promise.all(records.map((rec) => createWaitObserver(ctx, user, rec, null)));
+  const outcomes = observers.map((observer) => observer.immediateResult ? projectBatchWaitOutcome(observer.immediateResult) : null);
+  let pending = outcomes.filter((outcome) => outcome === null).length;
+  if (pending === 0) {
+    const finalized = outcomes.filter((outcome) => outcome !== null);
+    return {
+      outcomes: finalized,
+      overall: overallWaitOutcome(finalized)
+    };
+  }
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const finalize = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      for (const observer of observers) observer.cancel();
+      const finalized = outcomes.map((outcome, index) => outcome ?? timeoutBatchWaitOutcome(records[index], observers[index], timeoutSeconds));
+      resolve({
+        outcomes: finalized,
+        overall: overallWaitOutcome(finalized)
+      });
+    };
+    observers.forEach((observer, index) => {
+      if (outcomes[index] !== null) return;
+      void observer.promise.then((result) => {
+        if (settled || !result) return;
+        outcomes[index] = projectBatchWaitOutcome(result);
+        pending -= 1;
+        if (pending === 0) finalize();
+      });
+    });
+    if (timeoutSeconds > 0) {
+      timer = setTimeout(finalize, timeoutSeconds * 1e3);
+      timer.unref();
+    }
+  });
+}
+async function waitForAnySession(ctx, user, records, timeoutSeconds) {
+  const observers = await Promise.all(records.map((rec) => createWaitObserver(ctx, user, rec, null)));
+  const immediateIndex = observers.findIndex((observer) => observer.immediateResult !== void 0);
+  if (immediateIndex >= 0) {
+    observers.forEach((observer, index) => {
+      if (index !== immediateIndex) observer.cancel();
+    });
+    return projectAnyWaitResult(
+      observers[immediateIndex].immediateResult,
+      records.filter((_rec, index) => index !== immediateIndex && observers[index].immediateResult === void 0).map((rec) => rec.name)
+    );
+  }
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      observers.forEach((observer) => observer.cancel());
+      resolve(result);
+    };
+    observers.forEach((observer, index) => {
+      void observer.promise.then((result) => {
+        if (settled || !result) return;
+        settle(projectAnyWaitResult(
+          result,
+          records.filter((_rec, otherIndex) => otherIndex !== index).map((rec) => rec.name)
+        ));
+      });
+    });
+    if (timeoutSeconds > 0) {
+      timer = setTimeout(() => {
+        settle({
+          outcome: "timeout",
+          timeout_s: timeoutSeconds,
+          still_running: records.map((rec) => rec.name)
+        });
+      }, timeoutSeconds * 1e3);
+      timer.unref();
+    }
+  });
+}
+async function createWaitObserver(ctx, user, rec, requestedTurnId) {
+  if (rec.state !== "live") {
+    return immediateWaitObserver(crashedWaitResult(rec));
+  }
+  const sessionKey = keyFor2(user, rec.name);
+  let targetTurnId = requestedTurnId ?? rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+  if (requestedTurnId) {
+    const historical = await findTerminalEvent(ctx, user, rec.name, requestedTurnId);
+    if (historical) return immediateWaitObserver(terminalWaitResult(rec.name, rec.thread_id, requestedTurnId, historical));
+  } else if (targetTurnId) {
+    const historical = await findTerminalEvent(ctx, user, rec.name, targetTurnId);
+    if (historical) return immediateWaitObserver(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, historical));
+  }
+  let settled = false;
+  let sub = null;
+  let resolvePromise;
+  const promise = new Promise((resolve) => {
+    resolvePromise = resolve;
+  });
+  const settle = (result) => {
+    if (settled) return;
+    settled = true;
+    sub?.dispose();
+    resolvePromise(result);
+  };
+  sub = ctx.events.subscribe(user, (event) => {
+    if (event.session !== rec.name) return;
+    if (event.thread_id !== rec.thread_id) return;
+    if (!targetTurnId) {
+      targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+    }
+    if (!targetTurnId) {
+      if (event.type === "turn.started") {
+        const turnId = eventTurnId(event);
+        if (!turnId) return;
+        targetTurnId = turnId;
+      } else if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
+        settle(waitErrorResult(rec, null, event.type, event.id, event.payload));
+      }
+      return;
+    }
+    if (isTurnTerminalEvent(event) && eventTurnId(event) === targetTurnId) {
+      settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
+      return;
+    }
+    if (event.type === SESSION_CRASHED_EVENT_TYPE && eventCrashTurnId(event) === targetTurnId) {
+      settle(waitErrorResult(rec, targetTurnId, event.type, event.id, event.payload));
+      return;
+    }
+    if (event.type === SESSION_CLOSED_EVENT_TYPE) {
+      settle(waitErrorResult(rec, targetTurnId, event.type, event.id, event.payload));
+    }
+  });
+  return {
+    promise,
+    cancel: () => settle(null),
+    currentTurnId: () => targetTurnId ?? null
+  };
+}
+function immediateWaitObserver(result) {
+  return {
+    immediateResult: result,
+    promise: Promise.resolve(result),
+    cancel: () => void 0,
+    currentTurnId: () => asString6(result.turn_id) ?? null
+  };
+}
+function crashedWaitResult(rec) {
+  return waitErrorResult(
+    rec,
+    rec.current_turn_id ?? rec.last_turn_id ?? null,
+    SESSION_CRASHED_EVENT_TYPE,
+    null,
+    { reason: rec.crash_reason ?? "session_crashed" }
+  );
+}
+function waitErrorResult(rec, turnId, eventType, eventId, error) {
+  const result = {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    turn_id: turnId,
+    outcome: "error",
+    event_type: eventType,
+    error
+  };
+  if (eventId !== null) result.event_id = eventId;
+  return result;
+}
+function timeoutWaitResult(rec, turnId, timeoutSeconds) {
+  return {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    turn_id: turnId,
+    outcome: "timeout",
+    timeout_s: timeoutSeconds
+  };
+}
+function isTurnTerminalEvent(event) {
+  return event.type === "turn.completed" || event.type === "turn.error" || event.type === "turn.interrupted";
+}
+function projectBatchWaitOutcome(result) {
+  const projected = pickDefined(result, ["session", "outcome", "turn_id"]);
+  const codexErrorInfo = extractCodexErrorInfo2(result);
+  if (codexErrorInfo) projected.codex_error_info = codexErrorInfo;
+  return projected;
+}
+function timeoutBatchWaitOutcome(rec, observer, timeoutSeconds) {
+  return projectBatchWaitOutcome(timeoutWaitResult(rec, observer.currentTurnId(), timeoutSeconds));
+}
+function projectAnyWaitResult(result, stillRunning) {
+  const projected = pickDefined(result, ["session", "outcome", "turn_id", "timeout_s"]);
+  const codexErrorInfo = extractCodexErrorInfo2(result);
+  if (codexErrorInfo) projected.codex_error_info = codexErrorInfo;
+  projected.still_running = stillRunning;
+  return projected;
+}
+function extractCodexErrorInfo2(result) {
+  const error = result.error;
+  if (!error || typeof error !== "object" || Array.isArray(error)) return null;
+  const info = error.codex_error_info;
+  return typeof info === "string" && info.length > 0 ? info : null;
+}
+function overallWaitOutcome(outcomes) {
+  const values = outcomes.map((outcome) => outcome.outcome);
+  if (values.every((value) => value === "completed")) return "completed";
+  const hasError = values.includes("error");
+  const hasTimeout = values.includes("timeout");
+  if (hasError && hasTimeout) return "partial";
+  if (hasError) return "error";
+  if (hasTimeout) return "timeout";
+  return "partial";
 }
 function parseTruncateFlag(value) {
   if (value === void 0) return void 0;
@@ -8944,7 +9402,7 @@ async function listTurnsFromRelativeOffset(client, threadId, relativeSince, limi
 
 // src/daemon/handlers/cursor.ts
 var cursorSave = async (ctx, req) => {
-  const user = requireUser2(ctx, req);
+  const user = requireUser3(ctx, req);
   const name = reqPositional2(req, 0, "name");
   const explicitEventId = asString7(getFlag3(req, "event-id"));
   const eventId = explicitEventId ?? await currentTailEventId(ctx, user);
@@ -8956,18 +9414,18 @@ var cursorSave = async (ctx, req) => {
   return { cursor };
 };
 var cursorList = async (ctx, req) => {
-  const user = requireUser2(ctx, req);
+  const user = requireUser3(ctx, req);
   return { cursors: ctx.cursors.list(user) };
 };
 var cursorGet = async (ctx, req) => {
-  const user = requireUser2(ctx, req);
+  const user = requireUser3(ctx, req);
   const name = reqPositional2(req, 0, "name");
   const cursor = ctx.cursors.get(user, name);
   if (!cursor) throw invalidParams(`cursor '${name}' not found`);
   return { event_id: cursor.event_id };
 };
 var cursorDelete = async (ctx, req) => {
-  const user = requireUser2(ctx, req);
+  const user = requireUser3(ctx, req);
   const name = reqPositional2(req, 0, "name");
   const deleted = await ctx.cursors.delete(user, name);
   if (!deleted) throw invalidParams(`cursor '${name}' not found`);
@@ -8981,7 +9439,7 @@ async function currentTailEventId(ctx, user) {
   const last = listed.events[listed.events.length - 1];
   return last?.id ?? null;
 }
-function requireUser2(ctx, req) {
+function requireUser3(ctx, req) {
   const user = req.bearer;
   if (!user) throw invalidParams("bearer token required");
   if (!ctx.users.has(user)) {
@@ -8990,11 +9448,11 @@ function requireUser2(ctx, req) {
   return user;
 }
 function reqPositional2(req, index, name) {
-  const value = asPositionals2(req)[index];
+  const value = asPositionals3(req)[index];
   if (!value) throw invalidParams(`missing positional '${name}'`);
   return value;
 }
-function asPositionals2(req) {
+function asPositionals3(req) {
   const positionals = req.params.positionals;
   return Array.isArray(positionals) ? positionals.filter((value) => typeof value === "string") : [];
 }
@@ -9197,7 +9655,7 @@ var monitorEvents = async (ctx, req, stream) => {
 };
 var monitorAlarm = async (_ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor alarm requires streaming");
-  const positionals = asPositionals3(req);
+  const positionals = asPositionals4(req);
   const intervalS = toInt4(positionals[0], 0);
   if (intervalS <= 0) throw invalidParams("first positional must be interval seconds (positive integer)");
   const command = positionals[1];
@@ -9343,7 +9801,7 @@ function asFlags2(req) {
   const f = req.params.flags;
   return f && typeof f === "object" ? f : {};
 }
-function asPositionals3(req) {
+function asPositionals4(req) {
   const p = req.params.positionals;
   return Array.isArray(p) ? p.filter((x) => typeof x === "string") : [];
 }
@@ -9444,6 +9902,7 @@ var HANDLERS = {
   "session:context": sessionContext,
   "session:list": sessionList,
   "message:send": messageSend,
+  "message:send-many": messageSendMany,
   "message:peer": messagePeer,
   "message:interrupt": messageInterrupt,
   "message:approval": messageApproval,

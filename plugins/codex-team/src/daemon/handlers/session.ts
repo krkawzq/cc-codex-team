@@ -40,6 +40,7 @@ import { SESSION_CLOSED_EVENT_TYPE } from "../events";
 import { cancelPendingWithEvent } from "../pending-cancel";
 import { renderContext } from "../../format/markdown";
 import { renderTable } from "../../format/table";
+import { matchesGlob } from "../../util/glob";
 
 const attachLocks = new Map<string, Promise<void>>();
 const DEFAULT_SESSION_LIST_LIMIT = 50;
@@ -186,38 +187,48 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
 export const sessionDetach: HandlerFn = async (ctx, req) => {
   requireUser(ctx, req);
   const user = req.bearer!;
-  const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
+  const detachAll = isTrue(flags["all"]);
+  const match = asString(flags["match"]);
   const graceful = isTrue(flags["graceful"]);
+  if (!detachAll && match !== null) {
+    throw invalidParams("--match requires --all");
+  }
+
+  if (detachAll) {
+    if (asPositionals(req).length > 0) {
+      throw invalidParams("session detach --all does not accept positional targets");
+    }
+    const live = ctx.sessions.listLive(user)
+      .filter((rec) => match === null || matchesGlob(match, rec.name));
+    const results = await Promise.all(live.map(async (rec) => {
+      try {
+        const detached = await detachSessionRecord(ctx, user, rec, graceful);
+        return {
+          session: detached.name,
+          detached: true,
+          graceful,
+        };
+      } catch (error) {
+        return {
+          session: rec.name,
+          ok: false,
+          error: normalizeDetachError(error),
+        };
+      }
+    }));
+    return { results };
+  }
+
+  const identifier = asPositional(req, 0, "session");
 
   const rec = ctx.sessions.get(user, identifier);
   if (!rec) {
     return { session: null, noop: true };
   }
 
-  const sessionKey = keyFor(user, rec.name);
-  const teardown = await ctx.queues.beginTeardown(sessionKey);
-  const client = ctx.pool.clientForSession(sessionKey);
-  const turnId = teardown.currentTurnId;
-
-  if (client && !graceful && turnId) {
-    try { await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions()); } catch { /* ignore if no turn */ }
-  }
-
-  if (graceful) {
-    await ctx.queues.waitForIdle(sessionKey);
-  }
-
-  if (client) {
-    try { await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions()); } catch { /* ignore */ }
-  }
-
-  ctx.pool.release(sessionKey);
-  await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
-  ctx.sessions.remove(user, rec.name);
-  ctx.queues.finalDispose(sessionKey);
-  await appendSessionClosed(ctx, user, rec, "user_detach");
-  return { session: rec, noop: false, graceful };
+  const detached = await detachSessionRecord(ctx, user, rec, graceful);
+  return { session: detached, noop: false, graceful };
 };
 
 export const sessionRename: HandlerFn = async (ctx, req) => {
@@ -729,6 +740,50 @@ function validateSessionAutoApprovePatterns(patterns: string[]): string[] {
   const validationError = validateParsedAutoApprovePatterns(patterns);
   if (validationError) throw invalidParams(validationError);
   return [...patterns];
+}
+
+async function detachSessionRecord(
+  ctx: DaemonContext,
+  user: string,
+  rec: SessionRecord,
+  graceful: boolean,
+): Promise<SessionRecord> {
+  const sessionKey = keyFor(user, rec.name);
+  const teardown = await ctx.queues.beginTeardown(sessionKey);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const turnId = teardown.currentTurnId;
+
+  if (client && !graceful && turnId) {
+    try { await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions()); } catch { /* ignore if no turn */ }
+  }
+
+  if (graceful) {
+    await ctx.queues.waitForIdle(sessionKey);
+  }
+
+  if (client) {
+    try { await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions()); } catch { /* ignore */ }
+  }
+
+  ctx.pool.release(sessionKey);
+  await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
+  ctx.sessions.remove(user, rec.name);
+  ctx.queues.finalDispose(sessionKey);
+  await appendSessionClosed(ctx, user, rec, "user_detach");
+  return rec;
+}
+
+function normalizeDetachError(error: unknown): Record<string, unknown> {
+  if (error instanceof CodexTeamError) {
+    return {
+      code: error.code,
+      message: error.message,
+    };
+  }
+  return {
+    code: "internal",
+    message: error instanceof Error ? error.message : String(error),
+  };
 }
 
 

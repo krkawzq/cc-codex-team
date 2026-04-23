@@ -32,6 +32,7 @@ import {
 } from "./handlers/session";
 import {
   messageSend,
+  messageSendMany,
   messagePeer,
   messageInterrupt,
   messageApproval,
@@ -93,6 +94,7 @@ const HANDLERS: Record<string, HandlerFn> = {
   "session:list": sessionList,
 
   "message:send": messageSend,
+  "message:send-many": messageSendMany,
   "message:peer": messagePeer,
   "message:interrupt": messageInterrupt,
   "message:approval": messageApproval,
