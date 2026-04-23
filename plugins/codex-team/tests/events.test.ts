@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import os from "node:os";
+import { performance } from "node:perf_hooks";
 import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +9,7 @@ import {
   APPROVAL_REQUEST_CANCELLED_EVENT_TYPE,
   AUTO_APPROVED_EVENT_TYPE,
   EventLog,
+  EventRingBuffer,
   SESSION_CLOSED_EVENT_TYPE,
   SESSION_CRASHED_EVENT_TYPE,
   SESSION_PENDING_DROPPED_EVENT_TYPE,
@@ -16,15 +18,55 @@ import {
 } from "../src/daemon/events";
 import { logger } from "../src/logger";
 import { encodeToken } from "../src/paths";
+import type { TeamEvent } from "../src/types";
 
 function mkTmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-events-"));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function makeEvent(id: number, type = "turn.completed"): TeamEvent {
+  return {
+    id: `evt-${id}`,
+    ts: new Date(id * 1_000).toISOString(),
+    type,
+    session: "sess-1",
+    thread_id: "th-1",
+    payload: { i: id },
+  };
+}
+
+function readPersistedEvents(filePath: string): TeamEvent[] {
+  const raw = fs.readFileSync(filePath, "utf8").trim();
+  if (!raw) return [];
+  return raw
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((entry) => entry.kind !== "event_log_header") as TeamEvent[];
+}
+
+interface EventLogInternals {
+  compactFile(user: string): Promise<void>;
+  enqueueFsOp(user: string, op: () => Promise<unknown>): Promise<unknown>;
+  pendingBytes: Map<string, number>;
+  pendingLines: Map<string, string[]>;
 }
 
 describe("EventLog", () => {
   const dirs: string[] = [];
 
   afterEach(async () => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     for (const dir of dirs.splice(0, dirs.length)) {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -119,6 +161,49 @@ describe("EventLog", () => {
     const filePath = path.join(dir, "users", encodeToken("user-1"), "events.log");
     const lines = fs.readFileSync(filePath, "utf8").trim().split("\n");
     expect(lines.length).toBeLessThan(206);
+  });
+
+  it("does not persist duplicate ids when compaction overlaps later appends", async () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const log = new EventLog(100, dir);
+    const internals = log as unknown as EventLogInternals;
+
+    for (let i = 0; i < 120; i++) {
+      await log.append("user-1", {
+        type: "turn.completed",
+        session: "sess-1",
+        thread_id: "th-1",
+        payload: { i },
+      });
+    }
+
+    const gate = deferred<void>();
+    void internals.enqueueFsOp("user-1", async () => {
+      await gate.promise;
+      return true;
+    });
+
+    const compaction = internals.compactFile("user-1");
+    for (let i = 120; i < 135; i++) {
+      await log.append("user-1", {
+        type: "turn.completed",
+        session: "sess-1",
+        thread_id: "th-1",
+        payload: { i },
+      });
+    }
+
+    gate.resolve();
+    await compaction;
+    await log.flush();
+
+    const filePath = path.join(dir, "users", encodeToken("user-1"), "events.log");
+    const ids = readPersistedEvents(filePath).map((event) => event.id);
+
+    expect(ids[0]).toBe("evt-21");
+    expect(ids.at(-1)).toBe("evt-135");
+    expect(new Set(ids).size).toBe(ids.length);
   });
 
   it("retries failed appendFile batches instead of dropping them", async () => {
@@ -267,6 +352,112 @@ describe("EventLog", () => {
         }),
       ],
     });
+  });
+
+  it("flushes overflow backlogs even when new events arrive before the overflow delay", async () => {
+    vi.useFakeTimers();
+
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const log = new EventLog(100, dir);
+    const writeSpy = vi.spyOn(fs.promises, "writeFile");
+    const largePayload = "x".repeat(1_100_000);
+
+    for (let i = 0; i < 8; i++) {
+      await log.append("user-1", {
+        type: "turn.completed",
+        session: "sess-1",
+        thread_id: "th-1",
+        payload: { i, blob: largePayload },
+      });
+      await vi.advanceTimersByTimeAsync(100);
+    }
+
+    const filePath = path.join(dir, "users", encodeToken("user-1"), "events.log");
+    expect(writeSpy).toHaveBeenCalled();
+    await log.flush();
+    expect(fs.existsSync(filePath)).toBe(true);
+    expect(readPersistedEvents(filePath).length).toBeGreaterThan(0);
+  });
+
+  it("caps pending persisted backlog and emits a warning when dropping lines", async () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const log = new EventLog(100, dir);
+    const internals = log as unknown as EventLogInternals;
+    const largePayload = "x".repeat(2_000_000);
+
+    for (let i = 0; i < 10; i++) {
+      await log.append("user-1", {
+        type: "turn.completed",
+        session: "sess-1",
+        thread_id: "th-1",
+        payload: { i, blob: largePayload },
+      });
+    }
+
+    const listed = await log.listSince("user-1", null);
+    expect(listed.ok).toBe(true);
+    if (listed.ok) {
+      expect(listed.events).toContainEqual(expect.objectContaining({
+        type: "warning",
+        payload: expect.objectContaining({
+          kind: "event_log_backlog_overflow",
+        }),
+      }));
+    }
+
+    expect(internals.pendingBytes.get("user-1") ?? 0).toBeLessThanOrEqual(16 * 1024 * 1024);
+    expect(internals.pendingLines.get("user-1")?.length ?? 0).toBeLessThanOrEqual(1000);
+  });
+});
+
+describe("EventRingBuffer", () => {
+  it("returns correct slices for retained cursors and reports rotated ids", () => {
+    const retention = 200;
+    const ring = new EventRingBuffer(retention);
+    for (let i = 1; i <= retention * 2; i++) {
+      ring.push(makeEvent(i, i % 2 === 0 ? "turn.completed" : "item.agent_message_delta"));
+    }
+
+    expect(ring.length).toBe(retention);
+    expect(ring.oldestId()).toBe("evt-201");
+
+    let seed = 7;
+    for (let i = 0; i < 12; i++) {
+      seed = (seed * 48271) % 2147483647;
+      const cursor = 201 + (seed % (retention - 1));
+      const listed = ring.listSince(`evt-${cursor}`);
+      expect(listed.ok).toBe(true);
+      if (listed.ok) {
+        const expectedIds = Array.from({ length: 400 - cursor }, (_, offset) => `evt-${cursor + offset + 1}`);
+        expect(listed.events.map((event) => event.id)).toEqual(expectedIds);
+      }
+    }
+
+    expect(ring.listSince("evt-200")).toEqual({
+      ok: false,
+      reason: "id_rotated",
+      oldest_available_id: "evt-201",
+    });
+    expect(ring.listSince("evt-401")).toEqual({
+      ok: false,
+      reason: "invalid_since",
+    });
+  });
+
+  it("appends 100k events without quadratic slowdown", () => {
+    const ring = new EventRingBuffer(10_000);
+    const start = performance.now();
+
+    for (let i = 1; i <= 100_000; i++) {
+      ring.push(makeEvent(i));
+    }
+
+    const elapsedMs = performance.now() - start;
+    expect(ring.length).toBe(10_000);
+    expect(ring.oldestId()).toBe("evt-90001");
+    expect(elapsedMs).toBeLessThan(1000);
   });
 });
 
