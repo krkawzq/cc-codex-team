@@ -31,6 +31,16 @@ export interface TeamEvent {
   payload: Record<string, unknown>;
 }
 
+export type TurnCompletedStatus = "completed" | "failed" | "cancelled" | "interrupted";
+
+export interface CanonicalTokenUsage {
+  input: number | null;
+  cached_input: number | null;
+  output: number | null;
+  reasoning_output: number | null;
+  total: number | null;
+}
+
 export interface DaemonInfo {
   pid: number;
   version: string;

@@ -135,7 +135,7 @@ function renderTurn(turn: TurnListItem, ctx: RenderContext): string {
   if (turn.durationMs !== undefined && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
   if (turn.startedAt !== undefined && turn.startedAt !== null) attrs.started_at = turn.startedAt;
   if (turn.completedAt !== undefined && turn.completedAt !== null) attrs.completed_at = turn.completedAt;
-  const err = turn.error ?? null;
+  const err = turn["error"] ?? null;
   if (err) attrs.error = err;
 
   const items = Array.isArray((turn as unknown as { items?: unknown[] }).items)
@@ -302,7 +302,7 @@ function renderTranscriptHook(item: TurnItem, type: string, ctx: RenderContext):
 }
 
 function renderTurnFallback(turn: TurnListItem, ctx: RenderContext): string | null {
-  const error = asObject(turn.error);
+  const error = asObject(turn["error"]);
   if (Object.keys(error).length === 0) return null;
   const message = summarizeBlockText(
     asString(error.message)

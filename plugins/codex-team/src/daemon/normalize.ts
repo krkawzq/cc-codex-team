@@ -1,10 +1,12 @@
 import type { JsonValue } from "../codex/errors";
 import type { ServerNotification, ServerRequest } from "../codex/appServerClient";
+import type { CanonicalTokenUsage, TurnCompletedStatus } from "../types";
+import { INTERNAL_TURN_FAILED_EVENT_TYPE } from "./events";
 
 const NOTIF_MAP: Record<string, string> = {
   "turn/started": "turn.started",
   "turn/completed": "turn.completed",
-  "error": "turn.error",
+  "error": INTERNAL_TURN_FAILED_EVENT_TYPE,
 
   "item/started": "item.started",
   "item/completed": "item.completed",
@@ -147,7 +149,7 @@ function buildNotificationPayload(type: string, params: Record<string, unknown>)
         turn,
       };
     }
-    case "turn.error": {
+    case INTERNAL_TURN_FAILED_EVENT_TYPE: {
       const err = asObject(params.error as JsonValue);
       return {
         turn_id: (params.turnId as string) ?? null,
@@ -185,7 +187,7 @@ function buildNotificationPayload(type: string, params: Record<string, unknown>)
     case "thread.token_usage_updated":
       return {
         turn_id: (params.turnId as string) ?? null,
-        token_usage: params.tokenUsage ?? null,
+        token_usage: normalizeCanonicalTokenUsage(params.tokenUsage),
       };
     case "thread.name_updated":
       return { name: (params.threadName as string) ?? null };
@@ -273,41 +275,58 @@ function deriveTurnEndedAt(turn: Record<string, unknown>): number | null {
   return asNumber(turn.endedAt) ?? asNumber(turn.completedAt);
 }
 
-function normalizeTurnCompletedStatus(value: unknown): "completed" | "errored" | "cancelled" | null {
+function normalizeTurnCompletedStatus(value: unknown): TurnCompletedStatus | null {
   if (typeof value !== "string") return null;
   if (value === "completed") return "completed";
+  if (value === "interrupted") return "interrupted";
   if (value === "cancelled" || value === "canceled") return "cancelled";
-  if (value === "errored" || value === "error" || value === "failed") return "errored";
+  if (value === "errored" || value === "error" || value === "failed") return "failed";
   return null;
 }
 
-function deriveTurnTokenUsage(turn: Record<string, unknown>): {
-  prompt: number | null;
-  completion: number | null;
-  total: number | null;
-} {
+function deriveTurnTokenUsage(turn: Record<string, unknown>): CanonicalTokenUsage {
   const usageSource = turn.tokenUsage ?? turn.token_usage ?? turn.usage;
-  const usage = asObject(usageSource);
-  const prompt =
-    asNumber(usage.prompt) ??
-    asNumber(usage.promptTokens) ??
-    asNumber(usage.prompt_tokens) ??
+  return normalizeCanonicalTokenUsage(usageSource);
+}
+
+function normalizeCanonicalTokenUsage(value: unknown): CanonicalTokenUsage {
+  const usage = asObject(value);
+  const input =
     asNumber(usage.input) ??
     asNumber(usage.inputTokens) ??
-    asNumber(usage.input_tokens);
-  const completion =
-    asNumber(usage.completion) ??
-    asNumber(usage.completionTokens) ??
-    asNumber(usage.completion_tokens) ??
+    asNumber(usage.input_tokens) ??
+    asNumber(usage.prompt) ??
+    asNumber(usage.promptTokens) ??
+    asNumber(usage.prompt_tokens);
+  const cachedInput =
+    asNumber(usage.cached_input) ??
+    asNumber(usage.cachedInput) ??
+    asNumber(usage.cachedInputTokens) ??
+    asNumber(usage.cached_input_tokens);
+  const output =
     asNumber(usage.output) ??
     asNumber(usage.outputTokens) ??
-    asNumber(usage.output_tokens);
+    asNumber(usage.output_tokens) ??
+    asNumber(usage.completion) ??
+    asNumber(usage.completionTokens) ??
+    asNumber(usage.completion_tokens);
+  const reasoningOutput =
+    asNumber(usage.reasoning_output) ??
+    asNumber(usage.reasoningOutput) ??
+    asNumber(usage.reasoningOutputTokens) ??
+    asNumber(usage.reasoning_output_tokens);
   const total =
     asNumber(usage.total) ??
     asNumber(usage.totalTokens) ??
     asNumber(usage.total_tokens);
 
-  return { prompt, completion, total };
+  return {
+    input,
+    cached_input: cachedInput,
+    output,
+    reasoning_output: reasoningOutput,
+    total,
+  };
 }
 
 function fallbackType(method: string): string {

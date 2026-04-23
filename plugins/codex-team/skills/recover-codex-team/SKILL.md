@@ -1,7 +1,7 @@
 ---
 name: recover-codex-team
 description: >-
-  Recovery playbook for codex-team failures — error code triage, auto-recovery guarantees, manual intervention paths. **Proactively load whenever a codex-team command or event indicates trouble:** `turn.error`, `session.crashed`, `session.closed`, `session.pending_dropped`, `session.seized`, `turn.queued_failed`, or a CLI error envelope with code `daemon_unreachable`, `session_busy`, `session_not_live`, `session_not_found`, `user_not_found`, `codex_error` (see `data.codex_error_info` — `context_window_exceeded`, `usage_limit_exceeded`, `unauthorized`, `sandbox_error`, `active_turn_not_steerable`, `server_overloaded`, …), `id_rotated`, `invalid_decision`. Also for repeated reply mismatches or any `warning` payload keyed by `approval_reply_delivery_failed` / `user_input_reply_delivery_failed`. Not for: routine turn handling (`manage-codex-team`), tuning (`configure-codex-team`), topology choice (`codex-team-playbooks`), first-time mental model (`using-codex-team`).
+  Recovery playbook for codex-team failures — error code triage, auto-recovery guarantees, manual intervention paths. **Proactively load whenever a codex-team command or event indicates trouble:** failed `turn.completed`, `session.crashed`, `session.closed`, `session.pending_dropped`, `session.seized`, `turn.queued_failed`, or a CLI error envelope with code `daemon_unreachable`, `session_busy`, `session_not_live`, `session_not_found`, `user_not_found`, `codex_error` (see `data.codex_error_info` — `context_window_exceeded`, `usage_limit_exceeded`, `unauthorized`, `sandbox_error`, `active_turn_not_steerable`, `server_overloaded`, …), `id_rotated`, `invalid_decision`. Also for repeated reply mismatches or any `warning` payload keyed by `approval_reply_delivery_failed` / `user_input_reply_delivery_failed`. Not for: routine turn handling (`manage-codex-team`), tuning (`configure-codex-team`), topology choice (`codex-team-playbooks`), or first-time mental model (`using-codex-team`).
 ---
 
 # Recover codex-team
@@ -110,7 +110,7 @@ codex-team -b $TOK session logs <name> --follow # live follow
 # recent events
 codex-team -b $TOK cursor save recover-tail
 codex-team -b $TOK monitor events --stream --summary --cursor recover-tail \
-  --filter turn.error,session.crashed,session.closed,approval.command_execution
+  --filter turn.completed,session.crashed,session.closed,approval.command_execution
 
 # heal a crashed live session
 codex-team -b $TOK session heal <session>

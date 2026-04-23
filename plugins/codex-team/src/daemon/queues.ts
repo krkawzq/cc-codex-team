@@ -10,7 +10,7 @@ import { logger } from "../logger";
 // - `currentTurnId` tracks the single in-flight turn for a session.
 // - Any queued head keeps FIFO ownership until it either starts successfully or
 //   is dropped after repeated dispatch failures.
-// - `turn.error` with `willRetry=true` preserves `currentTurnId` so the retry
+// - A retried failure preserves `currentTurnId` so the retry
 //   path can continue the same logical turn; `willRetry=false` releases the
 //   turn and drains the queued head.
 // - Teardown is tombstoned before the session record is removed so late

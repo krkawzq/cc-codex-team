@@ -1,7 +1,7 @@
 ---
 name: using-codex-team
 description: >-
-  Entry router and mental model for codex-team — a multi-session Codex orchestration layer Claude uses to spawn long-lived worker sessions in parallel. **Proactively load this skill whenever a coding task decomposes into ≥2 mechanically independent subtasks, OR matches any of: parallel/concurrent work, bulk refactor, multi-file migration, audit+fix, map-reduce, fan-out, swarm, spawn workers, worker+reviewer, plan→execute→verify, debate, long-horizon / autonomous / unattended coding, 并行 / 并发 / 批量 / 同时 / 多个 agent — even without an explicit "codex-team" mention.** Also load on (a) the user naming codex-team, Codex workers, long-lived Codex sessions, bearer token, codex-team CLI; (b) seeing a `turn.completed` / `turn.error` / `approval.*` / `user_input.request` / `session.crashed` / `session.closed` / `session.seized` / `turn.queued_*` event in the task panel; (c) picking whether codex-team is the right tool vs. direct `codex` CLI / `codex:codex-rescue` subagent. Not for: one-shot edits you'd micromanage — use `codex:codex-rescue` or the `codex` CLI directly.
+  Entry router and mental model for codex-team — a multi-session Codex orchestration layer Claude uses to spawn long-lived worker sessions in parallel. **Proactively load this skill whenever a coding task decomposes into ≥2 mechanically independent subtasks, OR matches any of: parallel/concurrent work, bulk refactor, multi-file migration, audit+fix, map-reduce, fan-out, swarm, spawn workers, worker+reviewer, plan→execute→verify, debate, long-horizon / autonomous / unattended coding, 并行 / 并发 / 批量 / 同时 / 多个 agent — even without an explicit "codex-team" mention.** Also load on (a) the user naming codex-team, Codex workers, long-lived Codex sessions, bearer token, codex-team CLI; (b) seeing a `turn.completed` / `approval.*` / `user_input.request` / `session.crashed` / `session.closed` / `session.seized` / `turn.queued_*` event in the task panel; (c) picking whether codex-team is the right tool vs. direct `codex` CLI / `codex:codex-rescue` subagent. Not for: one-shot edits you'd micromanage — use `codex:codex-rescue` or the `codex` CLI directly.
 ---
 
 # Using codex-team
@@ -142,7 +142,7 @@ Do not violate these, even under duress:
 4. **`send` is non-blocking.** It starts a turn and returns. Don't poll for completion — listen on events or block explicitly with `message wait`.
 5. **`peer` needs an active turn.** Without one, use `send`.
 6. **`interrupt` is hard.** It kills in-flight tool calls. Prefer `peer` if you want to redirect without destroying state.
-7. **Events are summaries.** Always. In 0.5.2, `turn.completed` is compact metadata only (`turn_id`, `status`, `duration_ms`, `items_count`, `token_usage`, `ended_at`, `turn_items_included: false`). Never expect full turn content in the event stream.
+7. **Events are summaries.** Always. In 0.5.5, `turn.completed` is compact metadata only (`turn_id`, `status ∈ {completed, failed, cancelled, interrupted}`, `duration_ms`, `items_count`, `token_usage`, `ended_at`, `turn_items_included: false`). `token_usage` uses `{input, cached_input, output, reasoning_output, total}`. Never expect full turn content in the event stream.
 8. **Approvals block the turn.** A session waiting on `approval.*` or `user_input.request` cannot make progress until you reply.
 9. **Multiple agents can share a session via `--takeover`**, but the original holder gets a `session.seized` event and loses pending requests. Cross-user attach by name must be unique; otherwise use the `thread_id`.
 10. **Daemon auto-shuts down after 6h idle.** Idle is only evaluated when there are 0 live sessions; live sessions keep the daemon alive. Don't rely on the daemon being there forever if you walk away.
@@ -186,7 +186,7 @@ Combine with Monitor filters for the event stream:
 ```bash
 # Compact fan-out event stream: only decision-worthy events, one line each
 monitor events --stream --summary --cursor review-tail \
-  --filter turn.completed,turn.error,approval.command_execution,approval.file_change,user_input.request,session.crashed
+  --filter turn.completed,approval.command_execution,approval.file_change,user_input.request,session.crashed
 ```
 
 ## Slash commands

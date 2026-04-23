@@ -1,6 +1,6 @@
 # Event catalogue
 
-Every `monitor events` line is a JSON object with the shape:
+Every `monitor events` line is one JSON object:
 
 ```json
 {
@@ -9,45 +9,44 @@ Every `monitor events` line is a JSON object with the shape:
   "type": "<category.subtype>",
   "session": "<name> | null",
   "thread_id": "<uuid> | null",
-  "payload": { ... }
+  "payload": { "...": "..." }
 }
 ```
 
-`session` and `thread_id` are usually `null` for system-level events. Two exceptions matter operationally: session-scoped `warning` events for reply durability, and `monitor.overflow`, which may echo your `--session` filter context.
+`session` and `thread_id` are usually `null` for system events. Session-scoped warnings and queue events keep both.
 
-## Session events
+## Turn lifecycle
 
-### `turn.started` / `turn.completed`
+### `turn.started`
 
-Turn lifecycle. `completed` is the authoritative end signal. **The two have different payload shapes in 0.5.2** — `turn.started` carries the full `Turn` object, `turn.completed` is intentionally compact so the event log stays small.
+`turn.started` keeps the richer start snapshot:
 
 ```json
-// turn.started
-payload: { "turn_id", "status", "started_at", "completed_at", "duration_ms", "item_count", "turn" }
-
-// turn.completed (0.5.2 compact)
 payload: {
   "turn_id",
-  "status",              // "completed" | "failed" | "interrupted" | "cancelled"
+  "status",
+  "started_at",
+  "completed_at",
   "duration_ms",
-  "items_count",         // NOTE: plural, differs from turn.started's "item_count"
-  "token_usage",         // { input, cached_input, output, reasoning_output, total } | null
-  "ended_at",            // wall-clock ms since epoch
-  "turn_items_included": false   // always false in 0.5.2 — fetch content with message tail / history
+  "item_count",
+  "turn"
 }
 ```
 
-Status values for `turn.started`: `inProgress` / `completed` / `failed` / `interrupted`.
+### `turn.completed`
 
-### `turn.error`
-
-Turn failed. Often followed by daemon auto-retry if `will_retry: true`.
+`turn.completed` is the only terminal turn event in 0.5.5.
 
 ```json
 payload: {
   "turn_id",
-  "will_retry": bool,
-  "error": {
+  "status",              // "completed" | "failed" | "cancelled" | "interrupted"
+  "duration_ms",         // number | null
+  "items_count",         // number
+  "token_usage",         // { input, cached_input, output, reasoning_output, total } | null
+  "ended_at",            // upstream turn end timestamp value
+  "turn_items_included": false,
+  "error": {             // only present when status == "failed" and details exist
     "message": "...",
     "codex_error_info": "server_overloaded" | "context_window_exceeded" | ... | null,
     "additional_details": "..." | null
@@ -55,177 +54,127 @@ payload: {
 }
 ```
 
-Common `codex_error_info`:
+Notes:
 
-| Value | Meaning | Action |
+- `status="completed"` is success.
+- `status="failed"` is terminal failure. There is no separate turn-failure event.
+- Retryable transient failures do not fan out as events in 0.5.5. The daemon retries internally and only emits a terminal event if the turn ultimately fails.
+- `turn.completed` never includes the full turn items. Use `message tail` or `message history` for content.
+
+Common `codex_error_info` values on failed turns:
+
+| Value | Meaning | Typical action |
 |---|---|---|
-| `server_overloaded` | Codex backend busy | daemon auto-retries |
-| `http_connection_failed` / `response_stream_connection_failed` / `response_stream_disconnected` | Transient app-server transport failure | daemon auto-retries |
-| `context_window_exceeded` | Context too large | compact or start fresh session |
-| `usage_limit_exceeded` | Account quota | stop; nothing to retry |
-| `active_turn_not_steerable` | You tried interrupt/steer during review/compact | wait for that turn |
-| `unauthorized` | Codex auth expired | run `codex login` out-of-band |
-| `sandbox_error` | Shell/file op blocked by sandbox | check `--sandbox` flag |
+| `server_overloaded` | Backend overloaded | wait for daemon retry or re-run later |
+| `http_connection_failed` / `response_stream_connection_failed` / `response_stream_disconnected` | Transport failure | usually retryable |
+| `context_window_exceeded` | Context too large | compact, fork earlier, or start fresh |
+| `usage_limit_exceeded` | Account quota exhausted | stop and check quota |
+| `active_turn_not_steerable` | interrupt/peer during review or compact | wait for the turn to finish |
+| `unauthorized` | Codex auth expired | refresh auth out of band |
+| `sandbox_error` | sandbox blocked the required action | widen sandbox or decline |
 
-### `item.started` / `item.completed`
+## Item lifecycle
 
-Fine-grained step lifecycle. `payload: { item_id, turn_id, type, status }`.
+- `item.started`
+- `item.completed`
 
-`type` values: `agent_message`, `reasoning`, `command_execution`, `file_change`, `file_read`, `mcp_tool_call`, `web_search`, `plan_update`, etc.
+Payload:
 
-Most of the time you only care about `item.completed` with `type: agent_message` or `type: file_change` — those tell you the agent produced output.
+```json
+payload: { "item_id", "turn_id", "type", "status" }
+```
 
-### Thread lifecycle
+Useful `type` values include `agent_message`, `reasoning`, `command_execution`, `file_change`, `file_read`, `mcp_tool_call`, `web_search`, and `plan_update`.
 
-- `thread.started` — thread creation (often fires right after `session new`)
-- `thread.closed` — thread permanently closed by codex. **codex-team auto-detaches.** The session cannot be attached again.
-- `thread.status_changed` — status transition
-- `thread.token_usage_updated` — running token usage
-- `thread.name_updated` / `thread.archived` / `thread.unarchived` — metadata
+## Thread lifecycle
 
-### Queue lifecycle
+- `thread.started`
+- `thread.closed`
+- `thread.status_changed`
+- `thread.name_updated`
+- `thread.archived`
+- `thread.unarchived`
+- `thread.token_usage_updated`
 
-- `turn.queued_started` — a previously queued `message send` has just been dispatched. Payload carries the stable `queue_id` returned by `message send` plus the real `turn_id`.
-- `turn.queued_failed` — daemon tried to auto-dispatch a queued turn after `turn.completed`, but dispatch failed. Payload:
+`thread.token_usage_updated` uses the same canonical usage shape:
 
 ```json
 payload: {
-  "queue_id": "queue-<hex>",
+  "turn_id",
+  "token_usage": { "input", "cached_input", "output", "reasoning_output", "total" }
+}
+```
+
+## Queue lifecycle
+
+- `turn.queued_started` means a previously queued `message send` has just been dispatched.
+
+```json
+payload: { "turn_id", "queue_id" }
+```
+
+- `turn.queued_failed` means daemon auto-drain tried to dispatch the next queued prompt and failed. The item stays queued.
+
+```json
+payload: {
+  "queue_id",
   "error": { "message": "..." }
 }
 ```
 
-The failed item stays queued. Treat this as "operator attention needed", not as a terminal turn result.
-
-## Approval / input events (needs response)
-
-### `approval.command_execution`
-
-Codex wants to run a shell command that the approval policy doesn't auto-approve.
+- `turn.queued_dropped` means daemon gave up after repeated dispatch failures and dropped the queued item.
 
 ```json
 payload: {
-  "kind": "approval.command_execution",
-  "request_id": "req-<hex>",
-  "turn_id", "item_id",
-  "command": ["bash","-lc","rm -rf build"],
-  "cwd": "/repo",
-  "reason": "cleanup old artefacts",
-  "raw": { ... }
+  "queue_id",
+  "error": { "message": "..." },
+  "failure_count": 3
 }
 ```
 
-Respond:
+## Approval and input events
 
-```bash
-codex-team -b $TOK message approval <session> <request_id> accept
-```
+These require a reply:
 
-### `approval.file_change`
+- `approval.command_execution`
+- `approval.file_change`
+- `approval.permissions`
+- `approval.mcp_elicitation`
+- `user_input.request`
 
-Codex wants to apply a patch (file edit).
+All approval events include `request_id`, plus `turn_id` / `item_id` when applicable. `user_input.request` carries a `questions` array.
 
-```json
-payload: {
-  "kind": "approval.file_change",
-  "request_id", "turn_id", "item_id",
-  "reason": "...",
-  "grant_root": "/repo",
-  "raw": { ... }
-}
-```
+Related cancellation events:
 
-Response shortcuts: `accept` / `accept-session` / `decline` / `cancel`.
-
-### `approval.permissions`
-
-Codex wants a permission escalation beyond the current policy.
-
-```json
-payload: {
-  "kind": "approval.permissions",
-  "request_id", "turn_id", "item_id",
-  "reason": "...",
-  "cwd": "...",
-  "permissions": { "filesystem": {...}, "network": {...} },
-  "raw": { ... }
-}
-```
-
-Shortcut `accept` grants the entire requested profile with `scope: "turn"`. For partial grants or session-wide scope, use `--json`.
-
-### `approval.mcp_elicitation`
-
-MCP server asks for structured user input (two modes):
-
-- `mode: "url"` — user completes an external flow. `accept` means "I finished". No content.
-- `mode: "form"` — user fills a schema. `accept` requires `--json` with matching `content`.
-
-```json
-payload: {
-  "kind": "approval.mcp_elicitation",
-  "request_id",
-  "server_name", "mode", "message",
-  "requested_schema": { ... } | undefined,
-  "url": "..." | undefined,
-  "raw": { ... }
-}
-```
-
-### `user_input.request` — askUserQuestion
-
-Tool wants to pose questions.
-
-```json
-payload: {
-  "request_id", "turn_id", "item_id",
-  "questions": [
-    {
-      "id": "q1", "header": "Database", "question": "Which backend?",
-      "is_other": false, "is_secret": false,
-      "options": [{"label":"Postgres",...}, {"label":"SQLite",...}]
-    }
-  ],
-  "raw": { ... }
-}
-```
-
-Respond:
-
-```bash
-# single question, single answer
-codex-team -b $TOK message answer <s> <request_id> "Postgres"
-
-# multi-question / multi-select / free-text
-codex-team -b $TOK message answer <s> <request_id> --json \
-  '{"answers":{"q1":{"answers":["Postgres"]},"q2":{"answers":["idx1","idx2"]}}}'
-```
+- `approval.request_cancelled`
+- `user_input.request_cancelled`
 
 ## Control-plane events
 
-### `session.seized`
+- `session.crashed`
+- `session.closed`
+- `session.pending_dropped`
+- `session.seized`
+- `server_request_resolved`
+- `model_rerouted`
+- `auto_approved`
 
-Your live session was taken over by another user via `session attach --takeover`. Pending approvals on this session were cancelled. You can `attach --takeover` it back if you want.
-
-### `server_request_resolved`
-
-A pending approval/input request you had was already answered by another client (rare; mostly multi-agent scenarios). Internal cleanup — no action needed.
-
-### `model_rerouted`
-
-Your turn was routed to a fallback model due to rate limits.
+`session.crashed` means the live app-server died. If there was an active turn, you should expect a matching `turn.completed` event with `status="failed"`.
 
 ## System events
 
-Most of these have `session = null` and `thread_id = null`.
+- `warning`
+- `error`
+- `config_warning`
+- `deprecation_notice`
+- `account.updated`
+- `account.rate_limits_updated`
+- `account.login_completed`
+- `mcp_server.status_updated`
+- `mcp_server.oauth_login_completed`
+- `monitor.overflow`
 
-- `warning` / `error` — generic codex-side alerts
-- `config_warning` — codex config issue (invalid key, conflicting overrides)
-- `deprecation_notice` — codex API deprecation
-- `account.updated` / `account.rate_limits_updated` / `account.login_completed` — auth/quota state
-- `mcp_server.status_updated` — MCP server startup transitions
-- `mcp_server.oauth_login_completed` — MCP OAuth flow result
-- `monitor.overflow` — interval-mode `monitor events` dropped backlog because its bounded queue overflowed. Payload:
+`monitor.overflow` payload:
 
 ```json
 payload: {
@@ -236,44 +185,30 @@ payload: {
 }
 ```
 
-### `warning` payload kinds you should recognize
+## High-frequency deltas
 
-These warnings are daemon-generated, not codex-originated:
+Hidden by default unless you pass `--include-delta`:
 
-| `payload.kind` | Meaning | Typical response |
-|---|---|---|
-| `approval_reply_backpressured` | approval response reached app-server slowly because stdin was backpressured | wait; the command may resolve a bit later |
-| `approval_reply_delivery_failed` | approval response could not be delivered to app-server | inspect daemon logs, then decide whether to retry from fresh state |
-| `user_input_reply_backpressured` | `message answer` hit the same stdin backpressure path | wait; the command may resolve a bit later |
-| `user_input_reply_delivery_failed` | `message answer` could not be delivered | inspect daemon logs, then retry only after re-checking pending state |
-
-All four carry at least `payload.kind`, `payload.message`, and `payload.request_id`.
-
-## High-frequency deltas (default filtered)
-
-These fire token-by-token. Off by default; enable with `--include-delta`:
-
-- `item.agent_message_delta` — assistant text stream
-- `item.command_exec_output_delta` — shell output stream
-- `item.file_change_output_delta` — patch preview stream
-- `item.reasoning_text_delta` / `item.reasoning_summary_text_delta`
+- `item.agent_message_delta`
+- `item.command_exec_output_delta`
+- `item.file_change_output_delta`
+- `item.reasoning_text_delta`
+- `item.reasoning_summary_text_delta`
 - `item.plan_delta`
 
-Use case: real-time UI rendering. Anti-use: programmatic decisions — wait for `item.completed` instead.
+These are for live rendering, not control flow.
 
 ## Filtering strategy
 
-For a typical orchestration loop, subscribe with:
+Typical orchestration filter:
 
-```
+```bash
 monitor events --stream --filter \
-  turn.completed,turn.queued_started,turn.queued_failed,turn.error,approval.command_execution,approval.file_change,approval.permissions,approval.mcp_elicitation,user_input.request,thread.closed,session.seized,warning
+  turn.completed,turn.queued_started,turn.queued_failed,approval.command_execution,approval.file_change,approval.permissions,approval.mcp_elicitation,user_input.request,thread.closed,session.seized,warning
 ```
 
-That covers: decision points + errors + ownership changes. Skip `item.*` unless you want fine-grained progress visibility.
+Add `session.crashed` if you want explicit crash notifications alongside the failed terminal turn event.
 
-## Rotation / resumption
+## Rotation and resume
 
-Events are a per-user ring buffer (default 10000). If you reconnect with `--since <id>` and the id has been rotated out, you get an `id_rotated` error with `data.oldest_available_id` so you can resume from there.
-
-Daemon restart preserves events to disk; `monitor events --since` works across restarts.
+Events live in a per-user ring buffer. If `--since <id>` points to a rotated-out event, the daemon returns `id_rotated` with `oldest_available_id`. For durable resumes, save a cursor and monitor with `--cursor <name>`.

@@ -898,7 +898,7 @@ describe("runCli", () => {
           id: req.id,
           result: {
             outcome: "error",
-            event_type: "turn.error",
+            event_type: "turn.completed",
           },
         });
       }, 0);

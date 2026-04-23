@@ -30,9 +30,9 @@ Context poisoning. A session that just did a refactor carries those decisions in
 
 ## 7. Detaching mid-turn because "it's taking too long"
 
-Detach kills in-flight work. If the turn is productive but slow, wait. If it's stuck (no item events for minutes), `message interrupt` first, see the turn.error, then decide.
+Detach kills in-flight work. If the turn is productive but slow, wait. If it's stuck (no item events for minutes), `message interrupt` first, inspect the terminal `turn.completed` status, then decide.
 
-## 8. Ignoring `turn.error` events
+## 8. Ignoring failed `turn.completed` events
 
 An errored turn often means a fundamental issue (context too large, auth, sandbox too tight). Silently retrying via the daemon's overload-retry doesn't fix those. Read the `codex_error_info` and act accordingly.
 

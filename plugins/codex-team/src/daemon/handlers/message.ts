@@ -606,7 +606,11 @@ function terminalWaitResult(
     event_type: event.type,
     event_id: event.id,
     ...completedFields,
-    ...(event.type === "turn.error" ? { error: event.payload.error ?? event.payload } : {}),
+    ...(
+      event.type === "turn.completed" && completedStatus !== "completed"
+        ? { error: event.payload.error ?? null }
+        : {}
+    ),
   };
 }
 
@@ -621,7 +625,7 @@ async function findTerminalEvent(
   for (let i = listed.events.length - 1; i >= 0; i--) {
     const event = listed.events[i]!;
     if (event.session !== session) continue;
-    if (event.type !== "turn.completed" && event.type !== "turn.error" && event.type !== "turn.interrupted") continue;
+    if (event.type !== "turn.completed" && event.type !== "turn.interrupted") continue;
     if (eventTurnId(event) !== turnId) continue;
     return event;
   }
@@ -961,7 +965,7 @@ function timeoutWaitResult(rec: SessionRecord, turnId: string | null, timeoutSec
 }
 
 function isTurnTerminalEvent(event: TeamEvent): boolean {
-  return event.type === "turn.completed" || event.type === "turn.error" || event.type === "turn.interrupted";
+  return event.type === "turn.completed" || event.type === "turn.interrupted";
 }
 
 function latestRecentTerminalEvent(
@@ -973,7 +977,7 @@ function latestRecentTerminalEvent(
   const event = ctx.events.latestEvent(user, {
     session,
     thread_id: threadId,
-    types: ["turn.completed", "turn.error", "turn.interrupted", SESSION_CRASHED_EVENT_TYPE, SESSION_CLOSED_EVENT_TYPE],
+    types: ["turn.completed", "turn.interrupted", SESSION_CRASHED_EVENT_TYPE, SESSION_CLOSED_EVENT_TYPE],
   });
   if (!event) return null;
   const ageMs = Date.now() - Date.parse(event.ts);

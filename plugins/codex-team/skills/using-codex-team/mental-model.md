@@ -31,7 +31,7 @@ CLI (stateless) ──► Daemon (stateful, per-OS-user singleton)
 |---|---|
 | First `codex-team` cli call | Spawn daemon (detached child) if sock isn't live |
 | cli disconnect mid-stream | Drop subscription / alarm timer / stream cleanup |
-| app-server process death | Emit `turn.error` for affected sessions, re-acquire a client, and attempt `thread/resume` for each still-live session |
+| app-server process death | Mark affected sessions `crashed`, emit `session.crashed`, emit `turn.completed` with `status:"failed"` for the active turn, then re-acquire a client and attempt `thread/resume` for each still-live session |
 | `thread.closed` notification from codex | Auto-detach the session, cancel pending approvals |
 | 6h no activity AND 0 live sessions | `shutdownDaemon("idle timeout")` |
 | SIGTERM / SIGINT | `shutdownDaemon` — pool.shutdown → flush event log → unlink sock + pid |
