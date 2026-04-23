@@ -5018,8 +5018,8 @@ var TurnQueues = class {
   async sendOrQueue(sessionKey, client, threadId, input, retry) {
     return await this.withSessionLock(sessionKey, async (state) => {
       assertActive(state);
-      if (state.currentTurnId || state.draining) {
-        const queued = { id: queueId(), input, enqueuedAt: (/* @__PURE__ */ new Date()).toISOString() };
+      if (state.currentTurnId || state.draining || state.pending.length > 0) {
+        const queued = { id: queueId(), input, enqueuedAt: (/* @__PURE__ */ new Date()).toISOString(), failedAttempts: 0 };
         state.pending.push(queued);
         return { started: false, turn_id: state.currentTurnId, queue_id: queued.id, queued_depth: state.pending.length };
       }
@@ -5043,11 +5043,17 @@ var TurnQueues = class {
     this.resolveIdleWaiters(state);
   }
   isTeardown(sessionKey) {
-    return this.states.get(sessionKey)?.tearingDown ?? false;
+    const state = this.states.get(sessionKey);
+    if (!state) return true;
+    return state.tearingDown;
   }
-  async beginTeardown(sessionKey) {
+  markTeardown(sessionKey) {
     const state = this.getOrInit(sessionKey);
     state.tearingDown = true;
+  }
+  async beginTeardown(sessionKey) {
+    this.markTeardown(sessionKey);
+    const state = this.getOrInit(sessionKey);
     await state.serial;
     return { currentTurnId: state.currentTurnId };
   }
@@ -5084,48 +5090,21 @@ var TurnQueues = class {
   }
   async onTurnCompleted(sessionKey, client, threadId, retry) {
     return await this.withSessionLock(sessionKey, async (state) => {
-      state.draining = true;
-      state.currentTurnId = null;
-      this.resolveIdleWaiters(state);
-      if (state.pending.length === 0 || !client || state.disposed || state.tearingDown) {
-        state.draining = false;
-        this.resolveIdleWaiters(state);
-        return { turn_id: null, queue_id: null, failed: false };
-      }
-      const next = state.pending[0];
-      const generation = state.generation;
-      try {
-        if (!isStateUsable(state, generation)) {
-          return { turn_id: null, queue_id: null, failed: false };
-        }
-        const res = await turnStart(client, threadId, next.input, retry);
-        if (!isStateUsable(state, generation)) {
-          return { turn_id: null, queue_id: null, failed: false };
-        }
-        state.pending.shift();
-        state.currentTurnId = res.turnId;
-        return { turn_id: res.turnId, queue_id: next.id, failed: false };
-      } catch (e) {
-        if (!isStateUsable(state, generation)) {
-          return { turn_id: null, queue_id: null, failed: false };
-        }
-        const err2 = e;
-        logger.warn("failed to dispatch queued turn", { session: sessionKey, err: err2.message, queue_id: next.id });
-        return {
-          turn_id: null,
-          queue_id: next.id,
-          failed: true,
-          error_message: err2.message
-        };
-      } finally {
-        if (isSameGeneration(state, generation)) {
-          state.draining = false;
-          this.resolveIdleWaiters(state);
-        }
-      }
+      return await this.releaseCurrentTurnAndDrain(state, sessionKey, client, threadId, retry);
     });
   }
-  dispose(sessionKey) {
+  async onTurnErrored(sessionKey, turnId, options, client, threadId, retry) {
+    return await this.withSessionLock(sessionKey, async (state) => {
+      if (options.willRetry) {
+        return { turn_id: null, queue_id: null, failed: false, dropped: [] };
+      }
+      if (state.currentTurnId && turnId && state.currentTurnId !== turnId) {
+        return { turn_id: null, queue_id: null, failed: false, dropped: [] };
+      }
+      return await this.releaseCurrentTurnAndDrain(state, sessionKey, client, threadId, retry);
+    });
+  }
+  finalDispose(sessionKey) {
     const state = this.states.get(sessionKey);
     if (!state) return { dropped: 0 };
     state.disposed = true;
@@ -5138,6 +5117,9 @@ var TurnQueues = class {
     this.resolveIdleWaiters(state);
     this.states.delete(sessionKey);
     return { dropped };
+  }
+  dispose(sessionKey) {
+    return this.finalDispose(sessionKey);
   }
   getOrInit(sessionKey) {
     let state = this.states.get(sessionKey);
@@ -5171,6 +5153,69 @@ var TurnQueues = class {
       release();
     }
   }
+  async releaseCurrentTurnAndDrain(state, sessionKey, client, threadId, retry) {
+    state.draining = true;
+    state.currentTurnId = null;
+    this.resolveIdleWaiters(state);
+    const generation = state.generation;
+    const dropped = [];
+    try {
+      while (state.pending.length > 0 && client && !state.disposed && !state.tearingDown) {
+        const next = state.pending[0];
+        try {
+          if (!isStateUsable(state, generation)) {
+            return { turn_id: null, queue_id: null, failed: false, dropped };
+          }
+          const res = await turnStart(client, threadId, next.input, retry);
+          if (!isStateUsable(state, generation)) {
+            return { turn_id: null, queue_id: null, failed: false, dropped };
+          }
+          state.pending.shift();
+          state.currentTurnId = res.turnId;
+          return { turn_id: res.turnId, queue_id: next.id, failed: false, dropped };
+        } catch (e) {
+          if (!isStateUsable(state, generation)) {
+            return { turn_id: null, queue_id: null, failed: false, dropped };
+          }
+          const err2 = e;
+          next.failedAttempts += 1;
+          logger.warn("failed to dispatch queued turn", {
+            session: sessionKey,
+            err: err2.message,
+            queue_id: next.id,
+            failure_count: next.failedAttempts
+          });
+          if (next.failedAttempts < queueHeadRetryMax(retry)) {
+            return {
+              turn_id: null,
+              queue_id: next.id,
+              failed: true,
+              error_message: err2.message,
+              dropped
+            };
+          }
+          state.pending.shift();
+          dropped.push({
+            queue_id: next.id,
+            error_message: err2.message,
+            failure_count: next.failedAttempts
+          });
+          logger.warn("dropping queued turn after repeated dispatch failures", {
+            session: sessionKey,
+            err: err2.message,
+            queue_id: next.id,
+            failure_count: next.failedAttempts
+          });
+        }
+      }
+      return { turn_id: null, queue_id: null, failed: false, dropped };
+    } finally {
+      if (isSameGeneration(state, generation)) {
+        state.draining = false;
+        this.resolveIdleWaiters(state);
+      }
+    }
+  }
   isIdle(state) {
     return state.currentTurnId === null && !state.draining;
   }
@@ -5193,6 +5238,13 @@ function isSameGeneration(state, generation) {
 }
 function isStateUsable(state, generation) {
   return !state.disposed && !state.tearingDown && isSameGeneration(state, generation);
+}
+function queueHeadRetryMax(retry) {
+  const candidate = retry?.maxAttempts;
+  if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) {
+    return Math.floor(candidate);
+  }
+  return 3;
 }
 
 // src/daemon/orphans.ts
@@ -7305,9 +7357,9 @@ var sessionDetach = async (ctx, req) => {
     }
   }
   ctx.pool.release(sessionKey);
-  ctx.queues.dispose(sessionKey);
   await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
   ctx.sessions.remove(user, rec.name);
+  ctx.queues.finalDispose(sessionKey);
   await appendSessionClosed(ctx, user, rec, "user_detach");
   return { session: rec, noop: false, graceful };
 };
@@ -7717,9 +7769,9 @@ async function seizeFromOtherUser(ctx, fromUser, toUser, rec) {
     }
   }
   ctx.pool.release(sessionKey);
-  ctx.queues.dispose(sessionKey);
   await cancelPendingWithEvent(ctx, fromUser, rec.name, rec.thread_id, "session_seized");
   ctx.sessions.remove(fromUser, rec.name);
+  ctx.queues.finalDispose(sessionKey);
   await ctx.events.append(fromUser, {
     type: "session.seized",
     session: rec.name,
@@ -9502,15 +9554,34 @@ async function handleNotification2(ctx, e) {
     }
   }
   if (norm.type === "turn.error" && sessionName && rec) {
+    const turnId = norm.payload.turn_id ?? rec.last_turn_id ?? null;
+    const willRetry = Boolean(norm.payload.will_retry);
     ctx.sessions.update(e.user, sessionName, {
-      last_turn_id: norm.payload.turn_id ?? rec.last_turn_id ?? null,
-      current_turn_id: null,
-      current_turn_started_at: null,
+      last_turn_id: turnId,
+      current_turn_id: willRetry ? rec.current_turn_id ?? turnId : null,
+      current_turn_started_at: willRetry ? rec.current_turn_started_at ?? null : null,
       current_item_type: null,
-      items_in_turn: 0
+      items_in_turn: willRetry ? rec.items_in_turn ?? 0 : 0
+    });
+    const client = ctx.pool.clientForSession(keyFor3(e.user, sessionName));
+    void ctx.queues.onTurnErrored(
+      keyFor3(e.user, sessionName),
+      turnId,
+      { willRetry },
+      client,
+      norm.threadId ?? rec.thread_id,
+      ctx.retryOptions()
+    ).then(async (next) => {
+      await appendQueueDrainEvents(ctx, e.user, sessionName, norm.threadId ?? rec.thread_id, next, false);
+    }).catch((err2) => {
+      logger.warn("turn error queue drain failed", {
+        session: sessionName,
+        err: err2.message
+      });
     });
   }
   if (norm.type === "turn.completed" && sessionName && norm.threadId) {
+    const threadId = norm.threadId;
     if (rec) {
       ctx.sessions.update(e.user, sessionName, {
         last_turn_id: norm.payload.turn_id ?? rec.last_turn_id ?? null,
@@ -9522,38 +9593,8 @@ async function handleNotification2(ctx, e) {
       });
     }
     const client = ctx.pool.clientForSession(keyFor3(e.user, sessionName));
-    void ctx.queues.onTurnCompleted(keyFor3(e.user, sessionName), client, norm.threadId, ctx.retryOptions()).then(async (next) => {
-      if (next.turn_id) {
-        logger.debug("drained queued turn", { session: sessionName, turn_id: next.turn_id, queue_id: next.queue_id });
-        await ctx.events.append(e.user, {
-          type: "turn.queued_started",
-          session: sessionName,
-          thread_id: norm.threadId,
-          payload: {
-            turn_id: next.turn_id,
-            queue_id: next.queue_id
-          }
-        });
-        return;
-      }
-      if (next.failed && next.queue_id) {
-        logger.warn("queued turn remains enqueued after dispatch failure", {
-          session: sessionName,
-          queue_id: next.queue_id,
-          err: next.error_message
-        });
-        await ctx.events.append(e.user, {
-          type: "turn.queued_failed",
-          session: sessionName,
-          thread_id: norm.threadId,
-          payload: {
-            queue_id: next.queue_id,
-            error: {
-              message: next.error_message
-            }
-          }
-        });
-      }
+    void ctx.queues.onTurnCompleted(keyFor3(e.user, sessionName), client, threadId, ctx.retryOptions()).then(async (next) => {
+      await appendQueueDrainEvents(ctx, e.user, sessionName, threadId, next, true);
     }).catch((err2) => {
       logger.warn("turn completion queue drain failed", {
         session: sessionName,
@@ -9604,8 +9645,13 @@ async function handleServerRequest(ctx, e) {
     e.respondError(-32e3, "session detached");
     return;
   }
+  const rec = ctx.sessions.get(e.user, sessionName);
+  if (!rec || rec.state !== "live" || rec.thread_id !== norm.threadId) {
+    e.respondError(-32e3, "session torn down");
+    return;
+  }
   if (ctx.queues.isTeardown(keyFor3(e.user, sessionName))) {
-    e.respondError(-32e3, "session detached");
+    e.respondError(-32e3, "session torn down");
     return;
   }
   const effectiveClient = ctx.pool.clientById(e.clientId);
@@ -9763,6 +9809,7 @@ async function closeSession(ctx, user, sessionName, reason, unsubscribe) {
   const rec = ctx.sessions.get(user, sessionName);
   if (!rec) return;
   const sessionKey = keyFor3(user, sessionName);
+  ctx.queues.markTeardown(sessionKey);
   const client = ctx.pool.clientForSession(sessionKey);
   if (unsubscribe && client) {
     try {
@@ -9771,10 +9818,63 @@ async function closeSession(ctx, user, sessionName, reason, unsubscribe) {
     }
   }
   ctx.pool.release(sessionKey);
-  ctx.queues.dispose(sessionKey);
   await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, reason);
   ctx.sessions.remove(user, sessionName);
+  ctx.queues.finalDispose(sessionKey);
   await appendSessionClosed2(ctx, user, rec.name, rec.thread_id, reason);
+}
+async function appendQueueDrainEvents(ctx, user, sessionName, threadId, result, emitQueuedStarted) {
+  for (const dropped of result.dropped) {
+    logger.warn("dropping queued turn after repeated dispatch failures", {
+      session: sessionName,
+      queue_id: dropped.queue_id,
+      err: dropped.error_message,
+      failure_count: dropped.failure_count
+    });
+    await ctx.events.append(user, {
+      type: "turn.queued_dropped",
+      session: sessionName,
+      thread_id: threadId,
+      payload: {
+        queue_id: dropped.queue_id,
+        error: {
+          message: dropped.error_message
+        },
+        failure_count: dropped.failure_count
+      }
+    });
+  }
+  if (result.turn_id && emitQueuedStarted) {
+    logger.debug("drained queued turn", { session: sessionName, turn_id: result.turn_id, queue_id: result.queue_id });
+    await ctx.events.append(user, {
+      type: "turn.queued_started",
+      session: sessionName,
+      thread_id: threadId,
+      payload: {
+        turn_id: result.turn_id,
+        queue_id: result.queue_id
+      }
+    });
+    return;
+  }
+  if (result.failed && result.queue_id) {
+    logger.warn("queued turn remains enqueued after dispatch failure", {
+      session: sessionName,
+      queue_id: result.queue_id,
+      err: result.error_message
+    });
+    await ctx.events.append(user, {
+      type: "turn.queued_failed",
+      session: sessionName,
+      thread_id: threadId,
+      payload: {
+        queue_id: result.queue_id,
+        error: {
+          message: result.error_message
+        }
+      }
+    });
+  }
 }
 async function appendSessionClosed2(ctx, user, session, threadId, reason) {
   await ctx.events.append(user, {

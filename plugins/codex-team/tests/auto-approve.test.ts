@@ -122,6 +122,7 @@ function makeWireContext(patterns: string[]) {
         get: vi.fn().mockReturnValue({
           name: "sess-1",
           thread_id: "th-1",
+          state: "live",
           autoApprovePatterns: patterns,
           experimental_tools: [],
         }),
