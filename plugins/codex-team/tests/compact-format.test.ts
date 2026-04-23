@@ -459,6 +459,26 @@ describe("formatCompact", () => {
       },
     ],
     [
+      "session:logs",
+      {
+        session: "audit",
+        thread_id: "th-1",
+        app_server_id: "as-1",
+        pid: 12345,
+        lines: [
+          { ts: "2026-04-23T00:00:00.000Z", stream: "stderr", line: "boom" },
+        ],
+        truncated_from: 400,
+      },
+      {
+        session: "audit",
+        lines: [
+          { ts: "2026-04-23T00:00:00.000Z", stream: "stderr", line: "boom" },
+        ],
+        truncated_from: 400,
+      },
+    ],
+    [
       "session:events",
       {
         id: "evt-7",

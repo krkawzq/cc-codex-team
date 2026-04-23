@@ -149,6 +149,7 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
     method === "session:events" ||
     method === "monitor:alarm" ||
     method === "daemon:logs" ||
+    (method === "session:logs" && truthy(parsed.flags["follow"] ?? parsed.flags["f"])) ||
     (method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]));
 
   // Forward stdin if caller used --stdin
@@ -318,7 +319,9 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
         const ackAfterWrite = createStreamAckCallback(method, sock, reqId, msg.data);
         const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
-        if (markdown !== null) {
+        if (truthy(parsed.flags.short)) {
+          writeStdout(formatShort(method, msg.data) + "\n", ackAfterWrite);
+        } else if (markdown !== null) {
           writeStdout(markdown + "\n", ackAfterWrite);
         } else {
           const rendered = truthy(parsed.flags.full) ? msg.data : formatCompact(method, msg.data);
@@ -823,6 +826,11 @@ function validateCliFlags(parsed: ParsedArgs, method: string, effectiveMethod: s
       return "--summary cannot be used with --by-tool or --by-item-kind";
     }
   }
+  if (effectiveMethod === "session:logs") {
+    if (parsed.flags.n === true) return "-n requires a value";
+    if (parsed.flags.stream === true) return "--stream requires a value";
+    if (parsed.flags.truncate === true) return "--truncate requires a value";
+  }
   return null;
 }
 
@@ -865,6 +873,7 @@ function isReadOnlyMethod(method: string): boolean {
     method === "cursor:get" ||
     method === "session:health" ||
     method === "session:health:all" ||
+    method === "session:logs" ||
     method === "session:events" ||
     method === "session:info" ||
     method === "session:context" ||

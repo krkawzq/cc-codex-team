@@ -20,6 +20,9 @@ export function formatShort(method: string, data: unknown): string {
     case "session:health:all":
       body = formatSessionHealth(data);
       break;
+    case "session:logs":
+      body = formatSessionLogs(data);
+      break;
     case "session:info":
       body = formatSessionInfo(data);
       break;
@@ -146,6 +149,22 @@ function formatSessionList(data: unknown): string {
         formatScalar(session.model ?? session.model_provider),
         `busy=${busyFlag(session.busy, turnId, turn, turnIdKnown)}`,
       ].join("  ");
+    })
+    .join("\n");
+}
+
+function formatSessionLogs(data: unknown): string {
+  const value = asObject(data);
+  const lines = Array.isArray(value.lines) ? value.lines : [];
+  if (lines.length === 0) return "(no logs)";
+  return lines
+    .map((entry) => {
+      const line = asObject(entry);
+      return [
+        formatScalar(line.ts),
+        formatScalar(line.stream),
+        formatScalar(line.line),
+      ].join(" ");
     })
     .join("\n");
 }

@@ -294,6 +294,7 @@ var COMMANDS = /* @__PURE__ */ new Set([
   "session:context",
   "session:list",
   "session:events",
+  "session:logs",
   "message:send",
   "message:send-many",
   "message:peer",
@@ -504,6 +505,7 @@ var SHORT_COMMANDS = /* @__PURE__ */ new Set([
   "session:info",
   "session:health",
   "session:health:all",
+  "session:logs",
   "session:list",
   "message:history"
 ]);
@@ -1467,6 +1469,62 @@ var sessionGroup = {
       notes: [
         "Default output is chronological oldest-to-newest NDJSON for the retained event window.",
         "Use --since to page forward from a prior event ID."
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "logs",
+      summary: "Show the recent app-server stdout/stderr tail for one session.",
+      usage: "codex-team -b <token> session logs <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET }
+      ],
+      flags: [
+        {
+          long: "-n",
+          type: "int",
+          default: "100",
+          required: false,
+          description: "Return the last N captured log lines."
+        },
+        {
+          long: "--follow",
+          short: "-f",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Keep streaming new log lines until the CLI exits."
+        },
+        {
+          long: "--stream",
+          type: "enum",
+          default: "stderr",
+          required: false,
+          description: "Choose stderr, stdout, or all captured streams."
+        },
+        {
+          long: "--truncate",
+          type: "int",
+          default: "2048",
+          required: false,
+          description: "Clip each log line to this many bytes; use 0 to disable clipping."
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print '<ts> <stream> <line>' per log line."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN session logs audit -n 50",
+        "codex-team -b $TOKEN session logs audit --stream all",
+        "codex-team -b $TOKEN session logs audit --follow --short"
+      ],
+      notes: [
+        "Detached sessions return session_not_live; re-attach them first.",
+        "Crashed sessions return the last captured tail with state=crashed."
       ],
       needs_bearer: true
     }),
@@ -2599,6 +2657,9 @@ function formatShort(method, data) {
     case "session:health:all":
       body = formatSessionHealth(data);
       break;
+    case "session:logs":
+      body = formatSessionLogs(data);
+      break;
     case "session:info":
       body = formatSessionInfo(data);
       break;
@@ -2710,6 +2771,19 @@ function formatSessionList(data) {
       formatScalar(session.model ?? session.model_provider),
       `busy=${busyFlag(session.busy, turnId, turn, turnIdKnown)}`
     ].join("  ");
+  }).join("\n");
+}
+function formatSessionLogs(data) {
+  const value = asObject(data);
+  const lines = Array.isArray(value.lines) ? value.lines : [];
+  if (lines.length === 0) return "(no logs)";
+  return lines.map((entry) => {
+    const line = asObject(entry);
+    return [
+      formatScalar(line.ts),
+      formatScalar(line.stream),
+      formatScalar(line.line)
+    ].join(" ");
   }).join("\n");
 }
 function formatDaemonUserList(data) {
@@ -3049,6 +3123,8 @@ function formatCompact(method, data) {
       return compactSessionHealthAll(data);
     case "session:events":
       return asObject2(data);
+    case "session:logs":
+      return compactSessionLogs(data);
     case "session:heal":
       return compactSessionHeal(data);
     case "message:send":
@@ -3173,6 +3249,10 @@ function compactSessionContext(data) {
   const thread = projectThread(value.thread);
   if (Object.keys(thread).length > 0) out.thread = thread;
   return out;
+}
+function compactSessionLogs(data) {
+  const value = asObject2(data);
+  return pickFields(value, ["session", "state", "lines", "truncated_from"]);
 }
 function compactSessionList(data) {
   const value = asObject2(data);
@@ -4044,7 +4124,7 @@ async function runVersion(sockPath) {
 }
 async function dispatchCommand(sockPath, parsed, method) {
   const cliConfig = readCliConfig();
-  const needsStreaming = method === "monitor:events" || method === "session:events" || method === "monitor:alarm" || method === "daemon:logs" || method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]);
+  const needsStreaming = method === "monitor:events" || method === "session:events" || method === "monitor:alarm" || method === "daemon:logs" || method === "session:logs" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]) || method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]);
   if (truthy(parsed.flags["stdin"]) && !("stdin_content" in parsed.flags)) {
     try {
       const content = await readStdinAll();
@@ -4199,7 +4279,9 @@ async function runStream(sock, parsed, method) {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
         const ackAfterWrite = createStreamAckCallback(method, sock, reqId, msg.data);
         const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
-        if (markdown !== null) {
+        if (truthy(parsed.flags.short)) {
+          writeStdout(formatShort(method, msg.data) + "\n", ackAfterWrite);
+        } else if (markdown !== null) {
           writeStdout(markdown + "\n", ackAfterWrite);
         } else {
           const rendered = truthy(parsed.flags.full) ? msg.data : formatCompact(method, msg.data);
@@ -4612,6 +4694,11 @@ function validateCliFlags(parsed, method, effectiveMethod) {
       return "--summary cannot be used with --by-tool or --by-item-kind";
     }
   }
+  if (effectiveMethod === "session:logs") {
+    if (parsed.flags.n === true) return "-n requires a value";
+    if (parsed.flags.stream === true) return "--stream requires a value";
+    if (parsed.flags.truncate === true) return "--truncate requires a value";
+  }
   return null;
 }
 function resolveMethod(method, parsed) {
@@ -4634,7 +4721,7 @@ function isTransientRequestError(err2) {
   return isTransientConnectError(err2) || err2.message === "daemon closed connection";
 }
 function isReadOnlyMethod(method) {
-  return method === "version" || method === "status" || method === "daemon:fleet:status" || method === "daemon:status" || method === "daemon:user:list" || method === "daemon:config:get" || method === "daemon:config:list" || method === "cursor:list" || method === "cursor:get" || method === "session:health" || method === "session:health:all" || method === "session:events" || method === "session:info" || method === "session:context" || method === "session:list" || method === "message:history";
+  return method === "version" || method === "status" || method === "daemon:fleet:status" || method === "daemon:status" || method === "daemon:user:list" || method === "daemon:config:get" || method === "daemon:config:list" || method === "cursor:list" || method === "cursor:get" || method === "session:health" || method === "session:health:all" || method === "session:logs" || method === "session:events" || method === "session:info" || method === "session:context" || method === "session:list" || method === "message:history";
 }
 function readCliConfig() {
   const config = new ConfigStore();
@@ -7156,10 +7243,13 @@ var STDERR_TAIL_LINES = 400;
 var DEFAULT_REQUEST_TIMEOUT_MS = 12e4;
 var AppServerClient = class extends import_node_events.EventEmitter {
   proc = null;
-  buf = "";
+  stdoutBuf = "";
+  stderrBuf = "";
   pending = /* @__PURE__ */ new Map();
-  stderrTail = [];
+  stdoutLogTail = [];
+  stderrLogTail = [];
   lastPid = null;
+  nextLogSeq = 1;
   options;
   initialized = false;
   constructor(options = {}) {
@@ -7183,7 +7273,22 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     return this.proc?.pid ?? this.lastPid;
   }
   stderrTailText() {
-    return this.stderrTail.join("\n");
+    return this.stderrLogTail.map((entry) => entry.line).join("\n");
+  }
+  stdoutTailText() {
+    return this.stdoutLogTail.map((entry) => entry.line).join("\n");
+  }
+  stderrTail(n = this.options.stderrTailLines) {
+    return this.sliceTail(this.stderrLogTail, n);
+  }
+  stdoutTail(n = this.options.stderrTailLines) {
+    return this.sliceTail(this.stdoutLogTail, n);
+  }
+  logTail(stream, n = this.options.stderrTailLines) {
+    if (stream === "stdout") return this.stdoutTail(n);
+    if (stream === "stderr") return this.stderrTail(n);
+    const merged = [...this.stdoutLogTail, ...this.stderrLogTail].sort((left, right) => left.seq - right.seq);
+    return this.sliceTail(merged, n);
   }
   async start() {
     if (this.proc) throw new Error("app-server already started");
@@ -7207,6 +7312,8 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     });
     this.proc.on("exit", (code, signal) => {
       logger.info("app-server exited", { code, signal });
+      this.flushLogBuffer("stdout", true);
+      this.flushLogBuffer("stderr", true);
       this.failAllPending(new TransportClosedError(`app-server exited (code=${code}, signal=${signal})`));
       this.emit("close", code);
       this.proc = null;
@@ -7329,29 +7436,12 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     });
   }
   onStdout(chunk) {
-    this.buf += chunk;
-    let idx;
-    while ((idx = this.buf.indexOf("\n")) >= 0) {
-      const line = this.buf.slice(0, idx);
-      this.buf = this.buf.slice(idx + 1);
-      if (!line.trim()) continue;
-      let parsed;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        logger.warn("malformed line from app-server", { snippet: line.slice(0, 200) });
-        continue;
-      }
-      this.dispatchIncoming(parsed);
-    }
+    this.stdoutBuf += chunk;
+    this.flushLogBuffer("stdout");
   }
   onStderr(chunk) {
-    const lines = chunk.split("\n");
-    for (const line of lines) {
-      if (!line) continue;
-      this.stderrTail.push(line);
-      if (this.stderrTail.length > this.options.stderrTailLines) this.stderrTail.shift();
-    }
+    this.stderrBuf += chunk;
+    this.flushLogBuffer("stderr");
   }
   dispatchIncoming(msg) {
     const hasId = "id" in msg;
@@ -7394,6 +7484,56 @@ var AppServerClient = class extends import_node_events.EventEmitter {
       p.reject(err2);
     }
     this.pending.clear();
+  }
+  flushLogBuffer(stream, includePartial = false) {
+    const current = stream === "stdout" ? this.stdoutBuf : this.stderrBuf;
+    let remaining = current;
+    let idx;
+    while ((idx = remaining.indexOf("\n")) >= 0) {
+      const line = remaining.slice(0, idx);
+      remaining = remaining.slice(idx + 1);
+      this.recordLogLine(stream, line);
+    }
+    if (includePartial && remaining.length > 0) {
+      this.recordLogLine(stream, remaining);
+      remaining = "";
+    }
+    if (stream === "stdout") this.stdoutBuf = remaining;
+    else this.stderrBuf = remaining;
+  }
+  recordLogLine(stream, line) {
+    if (!line) return;
+    const entry = {
+      stream,
+      line,
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      seq: this.nextLogSeq++
+    };
+    const target = stream === "stdout" ? this.stdoutLogTail : this.stderrLogTail;
+    target.push(entry);
+    if (target.length > this.options.stderrTailLines) target.shift();
+    const rendered = this.stripLogLine(entry);
+    this.emit(`${stream}_line`, rendered);
+    if (stream !== "stdout") return;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      logger.warn("malformed line from app-server", { snippet: line.slice(0, 200) });
+      return;
+    }
+    this.dispatchIncoming(parsed);
+  }
+  sliceTail(lines, n) {
+    const limit = normalizeTailCount(n, this.options.stderrTailLines);
+    return lines.slice(Math.max(0, lines.length - limit)).map((entry) => this.stripLogLine(entry));
+  }
+  stripLogLine(entry) {
+    return {
+      stream: entry.stream,
+      line: entry.line,
+      ts: entry.ts
+    };
   }
 };
 function resolveLaunch(bin, args) {
@@ -7455,6 +7595,10 @@ function forceKillProcess(proc) {
   } catch {
   }
 }
+function normalizeTailCount(value, fallback) {
+  if (!Number.isFinite(value)) return Math.max(1, Math.floor(fallback));
+  return Math.max(1, Math.floor(value));
+}
 
 // src/codex/pool.ts
 var AppServerPool = class extends import_node_events2.EventEmitter {
@@ -7462,6 +7606,7 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
   byUser = /* @__PURE__ */ new Map();
   byClient = /* @__PURE__ */ new Map();
   bySession = /* @__PURE__ */ new Map();
+  closedLogsBySession = /* @__PURE__ */ new Map();
   inFlightAcquireBySession = /* @__PURE__ */ new Map();
   nextClientId = 1;
   shuttingDown = false;
@@ -7502,11 +7647,13 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     if (managed) {
       managed.sessions.add(sessionKey);
       this.bySession.set(sessionKey, managed);
+      this.closedLogsBySession.delete(sessionKey);
       return managed.client;
     }
     const fresh = await this.spawn(user, clientOptions);
     fresh.sessions.add(sessionKey);
     this.bySession.set(sessionKey, fresh);
+    this.closedLogsBySession.delete(sessionKey);
     return fresh.client;
   }
   release(sessionKey) {
@@ -7514,6 +7661,7 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     if (!m) return;
     m.sessions.delete(sessionKey);
     this.bySession.delete(sessionKey);
+    this.closedLogsBySession.delete(sessionKey);
   }
   rekeySession(oldKey, newKey) {
     if (oldKey === newKey) return;
@@ -7523,6 +7671,11 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     m.sessions.add(newKey);
     this.bySession.delete(oldKey);
     this.bySession.set(newKey, m);
+    const closed = this.closedLogsBySession.get(oldKey);
+    if (closed) {
+      this.closedLogsBySession.delete(oldKey);
+      this.closedLogsBySession.set(newKey, cloneClosedSessionLogs(closed));
+    }
   }
   async acquireForAdhoc(user, clientOptions) {
     if (this.shuttingDown) throw new Error("pool is shutting down");
@@ -7539,8 +7692,16 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     const m = this.bySession.get(sessionKey);
     return m ? m.client : null;
   }
+  sessionBinding(sessionKey) {
+    const m = this.bySession.get(sessionKey);
+    return m ? { appServerId: m.id, pid: m.client.pid() } : null;
+  }
   clientById(clientId) {
     return this.byClient.get(clientId)?.client ?? null;
+  }
+  closedLogsForSession(sessionKey) {
+    const snapshot = this.closedLogsBySession.get(sessionKey);
+    return snapshot ? cloneClosedSessionLogs(snapshot) : null;
   }
   listClients() {
     return Array.from(this.byClient.values()).map((m) => ({
@@ -7563,6 +7724,7 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     this.byUser.clear();
     this.byClient.clear();
     this.bySession.clear();
+    this.closedLogsBySession.clear();
   }
   async closeUser(user) {
     const managed = [...this.byUser.get(user) ?? []];
@@ -7602,8 +7764,22 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
       const sessions = Array.from(managed.sessions);
       const reason = managed.closeReason ?? (this.shuttingDown ? "shutdown" : "unexpected");
       managed.closeReason = null;
+      const closedLogs = {
+        appServerId: id,
+        pid: client.pid(),
+        closedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        stderrTail: client.stderrTail(),
+        stdoutTail: client.stdoutTail()
+      };
       for (const s of sessions) this.bySession.delete(s);
       managed.sessions.clear();
+      if (reason === "unexpected") {
+        for (const sessionKey of sessions) {
+          this.closedLogsBySession.set(sessionKey, cloneClosedSessionLogs(closedLogs));
+        }
+      } else {
+        for (const sessionKey of sessions) this.closedLogsBySession.delete(sessionKey);
+      }
       const list2 = this.byUser.get(user);
       if (list2) {
         const idx = list2.indexOf(managed);
@@ -7636,6 +7812,15 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     return managed;
   }
 };
+function cloneClosedSessionLogs(value) {
+  return {
+    appServerId: value.appServerId,
+    pid: value.pid,
+    closedAt: value.closedAt,
+    stderrTail: value.stderrTail.map((entry) => ({ ...entry })),
+    stdoutTail: value.stdoutTail.map((entry) => ({ ...entry }))
+  };
+}
 
 // src/daemon/context.ts
 function buildContext(opts = {}) {
@@ -8859,6 +9044,8 @@ function matchesGlob(pattern, value) {
 var attachLocks = /* @__PURE__ */ new Map();
 var DEFAULT_SESSION_LIST_LIMIT = 50;
 var LOCAL_SESSION_LIST_CURSOR_PREFIX = "local:";
+var DEFAULT_SESSION_LOG_LINE_LIMIT = 100;
+var DEFAULT_SESSION_LOG_TRUNCATE_BYTES = 2048;
 var sessionNew = async (ctx, req) => {
   requireUser(ctx, req);
   const user = req.bearer;
@@ -10133,6 +10320,50 @@ var sessionEvents = async (ctx, req, stream) => {
   stream.onClose(() => sub.dispose());
   return { streaming: true };
 };
+var sessionLogs = async (ctx, req, stream) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "name|thread_id");
+  const flags = asFlags(req);
+  const follow = isTrue2(flags["follow"]) || isTrue2(flags["f"]);
+  const lineLimit = parseSessionLogsIntFlag(flags["n"], DEFAULT_SESSION_LOG_LINE_LIMIT, "-n", { minimum: 1 });
+  const truncateBytes = parseSessionLogsIntFlag(
+    flags["truncate"],
+    DEFAULT_SESSION_LOG_TRUNCATE_BYTES,
+    "--truncate",
+    { minimum: 0 }
+  );
+  const selectedStream = parseSessionLogsStream(flags["stream"]);
+  const target = await resolveSessionLogsTarget(ctx, user, identifier);
+  const initial = buildSessionLogsResponse(ctx, user, target.rec, selectedStream, lineLimit, truncateBytes);
+  if (!follow || !stream || target.rec.state === "crashed") {
+    if (follow && stream) {
+      stream.chunk(initial);
+      stream.end();
+      return { streaming: true };
+    }
+    return initial;
+  }
+  const client = target.client;
+  if (!client) {
+    throw new CodexTeamError("session_not_live", `session '${target.rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${target.rec.name}'`);
+  }
+  const emitLiveLine = (entry) => {
+    if (!matchesSessionLogStream(selectedStream, entry.stream)) return;
+    stream.chunk(buildSessionLogsIncrement(ctx, user, target.rec, truncateBytes, entry));
+  };
+  const onClose = () => stream.end();
+  if (selectedStream === "stderr" || selectedStream === "all") client.on("stderr_line", emitLiveLine);
+  if (selectedStream === "stdout" || selectedStream === "all") client.on("stdout_line", emitLiveLine);
+  client.on("close", onClose);
+  stream.chunk(initial);
+  stream.onClose(() => {
+    client.off("stderr_line", emitLiveLine);
+    client.off("stdout_line", emitLiveLine);
+    client.off("close", onClose);
+  });
+  return { streaming: true };
+};
 function buildSessionHealthSnapshot(ctx, user, rec) {
   const sessionKey = keyFor(user, rec.name);
   const busyTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
@@ -10312,6 +10543,117 @@ function numericValue2(value) {
 }
 function isSessionEventDeltaType(type) {
   return type.endsWith("_delta");
+}
+async function resolveSessionLogsTarget(ctx, user, identifier) {
+  const rec = ctx.sessions.get(user, identifier);
+  if (rec) {
+    const client2 = rec.state === "live" ? ctx.pool.clientForSession(keyFor(user, rec.name)) : null;
+    if (rec.state === "live" && !isClientAlive(client2)) {
+      throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
+    }
+    return { rec, client: client2 };
+  }
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "detached") {
+    const attachTarget = target.name ?? target.threadId;
+    throw new CodexTeamError(
+      "session_not_live",
+      `session '${attachTarget}' is detached; re-attach the session with 'codex-team -b ${user} session attach ${attachTarget}' first`
+    );
+  }
+  const client = ctx.pool.clientForSession(keyFor(user, target.session.name));
+  if (!isClientAlive(client)) {
+    throw new CodexTeamError("session_not_live", `session '${target.session.name}' is unhealthy; run 'codex-team -b ${user} session heal ${target.session.name}'`);
+  }
+  return { rec: target.session, client };
+}
+function buildSessionLogsResponse(ctx, user, rec, selectedStream, lineLimit, truncateBytes) {
+  const sessionKey = keyFor(user, rec.name);
+  const binding = rec.state === "live" ? ctx.pool.sessionBinding(sessionKey) : null;
+  const client = rec.state === "live" ? ctx.pool.clientForSession(sessionKey) : null;
+  const closed = rec.state === "crashed" ? ctx.pool.closedLogsForSession(sessionKey) : null;
+  const sourceLines = rec.state === "crashed" ? selectStoredSessionLogLines(closed, selectedStream) : selectLiveSessionLogLines(client, selectedStream);
+  const rendered = projectSessionLogLines(sourceLines, lineLimit, truncateBytes);
+  const response = {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    app_server_id: binding?.appServerId ?? closed?.appServerId ?? null,
+    pid: binding?.pid ?? closed?.pid ?? null,
+    lines: rendered.lines,
+    truncated_from: rendered.truncatedFrom
+  };
+  if (rec.state === "crashed") response.state = "crashed";
+  return response;
+}
+function buildSessionLogsIncrement(ctx, user, rec, truncateBytes, entry) {
+  const binding = ctx.pool.sessionBinding(keyFor(user, rec.name));
+  return {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    app_server_id: binding?.appServerId ?? null,
+    pid: binding?.pid ?? null,
+    lines: [truncateSessionLogLine(entry, truncateBytes)],
+    truncated_from: null
+  };
+}
+function parseSessionLogsIntFlag(value, fallback, label, options) {
+  if (value === void 0) return fallback;
+  const raw = asString5(value);
+  if (!raw) throw invalidParams(`${label} requires a value`);
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < options.minimum) {
+    const expectation = options.minimum === 0 ? "a non-negative integer" : "a positive integer";
+    throw invalidParams(`${label} must be ${expectation}`);
+  }
+  return parsed;
+}
+function parseSessionLogsStream(value) {
+  if (value === void 0) return "stderr";
+  const raw = asString5(value);
+  if (!raw) throw invalidParams("--stream requires a value");
+  if (raw === "stderr" || raw === "stdout" || raw === "all") return raw;
+  throw invalidParams("--stream must be one of stderr, stdout, or all");
+}
+function selectLiveSessionLogLines(client, selectedStream) {
+  if (!client) return [];
+  if (selectedStream === "stderr") return client.stderrTail(Number.MAX_SAFE_INTEGER);
+  if (selectedStream === "stdout") return client.stdoutTail(Number.MAX_SAFE_INTEGER);
+  return client.logTail("all", Number.MAX_SAFE_INTEGER);
+}
+function selectStoredSessionLogLines(snapshot, selectedStream) {
+  if (!snapshot) return [];
+  if (selectedStream === "stderr") return snapshot.stderrTail;
+  if (selectedStream === "stdout") return snapshot.stdoutTail;
+  return [...snapshot.stderrTail, ...snapshot.stdoutTail].sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts));
+}
+function projectSessionLogLines(lines, lineLimit, truncateBytes) {
+  const truncatedFrom = lines.length > lineLimit ? lines.length : null;
+  return {
+    lines: lines.slice(Math.max(0, lines.length - lineLimit)).map((entry) => truncateSessionLogLine(entry, truncateBytes)),
+    truncatedFrom
+  };
+}
+function matchesSessionLogStream(selectedStream, stream) {
+  return selectedStream === "all" || selectedStream === stream;
+}
+function truncateSessionLogLine(entry, truncateBytes) {
+  return {
+    ...entry,
+    line: truncateTextByBytes(entry.line, truncateBytes)
+  };
+}
+function truncateTextByBytes(value, truncateBytes) {
+  if (truncateBytes <= 0 || Buffer.byteLength(value, "utf8") <= truncateBytes) return value;
+  const suffix = truncateBytes >= 3 ? "..." : "";
+  const budget = Math.max(0, truncateBytes - Buffer.byteLength(suffix, "utf8"));
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, mid), "utf8") <= budget) low = mid;
+    else high = mid - 1;
+  }
+  return `${value.slice(0, low)}${suffix}`;
 }
 
 // src/daemon/handlers/message.ts
@@ -11714,6 +12056,7 @@ var HANDLERS = {
   "session:list": sessionList,
   "session:health:all": sessionHealthAll,
   "session:events": sessionEvents,
+  "session:logs": sessionLogs,
   "message:send": messageSend,
   "message:send-many": messageSendMany,
   "message:peer": messagePeer,

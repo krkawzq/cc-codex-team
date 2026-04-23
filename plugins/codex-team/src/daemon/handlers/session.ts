@@ -1,6 +1,6 @@
 import fs from "node:fs";
 
-import type { AppServerClient } from "../../codex/appServerClient";
+import type { AppServerClient, AppServerLogLine, AppServerLogStream } from "../../codex/appServerClient";
 import type { HandlerFn } from "../dispatch";
 import type { DaemonContext } from "../context";
 import type { IpcRequest } from "../../ipc/protocol";
@@ -50,6 +50,8 @@ import { matchesGlob } from "../../util/glob";
 const attachLocks = new Map<string, Promise<void>>();
 const DEFAULT_SESSION_LIST_LIMIT = 50;
 const LOCAL_SESSION_LIST_CURSOR_PREFIX = "local:";
+const DEFAULT_SESSION_LOG_LINE_LIMIT = 100;
+const DEFAULT_SESSION_LOG_TRUNCATE_BYTES = 2048;
 
 export const sessionNew: HandlerFn = async (ctx, req) => {
   requireUser(ctx, req);
@@ -1646,6 +1648,55 @@ export const sessionEvents: HandlerFn = async (ctx, req, stream) => {
   return { streaming: true };
 };
 
+export const sessionLogs: HandlerFn = async (ctx, req, stream) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "name|thread_id");
+  const flags = asFlags(req);
+  const follow = isTrue(flags["follow"]) || isTrue(flags["f"]);
+  const lineLimit = parseSessionLogsIntFlag(flags["n"], DEFAULT_SESSION_LOG_LINE_LIMIT, "-n", { minimum: 1 });
+  const truncateBytes = parseSessionLogsIntFlag(
+    flags["truncate"],
+    DEFAULT_SESSION_LOG_TRUNCATE_BYTES,
+    "--truncate",
+    { minimum: 0 },
+  );
+  const selectedStream = parseSessionLogsStream(flags["stream"]);
+  const target = await resolveSessionLogsTarget(ctx, user, identifier);
+  const initial = buildSessionLogsResponse(ctx, user, target.rec, selectedStream, lineLimit, truncateBytes);
+
+  if (!follow || !stream || target.rec.state === "crashed") {
+    if (follow && stream) {
+      stream.chunk(initial);
+      stream.end();
+      return { streaming: true };
+    }
+    return initial;
+  }
+
+  const client = target.client;
+  if (!client) {
+    throw new CodexTeamError("session_not_live", `session '${target.rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${target.rec.name}'`);
+  }
+
+  const emitLiveLine = (entry: AppServerLogLine) => {
+    if (!matchesSessionLogStream(selectedStream, entry.stream)) return;
+    stream.chunk(buildSessionLogsIncrement(ctx, user, target.rec, truncateBytes, entry));
+  };
+  const onClose = () => stream.end();
+
+  if (selectedStream === "stderr" || selectedStream === "all") client.on("stderr_line", emitLiveLine);
+  if (selectedStream === "stdout" || selectedStream === "all") client.on("stdout_line", emitLiveLine);
+  client.on("close", onClose);
+  stream.chunk(initial);
+  stream.onClose(() => {
+    client.off("stderr_line", emitLiveLine);
+    client.off("stdout_line", emitLiveLine);
+    client.off("close", onClose);
+  });
+  return { streaming: true };
+};
+
 function buildSessionHealthSnapshot(
   ctx: DaemonContext,
   user: string,
@@ -1891,4 +1942,169 @@ function numericValue(value: unknown): number {
 
 function isSessionEventDeltaType(type: string): boolean {
   return type.endsWith("_delta");
+}
+
+async function resolveSessionLogsTarget(
+  ctx: DaemonContext,
+  user: string,
+  identifier: string,
+): Promise<{ rec: SessionRecord; client: AppServerClient | null }> {
+  const rec = ctx.sessions.get(user, identifier);
+  if (rec) {
+    const client = rec.state === "live" ? ctx.pool.clientForSession(keyFor(user, rec.name)) : null;
+    if (rec.state === "live" && !isClientAlive(client)) {
+      throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
+    }
+    return { rec, client };
+  }
+
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "detached") {
+    const attachTarget = target.name ?? target.threadId;
+    throw new CodexTeamError(
+      "session_not_live",
+      `session '${attachTarget}' is detached; re-attach the session with 'codex-team -b ${user} session attach ${attachTarget}' first`,
+    );
+  }
+
+  const client = ctx.pool.clientForSession(keyFor(user, target.session.name));
+  if (!isClientAlive(client)) {
+    throw new CodexTeamError("session_not_live", `session '${target.session.name}' is unhealthy; run 'codex-team -b ${user} session heal ${target.session.name}'`);
+  }
+  return { rec: target.session, client };
+}
+
+function buildSessionLogsResponse(
+  ctx: DaemonContext,
+  user: string,
+  rec: SessionRecord,
+  selectedStream: AppServerLogStream | "all",
+  lineLimit: number,
+  truncateBytes: number,
+): Record<string, unknown> {
+  const sessionKey = keyFor(user, rec.name);
+  const binding = rec.state === "live" ? ctx.pool.sessionBinding(sessionKey) : null;
+  const client = rec.state === "live" ? ctx.pool.clientForSession(sessionKey) : null;
+  const closed = rec.state === "crashed" ? ctx.pool.closedLogsForSession(sessionKey) : null;
+  const sourceLines = rec.state === "crashed"
+    ? selectStoredSessionLogLines(closed, selectedStream)
+    : selectLiveSessionLogLines(client, selectedStream);
+  const rendered = projectSessionLogLines(sourceLines, lineLimit, truncateBytes);
+
+  const response: Record<string, unknown> = {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    app_server_id: binding?.appServerId ?? closed?.appServerId ?? null,
+    pid: binding?.pid ?? closed?.pid ?? null,
+    lines: rendered.lines,
+    truncated_from: rendered.truncatedFrom,
+  };
+  if (rec.state === "crashed") response.state = "crashed";
+  return response;
+}
+
+function buildSessionLogsIncrement(
+  ctx: DaemonContext,
+  user: string,
+  rec: SessionRecord,
+  truncateBytes: number,
+  entry: AppServerLogLine,
+): Record<string, unknown> {
+  const binding = ctx.pool.sessionBinding(keyFor(user, rec.name));
+  return {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    app_server_id: binding?.appServerId ?? null,
+    pid: binding?.pid ?? null,
+    lines: [truncateSessionLogLine(entry, truncateBytes)],
+    truncated_from: null,
+  };
+}
+
+function parseSessionLogsIntFlag(
+  value: unknown,
+  fallback: number,
+  label: string,
+  options: { minimum: number },
+): number {
+  if (value === undefined) return fallback;
+  const raw = asString(value);
+  if (!raw) throw invalidParams(`${label} requires a value`);
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < options.minimum) {
+    const expectation = options.minimum === 0 ? "a non-negative integer" : "a positive integer";
+    throw invalidParams(`${label} must be ${expectation}`);
+  }
+  return parsed;
+}
+
+function parseSessionLogsStream(value: unknown): AppServerLogStream | "all" {
+  if (value === undefined) return "stderr";
+  const raw = asString(value);
+  if (!raw) throw invalidParams("--stream requires a value");
+  if (raw === "stderr" || raw === "stdout" || raw === "all") return raw;
+  throw invalidParams("--stream must be one of stderr, stdout, or all");
+}
+
+function selectLiveSessionLogLines(
+  client: AppServerClient | null,
+  selectedStream: AppServerLogStream | "all",
+): AppServerLogLine[] {
+  if (!client) return [];
+  if (selectedStream === "stderr") return client.stderrTail(Number.MAX_SAFE_INTEGER);
+  if (selectedStream === "stdout") return client.stdoutTail(Number.MAX_SAFE_INTEGER);
+  return client.logTail("all", Number.MAX_SAFE_INTEGER);
+}
+
+function selectStoredSessionLogLines(
+  snapshot: ReturnType<DaemonContext["pool"]["closedLogsForSession"]>,
+  selectedStream: AppServerLogStream | "all",
+): AppServerLogLine[] {
+  if (!snapshot) return [];
+  if (selectedStream === "stderr") return snapshot.stderrTail;
+  if (selectedStream === "stdout") return snapshot.stdoutTail;
+  return [...snapshot.stderrTail, ...snapshot.stdoutTail]
+    .sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts));
+}
+
+function projectSessionLogLines(
+  lines: AppServerLogLine[],
+  lineLimit: number,
+  truncateBytes: number,
+): { lines: AppServerLogLine[]; truncatedFrom: number | null } {
+  const truncatedFrom = lines.length > lineLimit ? lines.length : null;
+  return {
+    lines: lines
+      .slice(Math.max(0, lines.length - lineLimit))
+      .map((entry) => truncateSessionLogLine(entry, truncateBytes)),
+    truncatedFrom,
+  };
+}
+
+function matchesSessionLogStream(
+  selectedStream: AppServerLogStream | "all",
+  stream: AppServerLogStream,
+): boolean {
+  return selectedStream === "all" || selectedStream === stream;
+}
+
+function truncateSessionLogLine(entry: AppServerLogLine, truncateBytes: number): AppServerLogLine {
+  return {
+    ...entry,
+    line: truncateTextByBytes(entry.line, truncateBytes),
+  };
+}
+
+function truncateTextByBytes(value: string, truncateBytes: number): string {
+  if (truncateBytes <= 0 || Buffer.byteLength(value, "utf8") <= truncateBytes) return value;
+  const suffix = truncateBytes >= 3 ? "..." : "";
+  const budget = Math.max(0, truncateBytes - Buffer.byteLength(suffix, "utf8"));
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, mid), "utf8") <= budget) low = mid;
+    else high = mid - 1;
+  }
+  return `${value.slice(0, low)}${suffix}`;
 }

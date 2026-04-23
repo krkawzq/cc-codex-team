@@ -84,6 +84,16 @@ describe("formatShort", () => {
       },
       "turn-1 completed 1s items=3\nturn-2 running 1s items=2",
     ],
+    [
+      "session:logs",
+      {
+        lines: [
+          { ts: "2026-04-23T00:00:00.000Z", stream: "stderr", line: "boom" },
+          { ts: "2026-04-23T00:00:01.000Z", stream: "stdout", line: "{\"jsonrpc\":\"2.0\"}" },
+        ],
+      },
+      "2026-04-23T00:00:00.000Z stderr boom\n2026-04-23T00:00:01.000Z stdout {\"jsonrpc\":\"2.0\"}",
+    ],
   ])("renders %s compactly", (method, data, expected) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-23T01:00:00.000Z"));

@@ -104,6 +104,8 @@ codex-team daemon logs -n 200 --level debug
 codex-team -b $TOK status
 codex-team -b $TOK session list --format table
 codex-team -b $TOK session health <session>
+codex-team -b $TOK session logs <name> -n 50    # per-session stderr tail
+codex-team -b $TOK session logs <name> --follow # live follow
 
 # recent events
 codex-team -b $TOK cursor save recover-tail

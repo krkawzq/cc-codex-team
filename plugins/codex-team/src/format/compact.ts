@@ -99,6 +99,8 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
       return compactSessionHealthAll(data);
     case "session:events":
       return asObject(data);
+    case "session:logs":
+      return compactSessionLogs(data);
     case "session:heal":
       return compactSessionHeal(data);
     case "message:send":
@@ -250,6 +252,11 @@ function compactSessionContext(data: unknown): Record<string, unknown> {
   const thread = projectThread(value.thread);
   if (Object.keys(thread).length > 0) out.thread = thread;
   return out;
+}
+
+function compactSessionLogs(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  return pickFields(value, ["session", "state", "lines", "truncated_from"]);
 }
 
 function compactSessionList(data: unknown): Record<string, unknown> {

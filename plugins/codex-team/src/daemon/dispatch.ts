@@ -35,6 +35,7 @@ import {
   sessionUnarchive,
   sessionHealthAll,
   sessionEvents,
+  sessionLogs,
 } from "./handlers/session";
 import {
   messageSend,
@@ -104,6 +105,7 @@ const HANDLERS: Record<string, HandlerFn> = {
   "session:list": sessionList,
   "session:health:all": sessionHealthAll,
   "session:events": sessionEvents,
+  "session:logs": sessionLogs,
 
   "message:send": messageSend,
   "message:send-many": messageSendMany,

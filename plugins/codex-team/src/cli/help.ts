@@ -994,6 +994,62 @@ const sessionGroup: HelpNode = {
       needs_bearer: true,
     }),
     leaf({
+      name: "logs",
+      summary: "Show the recent app-server stdout/stderr tail for one session.",
+      usage: "codex-team -b <token> session logs <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET },
+      ],
+      flags: [
+        {
+          long: "-n",
+          type: "int",
+          default: "100",
+          required: false,
+          description: "Return the last N captured log lines.",
+        },
+        {
+          long: "--follow",
+          short: "-f",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Keep streaming new log lines until the CLI exits.",
+        },
+        {
+          long: "--stream",
+          type: "enum",
+          default: "stderr",
+          required: false,
+          description: "Choose stderr, stdout, or all captured streams.",
+        },
+        {
+          long: "--truncate",
+          type: "int",
+          default: "2048",
+          required: false,
+          description: "Clip each log line to this many bytes; use 0 to disable clipping.",
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print '<ts> <stream> <line>' per log line.",
+        },
+      ],
+      examples: [
+        "codex-team -b $TOKEN session logs audit -n 50",
+        "codex-team -b $TOKEN session logs audit --stream all",
+        "codex-team -b $TOKEN session logs audit --follow --short",
+      ],
+      notes: [
+        "Detached sessions return session_not_live; re-attach them first.",
+        "Crashed sessions return the last captured tail with state=crashed.",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
       name: "heal",
       summary: "Re-attach a crashed or dead live session to a fresh app-server.",
       usage: "codex-team -b <token> session heal <name|thread_id> [flags]",
