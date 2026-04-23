@@ -9739,7 +9739,7 @@ function createRenderContext(options = {}) {
   const normalized = normalizeTruncateOption(options.truncate);
   return {
     inlineMaxBytes: INLINE_MAX_BYTES,
-    truncateBytes: normalized === 0 ? null : normalized ?? INLINE_MAX_BYTES
+    truncateBytes: normalized === 0 ? null : normalized === null ? INLINE_MAX_BYTES : normalized
   };
 }
 function normalizeTruncateOption(value) {
@@ -10337,26 +10337,38 @@ var sessionFork = async (ctx, req) => {
   const newNameRaw = asPositionalOptional(req, 1);
   const flags = asFlags(req);
   const atTurn = asString5(flags["at-turn"]);
-  const source = ctx.sessions.get(user, identifier);
-  if (!source) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+  const source = await resolveSessionTarget(ctx, user, identifier);
+  const sourceName = resolveRollbackSessionName(source, ctx, user);
+  const sourceRecord = source.kind === "live" ? source.session : null;
+  const sourceThread = source.kind === "live" ? { id: source.threadId, name: source.name, cwd: source.session.cwd } : source.thread;
+  const sourceDefaults = source.kind === "live" ? {
+    model: source.session.model,
+    cwd: source.session.cwd,
+    sandbox: source.session.sandbox,
+    approval: source.session.approval,
+    effort: source.session.effort,
+    profile: source.session.profile,
+    experimentalTools: source.session.experimental_tools ?? [],
+    autoApprovePatterns: validateSessionAutoApprovePatterns(source.session.autoApprovePatterns ?? [])
+  } : resolveRollbackDefaults(ctx, sourceRecord, sourceThread);
   let newName = newNameRaw ?? generateSessionName();
   if (newNameRaw) validateSessionName(newNameRaw);
   while (ctx.sessions.get(user, newName)) newName = generateSessionName();
-  const autoApprovePatterns = validateSessionAutoApprovePatterns(source.autoApprovePatterns ?? []);
-  const sourceCwd = source.cwd ? resolveAndValidatePersistedCwd(source.cwd, {
+  const sourceCwd = source.kind === "live" && sourceDefaults.cwd ? resolveAndValidatePersistedCwd(sourceDefaults.cwd, {
     label: "source session's cwd",
     missing: (cwd) => `source session's cwd '${cwd}' does not exist`,
     notDirectory: (cwd) => `source session's cwd '${cwd}' is no longer a directory`,
     inaccessible: (cwd) => `source session's cwd '${cwd}' is not accessible (permission denied or similar)`
-  }) : void 0;
+  }) : sourceDefaults.cwd;
+  const sourceClient = await clientForThreadTarget(ctx, user, source);
   const client = await ctx.pool.acquire(
     user,
     keyFor(user, newName),
-    buildExperimentalToolAppServerOptions(source.experimental_tools ?? [])
+    buildExperimentalToolAppServerOptions(sourceDefaults.experimentalTools)
   );
   let forkResult;
   try {
-    forkResult = await threadFork(client, source.thread_id, atTurn ?? void 0, ctx.retryOptions());
+    forkResult = await threadFork(sourceClient, source.threadId, atTurn ?? void 0, ctx.retryOptions());
   } catch (e) {
     ctx.pool.release(keyFor(user, newName));
     throw e;
@@ -10371,33 +10383,33 @@ var sessionFork = async (ctx, req) => {
     name: newName,
     thread_id: newThreadId,
     state: "live",
-    model: source.model,
+    model: sourceDefaults.model,
     cwd: sourceCwd,
-    sandbox: source.sandbox,
-    approval: source.approval,
-    effort: source.effort,
-    profile: source.profile,
-    experimental_tools: source.experimental_tools,
-    autoApprovePatterns,
+    sandbox: sourceDefaults.sandbox,
+    approval: sourceDefaults.approval,
+    effort: sourceDefaults.effort,
+    profile: sourceDefaults.profile,
+    experimental_tools: sourceDefaults.experimentalTools.length > 0 ? sourceDefaults.experimentalTools : void 0,
+    autoApprovePatterns: sourceDefaults.autoApprovePatterns,
     created_at: now,
     last_active_at: now,
     turn_count: 0,
     ...sessionRuntimeDefaults()
   };
   ctx.sessions.add(user, record);
-  return { session: record, forked_from: source.name, at_turn: atTurn };
+  return { session: record, forked_from: sourceName, at_turn: atTurn };
 };
 var sessionInfo = async (ctx, req) => {
   requireUser(ctx, req);
   const user = req.bearer;
   const identifier = asPositional(req, 0, "session");
-  const rec = ctx.sessions.get(user, identifier);
-  if (rec) {
-    return { session: rec };
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "live") {
+    return { session: target.session };
   }
   try {
     const client = await ctx.pool.acquireForAdhoc(user);
-    const result = await threadRead(client, identifier, ctx.retryOptions());
+    const result = await threadRead(client, target.threadId, ctx.retryOptions());
     return { session: null, thread: result.thread, live: false };
   } catch (e) {
     throw new CodexTeamError("session_not_found", `session '${identifier}' not found: ${e.message}`);
@@ -10412,30 +10424,20 @@ var sessionContext = async (ctx, req) => {
   if (format !== "json" && format !== "markdown") {
     throw invalidParams(`--format must be json or markdown`);
   }
-  const rec = ctx.sessions.get(user, identifier);
-  let threadId;
-  let client;
-  if (rec) {
-    threadId = rec.thread_id;
-    client = ctx.pool.clientForSession(keyFor(user, rec.name));
-    if (!client) client = await ctx.pool.acquireForAdhoc(user);
-  } else {
-    if (!looksLikeThreadId(identifier)) {
-      throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
-    }
-    threadId = identifier;
-    client = await ctx.pool.acquireForAdhoc(user);
-  }
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  const threadId = target.threadId;
+  let client = target.kind === "live" ? ctx.pool.clientForSession(keyFor(user, target.session.name)) : null;
+  if (!client) client = await ctx.pool.acquireForAdhoc(user);
   const result = await threadRead(client, threadId, ctx.retryOptions());
   const response = {
-    session: rec?.name ?? null,
+    session: target.kind === "live" ? target.session.name : target.name ?? null,
     thread_id: threadId,
     thread: result.thread
   };
   if (format === "markdown") {
     response.format = "markdown";
     response.markdown = renderContext({
-      session: rec?.name ?? null,
+      session: target.kind === "live" ? target.session.name : target.name ?? null,
       thread_id: threadId,
       thread: result.thread
     });
@@ -10505,7 +10507,8 @@ var sessionList = async (ctx, req) => {
     pageSize: limit,
     includeArchived: archivedMode !== "exclude"
   }, ctx.retryOptions());
-  const sessions = result.data.map((thread) => decorateThreadSession(ctx, user, thread)).filter((session) => matchesOwnerFilter(session, ownerFilter, user)).filter((session) => matchesArchivedMode(session, archivedMode)).filter((session) => matchesStateFilter(session, stateFilter)).map(stripInternalSessionMetadata);
+  const ownedThreadIds = await listUserOwnedThreadIds(ctx, user);
+  const sessions = result.data.filter((thread) => isUserVisibleThread(ctx, user, thread, ownedThreadIds)).map((thread) => decorateThreadSession(ctx, user, thread, ownedThreadIds)).filter((session) => matchesOwnerFilter(session, ownerFilter, user)).filter((session) => matchesArchivedMode(session, archivedMode)).filter((session) => matchesStateFilter(session, stateFilter)).map(stripInternalSessionMetadata);
   Object.assign(response, {
     sessions,
     next_cursor: result.nextCursor
@@ -10555,8 +10558,12 @@ var sessionHeal = async (ctx, req) => {
   const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
   const force = isTrue2(flags["force"]);
-  const rec = ctx.sessions.get(user, identifier);
-  if (!rec) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "detached") {
+    const attachTarget = target.name ?? target.threadId;
+    throw new CodexTeamError("session_not_live", detachedAttachMessage(user, attachTarget));
+  }
+  const rec = target.session;
   if (rec.state !== "live" && rec.state !== "crashed") {
     throw invalidParams(`session '${rec.name}' is in unexpected state '${String(rec.state)}'`);
   }
@@ -10977,7 +10984,7 @@ function decorateLiveSession(ctx, owner, rec) {
     model: rec.model ?? null
   };
 }
-function decorateThreadSession(ctx, currentUser, thread) {
+function decorateThreadSession(ctx, currentUser, thread, ownedThreadIds = /* @__PURE__ */ new Set()) {
   const threadId = typeof thread.id === "string" ? thread.id : null;
   const live = threadId ? ctx.sessions.findLiveAnywhere(threadId) : null;
   const rec = live?.record ?? null;
@@ -11008,7 +11015,14 @@ function decorateThreadSession(ctx, currentUser, thread) {
     out.current_turn_id = null;
   }
   if (owner) out.owner = owner;
+  else if (threadId && ownedThreadIds.has(threadId)) out.owner = currentUser;
   return out;
+}
+function isUserVisibleThread(ctx, currentUser, thread, ownedThreadIds) {
+  if (typeof thread.id !== "string" || thread.id.length === 0) return false;
+  const live = ctx.sessions.findLiveAnywhere(thread.id);
+  if (live) return true;
+  return ownedThreadIds.has(thread.id);
 }
 function deriveBusyInfo(ctx, owner, rec) {
   const sessionKey = keyFor(owner, rec.name);
@@ -11051,6 +11065,9 @@ function matchesOwnerFilter(session, ownerFilter, currentUser) {
     return owner === null || owner === currentUser;
   }
   return ownerFilter.token === currentUser ? owner === null || owner === currentUser : owner === ownerFilter.token;
+}
+function detachedAttachMessage(user, attachTarget) {
+  return `session '${attachTarget}' is detached; re-attach the session with 'codex-team -b ${user} session attach ${attachTarget}' first`;
 }
 function paginateLocalSessionRows(rows, limit, cursor) {
   const start = decodeLocalSessionListCursor(cursor);
@@ -11389,6 +11406,8 @@ async function readDetachedThreadById(ctx, user, threadId) {
   }
 }
 async function findDetachedThreadByName(ctx, user, name) {
+  const ownedThreadIds = await listUserOwnedThreadIds(ctx, user);
+  if (ownedThreadIds.size === 0) return null;
   const client = await ctx.pool.acquireForAdhoc(user);
   let cursor;
   let match = null;
@@ -11399,6 +11418,7 @@ async function findDetachedThreadByName(ctx, user, name) {
       ...cursor ? { cursor } : {}
     }, ctx.retryOptions());
     for (const thread of page.data) {
+      if (typeof thread.id !== "string" || !ownedThreadIds.has(thread.id)) continue;
       if (asString5(thread.name) !== name) continue;
       if (match) return "ambiguous";
       match = thread;
@@ -11406,6 +11426,30 @@ async function findDetachedThreadByName(ctx, user, name) {
     cursor = page.nextCursor ?? void 0;
   } while (cursor);
   return match;
+}
+async function listUserOwnedThreadIds(ctx, user) {
+  const owned = /* @__PURE__ */ new Set();
+  if (typeof ctx.sessions.listAll === "function") {
+    for (const rec of ctx.sessions.listAll(user)) {
+      if (typeof rec.thread_id === "string" && rec.thread_id.length > 0) {
+        owned.add(rec.thread_id);
+      }
+    }
+  }
+  if (!ctx.events || typeof ctx.events.listSince !== "function") return owned;
+  const listed = await ctx.events.listSince(user, null, { includeDelta: true }).catch(() => null);
+  if (!listed?.ok) return owned;
+  for (const event of listed.events) {
+    if (typeof event.thread_id !== "string" || event.thread_id.length === 0) continue;
+    if (event.type === "session.seized") {
+      owned.delete(event.thread_id);
+      continue;
+    }
+    if (event.type === SESSION_CLOSED_EVENT_TYPE) {
+      owned.add(event.thread_id);
+    }
+  }
+  return owned;
 }
 var sessionHealthAll = async (ctx, req) => {
   requireUser(ctx, req);
@@ -11726,7 +11770,7 @@ async function resolveSessionLogsTarget(ctx, user, identifier) {
     const attachTarget = target.name ?? target.threadId;
     throw new CodexTeamError(
       "session_not_live",
-      `session '${attachTarget}' is detached; re-attach the session with 'codex-team -b ${user} session attach ${attachTarget}' first`
+      detachedAttachMessage(user, attachTarget)
     );
   }
   const client = ctx.pool.clientForSession(keyFor(user, target.session.name));
@@ -11985,7 +12029,8 @@ var messageAnswer = async (ctx, req) => {
   return { session: rec.name, request_id: requestId, responded: true, response };
 };
 var messageHistory = async (ctx, req) => {
-  const { rec, client } = await resolveLive(ctx, req);
+  const user = requireUser2(ctx, req);
+  const identifier = asPositional2(req, 0, "session");
   const limitRaw = getFlag2(req, "limit");
   const limit = typeof limitRaw === "string" ? parseInt(limitRaw, 10) : typeof limitRaw === "number" ? limitRaw : 50;
   const sinceRaw = asString6(getFlag2(req, "since"));
@@ -11994,6 +12039,11 @@ var messageHistory = async (ctx, req) => {
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
   const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 50;
   const relativeSince = sinceRaw && /^-\d+$/.test(sinceRaw) ? Math.max(1, Math.floor(Math.abs(Number(sinceRaw)))) : null;
+  const detached = await resolveDetachedReadableTarget(ctx, user, identifier);
+  if (detached) {
+    return await renderDetachedHistory(ctx, user, detached, safeLimit, relativeSince, sinceRaw, format, truncate);
+  }
+  const { rec, client } = await resolveLiveTarget(ctx, user, identifier);
   const result = relativeSince ? await listTurnsFromRelativeOffset(client, rec.thread_id, relativeSince, safeLimit, ctx.retryOptions()) : await threadTurnsList(client, rec.thread_id, {
     limit: safeLimit,
     cursor: sinceRaw ?? void 0,
@@ -12022,13 +12072,22 @@ var messageHistory = async (ctx, req) => {
   return response;
 };
 var messageTail = async (ctx, req, stream) => {
-  const { user, rec, client } = await resolveLive(ctx, req);
+  const user = requireUser2(ctx, req);
+  const identifier = asPositional2(req, 0, "session");
   const nRaw = getFlag2(req, "n");
   const n = typeof nRaw === "string" ? parseInt(nRaw, 10) : typeof nRaw === "number" ? nRaw : 3;
   const format = asString6(getFlag2(req, "format")) ?? "json";
   const truncate = parseTruncateFlag(getFlag2(req, "truncate"));
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
   const follow = isTrue3(getFlag2(req, "follow")) || isTrue3(getFlag2(req, "f"));
+  const detached = await resolveDetachedReadableTarget(ctx, user, identifier);
+  if (detached) {
+    if (follow) {
+      throw new CodexTeamError("session_not_live", detachedAttachMessage(user, detached.session));
+    }
+    return await renderDetachedTail(ctx, user, detached, Number.isFinite(n) ? Math.max(1, Math.floor(n)) : 3, format, truncate);
+  }
+  const { rec, client } = await resolveLiveTarget(ctx, user, identifier);
   const snapshot = async () => {
     const result = await threadTurnsList(client, rec.thread_id, {
       limit: Number.isFinite(n) ? Math.max(1, Math.floor(n)) : 3,
@@ -12096,6 +12155,74 @@ var messageWait = async (ctx, req) => {
   }
   return await waitForAnySession(ctx, user, records, timeoutSeconds);
 };
+async function resolveDetachedReadableTarget(ctx, user, identifier) {
+  const rec = ctx.sessions.get(user, identifier);
+  if (rec) return null;
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "live") return null;
+  return {
+    session: target.name ?? identifier,
+    threadId: target.threadId
+  };
+}
+async function renderDetachedHistory(ctx, user, target, limit, relativeSince, sinceRaw, format, truncate) {
+  if (sinceRaw && !relativeSince) {
+    throw new CodexTeamError("session_not_live", detachedAttachMessage(user, target.session));
+  }
+  const thread = await readDetachedThreadSnapshot(ctx, user, target);
+  const turns = selectDetachedTurns(thread, limit, relativeSince);
+  const response = {
+    session: target.session,
+    thread_id: target.threadId,
+    turns,
+    next_cursor: null,
+    format
+  };
+  if (relativeSince) response.relative_since = relativeSince;
+  if (format === "markdown") {
+    response.markdown = renderHistory({
+      session: target.session,
+      thread_id: target.threadId,
+      turns,
+      nextCursor: null
+    }, { truncate });
+  }
+  return response;
+}
+async function renderDetachedTail(ctx, user, target, limit, format, truncate) {
+  const thread = await readDetachedThreadSnapshot(ctx, user, target);
+  const turns = selectDetachedTurns(thread, limit, null);
+  const response = {
+    session: target.session,
+    turns,
+    format,
+    follow: false,
+    thread
+  };
+  if (format === "markdown") {
+    response.markdown = renderTail({
+      session: target.session,
+      thread_id: target.threadId,
+      turns,
+      thread,
+      follow: false
+    }, { truncate });
+  }
+  return response;
+}
+async function readDetachedThreadSnapshot(ctx, user, target) {
+  const client = await ctx.pool.acquireForAdhoc(user);
+  try {
+    return (await threadRead(client, target.threadId, ctx.retryOptions())).thread;
+  } catch {
+    throw new CodexTeamError("session_not_live", detachedAttachMessage(user, target.session));
+  }
+}
+function selectDetachedTurns(thread, limit, relativeSince) {
+  const snapshotTurns = Array.isArray(thread.turns) ? thread.turns.filter((turn) => Boolean(turn) && typeof turn === "object" && typeof turn.id === "string") : [];
+  const offset = relativeSince ? Math.max(0, relativeSince - 1) : 0;
+  return snapshotTurns.slice(offset, offset + limit);
+}
 async function resolveLive(ctx, req) {
   const user = requireUser2(ctx, req);
   const identifier = asPositional2(req, 0, "session");
