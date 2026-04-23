@@ -2312,13 +2312,22 @@ var HELP_TREE = {
           default: "false",
           required: false,
           description: "Print one summary line with verdict, failed checks, and warnings."
+        },
+        {
+          long: "--json",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Emit one JSON object with verdict, checks, and exit_code for automation."
         }
       ],
       examples: [
         "codex-team doctor",
+        "codex-team doctor --json",
         "codex-team doctor --short"
       ],
       notes: [
+        "Human-readable by default. Use --json for programmatic consumption; --short stays plain-text and cannot be combined with --json.",
         "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
         "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness."
       ],
@@ -3658,6 +3667,7 @@ function hasOwn2(record, key) {
 // src/cli/doctor.ts
 var import_node_fs7 = __toESM(require("fs"));
 var import_node_net3 = __toESM(require("net"));
+var import_node_os2 = __toESM(require("os"));
 var import_node_path7 = __toESM(require("path"));
 var import_node_child_process2 = require("child_process");
 
@@ -3893,7 +3903,9 @@ function buildDoctorContext(options = {}) {
     sockPath,
     pidPath: pidFilePath(dataDir),
     launcherPath: import_node_path7.default.join(options.packageRoot ?? PACKAGE_ROOT, "bin", "codex-team"),
-    pathEnv: options.pathEnv ?? process.env.PATH
+    pathEnv: options.pathEnv ?? process.env.PATH,
+    pluginRoot: options.pluginRoot ?? process.env.CLAUDE_PLUGIN_ROOT,
+    invokedAs: options.invokedAs ?? process.argv[1]
   };
 }
 function checkNode() {
@@ -3911,21 +3923,49 @@ function checkCodexBin(_ctx, deps = DEFAULT_DEPS) {
   });
   if (result.error) {
     const err2 = result.error;
-    if (err2.code === "ENOENT") return fail("codex", "codex binary not found on PATH");
-    return fail("codex", `codex --version errored: ${err2.message}`);
+    if (err2.code === "ENOENT") {
+      return fail("codex", "codex binary not found on PATH", {
+        name: "codex_binary",
+        detail: "codex binary not found on PATH"
+      });
+    }
+    return fail("codex", `codex --version errored: ${err2.message}`, {
+      name: "codex_binary",
+      detail: `codex --version errored: ${err2.message}`
+    });
   }
   if (result.status !== 0) {
-    return fail("codex", `codex --version errored: ${formatSpawnFailure(result)}`);
+    return fail("codex", `codex --version errored: ${formatSpawnFailure(result)}`, {
+      name: "codex_binary",
+      detail: `codex --version errored: ${formatSpawnFailure(result)}`
+    });
   }
   const version2 = firstLine(result.stdout) || firstLine(result.stderr) || "unknown";
-  return ok2("codex", `codex=${version2}`);
+  return ok2("codex", `codex=${version2}`, {
+    name: "codex_binary",
+    detail: `codex=${version2}`
+  });
 }
 function checkLauncherOnPath(ctx, deps = DEFAULT_DEPS) {
+  const bundledLauncher = resolveBundledPluginLauncher(ctx);
+  if (bundledLauncher) {
+    return ok2("path", `launcher=${bundledLauncher} (plugin mode)`, {
+      name: "launcher_on_path",
+      detail: `launcher=${bundledLauncher} (plugin mode)`
+    });
+  }
   const resolved = resolveOnPath("codex-team", ctx.pathEnv, deps.fs);
   if (resolved) {
-    return ok2("path", `codex-team=${resolved}`);
+    return ok2("path", `codex-team=${resolved}`, {
+      name: "launcher_on_path",
+      detail: `codex-team=${resolved}`
+    });
   }
-  return warn("path", `codex-team not on PATH; use ${ctx.launcherPath}`);
+  return warn("path", `codex-team not on PATH; use ${ctx.launcherPath}`, {
+    name: "launcher_on_path",
+    detail: "codex-team not on PATH",
+    hint: `use ${ctx.launcherPath}`
+  });
 }
 function checkDataDirWritable(ctx, deps = DEFAULT_DEPS) {
   const testPath = import_node_path7.default.join(ctx.dataDir, ".doctor-write-test");
@@ -3933,34 +3973,68 @@ function checkDataDirWritable(ctx, deps = DEFAULT_DEPS) {
     deps.fs.mkdirSync(ctx.dataDir, { recursive: true });
     deps.fs.writeFileSync(testPath, "ok");
     deps.fs.unlinkSync(testPath);
-    return ok2("data_dir", `data_dir=${ctx.dataDir} writable`);
+    return ok2("data_dir", `data_dir=${ctx.dataDir} writable`, {
+      name: "data_dir_writable",
+      detail: `data_dir=${ctx.dataDir} writable`
+    });
   } catch (e) {
     try {
       deps.fs.unlinkSync(testPath);
     } catch {
     }
-    return fail("data_dir", `data_dir not writable: ${ctx.dataDir}`);
+    const error = e;
+    const hint = shouldSuggestWritableTmpDir(error.code) ? `Try: CODEX_TEAM_DATA_DIR=${suggestWritableTmpDir()} codex-team doctor` : void 0;
+    return fail("data_dir", `data_dir=${ctx.dataDir} not writable`, {
+      name: "data_dir_writable",
+      detail: `${ctx.dataDir} not writable`,
+      hint,
+      showHintInText: Boolean(hint)
+    });
   }
 }
 async function checkSocketBind(ctx, deps = DEFAULT_DEPS) {
-  const result = await probeSocketBind(ctx.sockPath, {
-    fs: deps.fs,
-    createServer: deps.createServer
-  });
+  let result;
+  try {
+    result = await probeSocketBind(ctx.sockPath, {
+      fs: deps.fs,
+      createServer: deps.createServer
+    });
+  } catch (e) {
+    const error = e;
+    const code = error.code ?? "UNKNOWN";
+    return fail("socket_bind", `socket_bind ${code} - probe setup failed: ${error.message}`, {
+      name: "socket_bind",
+      detail: `socket_bind ${code} - probe setup failed: ${error.message}`
+    });
+  }
   if (!result.ok) {
     const code = result.error?.code ?? "UNKNOWN";
     if (code === "EPERM" || code === "EACCES") {
-      return fail("socket_bind", `socket_bind ${code} - sandbox forbids listen(); codex-team won't work here`);
+      return fail("socket_bind", `socket_bind ${code} - sandbox forbids listen()`, {
+        name: "socket_bind",
+        detail: `socket_bind ${code} - sandbox forbids listen()`,
+        hint: "Hint: no workaround here; this environment cannot host the daemon. Sanity check: run `codex-team version`.",
+        showHintInText: true
+      });
     }
-    return fail("socket_bind", `socket_bind ${code} - listen() failed: ${result.error?.message ?? "unknown error"}`);
+    return fail("socket_bind", `socket_bind ${code} - listen() failed: ${result.error?.message ?? "unknown error"}`, {
+      name: "socket_bind",
+      detail: `socket_bind ${code} - listen() failed: ${result.error?.message ?? "unknown error"}`
+    });
   }
-  return ok2("socket_bind", "socket_bind permitted");
+  return ok2("socket_bind", "socket_bind permitted", {
+    name: "socket_bind",
+    detail: "socket_bind permitted"
+  });
 }
 function checkDaemonPid(ctx, deps = DEFAULT_DEPS) {
   const record = readPidRecord(ctx.pidPath, deps.fs);
   if (!record) {
     return {
-      ...ok2("daemon_pid", "daemon not running (will auto-spawn on first `-b` call)"),
+      ...ok2("daemon_pid", "daemon not running (will auto-spawn on first `-b` call)", {
+        name: "daemon_pid",
+        detail: "daemon not running (will auto-spawn on first `-b` call)"
+      }),
       daemonState: "not_running",
       pid: null
     };
@@ -3969,40 +4043,68 @@ function checkDaemonPid(ctx, deps = DEFAULT_DEPS) {
   const isDaemon = alive && deps.isLikelyCodexTeamDaemonProcess(record.pid);
   if (isDaemon) {
     return {
-      ...ok2("daemon_pid", `daemon running, pid=${record.pid}`),
+      ...ok2("daemon_pid", `daemon running, pid=${record.pid}`, {
+        name: "daemon_pid",
+        detail: `daemon running, pid=${record.pid}`
+      }),
       daemonState: "running",
       pid: record.pid
     };
   }
   const reason = alive ? `pid ${record.pid} is not a codex-team daemon` : `pid ${record.pid} is not running`;
   return {
-    ...warn("daemon_pid", `stale pidfile: ${reason}. Safe to remove manually: \`rm ${ctx.pidPath}\``),
+    ...warn("daemon_pid", `stale pidfile: ${reason}`, {
+      name: "daemon_pid",
+      detail: `stale pidfile: ${reason}`,
+      hint: "Hint: the next `codex-team -b <token> ...` call auto-cleans stale daemon.pid and daemon.sock when needed; no manual `rm` is required.",
+      showHintInText: true
+    }),
     daemonState: "not_running",
     pid: record.pid
   };
 }
 async function checkDaemonSocket(ctx, pidResult, deps = DEFAULT_DEPS) {
   if (pidResult.daemonState !== "running") {
-    return skip("daemon_socket", "daemon_socket (daemon not running)");
+    return skip("daemon_socket", "daemon_socket (daemon not running)", {
+      name: "daemon_socket",
+      detail: "daemon_socket (daemon not running)"
+    });
   }
   const result = await connectSockOnce(ctx.sockPath, 2e3, deps.createConnection);
   if (result.ok) {
-    return ok2("daemon_socket", "daemon_socket reachable");
+    return ok2("daemon_socket", "daemon_socket reachable", {
+      name: "daemon_socket",
+      detail: "daemon_socket reachable"
+    });
   }
   const code = result.code ?? "UNKNOWN";
-  return fail("daemon_socket", `daemon_socket ${code} - ${interpretSocketConnectError(code, result.message)}`);
+  return fail("daemon_socket", `daemon_socket ${code} - ${interpretSocketConnectError(code, result.message)}`, {
+    name: "daemon_socket",
+    detail: `daemon_socket ${code} - ${interpretSocketConnectError(code, result.message)}`
+  });
 }
 function checkDistFreshness(ctx, deps = DEFAULT_DEPS) {
   const distPath = import_node_path7.default.join(ctx.packageRoot, "dist", "main.js");
   const distStat = statIfExists(distPath, deps.fs);
   if (!distStat) {
-    return warn("dist", "dist missing; run `npm run build` in plugins/codex-team");
+    return warn("dist", "dist missing; run `npm run build` in plugins/codex-team", {
+      name: "dist_freshness",
+      detail: "dist missing",
+      hint: "run `npm run build` in plugins/codex-team"
+    });
   }
   const sourceNewest = newestMtime(import_node_path7.default.join(ctx.packageRoot, "src"), deps.fs);
   if (sourceNewest !== null && sourceNewest > distStat.mtimeMs) {
-    return warn("dist", "source newer than dist; run `npm run build` in plugins/codex-team");
+    return warn("dist", "source newer than dist; run `npm run build` in plugins/codex-team", {
+      name: "dist_freshness",
+      detail: "source newer than dist",
+      hint: "run `npm run build` in plugins/codex-team"
+    });
   }
-  return ok2("dist", "dist current");
+  return ok2("dist", "dist current", {
+    name: "dist_freshness",
+    detail: "dist current"
+  });
 }
 async function runDoctor(options = {}, deps = DEFAULT_DEPS) {
   const ctx = buildDoctorContext(options);
@@ -4025,9 +4127,30 @@ async function runDoctor(options = {}, deps = DEFAULT_DEPS) {
 `);
     return exitCodeForVerdict(verdict);
   }
+  if (options.json) {
+    write(`${JSON.stringify({
+      ok: true,
+      data: {
+        verdict,
+        checks: results.map((result) => ({
+          name: result.name,
+          status: renderStatus(result.status),
+          detail: result.detail,
+          ...result.hint ? { hint: result.hint } : {}
+        })),
+        exit_code: exitCodeForVerdict(verdict)
+      }
+    })}
+`);
+    return exitCodeForVerdict(verdict);
+  }
   for (const result of results) {
     write(`[${renderStatus(result.status)}] ${result.message}
 `);
+    if (result.showHintInText && result.hint) {
+      write(`       ${result.hint}
+`);
+    }
   }
   write(`=== ${verdict} ===
 `);
@@ -4060,17 +4183,67 @@ function renderStatus(status2) {
       return "OK";
   }
 }
-function ok2(id, message) {
-  return { id, status: "ok", message };
+function ok2(id, message, options = {}) {
+  return {
+    id,
+    name: options.name ?? id,
+    status: "ok",
+    message,
+    detail: options.detail ?? message,
+    hint: options.hint,
+    showHintInText: options.showHintInText
+  };
 }
-function warn(id, message) {
-  return { id, status: "warn", message };
+function warn(id, message, options = {}) {
+  return {
+    id,
+    name: options.name ?? id,
+    status: "warn",
+    message,
+    detail: options.detail ?? message,
+    hint: options.hint,
+    showHintInText: options.showHintInText
+  };
 }
-function fail(id, message) {
-  return { id, status: "fail", message };
+function fail(id, message, options = {}) {
+  return {
+    id,
+    name: options.name ?? id,
+    status: "fail",
+    message,
+    detail: options.detail ?? message,
+    hint: options.hint,
+    showHintInText: options.showHintInText
+  };
 }
-function skip(id, message) {
-  return { id, status: "skip", message };
+function skip(id, message, options = {}) {
+  return {
+    id,
+    name: options.name ?? id,
+    status: "skip",
+    message,
+    detail: options.detail ?? message,
+    hint: options.hint,
+    showHintInText: options.showHintInText
+  };
+}
+function resolveBundledPluginLauncher(ctx) {
+  if (!ctx.pluginRoot || !ctx.invokedAs) return null;
+  const pluginRoot = import_node_path7.default.resolve(ctx.pluginRoot, "plugins", "codex-team");
+  const invokedAs = import_node_path7.default.resolve(ctx.invokedAs);
+  const relative = import_node_path7.default.relative(pluginRoot, invokedAs);
+  if (relative === "" || !relative.startsWith("..") && !import_node_path7.default.isAbsolute(relative)) {
+    return invokedAs;
+  }
+  return null;
+}
+function shouldSuggestWritableTmpDir(code) {
+  return code === "EROFS" || code === "EACCES" || code === "ENOENT";
+}
+function suggestWritableTmpDir() {
+  const baseTmp = process.env.TMPDIR?.trim() || import_node_os2.default.tmpdir();
+  const userLabel = typeof process.getuid === "function" ? String(process.getuid()) : process.env.USER?.trim() || process.env.USERNAME?.trim() || "data";
+  return import_node_path7.default.join(baseTmp, `codex-team-${userLabel}`);
 }
 function resolveOnPath(command, pathEnv, doctorFs) {
   const segments = (pathEnv ?? "").split(import_node_path7.default.delimiter).filter(Boolean);
@@ -4226,9 +4399,14 @@ async function runCli(argv) {
   }
   const effectiveMethod = resolveMethod(method, parsed);
   const short = truthy(parsed.flags.short);
+  const json = method === "doctor" && parsed.flags.json !== void 0;
   const format = flagString(parsed.flags.format);
   if (short && !supportsShort(effectiveMethod)) {
     process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
+    return 1;
+  }
+  if (method === "doctor" && short && json) {
+    process.stdout.write(JSON.stringify(err("invalid_params", "--short and --json are mutually exclusive")) + "\n");
     return 1;
   }
   if (method === "doctor" && truthy(parsed.flags.full)) {
@@ -4241,7 +4419,7 @@ async function runCli(argv) {
   }
   const sockPath = parsed.daemonSock || defaultSockPath();
   if (method === "doctor") {
-    return await runDoctor({ short, sockPath });
+    return await runDoctor({ short, json, sockPath });
   }
   if (method === "version") {
     return await runVersion(sockPath);
@@ -6226,7 +6404,7 @@ function serializeEventFile(buf) {
 
 // src/daemon/cursors.ts
 var import_node_fs12 = __toESM(require("fs"));
-var import_node_os2 = __toESM(require("os"));
+var import_node_os3 = __toESM(require("os"));
 var import_node_path12 = __toESM(require("path"));
 var import_promises2 = require("timers/promises");
 var CURSOR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -6517,7 +6695,7 @@ function makeCursorLockRecord() {
   return {
     pid: process.pid,
     started_at: (/* @__PURE__ */ new Date()).toISOString(),
-    host: import_node_os2.default.hostname(),
+    host: import_node_os3.default.hostname(),
     nonce: Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
   };
 }

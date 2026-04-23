@@ -75,6 +75,7 @@ describe("renderHelp", () => {
 
     expect(help).toContain("codex-team doctor");
     expect(help).toContain("--short");
+    expect(help).toContain("--json");
     expect(help).toContain("node version");
     expect(help).toContain("codex binary");
     expect(help).toContain("plugin launcher");

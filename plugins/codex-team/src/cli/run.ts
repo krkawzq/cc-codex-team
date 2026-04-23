@@ -59,9 +59,14 @@ export async function runCli(argv: string[]): Promise<number> {
   }
   const effectiveMethod = resolveMethod(method, parsed);
   const short = truthy(parsed.flags.short);
+  const json = method === "doctor" && parsed.flags.json !== undefined;
   const format = flagString(parsed.flags.format);
   if (short && !supportsShort(effectiveMethod)) {
     process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
+    return 1;
+  }
+  if (method === "doctor" && short && json) {
+    process.stdout.write(JSON.stringify(err("invalid_params", "--short and --json are mutually exclusive")) + "\n");
     return 1;
   }
   if (method === "doctor" && truthy(parsed.flags.full)) {
@@ -75,7 +80,7 @@ export async function runCli(argv: string[]): Promise<number> {
   const sockPath = parsed.daemonSock || defaultSockPath();
 
   if (method === "doctor") {
-    return await runDoctor({ short, sockPath });
+    return await runDoctor({ short, json, sockPath });
   }
 
   if (method === "version") {

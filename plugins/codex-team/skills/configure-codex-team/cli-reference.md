@@ -1,16 +1,16 @@
 # CLI reference
 
-Every command in `codex-team`. Output is always a single JSON object (`{"ok":true,"data":...}` or `{"ok":false,"error":{...}}`), except streaming commands which emit NDJSON.
+Every command in `codex-team`. Non-streaming commands return a single JSON object (`{"ok":true,"data":...}` or `{"ok":false,"error":{...}}`), except `doctor`, which is human-readable by default and adds `--json` for programmatic consumption. Streaming commands emit NDJSON.
 
 ## Output modes (0.5.3+)
 
-Every command accepts the same three output modes — pick based on what you're going to do with the result, not which command you're running.
+Most commands accept the same three output modes — pick based on what you're going to do with the result, not which command you're running. `doctor` is the carve-out: human-readable by default, `--json` for automation, `--short` for a one-line summary.
 
 | Mode | Flag | What you get |
 |---|---|---|
 | **Concise (default)** | _none_ | Inline JSON with only the fields Claude needs to decide what to do next (correlation ids, flow-control flags, outcome). ~2–6× smaller than `--full`. |
 | **Verbose** | `--full` | Pre-0.5.3 shape — the complete record including timestamps, config echo, nested objects. Use when you need a field the concise form omits. |
-| **Plain-text** | `--short` | One-line `key=value` for dashboards / `grep`. Not JSON. Available on state-heavy commands only (`status`, `session list`, `session info`, `session health`, `daemon status`, `daemon user list`, `message history`, `cursor list`, `daemon config list/get`, and the new action-command subset). |
+| **Plain-text** | `--short` | One-line `key=value` for dashboards / `grep`. Not JSON. Available on state-heavy commands only (`status`, `session list`, `session info`, `session health`, `daemon status`, `daemon user list`, `message history`, `cursor list`, `daemon config list/get`, and the new action-command subset), plus `doctor` as a verdict summary line. |
 
 **Rules**:
 - `--short` and `--full` are mutually exclusive (→ `invalid_params`).
@@ -39,10 +39,10 @@ Per-command help works too: `codex-team session --help`, `codex-team session new
 ## doctor (no `-b` required)
 
 ```
-codex-team doctor [--short]
+codex-team doctor [--short|--json]
 ```
 
-Runs eight ordered environment checks and exits `0` (HEALTHY) / `1` (DEGRADED) / `2` (BROKEN). Checks: Node version, `codex` binary on PATH, `codex-team` launcher on PATH, `data_dir` writable, local socket bind permitted, daemon pid/sock consistency, daemon socket reachable, dist freshness. First thing to run if any `codex-team` command hangs or returns `daemon_unreachable` / `socket_bind_denied`.
+Runs eight ordered environment checks and exits `0` (HEALTHY) / `1` (DEGRADED) / `2` (BROKEN). Default output is human-readable with inline remediation hints when a check fails. `--json` emits one success envelope with `{verdict, checks, exit_code}`. `--short` emits a single plain-text summary line. `--short` and `--json` are mutually exclusive. Checks: Node version, `codex` binary on PATH, `codex-team` launcher on PATH, `data_dir` writable, local socket bind permitted, daemon pid/sock consistency, daemon socket reachable, dist freshness. First thing to run if any `codex-team` command hangs or returns `daemon_unreachable` / `socket_bind_denied`.
 
 ## daemon group (no `-b` required)
 
