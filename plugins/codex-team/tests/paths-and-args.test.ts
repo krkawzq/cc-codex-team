@@ -216,6 +216,29 @@ describe("parseArgs", () => {
     expect(wait.flags.timeout).toBe("30");
   });
 
+  it("parses session list pagination and filtering flags", () => {
+    const parsed = parseArgs([
+      "-b", "token-1",
+      "session", "list",
+      "--all",
+      "--cursor", "cursor-1",
+      "--limit", "25",
+      "--archived", "include",
+      "--state", "live,crashed",
+      "--owner", "any",
+      "--loaded-only",
+    ]);
+
+    expect(parsed.commandPath).toEqual(["session", "list"]);
+    expect(parsed.flags.all).toBe(true);
+    expect(parsed.flags.cursor).toBe("cursor-1");
+    expect(parsed.flags.limit).toBe("25");
+    expect(parsed.flags.archived).toBe("include");
+    expect(parsed.flags.state).toBe("live,crashed");
+    expect(parsed.flags.owner).toBe("any");
+    expect(parsed.flags["loaded-only"]).toBe(true);
+  });
+
   it("treats --short and --full as mutually exclusive output modes", () => {
     const parsed = parseArgs(["-b", "token-1", "status", "--short", "--full"]);
 

@@ -10,6 +10,17 @@ import { validateParsedAutoApprovePatterns } from "./auto-approve";
 const NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SCHEMA_VERSION = 1;
+const DEFAULT_PERSIST_DEBOUNCE_MS = 50;
+const VOLATILE_SESSION_FIELDS = new Set<keyof SessionRecord>([
+  "last_turn_id",
+  "current_turn_id",
+  "current_turn_started_at",
+  "current_item_type",
+  "items_in_turn",
+  "pending_approvals",
+  "pending_user_inputs",
+  "token_usage_last_turn",
+]);
 
 export interface TokenUsageSummary {
   prompt: number;
@@ -56,15 +67,29 @@ export interface SessionLocator {
   record: SessionRecord;
 }
 
+interface SessionRegistryOptions {
+  persistDebounceMs?: number | (() => number);
+}
+
 export class SessionRegistry {
   private readonly dataDir: string;
+  private readonly resolvePersistDebounceMs: () => number;
   private readonly users = new Map<string, UserBucket>();
   private readonly globalByThreadId = new Map<string, string>();
   private readonly touchTimers = new Map<string, NodeJS.Timeout>();
   private readonly writeChains = new Map<string, Promise<void>>();
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, opts: SessionRegistryOptions = {}) {
     this.dataDir = dataDir;
+    const configured = opts.persistDebounceMs;
+    if (typeof configured === "function") {
+      this.resolvePersistDebounceMs = () => clampPersistDebounceMs(configured());
+    } else if (typeof configured === "number") {
+      const value = clampPersistDebounceMs(configured);
+      this.resolvePersistDebounceMs = () => value;
+    } else {
+      this.resolvePersistDebounceMs = () => DEFAULT_PERSIST_DEBOUNCE_MS;
+    }
   }
 
   loadForUser(user: string): void {
@@ -150,7 +175,7 @@ export class SessionRegistry {
     b.byName.set(record.name, record);
     b.byThreadId.set(record.thread_id, record);
     this.globalByThreadId.set(record.thread_id, user);
-    this.schedulePersist(user, 0);
+    this.schedulePersist(user, this.persistDebounceMs());
   }
 
   update(user: string, name: string, patch: Partial<SessionRecord>): SessionRecord {
@@ -159,6 +184,8 @@ export class SessionRegistry {
     const rec = b.byName.get(name);
     if (!rec) throw new CodexTeamError("session_not_found", `session '${name}' not found`);
 
+    let persistNeeded = false;
+
     if (patch.name && patch.name !== rec.name) {
       if (!NAME_RE.test(patch.name)) throw invalidParams(`invalid session name: ${patch.name}`);
       if (patch.name.startsWith("th-")) throw invalidParams("session name cannot start with 'th-'");
@@ -166,32 +193,41 @@ export class SessionRegistry {
       b.byName.delete(rec.name);
       rec.name = patch.name;
       b.byName.set(rec.name, rec);
+      persistNeeded = true;
     }
-    if (patch.last_active_at !== undefined) rec.last_active_at = patch.last_active_at;
-    if (patch.turn_count !== undefined) rec.turn_count = patch.turn_count;
-    if (patch.state !== undefined) rec.state = patch.state;
-    if (patch.recovery_state !== undefined) rec.recovery_state = patch.recovery_state ?? undefined;
-    if (patch.model !== undefined) rec.model = patch.model;
-    if (patch.cwd !== undefined) rec.cwd = patch.cwd;
-    if (patch.sandbox !== undefined) rec.sandbox = patch.sandbox;
-    if (patch.approval !== undefined) rec.approval = patch.approval;
-    if (patch.effort !== undefined) rec.effort = patch.effort;
-    if (patch.profile !== undefined) rec.profile = patch.profile;
+    persistNeeded = applySessionFieldUpdate(rec, "last_active_at", patch.last_active_at) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "turn_count", patch.turn_count) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "state", patch.state) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "recovery_state", patch.recovery_state ?? undefined, patch.recovery_state !== undefined) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "model", patch.model) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "cwd", patch.cwd) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "sandbox", patch.sandbox) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "approval", patch.approval) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "effort", patch.effort) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "profile", patch.profile) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "base_instructions", patch.base_instructions) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "developer_instructions", patch.developer_instructions) || persistNeeded;
     if (patch.experimental_tools !== undefined) {
-      rec.experimental_tools = patch.experimental_tools.length > 0 ? [...patch.experimental_tools] : undefined;
+      const normalized = patch.experimental_tools.length > 0 ? [...patch.experimental_tools] : undefined;
+      persistNeeded = applySessionFieldUpdate(rec, "experimental_tools", normalized, true) || persistNeeded;
     }
-    if (patch.last_turn_id !== undefined) rec.last_turn_id = patch.last_turn_id;
-    if (patch.current_turn_id !== undefined) rec.current_turn_id = patch.current_turn_id;
-    if (patch.current_turn_started_at !== undefined) rec.current_turn_started_at = patch.current_turn_started_at;
-    if (patch.current_item_type !== undefined) rec.current_item_type = patch.current_item_type;
-    if (patch.items_in_turn !== undefined) rec.items_in_turn = patch.items_in_turn;
-    if (patch.pending_approvals !== undefined) rec.pending_approvals = patch.pending_approvals;
-    if (patch.pending_user_inputs !== undefined) rec.pending_user_inputs = patch.pending_user_inputs;
-    if (patch.token_usage_last_turn !== undefined) rec.token_usage_last_turn = patch.token_usage_last_turn;
-    if (patch.crash_reason !== undefined) rec.crash_reason = patch.crash_reason;
-    if (patch.autoApprovePatterns !== undefined) rec.autoApprovePatterns = normalizeAutoApprovePatterns(patch.autoApprovePatterns);
+    applySessionFieldUpdate(rec, "last_turn_id", patch.last_turn_id);
+    applySessionFieldUpdate(rec, "current_turn_id", patch.current_turn_id);
+    applySessionFieldUpdate(rec, "current_turn_started_at", patch.current_turn_started_at);
+    applySessionFieldUpdate(rec, "current_item_type", patch.current_item_type);
+    applySessionFieldUpdate(rec, "items_in_turn", patch.items_in_turn);
+    applySessionFieldUpdate(rec, "pending_approvals", patch.pending_approvals);
+    applySessionFieldUpdate(rec, "pending_user_inputs", patch.pending_user_inputs);
+    applySessionFieldUpdate(rec, "token_usage_last_turn", patch.token_usage_last_turn);
+    persistNeeded = applySessionFieldUpdate(rec, "crash_reason", patch.crash_reason) || persistNeeded;
+    if (patch.autoApprovePatterns !== undefined) {
+      const normalized = normalizeAutoApprovePatterns(patch.autoApprovePatterns);
+      persistNeeded = applySessionFieldUpdate(rec, "autoApprovePatterns", normalized) || persistNeeded;
+    }
 
-    this.schedulePersist(user, 0);
+    if (persistNeeded) {
+      this.schedulePersist(user, this.persistDebounceMs());
+    }
     return rec;
   }
 
@@ -203,7 +239,7 @@ export class SessionRegistry {
     b.byName.delete(rec.name);
     b.byThreadId.delete(rec.thread_id);
     this.globalByThreadId.delete(rec.thread_id);
-    this.schedulePersist(user, 0);
+    this.schedulePersist(user, this.persistDebounceMs());
     return rec;
   }
 
@@ -236,7 +272,7 @@ export class SessionRegistry {
     const rec = b.byName.get(name);
     if (!rec) return;
     rec.last_active_at = new Date().toISOString();
-    this.schedulePersist(user, 250);
+    this.schedulePersist(user, this.persistDebounceMs());
   }
 
   async flush(): Promise<void> {
@@ -255,7 +291,7 @@ export class SessionRegistry {
     const bucket = this.users.get(user);
     const payload = {
       schema_version: SCHEMA_VERSION,
-      sessions: bucket ? Array.from(bucket.byName.values()) : [],
+      sessions: bucket ? Array.from(bucket.byName.values()).map((record) => toPersistedRecord(record)) : [],
     };
     const tmp = p + ".tmp";
     await fs.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
@@ -286,6 +322,10 @@ export class SessionRegistry {
 
   private emptyBucket(): UserBucket {
     return { byName: new Map(), byThreadId: new Map() };
+  }
+
+  private persistDebounceMs(): number {
+    return this.resolvePersistDebounceMs();
   }
 }
 
@@ -415,15 +455,14 @@ function normalizeLoadedRecord(value: unknown): SessionRecord | null {
     created_at: createdAt,
     last_active_at: lastActiveAt,
     turn_count: normalizeOptionalNumber(rec.turn_count) ?? 0,
-    last_turn_id: normalizeOptionalString(rec.last_turn_id) ?? runtimeDefaults.last_turn_id,
-    current_turn_id: normalizeOptionalString(rec.current_turn_id) ?? runtimeDefaults.current_turn_id,
-    current_turn_started_at:
-      normalizeOptionalString(rec.current_turn_started_at) ?? runtimeDefaults.current_turn_started_at,
-    current_item_type: normalizeOptionalString(rec.current_item_type) ?? runtimeDefaults.current_item_type,
-    items_in_turn: normalizeOptionalNumber(rec.items_in_turn) ?? runtimeDefaults.items_in_turn,
-    pending_approvals: normalizeOptionalNumber(rec.pending_approvals) ?? runtimeDefaults.pending_approvals,
-    pending_user_inputs: normalizeOptionalNumber(rec.pending_user_inputs) ?? runtimeDefaults.pending_user_inputs,
-    token_usage_last_turn: normalizeTokenUsage(rec.token_usage_last_turn) ?? runtimeDefaults.token_usage_last_turn,
+    last_turn_id: runtimeDefaults.last_turn_id,
+    current_turn_id: runtimeDefaults.current_turn_id,
+    current_turn_started_at: runtimeDefaults.current_turn_started_at,
+    current_item_type: runtimeDefaults.current_item_type,
+    items_in_turn: runtimeDefaults.items_in_turn,
+    pending_approvals: runtimeDefaults.pending_approvals,
+    pending_user_inputs: runtimeDefaults.pending_user_inputs,
+    token_usage_last_turn: runtimeDefaults.token_usage_last_turn,
     crash_reason: normalizeOptionalString(rec.crash_reason) ?? runtimeDefaults.crash_reason,
   };
 }
@@ -456,6 +495,81 @@ function normalizeStringArray(value: unknown): string[] {
 
 function normalizeOptionalNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function applySessionFieldUpdate<K extends keyof SessionRecord>(
+  record: SessionRecord,
+  key: K,
+  nextValue: SessionRecord[K] | undefined,
+  present = nextValue !== undefined,
+): boolean {
+  if (!present) return false;
+  if (sessionFieldEquals(record[key], nextValue)) return false;
+  record[key] = cloneSessionField(nextValue as SessionRecord[K]);
+  return !VOLATILE_SESSION_FIELDS.has(key);
+}
+
+function cloneSessionField<K extends keyof SessionRecord>(value: SessionRecord[K]): SessionRecord[K] {
+  if (Array.isArray(value)) {
+    return [...value] as SessionRecord[K];
+  }
+  if (value && typeof value === "object") {
+    return { ...value } as SessionRecord[K];
+  }
+  return value;
+}
+
+function sessionFieldEquals(left: unknown, right: unknown): boolean {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return arrayEquals(
+      Array.isArray(left) ? left : [],
+      Array.isArray(right) ? right : [],
+    );
+  }
+  if (isPlainObject(left) || isPlainObject(right)) {
+    if (!isPlainObject(left) || !isPlainObject(right)) return false;
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    if (leftKeys.length !== rightKeys.length) return false;
+    for (const key of leftKeys) {
+      if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+      if (!sessionFieldEquals(left[key], right[key])) return false;
+    }
+    return true;
+  }
+  return left === right;
+}
+
+function arrayEquals(left: unknown[], right: unknown[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (!sessionFieldEquals(left[i], right[i])) return false;
+  }
+  return true;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function toPersistedRecord(record: SessionRecord): Record<string, unknown> {
+  const persisted: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (VOLATILE_SESSION_FIELDS.has(key as keyof SessionRecord)) continue;
+    persisted[key] = clonePersistedValue(value);
+  }
+  return persisted;
+}
+
+function clonePersistedValue(value: unknown): unknown {
+  if (Array.isArray(value)) return [...value];
+  if (isPlainObject(value)) return { ...value };
+  return value;
+}
+
+function clampPersistDebounceMs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_PERSIST_DEBOUNCE_MS;
+  return Math.max(0, Math.floor(value));
 }
 
 void path;

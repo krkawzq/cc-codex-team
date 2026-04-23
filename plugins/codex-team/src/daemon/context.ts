@@ -46,7 +46,9 @@ export function buildContext(opts: { config?: ConfigStore; cursors?: CursorStore
 
   const users = new UserRegistry(dataDir);
 
-  const sessions = new SessionRegistry(dataDir);
+  const sessions = new SessionRegistry(dataDir, {
+    persistDebounceMs: () => toInt(config.getEffective("session.persist_debounce_ms"), 50),
+  });
   sessions.loadAllUsers(users.list().map((u) => u.token));
 
   const pidTracker = new PidTracker(dataDir);

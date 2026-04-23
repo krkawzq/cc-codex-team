@@ -30,6 +30,17 @@ export interface ThreadListResponse {
   backwardsCursor?: string | null;
 }
 
+export interface ThreadListParams {
+  cursor?: string;
+  pageSize?: number;
+  includeArchived?: boolean;
+  sortKey?: string;
+}
+
+export interface ThreadLoadedListResponse {
+  threads: Thread[];
+}
+
 export interface ThreadReadResponse {
   thread: Thread;
 }
@@ -79,16 +90,32 @@ export async function threadSetName(
 
 export async function threadList(
   client: AppServerClient,
-  params: Record<string, JsonValue> = {},
+  params: ThreadListParams = {},
   retry: RetryOptions = DEFAULT_RETRY,
 ): Promise<ThreadListResponse> {
-  const result = await retryOnOverload(() => client.request("thread/list", params as JsonValue), retry);
+  const requestParams: Record<string, JsonValue> = {};
+  if (params.cursor !== undefined) requestParams.cursor = params.cursor;
+  if (params.pageSize !== undefined) requestParams.limit = params.pageSize;
+  if (params.includeArchived !== undefined) requestParams.includeArchived = params.includeArchived;
+  if (params.sortKey !== undefined) requestParams.sortKey = params.sortKey;
+  const result = await retryOnOverload(() => client.request("thread/list", requestParams as JsonValue), retry);
   const obj = asObject(result);
   const data = Array.isArray(obj.data) ? (obj.data as Thread[]) : [];
   return {
     data,
     nextCursor: (obj.nextCursor as string | null | undefined) ?? null,
     backwardsCursor: (obj.backwardsCursor as string | null | undefined) ?? null,
+  };
+}
+
+export async function threadLoadedList(
+  client: AppServerClient,
+  retry: RetryOptions = DEFAULT_RETRY,
+): Promise<ThreadLoadedListResponse> {
+  const result = await retryOnOverload(() => client.request("thread/loadedList", {}), retry);
+  const obj = asObject(result);
+  return {
+    threads: Array.isArray(obj.threads) ? (obj.threads as Thread[]) : [],
   };
 }
 

@@ -82,7 +82,7 @@ describe("SessionRegistry persisted load", () => {
     );
   });
 
-  it("backfills pre-0.5.2 lifecycle fields, heals successfully, and stops persisting app_server_client_id", async () => {
+  it("resets persisted volatile lifecycle fields on load, heals successfully, and stops persisting app_server_client_id", async () => {
     const dir = mkTmpDir();
     dirs.push(dir);
     const filePath = writeSessionsFile(dir, "user-1", [{
@@ -103,7 +103,7 @@ describe("SessionRegistry persisted load", () => {
       name: "sess-1",
       thread_id: "th-1",
       state: "live",
-      last_turn_id: "turn-8",
+      last_turn_id: null,
       current_turn_id: null,
       current_turn_started_at: null,
       current_item_type: null,
@@ -142,6 +142,7 @@ describe("SessionRegistry persisted load", () => {
       },
     });
 
+    sessions.touch("user-1", "sess-1");
     await sessions.flush();
     const persisted = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
       sessions: Array<Record<string, unknown>>;

@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   APPROVAL_REQUEST_CANCELLED_EVENT_TYPE,
   SESSION_CRASHED_EVENT_TYPE,
-  SESSION_PENDING_DROPPED_EVENT_TYPE,
   USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE,
 } from "../src/daemon/events";
 import { reconcileLoadedSessionsAfterRestart } from "../src/daemon/run";
@@ -113,7 +112,7 @@ describe("reconcileLoadedSessionsAfterRestart", () => {
       state: "crashed",
       recovery_state: "degraded",
       crash_reason: "app_server_crashed_on_restart",
-      last_turn_id: "turn-9",
+      last_turn_id: null,
       current_turn_id: null,
       current_turn_started_at: null,
       current_item_type: null,
@@ -127,7 +126,7 @@ describe("reconcileLoadedSessionsAfterRestart", () => {
         type: SESSION_CRASHED_EVENT_TYPE,
         payload: expect.objectContaining({
           reason: "app_server_crashed_on_restart",
-          last_turn_id: "turn-9",
+          last_turn_id: null,
         }),
       }),
       expect.objectContaining({
@@ -151,7 +150,7 @@ describe("reconcileLoadedSessionsAfterRestart", () => {
     ]);
   });
 
-  it("emits one synthetic session.pending_dropped event when restart lost pending metadata", async () => {
+  it("does not synthesize dropped-pending metadata once volatile counters stop persisting", async () => {
     const dir = mkTmpDir();
     dirs.push(dir);
     const filePath = userSessionsPath("user-1", dir);
@@ -206,15 +205,6 @@ describe("reconcileLoadedSessionsAfterRestart", () => {
       expect.objectContaining({
         user: "user-1",
         type: SESSION_CRASHED_EVENT_TYPE,
-      }),
-      expect.objectContaining({
-        user: "user-1",
-        type: SESSION_PENDING_DROPPED_EVENT_TYPE,
-        payload: {
-          session: "sess-1",
-          thread_id: "th-dead",
-          reason: "daemon_restart_pending_lost",
-        },
       }),
     ]);
   });
