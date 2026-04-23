@@ -3,28 +3,36 @@ import net from "node:net";
 import path from "node:path";
 
 import type { IpcMessage } from "./protocol";
+import { createLineParser, readMaxFrameBytes } from "./frameParser";
 import { isFilesystemSockPath, normalizeSockPath } from "../paths";
 
 export function writeMessage(socket: net.Socket, msg: IpcMessage): void {
   socket.write(JSON.stringify(msg) + "\n");
 }
 
-export function onMessages(socket: net.Socket, handler: (msg: IpcMessage) => void, onClose?: () => void): void {
-  let buf = "";
-  socket.on("data", (chunk) => {
-    buf += chunk.toString("utf8");
-    let idx: number;
-    while ((idx = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, idx);
-      buf = buf.slice(idx + 1);
-      if (!line.trim()) continue;
+export function onMessages(socket: net.Socket, handler: (msg: IpcMessage) => unknown, onClose?: () => void): { resume(): void } {
+  const parser = createLineParser({
+    maxFrameBytes: readMaxFrameBytes(),
+    peer: socketPeer(socket),
+    onError: (error) => {
+      if (socket.listenerCount("error") === 0) {
+        socket.once("error", () => undefined);
+      }
+      if (typeof socket.destroy === "function") socket.destroy(error);
+      else socket.emit("error", error);
+    },
+    onLine: (line) => {
       try {
         const msg = JSON.parse(line) as IpcMessage;
-        handler(msg);
+        return handler(msg);
       } catch {
-        // ignore malformed frame
+        return undefined;
       }
-    }
+    },
+  });
+
+  socket.on("data", (chunk) => {
+    parser.push(chunk);
   });
   if (onClose) {
     let closed = false;
@@ -36,6 +44,11 @@ export function onMessages(socket: net.Socket, handler: (msg: IpcMessage) => voi
     socket.on("close", onceClose);
     socket.on("end", onceClose);
   }
+  return {
+    resume(): void {
+      parser.resume();
+    },
+  };
 }
 
 export async function listenSock(sockPath: string): Promise<net.Server> {
@@ -113,4 +126,15 @@ export function unlinkSockIfStale(sockPath: string): void {
   } catch {
     // ignore
   }
+}
+
+function socketPeer(socket: net.Socket): string {
+  const remoteAddress = socket.remoteAddress;
+  const remotePort = socket.remotePort;
+  if (typeof remoteAddress === "string" && remoteAddress.length > 0) {
+    return remotePort ? `${remoteAddress}:${remotePort}` : remoteAddress;
+  }
+  const maybePath = (socket as net.Socket & { path?: string }).path;
+  if (typeof maybePath === "string" && maybePath.length > 0) return maybePath;
+  return "ipc_socket";
 }

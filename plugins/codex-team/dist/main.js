@@ -33,15 +33,183 @@ var import_node_child_process3 = require("child_process");
 var import_promises = require("timers/promises");
 
 // src/ipc/sock.ts
-var import_node_fs2 = __toESM(require("fs"));
+var import_node_fs3 = __toESM(require("fs"));
 var import_node_net = __toESM(require("net"));
-var import_node_path2 = __toESM(require("path"));
+var import_node_path3 = __toESM(require("path"));
+
+// src/logger.ts
+var import_node_fs = __toESM(require("fs"));
+var import_node_path = __toESM(require("path"));
+var LEVELS = {
+  error: 0,
+  warn: 1,
+  info: 2,
+  debug: 3,
+  trace: 4
+};
+var Logger = class {
+  level = "info";
+  stream = null;
+  logPath = null;
+  configure(opts) {
+    if (opts.level) this.level = opts.level;
+    if (opts.logPath && opts.logPath !== this.logPath) {
+      if (this.stream) this.stream.end();
+      import_node_fs.default.mkdirSync(import_node_path.default.dirname(opts.logPath), { recursive: true });
+      this.stream = import_node_fs.default.createWriteStream(opts.logPath, { flags: "a" });
+      this.logPath = opts.logPath;
+    }
+  }
+  setLevel(level) {
+    this.level = level;
+  }
+  emit(level, msg, meta) {
+    if (LEVELS[level] > LEVELS[this.level]) return;
+    const line = JSON.stringify({
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      level,
+      msg,
+      ...meta ?? {}
+    });
+    if (this.stream) {
+      this.stream.write(line + "\n");
+    } else {
+      process.stderr.write(line + "\n");
+    }
+  }
+  error(msg, meta) {
+    this.emit("error", msg, meta);
+  }
+  warn(msg, meta) {
+    this.emit("warn", msg, meta);
+  }
+  info(msg, meta) {
+    this.emit("info", msg, meta);
+  }
+  debug(msg, meta) {
+    this.emit("debug", msg, meta);
+  }
+  trace(msg, meta) {
+    this.emit("trace", msg, meta);
+  }
+};
+var logger = new Logger();
+
+// src/ipc/frameParser.ts
+var DEFAULT_MAX_FRAME_BYTES = 8 * 1024 * 1024;
+var NEWLINE_BYTE = 10;
+var EMPTY_BUFFER = Buffer.alloc(0);
+var FrameTooLargeError = class extends Error {
+  peer;
+  frameBytes;
+  maxFrameBytes;
+  constructor(peer, frameBytes, maxFrameBytes) {
+    super(`frame from ${peer} exceeded ${maxFrameBytes} bytes`);
+    this.name = "FrameTooLargeError";
+    this.peer = peer;
+    this.frameBytes = frameBytes;
+    this.maxFrameBytes = maxFrameBytes;
+  }
+};
+function createLineParser(options) {
+  const maxFrameBytes = normalizeMaxFrameBytes(options.maxFrameBytes);
+  let buffer = EMPTY_BUFFER;
+  let readOffset = 0;
+  let paused = false;
+  let failed = false;
+  const compactIfNeeded = () => {
+    if (readOffset === 0) return;
+    if (readOffset >= buffer.length) {
+      buffer = EMPTY_BUFFER;
+      readOffset = 0;
+      return;
+    }
+    if (readOffset < Math.floor(buffer.length / 2)) return;
+    buffer = Buffer.from(buffer.subarray(readOffset));
+    readOffset = 0;
+  };
+  const fail2 = (frameBytes) => {
+    if (failed) return;
+    failed = true;
+    const error = new FrameTooLargeError(options.peer, frameBytes, maxFrameBytes);
+    logger.warn("frame_too_large", {
+      peer: options.peer,
+      frame_bytes: frameBytes,
+      max_frame_bytes: maxFrameBytes
+    });
+    options.onError(error);
+  };
+  const parseAvailable = () => {
+    if (paused || failed) return;
+    while (true) {
+      const newlineIdx = buffer.indexOf(NEWLINE_BYTE, readOffset);
+      if (newlineIdx < 0) {
+        const unreadBytes = buffer.length - readOffset;
+        if (unreadBytes > maxFrameBytes) fail2(unreadBytes);
+        else compactIfNeeded();
+        return;
+      }
+      const frameBytes = newlineIdx - readOffset;
+      if (frameBytes > maxFrameBytes) {
+        fail2(frameBytes);
+        return;
+      }
+      const line = buffer.toString("utf8", readOffset, newlineIdx);
+      readOffset = newlineIdx + 1;
+      compactIfNeeded();
+      if (!line.trim()) continue;
+      if (options.onLine(line) === false) {
+        paused = true;
+        return;
+      }
+    }
+  };
+  const appendChunk = (chunk) => {
+    if (chunk.length === 0) return;
+    if (buffer.length === 0 || readOffset >= buffer.length) {
+      buffer = chunk;
+      readOffset = 0;
+      return;
+    }
+    const unread = readOffset === 0 ? buffer : buffer.subarray(readOffset);
+    buffer = Buffer.concat([unread, chunk]);
+    readOffset = 0;
+  };
+  return {
+    bufferedBytes() {
+      return Math.max(0, buffer.length - readOffset);
+    },
+    push(chunk) {
+      if (failed) return;
+      appendChunk(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8"));
+      parseAvailable();
+    },
+    resume() {
+      if (failed || !paused) return;
+      paused = false;
+      parseAvailable();
+    }
+  };
+}
+function readMaxFrameBytes(env = process.env) {
+  return parsePositiveIntEnv(env.CODEX_TEAM_MAX_FRAME_BYTES, DEFAULT_MAX_FRAME_BYTES);
+}
+function normalizeMaxFrameBytes(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_MAX_FRAME_BYTES;
+  return Math.max(1, Math.floor(value));
+}
+function parsePositiveIntEnv(raw, fallback) {
+  if (typeof raw !== "string" || raw.trim().length === 0) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
 
 // src/paths.ts
 var import_node_crypto = __toESM(require("crypto"));
-var import_node_fs = __toESM(require("fs"));
+var import_node_fs2 = __toESM(require("fs"));
 var import_node_os = __toESM(require("os"));
-var import_node_path = __toESM(require("path"));
+var import_node_path2 = __toESM(require("path"));
 var APP = "codex-team";
 var WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\";
 var UNIX_SOCKET_MAX_BYTES = 90;
@@ -59,40 +227,40 @@ function homeDir() {
 function defaultDataDir() {
   const configured = process.env.CODEX_TEAM_DATA_DIR;
   if (configured) return expandUserPath(configured);
-  return import_node_path.default.join(homeDir(), `.${APP}`);
+  return import_node_path2.default.join(homeDir(), `.${APP}`);
 }
 function defaultSockPath(dataDir = defaultDataDir(), platform = process.platform) {
   const configured = process.env.CODEX_TEAM_SOCK;
   if (configured) return normalizeSockPath(expandUserPath(configured, platform), platform);
   const resolvedDataDir = expandUserPath(dataDir, platform);
   if (platform === "win32") return namedPipePath(resolvedDataDir);
-  const candidate = import_node_path.default.join(resolvedDataDir, "daemon.sock");
+  const candidate = import_node_path2.default.join(resolvedDataDir, "daemon.sock");
   if (Buffer.byteLength(candidate, "utf8") <= UNIX_SOCKET_MAX_BYTES) return candidate;
-  return import_node_path.default.join(import_node_os.default.tmpdir(), `${APP}-${pathHash(resolvedDataDir)}.sock`);
+  return import_node_path2.default.join(import_node_os.default.tmpdir(), `${APP}-${pathHash(resolvedDataDir)}.sock`);
 }
 function defaultLogPath(dataDir = defaultDataDir()) {
-  return import_node_path.default.join(expandUserPath(dataDir), "daemon.log");
+  return import_node_path2.default.join(expandUserPath(dataDir), "daemon.log");
 }
 function configFilePath(dataDir = defaultDataDir()) {
-  return import_node_path.default.join(expandUserPath(dataDir), "config.json");
+  return import_node_path2.default.join(expandUserPath(dataDir), "config.json");
 }
 function pidFilePath(dataDir = defaultDataDir()) {
-  return import_node_path.default.join(expandUserPath(dataDir), "daemon.pid");
+  return import_node_path2.default.join(expandUserPath(dataDir), "daemon.pid");
 }
 function usersDir(dataDir = defaultDataDir()) {
-  return import_node_path.default.join(expandUserPath(dataDir), "users");
+  return import_node_path2.default.join(expandUserPath(dataDir), "users");
 }
 function userDir(token, dataDir = defaultDataDir()) {
-  return import_node_path.default.join(usersDir(dataDir), encodeToken(token));
+  return import_node_path2.default.join(usersDir(dataDir), encodeToken(token));
 }
 function userMetadataPath(token, dataDir = defaultDataDir()) {
-  return import_node_path.default.join(userDir(token, dataDir), "metadata.json");
+  return import_node_path2.default.join(userDir(token, dataDir), "metadata.json");
 }
 function userEventLogPath(token, dataDir = defaultDataDir()) {
-  return import_node_path.default.join(userDir(token, dataDir), "events.log");
+  return import_node_path2.default.join(userDir(token, dataDir), "events.log");
 }
 function userSessionsPath(token, dataDir = defaultDataDir()) {
-  return import_node_path.default.join(userDir(token, dataDir), "sessions.json");
+  return import_node_path2.default.join(userDir(token, dataDir), "sessions.json");
 }
 function normalizeSockPath(sockPath, platform = process.platform) {
   if (platform !== "win32") return sockPath;
@@ -110,7 +278,7 @@ function expandUserPath(input, platform = process.platform, home = homeDir()) {
     throw new Error(`unsupported user-home path '${input}'; only '~' is supported`);
   }
   if (input !== "~" && !input.startsWith("~/") && !input.startsWith("~\\")) return input;
-  const pathModule = platform === "win32" ? import_node_path.default.win32 : import_node_path.default.posix;
+  const pathModule = platform === "win32" ? import_node_path2.default.win32 : import_node_path2.default.posix;
   const suffix = input === "~" ? "" : input.slice(1).replace(/^[\\/]+/, "");
   return suffix.length > 0 ? pathModule.join(home, suffix) : home;
 }
@@ -145,9 +313,9 @@ function getLegacyWindowsDataDirWarning(opts) {
   if (!legacyHome) return null;
   const nativeHome = opts.nativeHome ?? homeDir();
   if (!nativeHome || nativeHome === legacyHome) return null;
-  const exists = opts.exists ?? import_node_fs.default.existsSync;
-  const legacyPath = import_node_path.default.join(legacyHome, `.${APP}`);
-  const newPath = import_node_path.default.join(nativeHome, `.${APP}`);
+  const exists = opts.exists ?? import_node_fs2.default.existsSync;
+  const legacyPath = import_node_path2.default.join(legacyHome, `.${APP}`);
+  const newPath = import_node_path2.default.join(nativeHome, `.${APP}`);
   if (!exists(legacyPath) || exists(newPath)) return null;
   return {
     legacyPath,
@@ -161,20 +329,27 @@ function writeMessage(socket, msg) {
   socket.write(JSON.stringify(msg) + "\n");
 }
 function onMessages(socket, handler, onClose) {
-  let buf = "";
-  socket.on("data", (chunk) => {
-    buf += chunk.toString("utf8");
-    let idx;
-    while ((idx = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, idx);
-      buf = buf.slice(idx + 1);
-      if (!line.trim()) continue;
+  const parser = createLineParser({
+    maxFrameBytes: readMaxFrameBytes(),
+    peer: socketPeer(socket),
+    onError: (error) => {
+      if (socket.listenerCount("error") === 0) {
+        socket.once("error", () => void 0);
+      }
+      if (typeof socket.destroy === "function") socket.destroy(error);
+      else socket.emit("error", error);
+    },
+    onLine: (line) => {
       try {
         const msg = JSON.parse(line);
-        handler(msg);
+        return handler(msg);
       } catch {
+        return void 0;
       }
     }
+  });
+  socket.on("data", (chunk) => {
+    parser.push(chunk);
   });
   if (onClose) {
     let closed = false;
@@ -186,11 +361,16 @@ function onMessages(socket, handler, onClose) {
     socket.on("close", onceClose);
     socket.on("end", onceClose);
   }
+  return {
+    resume() {
+      parser.resume();
+    }
+  };
 }
 async function listenSock(sockPath) {
   const endpoint = normalizeSockPath(sockPath);
   if (isFilesystemSockPath(sockPath)) {
-    import_node_fs2.default.mkdirSync(import_node_path2.default.dirname(endpoint), { recursive: true });
+    import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(endpoint), { recursive: true });
   }
   const server = import_node_net.default.createServer();
   await new Promise((resolve, reject) => {
@@ -229,7 +409,7 @@ function connectSock(sockPath, timeoutMs = 2e3) {
 function probeSock(sockPath, timeoutMs = 200) {
   return new Promise((resolve) => {
     const endpoint = normalizeSockPath(sockPath);
-    if (isFilesystemSockPath(sockPath) && !import_node_fs2.default.existsSync(endpoint)) {
+    if (isFilesystemSockPath(sockPath) && !import_node_fs3.default.existsSync(endpoint)) {
       resolve(false);
       return;
     }
@@ -258,9 +438,19 @@ function unlinkSockIfStale(sockPath) {
   if (!isFilesystemSockPath(sockPath)) return;
   const endpoint = normalizeSockPath(sockPath);
   try {
-    import_node_fs2.default.unlinkSync(endpoint);
+    import_node_fs3.default.unlinkSync(endpoint);
   } catch {
   }
+}
+function socketPeer(socket) {
+  const remoteAddress = socket.remoteAddress;
+  const remotePort = socket.remotePort;
+  if (typeof remoteAddress === "string" && remoteAddress.length > 0) {
+    return remotePort ? `${remoteAddress}:${remotePort}` : remoteAddress;
+  }
+  const maybePath = socket.path;
+  if (typeof maybePath === "string" && maybePath.length > 0) return maybePath;
+  return "ipc_socket";
 }
 
 // src/cli/args.ts
@@ -2230,64 +2420,6 @@ function err(code, message, data) {
 var import_node_fs4 = __toESM(require("fs"));
 var import_node_path4 = __toESM(require("path"));
 
-// src/logger.ts
-var import_node_fs3 = __toESM(require("fs"));
-var import_node_path3 = __toESM(require("path"));
-var LEVELS = {
-  error: 0,
-  warn: 1,
-  info: 2,
-  debug: 3,
-  trace: 4
-};
-var Logger = class {
-  level = "info";
-  stream = null;
-  logPath = null;
-  configure(opts) {
-    if (opts.level) this.level = opts.level;
-    if (opts.logPath && opts.logPath !== this.logPath) {
-      if (this.stream) this.stream.end();
-      import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(opts.logPath), { recursive: true });
-      this.stream = import_node_fs3.default.createWriteStream(opts.logPath, { flags: "a" });
-      this.logPath = opts.logPath;
-    }
-  }
-  setLevel(level) {
-    this.level = level;
-  }
-  emit(level, msg, meta) {
-    if (LEVELS[level] > LEVELS[this.level]) return;
-    const line = JSON.stringify({
-      ts: (/* @__PURE__ */ new Date()).toISOString(),
-      level,
-      msg,
-      ...meta ?? {}
-    });
-    if (this.stream) {
-      this.stream.write(line + "\n");
-    } else {
-      process.stderr.write(line + "\n");
-    }
-  }
-  error(msg, meta) {
-    this.emit("error", msg, meta);
-  }
-  warn(msg, meta) {
-    this.emit("warn", msg, meta);
-  }
-  info(msg, meta) {
-    this.emit("info", msg, meta);
-  }
-  debug(msg, meta) {
-    this.emit("debug", msg, meta);
-  }
-  trace(msg, meta) {
-    this.emit("trace", msg, meta);
-  }
-};
-var logger = new Logger();
-
 // src/daemon/auto-approve.ts
 function parseAutoApprovePatterns(raw) {
   if (raw.length === 0) return [];
@@ -2365,6 +2497,9 @@ function previewAutoApproveTarget(target) {
 function enumSpec(values, def, needsRestart, desc) {
   return { type: "enum", enumValues: values, default: def, needsRestart, description: desc };
 }
+function positiveIntValidator(value) {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? null : "expected positive integer";
+}
 var CONFIG_KEYS = {
   "daemon.idle_shutdown_hours": { type: "int", default: 6, needsRestart: false, description: "idle auto-shutdown threshold (hours)" },
   "daemon.log_level": enumSpec(["error", "warn", "info", "debug", "trace"], "info", false, "log verbosity"),
@@ -2378,6 +2513,7 @@ var CONFIG_KEYS = {
   "monitor.default_interval_seconds": { type: "int", default: 30, needsRestart: false, description: "default --interval for `monitor events`" },
   "monitor.cursor_persist_debounce_ms": { type: "int", default: 200, needsRestart: false, description: "debounce for cursor auto-updates from `monitor events` (milliseconds)" },
   "monitor.event_log_retention": { type: "int", default: 1e4, needsRestart: false, description: "per-user ring-buffer event retention" },
+  "monitor.alarm_output_cap_bytes": { type: "int", default: 16384, needsRestart: false, description: "per-stream capture cap for `monitor alarm` stdout/stderr", validate: positiveIntValidator },
   "session.persist_debounce_ms": { type: "int", default: 50, needsRestart: false, description: "debounce for persisting coarse session metadata" },
   "session.auto_approve_command_patterns": {
     type: "string",
@@ -3937,6 +4073,7 @@ var DEFAULT_DAEMON_READY_TIMEOUT_MS = 15e3;
 var DEFAULT_DAEMON_CONNECT_TIMEOUT_MS = 5e3;
 var DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS = 3;
 var DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS = 250;
+var DEFAULT_CLI_STDOUT_MAX_BYTES = 4 * 1024 * 1024;
 var DAEMON_STDERR_FLAG = "--stderr-to";
 async function readStdinAll() {
   return await new Promise((resolve, reject) => {
@@ -4126,8 +4263,13 @@ async function runStream(sock, parsed, method) {
     let finished = false;
     const stdoutQueue = [];
     const pendingFinalizers = [];
+    const stdoutMaxBytes = readCliStdoutMaxBytes();
+    const stdoutResumeBytes = Math.max(1, Math.floor(stdoutMaxBytes / 2));
     let stdoutBlocked = false;
     let socketPaused = false;
+    let queuePaused = false;
+    let stdoutQueueBytes = 0;
+    let parserControl = null;
     const finish = (code) => {
       if (finished) return;
       finished = true;
@@ -4136,10 +4278,21 @@ async function runStream(sock, parsed, method) {
       process.off("SIGBREAK", onInterrupt);
       resolve(code);
     };
+    const pauseSocket = () => {
+      if (socketPaused || typeof sock.pause !== "function") return;
+      socketPaused = true;
+      sock.pause();
+    };
     const maybeResumeSocket = () => {
-      if (!socketPaused) return;
+      if (!socketPaused || stdoutBlocked || queuePaused) return;
       socketPaused = false;
       if (typeof sock.resume === "function") sock.resume();
+    };
+    const maybeResumeParser = () => {
+      if (!queuePaused || stdoutBlocked || stdoutQueueBytes >= stdoutResumeBytes) return;
+      queuePaused = false;
+      maybeResumeSocket();
+      parserControl?.resume();
     };
     const flushFinalizers = () => {
       if (stdoutBlocked || stdoutQueue.length > 0) return;
@@ -4152,29 +4305,41 @@ async function runStream(sock, parsed, method) {
         const ok3 = process.stdout.write(next.line);
         if (!ok3) {
           stdoutBlocked = true;
-          if (!socketPaused && typeof sock.pause === "function") {
-            socketPaused = true;
-            sock.pause();
-          }
+          pauseSocket();
           process.stdout.once("drain", () => {
             stdoutBlocked = false;
             const flushed = stdoutQueue.shift();
+            stdoutQueueBytes = Math.max(0, stdoutQueueBytes - (flushed?.bytes ?? 0));
             flushed?.afterWrite?.();
-            maybeResumeSocket();
+            maybeResumeParser();
             flushStdout();
             flushFinalizers();
           });
           return;
         }
         stdoutQueue.shift();
+        stdoutQueueBytes = Math.max(0, stdoutQueueBytes - next.bytes);
         next.afterWrite?.();
       }
+      maybeResumeParser();
       maybeResumeSocket();
       flushFinalizers();
     };
     const writeStdout = (line, afterWrite) => {
-      stdoutQueue.push({ line, afterWrite });
+      const bytes = Buffer.byteLength(line);
+      stdoutQueue.push({ line, bytes, afterWrite });
+      stdoutQueueBytes += bytes;
+      let shouldContinueParsing = true;
+      if (stdoutQueueBytes > stdoutMaxBytes) {
+        queuePaused = true;
+        shouldContinueParsing = false;
+        pauseSocket();
+        queueMicrotask(() => {
+          maybeResumeParser();
+        });
+      }
       flushStdout();
+      return shouldContinueParsing;
     };
     const afterStdout = (cb) => {
       pendingFinalizers.push(cb);
@@ -4195,15 +4360,15 @@ async function runStream(sock, parsed, method) {
       bearer: parsed.bearer ?? void 0,
       params
     };
-    onMessages(sock, (msg) => {
+    parserControl = onMessages(sock, (msg) => {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
         const ackAfterWrite = createStreamAckCallback(method, sock, reqId, msg.data);
         const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
         if (markdown !== null) {
-          writeStdout(markdown + "\n", ackAfterWrite);
+          return writeStdout(markdown + "\n", ackAfterWrite);
         } else {
           const rendered = truthy(parsed.flags.full) ? msg.data : formatCompact(method, msg.data);
-          writeStdout(JSON.stringify(rendered) + "\n", ackAfterWrite);
+          return writeStdout(JSON.stringify(rendered) + "\n", ackAfterWrite);
         }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
@@ -4644,6 +4809,13 @@ function readCliConfig() {
     connectRetryAttempts: toInt(config.getEffective("daemon.connect_retry_attempts"), DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS),
     connectRetryDelayMs: toMs(config.getEffective("daemon.connect_retry_delay_seconds"), DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS)
   };
+}
+function readCliStdoutMaxBytes(env = process.env) {
+  const raw = env.CODEX_TEAM_CLI_STDOUT_MAX_BYTES;
+  if (typeof raw !== "string" || raw.trim().length === 0) return DEFAULT_CLI_STDOUT_MAX_BYTES;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_CLI_STDOUT_MAX_BYTES;
+  return Math.max(1, Math.floor(parsed));
 }
 function toInt(v, fallback) {
   return typeof v === "number" && Number.isFinite(v) ? Math.max(1, Math.floor(v)) : fallback;
@@ -7156,12 +7328,12 @@ var STDERR_TAIL_LINES = 400;
 var DEFAULT_REQUEST_TIMEOUT_MS = 12e4;
 var AppServerClient = class extends import_node_events.EventEmitter {
   proc = null;
-  buf = "";
   pending = /* @__PURE__ */ new Map();
   stderrTail = [];
   lastPid = null;
   options;
   initialized = false;
+  stdoutParser = this.createStdoutParser("app_server:unknown");
   constructor(options = {}) {
     super();
     this.options = {
@@ -7200,6 +7372,7 @@ var AppServerClient = class extends import_node_events.EventEmitter {
       windowsHide: true
     });
     this.lastPid = this.proc.pid ?? null;
+    this.stdoutParser = this.createStdoutParser(this.peerLabel());
     this.proc.on("error", (err2) => {
       logger.error("app-server spawn error", { err: err2.message });
       this.failAllPending(new TransportClosedError(`spawn error: ${err2.message}`));
@@ -7329,21 +7502,7 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     });
   }
   onStdout(chunk) {
-    this.buf += chunk;
-    let idx;
-    while ((idx = this.buf.indexOf("\n")) >= 0) {
-      const line = this.buf.slice(0, idx);
-      this.buf = this.buf.slice(idx + 1);
-      if (!line.trim()) continue;
-      let parsed;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        logger.warn("malformed line from app-server", { snippet: line.slice(0, 200) });
-        continue;
-      }
-      this.dispatchIncoming(parsed);
-    }
+    this.stdoutParser.push(chunk);
   }
   onStderr(chunk) {
     const lines = chunk.split("\n");
@@ -7394,6 +7553,30 @@ var AppServerClient = class extends import_node_events.EventEmitter {
       p.reject(err2);
     }
     this.pending.clear();
+  }
+  createStdoutParser(peer) {
+    return createLineParser({
+      maxFrameBytes: readMaxFrameBytes(),
+      peer,
+      onError: (error) => {
+        this.failAllPending(error);
+        this.emit("error", error);
+        void this.close().catch(() => void 0);
+      },
+      onLine: (line) => {
+        let parsed;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          logger.warn("malformed line from app-server", { snippet: line.slice(0, 200) });
+          return;
+        }
+        this.dispatchIncoming(parsed);
+      }
+    });
+  }
+  peerLabel() {
+    return this.lastPid ? `app_server:${this.lastPid}` : "app_server:unknown";
   }
 };
 function resolveLaunch(bin, args) {
@@ -11331,6 +11514,7 @@ var MAX_INTERVAL_QUEUE_EVENTS = 512;
 var MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
 var MAX_FLUSH_EVENTS_PER_TICK = 64;
 var DEFAULT_CURSOR_PERSIST_DEBOUNCE_MS = 200;
+var DEFAULT_ALARM_OUTPUT_CAP_BYTES = 16 * 1024;
 var ACKABLE_EVENT_ID_RE = /^evt-\d+$/;
 var monitorEvents = async (ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor events requires streaming");
@@ -11515,7 +11699,7 @@ var monitorEvents = async (ctx, req, stream) => {
   });
   return { streaming: true };
 };
-var monitorAlarm = async (_ctx, req, stream) => {
+var monitorAlarm = async (ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor alarm requires streaming");
   const positionals = asPositionals4(req);
   const intervalS = toInt4(positionals[0], 0);
@@ -11525,6 +11709,7 @@ var monitorAlarm = async (_ctx, req, stream) => {
   const flags = asFlags2(req);
   const once = isTrue4(flags["once"]);
   const timeoutS = toInt4(flags["timeout"], 60);
+  const outputCapBytes = numConfig(ctx, "monitor.alarm_output_cap_bytes", DEFAULT_ALARM_OUTPUT_CAP_BYTES);
   let cancelled = false;
   let running = false;
   let timer = null;
@@ -11547,8 +11732,8 @@ var monitorAlarm = async (_ctx, req, stream) => {
         const child = (0, import_node_child_process6.spawn)(file, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         activeChild = child;
         activeTimedOut = false;
-        let stdoutBuf = "";
-        let stderrBuf = "";
+        const stdoutBuf = new CappedOutputBuffer(outputCapBytes);
+        const stderrBuf = new CappedOutputBuffer(outputCapBytes);
         const timeoutTimer = setTimeout(() => {
           activeTimedOut = true;
           clearActiveTimeoutTimer();
@@ -11556,13 +11741,11 @@ var monitorAlarm = async (_ctx, req, stream) => {
         }, timeoutS * 1e3);
         timeoutTimer.unref();
         activeTimeoutTimer = timeoutTimer;
-        child.stdout.setEncoding("utf8");
         child.stdout.on("data", (c) => {
-          stdoutBuf += c;
+          stdoutBuf.append(c);
         });
-        child.stderr.setEncoding("utf8");
         child.stderr.on("data", (c) => {
-          stderrBuf += c;
+          stderrBuf.append(c);
         });
         child.on("error", (err2) => {
           clearActiveKillTimers();
@@ -11574,13 +11757,17 @@ var monitorAlarm = async (_ctx, req, stream) => {
           clearActiveKillTimers();
           if (activeChild === child) activeChild = null;
           if (!cancelled) {
-            if (stdoutBuf) stream.chunk({ stdout: stdoutBuf });
-            if (stderrBuf) stream.chunk({ stderr: stderrBuf });
+            const stdout = stdoutBuf.render();
+            const stderr = stderrBuf.render();
+            const outputTruncated = stdoutBuf.truncated() || stderrBuf.truncated();
+            if (stdout) stream.chunk({ stdout });
+            if (stderr) stream.chunk({ stderr });
             stream.chunk({
               __alarm_event: activeTimedOut ? "timeout" : "exit",
               exit_code: code,
               signal,
-              duration_ms: Date.now() - start
+              duration_ms: Date.now() - start,
+              ...outputTruncated ? { output_truncated: true } : {}
             });
           }
           resolve();
@@ -11659,6 +11846,54 @@ function shellCommand(command) {
     args: ["-c", command]
   };
 }
+var CappedOutputBuffer = class {
+  headBytes;
+  tailBytes;
+  capBytes;
+  totalBytes = 0;
+  head = Buffer.alloc(0);
+  tail = Buffer.alloc(0);
+  full = Buffer.alloc(0);
+  wasTruncated = false;
+  constructor(capBytes) {
+    this.capBytes = Math.max(1, Math.floor(capBytes));
+    this.headBytes = Math.floor(this.capBytes / 2);
+    this.tailBytes = this.capBytes - this.headBytes;
+  }
+  append(chunk) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+    if (buf.length === 0) return;
+    this.totalBytes += buf.length;
+    if (!this.wasTruncated) {
+      const next = this.full.length === 0 ? buf : Buffer.concat([this.full, buf]);
+      if (next.length <= this.capBytes) {
+        this.full = next;
+        return;
+      }
+      this.wasTruncated = true;
+      this.head = next.subarray(0, this.headBytes);
+      this.tail = this.tailBytes > 0 ? next.subarray(Math.max(0, next.length - this.tailBytes)) : Buffer.alloc(0);
+      this.full = Buffer.alloc(0);
+      return;
+    }
+    if (this.tailBytes === 0) return;
+    if (buf.length >= this.tailBytes) {
+      this.tail = buf.subarray(buf.length - this.tailBytes);
+      return;
+    }
+    const merged = this.tail.length === 0 ? buf : Buffer.concat([this.tail, buf]);
+    this.tail = merged.length <= this.tailBytes ? merged : merged.subarray(merged.length - this.tailBytes);
+  }
+  render() {
+    if (!this.wasTruncated) return this.full.toString("utf8");
+    const truncatedBytes = Math.max(0, this.totalBytes - this.head.length - this.tail.length);
+    const marker = Buffer.from(`[... ${truncatedBytes} bytes truncated ...]`, "utf8");
+    return Buffer.concat([this.head, marker, this.tail]).toString("utf8");
+  }
+  truncated() {
+    return this.wasTruncated;
+  }
+};
 function asFlags2(req) {
   const f = req.params.flags;
   return f && typeof f === "object" ? f : {};
@@ -11691,7 +11926,7 @@ function parseTypeList(v) {
   return s.split(",").map((x) => x.trim()).filter(Boolean);
 }
 function numConfig(ctx, key, fallback) {
-  const v = ctx.config.getEffective(key);
+  const v = ctx.config?.getEffective?.(key);
   return typeof v === "number" ? v : fallback;
 }
 function eventSize(event) {

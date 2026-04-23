@@ -80,6 +80,7 @@ describe("AppServerClient platform launch", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.resetModules();
+    delete process.env.CODEX_TEAM_MAX_FRAME_BYTES;
   });
 
   it("wraps JS entrypoints with the current Node executable", async () => {
@@ -154,6 +155,36 @@ describe("AppServerClient platform launch", () => {
     await vi.advanceTimersByTimeAsync(1000);
 
     await expectation;
+    expect(fakeProc.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("closes the client when the app-server emits an oversized frame", async () => {
+    const fakeProc = createFakeProc();
+    const spawn = vi.fn().mockReturnValue(fakeProc);
+    vi.doMock("node:child_process", () => ({
+      default: {
+        spawn,
+        execFileSync: vi.fn(),
+      },
+      spawn,
+      execFileSync: vi.fn(),
+    }));
+
+    process.env.CODEX_TEAM_MAX_FRAME_BYTES = "100";
+    const { AppServerClient } = await import("../src/codex/appServerClient");
+    const client = new AppServerClient();
+    const onError = vi.fn();
+    client.on("error", onError);
+
+    await client.start();
+    fakeProc.stdout.emit("data", "x".repeat(101));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({
+      frameBytes: 101,
+      maxFrameBytes: 100,
+    });
     expect(fakeProc.kill).toHaveBeenCalledWith("SIGTERM");
   });
 

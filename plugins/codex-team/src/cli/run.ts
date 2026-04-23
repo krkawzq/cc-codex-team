@@ -22,6 +22,7 @@ const DEFAULT_DAEMON_READY_TIMEOUT_MS = 15000;
 const DEFAULT_DAEMON_CONNECT_TIMEOUT_MS = 5000;
 const DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS = 3;
 const DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS = 250;
+const DEFAULT_CLI_STDOUT_MAX_BYTES = 4 * 1024 * 1024;
 const DAEMON_STDERR_FLAG = "--stderr-to";
 const DOCTOR_SUGGESTED_ACTION = "run `codex-team doctor` to diagnose";
 const SOCKET_BIND_DENIED_SUGGESTED_ACTION =
@@ -245,10 +246,15 @@ function exitCodeForResult(method: string, result: unknown): number {
 async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): Promise<number> {
   return await new Promise<number>((resolve) => {
     let finished = false;
-    const stdoutQueue: Array<{ line: string; afterWrite?: () => void }> = [];
+    const stdoutQueue: Array<{ line: string; bytes: number; afterWrite?: () => void }> = [];
     const pendingFinalizers: Array<() => void> = [];
+    const stdoutMaxBytes = readCliStdoutMaxBytes();
+    const stdoutResumeBytes = Math.max(1, Math.floor(stdoutMaxBytes / 2));
     let stdoutBlocked = false;
     let socketPaused = false;
+    let queuePaused = false;
+    let stdoutQueueBytes = 0;
+    let parserControl: { resume(): void } | null = null;
     const finish = (code: number) => {
       if (finished) return;
       finished = true;
@@ -257,10 +263,21 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
       process.off("SIGBREAK", onInterrupt);
       resolve(code);
     };
+    const pauseSocket = () => {
+      if (socketPaused || typeof sock.pause !== "function") return;
+      socketPaused = true;
+      sock.pause();
+    };
     const maybeResumeSocket = () => {
-      if (!socketPaused) return;
+      if (!socketPaused || stdoutBlocked || queuePaused) return;
       socketPaused = false;
       if (typeof sock.resume === "function") sock.resume();
+    };
+    const maybeResumeParser = () => {
+      if (!queuePaused || stdoutBlocked || stdoutQueueBytes >= stdoutResumeBytes) return;
+      queuePaused = false;
+      maybeResumeSocket();
+      parserControl?.resume();
     };
     const flushFinalizers = () => {
       if (stdoutBlocked || stdoutQueue.length > 0) return;
@@ -273,29 +290,41 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
         const ok = process.stdout.write(next.line);
         if (!ok) {
           stdoutBlocked = true;
-          if (!socketPaused && typeof sock.pause === "function") {
-            socketPaused = true;
-            sock.pause();
-          }
+          pauseSocket();
           process.stdout.once("drain", () => {
             stdoutBlocked = false;
             const flushed = stdoutQueue.shift();
+            stdoutQueueBytes = Math.max(0, stdoutQueueBytes - (flushed?.bytes ?? 0));
             flushed?.afterWrite?.();
-            maybeResumeSocket();
+            maybeResumeParser();
             flushStdout();
             flushFinalizers();
           });
           return;
         }
         stdoutQueue.shift();
+        stdoutQueueBytes = Math.max(0, stdoutQueueBytes - next.bytes);
         next.afterWrite?.();
       }
+      maybeResumeParser();
       maybeResumeSocket();
       flushFinalizers();
     };
-    const writeStdout = (line: string, afterWrite?: () => void) => {
-      stdoutQueue.push({ line, afterWrite });
+    const writeStdout = (line: string, afterWrite?: () => void): boolean => {
+      const bytes = Buffer.byteLength(line);
+      stdoutQueue.push({ line, bytes, afterWrite });
+      stdoutQueueBytes += bytes;
+      let shouldContinueParsing = true;
+      if (stdoutQueueBytes > stdoutMaxBytes) {
+        queuePaused = true;
+        shouldContinueParsing = false;
+        pauseSocket();
+        queueMicrotask(() => {
+          maybeResumeParser();
+        });
+      }
       flushStdout();
+      return shouldContinueParsing;
     };
     const afterStdout = (cb: () => void) => {
       pendingFinalizers.push(cb);
@@ -317,15 +346,15 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
       params,
     };
 
-    onMessages(sock, (msg) => {
+    parserControl = onMessages(sock, (msg) => {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
         const ackAfterWrite = createStreamAckCallback(method, sock, reqId, msg.data);
         const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
         if (markdown !== null) {
-          writeStdout(markdown + "\n", ackAfterWrite);
+          return writeStdout(markdown + "\n", ackAfterWrite);
         } else {
           const rendered = truthy(parsed.flags.full) ? msg.data : formatCompact(method, msg.data);
-          writeStdout(JSON.stringify(rendered) + "\n", ackAfterWrite);
+          return writeStdout(JSON.stringify(rendered) + "\n", ackAfterWrite);
         }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
@@ -922,6 +951,14 @@ function readCliConfig(): {
     connectRetryAttempts: toInt(config.getEffective("daemon.connect_retry_attempts"), DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS),
     connectRetryDelayMs: toMs(config.getEffective("daemon.connect_retry_delay_seconds"), DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS),
   };
+}
+
+function readCliStdoutMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CODEX_TEAM_CLI_STDOUT_MAX_BYTES;
+  if (typeof raw !== "string" || raw.trim().length === 0) return DEFAULT_CLI_STDOUT_MAX_BYTES;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_CLI_STDOUT_MAX_BYTES;
+  return Math.max(1, Math.floor(parsed));
 }
 
 function toInt(v: unknown, fallback: number): number {
