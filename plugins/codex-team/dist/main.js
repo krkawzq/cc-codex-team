@@ -457,6 +457,9 @@ function socketPeer(socket) {
 var COMMANDS = /* @__PURE__ */ new Set([
   "version",
   "doctor",
+  "profiles",
+  "profiles:list",
+  "profiles:show",
   "status",
   "daemon:fleet:status",
   "daemon:status",
@@ -688,6 +691,8 @@ function commandKey(path19) {
 }
 var SHORT_COMMANDS = /* @__PURE__ */ new Set([
   "doctor",
+  "profiles:list",
+  "profiles:show",
   "status",
   "daemon:fleet:status",
   "daemon:status",
@@ -1111,6 +1116,66 @@ var daemonGroup = {
     daemonFleetGroup,
     daemonUserGroup,
     daemonConfigGroup
+  ],
+  needs_bearer: false
+};
+var profilesGroup = {
+  name: "profiles",
+  summary: "Inspect bundled canonical session profiles shipped with the plugin.",
+  usage: "codex-team profiles <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team profiles list",
+    "codex-team profiles show fixer"
+  ],
+  subcommands: [
+    leaf({
+      name: "list",
+      summary: "List bundled profiles and their session-new flag bundles.",
+      usage: "codex-team profiles list [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact row per bundled profile to stdout."
+        }
+      ],
+      examples: [
+        "codex-team profiles list",
+        "codex-team profiles list --short"
+      ],
+      needs_bearer: false
+    }),
+    leaf({
+      name: "show",
+      summary: "Show one bundled profile and a copy-ready session-new command.",
+      usage: "codex-team profiles show <name> [flags]",
+      positionals: [
+        {
+          name: "name",
+          required: true,
+          description: "Canonical bundled profile name such as fixer or reviewer."
+        }
+      ],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print only the copy-ready session-new command."
+        }
+      ],
+      examples: [
+        "codex-team profiles show fixer",
+        "codex-team profiles show tester --short"
+      ],
+      needs_bearer: false
+    })
   ],
   needs_bearer: false
 };
@@ -2353,6 +2418,7 @@ var HELP_TREE = {
       ],
       needs_bearer: true
     }),
+    profilesGroup,
     daemonGroup,
     sessionGroup,
     messageGroup,
@@ -2786,6 +2852,12 @@ function formatShort(method, data) {
   const value = asObject(data);
   let body;
   switch (method) {
+    case "profiles:list":
+      body = formatProfilesList(data);
+      break;
+    case "profiles:show":
+      body = formatProfileShow(data);
+      break;
     case "status":
       body = formatStatus(data);
       break;
@@ -2820,6 +2892,32 @@ function formatShort(method, data) {
   const footerLines = extractFooterLines(method, value);
   return footerLines.length > 0 ? `${body}
 ${footerLines.join("\n")}` : body;
+}
+function formatProfilesList(data) {
+  const value = asObject(data);
+  const profiles = Array.isArray(value.profiles) ? value.profiles : [];
+  if (profiles.length === 0) return "(no profiles)";
+  const rows = profiles.map((entry) => {
+    const profile = asObject(entry);
+    const flags = asObject(profile.flags);
+    return [
+      formatScalar(profile.name),
+      formatScalar(flags.sandbox),
+      formatScalar(flags.effort),
+      formatScalar(flags.approval),
+      formatScalar(profile.description)
+    ];
+  });
+  const widths = rows[0].map(
+    (_, index) => Math.max(...rows.map((row) => row[index].length))
+  );
+  return rows.map(
+    (row) => row.map((cell, index) => index === row.length - 1 ? cell : cell.padEnd(widths[index])).join("  ")
+  ).join("\n");
+}
+function formatProfileShow(data) {
+  const value = asObject(data);
+  return asString(value.command) ?? "unknown";
 }
 function formatStatus(data) {
   const value = asObject(data);
@@ -3171,6 +3269,10 @@ function formatCompact(method, data) {
   switch (method) {
     case "version":
       return pickFields(data, ["daemon_version"]);
+    case "profiles:list":
+      return compactProfilesList(data);
+    case "profiles:show":
+      return compactProfileShow(data);
     case "status":
       return pickFields(data, [
         "token",
@@ -3304,6 +3406,15 @@ function formatCompact(method, data) {
     default:
       return asObject2(data);
   }
+}
+function compactProfilesList(data) {
+  const value = asObject2(data);
+  return {
+    profiles: asArray(value.profiles).map((entry) => pickFields(entry, ["name", "flags"]))
+  };
+}
+function compactProfileShow(data) {
+  return pickFields(data, ["name", "flags", "command"]);
 }
 function compactDaemonUserList(data) {
   const value = asObject2(data);
@@ -4360,6 +4471,92 @@ function interpretSocketConnectError(code, message) {
   }
 }
 
+// src/profiles/builtin.ts
+var BUILTIN_PROFILES = [
+  {
+    name: "fixer",
+    description: "Default worker \u2014 edits code, asks before risky ops",
+    flags: {
+      model: "gpt-5.4",
+      sandbox: "workspace-write",
+      approval: "on-request",
+      effort: "high",
+      auto_approve: "git*,npm test,npm run test*,vitest*,pytest*,cargo test*"
+    }
+  },
+  {
+    name: "reviewer",
+    description: "Read-only critic",
+    flags: {
+      model: "gpt-5.4",
+      sandbox: "read-only",
+      approval: "never",
+      effort: "xhigh"
+    }
+  },
+  {
+    name: "planner",
+    description: "Read-only strategist",
+    flags: {
+      model: "gpt-5.4",
+      sandbox: "read-only",
+      approval: "never",
+      effort: "xhigh"
+    }
+  },
+  {
+    name: "tester",
+    description: "Trusted automation \u2014 runs tests",
+    flags: {
+      model: "gpt-5.4-mini",
+      sandbox: "workspace-write",
+      approval: "never",
+      effort: "medium",
+      auto_approve: "npm test,vitest*,pytest*,cargo test*,go test*,make test*"
+    }
+  },
+  {
+    name: "explorer",
+    description: "Read-only investigator",
+    flags: {
+      model: "gpt-5.4-mini",
+      sandbox: "read-only",
+      approval: "never",
+      effort: "medium"
+    }
+  }
+];
+function findProfile(name) {
+  return BUILTIN_PROFILES.find((profile) => profile.name === name);
+}
+function renderSessionNewCommand(profile, sessionName = "<name>", cwd = "<repo>") {
+  const args = [
+    "codex-team",
+    "-b",
+    "$TOK",
+    "session",
+    "new",
+    sessionName,
+    "--cwd",
+    cwd,
+    "--model",
+    profile.flags.model,
+    "--sandbox",
+    profile.flags.sandbox,
+    "--approval",
+    profile.flags.approval,
+    "--effort",
+    profile.flags.effort
+  ];
+  if (profile.flags.auto_approve) {
+    args.push("--auto-approve", shellQuote(profile.flags.auto_approve));
+  }
+  return args.join(" ");
+}
+function shellQuote(value) {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
 // src/cli/run.ts
 var DAEMON_POLL_INTERVAL_MS = 100;
 var DEFAULT_DAEMON_READY_TIMEOUT_MS = 15e3;
@@ -4399,6 +4596,10 @@ async function runCli(argv) {
     });
   }
   const effectiveMethod = resolveMethod(method, parsed);
+  if (method === "profiles") {
+    process.stdout.write(renderHelp(parsed.commandPath));
+    return 0;
+  }
   const short = truthy(parsed.flags.short);
   const json = method === "doctor" && parsed.flags.json !== void 0;
   const format = flagString(parsed.flags.format);
@@ -4424,6 +4625,9 @@ async function runCli(argv) {
   }
   if (method === "version") {
     return await runVersion(sockPath);
+  }
+  if (isBuiltinProfilesMethod(method)) {
+    return runBuiltinProfiles(method, parsed);
   }
   const needsBearer = !isDaemonLevel(effectiveMethod);
   if (needsBearer && !parsed.bearer) {
@@ -5178,6 +5382,44 @@ function resolveMethod(method, parsed) {
     return "session:health:all";
   }
   return method;
+}
+function isBuiltinProfilesMethod(method) {
+  return method === "profiles:list" || method === "profiles:show";
+}
+function runBuiltinProfiles(method, parsed) {
+  if (method === "profiles:list") {
+    if (parsed.positionals.length > 0) {
+      process.stdout.write(JSON.stringify(err("invalid_params", "profiles list does not accept positional arguments")) + "\n");
+      return 1;
+    }
+    return writeLocalResult(method, {
+      profiles: BUILTIN_PROFILES
+    }, parsed);
+  }
+  if (parsed.positionals.length !== 1) {
+    process.stdout.write(JSON.stringify(err("invalid_params", "profiles show requires exactly 1 positional: <name>")) + "\n");
+    return 1;
+  }
+  const name = parsed.positionals[0];
+  const profile = findProfile(name);
+  if (!profile) {
+    const known = BUILTIN_PROFILES.map((entry) => entry.name).join(", ");
+    process.stdout.write(JSON.stringify(err("invalid_params", `profile '${name}' not found (known: ${known})`)) + "\n");
+    return 1;
+  }
+  return writeLocalResult(method, {
+    ...profile,
+    command: renderSessionNewCommand(profile)
+  }, parsed);
+}
+function writeLocalResult(method, result, parsed) {
+  if (truthy(parsed.flags.short)) {
+    process.stdout.write(formatShort(method, result) + "\n");
+    return 0;
+  }
+  const rendered = truthy(parsed.flags.full) ? result : formatCompact(method, result);
+  process.stdout.write(JSON.stringify(ok(rendered)) + "\n");
+  return 0;
 }
 function asStringFlag(value) {
   if (Array.isArray(value)) {

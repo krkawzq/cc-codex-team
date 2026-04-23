@@ -445,6 +445,67 @@ const daemonGroup: HelpNode = {
   needs_bearer: false,
 };
 
+const profilesGroup: HelpNode = {
+  name: "profiles",
+  summary: "Inspect bundled canonical session profiles shipped with the plugin.",
+  usage: "codex-team profiles <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team profiles list",
+    "codex-team profiles show fixer",
+  ],
+  subcommands: [
+    leaf({
+      name: "list",
+      summary: "List bundled profiles and their session-new flag bundles.",
+      usage: "codex-team profiles list [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact row per bundled profile to stdout.",
+        },
+      ],
+      examples: [
+        "codex-team profiles list",
+        "codex-team profiles list --short",
+      ],
+      needs_bearer: false,
+    }),
+    leaf({
+      name: "show",
+      summary: "Show one bundled profile and a copy-ready session-new command.",
+      usage: "codex-team profiles show <name> [flags]",
+      positionals: [
+        {
+          name: "name",
+          required: true,
+          description: "Canonical bundled profile name such as fixer or reviewer.",
+        },
+      ],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print only the copy-ready session-new command.",
+        },
+      ],
+      examples: [
+        "codex-team profiles show fixer",
+        "codex-team profiles show tester --short",
+      ],
+      needs_bearer: false,
+    }),
+  ],
+  needs_bearer: false,
+};
+
 const sessionGroup: HelpNode = {
   name: "session",
   summary: "Manage live Codex sessions for the current user.",
@@ -1688,6 +1749,7 @@ const HELP_TREE: HelpNode = {
       ],
       needs_bearer: true,
     }),
+    profilesGroup,
     daemonGroup,
     sessionGroup,
     messageGroup,

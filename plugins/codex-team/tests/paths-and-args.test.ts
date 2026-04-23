@@ -161,6 +161,16 @@ describe("parseArgs", () => {
     expect(parsed.flags.stream).toBe(true);
   });
 
+  it("parses profiles list and show command paths", () => {
+    const list = parseArgs(["profiles", "list"]);
+    expect(list.commandPath).toEqual(["profiles", "list"]);
+    expect(list.positionals).toEqual([]);
+
+    const show = parseArgs(["profiles", "show", "fixer"]);
+    expect(show.commandPath).toEqual(["profiles", "show"]);
+    expect(show.positionals).toEqual(["fixer"]);
+  });
+
   it("resolves subgroup help paths and skips positional validation", () => {
     const subgroup = parseArgs(["daemon", "config", "--help"]);
     expect(subgroup.help).toBe(true);
@@ -178,6 +188,12 @@ describe("parseArgs", () => {
     expect(cursor.commandPath).toEqual(["cursor"]);
     expect(cursor.positionals).toEqual([]);
     expect(cursor.unknown).toBeNull();
+
+    const profiles = parseArgs(["profiles", "--help"]);
+    expect(profiles.help).toBe(true);
+    expect(profiles.commandPath).toEqual(["profiles"]);
+    expect(profiles.positionals).toEqual([]);
+    expect(profiles.unknown).toBeNull();
   });
 
   it("treats --help as a command-path terminator", () => {

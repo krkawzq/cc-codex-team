@@ -12,6 +12,9 @@ export interface ParsedArgs {
 const COMMANDS: Set<string> = new Set([
   "version",
   "doctor",
+  "profiles",
+  "profiles:list",
+  "profiles:show",
   "status",
   "daemon:fleet:status",
   "daemon:status",
@@ -266,6 +269,8 @@ export function commandKey(path: string[]): string {
 
 const SHORT_COMMANDS: Set<string> = new Set([
   "doctor",
+  "profiles:list",
+  "profiles:show",
   "status",
   "daemon:fleet:status",
   "daemon:status",

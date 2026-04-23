@@ -8,6 +8,7 @@ describe("renderHelp", () => {
 
     expect(help).toContain("version");
     expect(help).toContain("doctor");
+    expect(help).toContain("profiles");
     expect(help).toContain("status");
     expect(help).toContain("daemon");
     expect(help).toContain("session");
@@ -44,6 +45,8 @@ describe("renderHelp", () => {
 
   it("documents --short for compact status commands", () => {
     expect(renderHelp(["status"])).toContain("--short");
+    expect(renderHelp(["profiles", "list"])).toContain("--short");
+    expect(renderHelp(["profiles", "show"])).toContain("--short");
     expect(renderHelp(["daemon", "status"])).toContain("--short");
     expect(renderHelp(["daemon", "fleet", "status"])).toContain("--users");
     expect(renderHelp(["daemon", "user", "list"])).toContain("--short");
@@ -60,6 +63,18 @@ describe("renderHelp", () => {
     expect(renderHelp(["session", "list"])).toContain("cannot be used with --format table");
     expect(renderHelp(["message", "history"])).toContain("cannot be used with --format markdown");
     expect(renderHelp(["session", "logs"])).toContain("--short");
+  });
+
+  it("renders the profiles command group and positional show argument", () => {
+    const group = renderHelp(["profiles"]);
+    expect(group).toContain("codex-team profiles");
+    expect(group).toContain("list");
+    expect(group).toContain("show");
+
+    const show = renderHelp(["profiles", "show"]);
+    expect(show).toContain("codex-team profiles show");
+    expect(show).toContain("<name>");
+    expect(show).toContain("Canonical bundled profile name");
   });
 
   it("documents --full on leaf commands", () => {

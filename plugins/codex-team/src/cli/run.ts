@@ -16,6 +16,7 @@ import { VERSION } from "../version";
 import { formatShort } from "../format/short";
 import { formatCompact } from "../format/compact";
 import { runDoctor } from "./doctor";
+import { BUILTIN_PROFILES, findProfile, renderSessionNewCommand } from "../profiles/builtin";
 
 const DAEMON_POLL_INTERVAL_MS = 100;
 const DEFAULT_DAEMON_READY_TIMEOUT_MS = 15000;
@@ -60,6 +61,10 @@ export async function runCli(argv: string[]): Promise<number> {
     });
   }
   const effectiveMethod = resolveMethod(method, parsed);
+  if (method === "profiles") {
+    process.stdout.write(renderHelp(parsed.commandPath));
+    return 0;
+  }
   const short = truthy(parsed.flags.short);
   const json = method === "doctor" && parsed.flags.json !== undefined;
   const format = flagString(parsed.flags.format);
@@ -87,6 +92,10 @@ export async function runCli(argv: string[]): Promise<number> {
 
   if (method === "version") {
     return await runVersion(sockPath);
+  }
+
+  if (isBuiltinProfilesMethod(method)) {
+    return runBuiltinProfiles(method, parsed);
   }
 
   const needsBearer = !isDaemonLevel(effectiveMethod);
@@ -1000,6 +1009,52 @@ function resolveMethod(method: string, parsed: ParsedArgs): string {
     return "session:health:all";
   }
   return method;
+}
+
+function isBuiltinProfilesMethod(method: string): boolean {
+  return method === "profiles:list" || method === "profiles:show";
+}
+
+function runBuiltinProfiles(method: string, parsed: ParsedArgs): number {
+  if (method === "profiles:list") {
+    if (parsed.positionals.length > 0) {
+      process.stdout.write(JSON.stringify(err("invalid_params", "profiles list does not accept positional arguments")) + "\n");
+      return 1;
+    }
+
+    return writeLocalResult(method, {
+      profiles: BUILTIN_PROFILES,
+    }, parsed);
+  }
+
+  if (parsed.positionals.length !== 1) {
+    process.stdout.write(JSON.stringify(err("invalid_params", "profiles show requires exactly 1 positional: <name>")) + "\n");
+    return 1;
+  }
+
+  const name = parsed.positionals[0]!;
+  const profile = findProfile(name);
+  if (!profile) {
+    const known = BUILTIN_PROFILES.map((entry) => entry.name).join(", ");
+    process.stdout.write(JSON.stringify(err("invalid_params", `profile '${name}' not found (known: ${known})`)) + "\n");
+    return 1;
+  }
+
+  return writeLocalResult(method, {
+    ...profile,
+    command: renderSessionNewCommand(profile),
+  }, parsed);
+}
+
+function writeLocalResult(method: string, result: unknown, parsed: ParsedArgs): number {
+  if (truthy(parsed.flags.short)) {
+    process.stdout.write(formatShort(method, result) + "\n");
+    return 0;
+  }
+
+  const rendered = truthy(parsed.flags.full) ? result : formatCompact(method, result);
+  process.stdout.write(JSON.stringify(ok(rendered)) + "\n");
+  return 0;
 }
 
 function asStringFlag(value: string | boolean | string[] | undefined): string | null {

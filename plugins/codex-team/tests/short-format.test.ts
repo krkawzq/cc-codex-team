@@ -10,6 +10,40 @@ describe("formatShort", () => {
 
   it.each([
     [
+      "profiles:list",
+      {
+        profiles: [
+          {
+            name: "fixer",
+            description: "Default worker — edits code, asks before risky ops",
+            flags: {
+              sandbox: "workspace-write",
+              effort: "high",
+              approval: "on-request",
+            },
+          },
+          {
+            name: "reviewer",
+            description: "Read-only critic",
+            flags: {
+              sandbox: "read-only",
+              effort: "xhigh",
+              approval: "never",
+            },
+          },
+        ],
+      },
+      "fixer     workspace-write  high   on-request  Default worker — edits code, asks before risky ops\nreviewer  read-only        xhigh  never       Read-only critic",
+    ],
+    [
+      "profiles:show",
+      {
+        name: "fixer",
+        command: "codex-team -b $TOK session new <name> --cwd <repo> --model gpt-5.4",
+      },
+      "codex-team -b $TOK session new <name> --cwd <repo> --model gpt-5.4",
+    ],
+    [
       "status",
       {
         token: "agent-f",

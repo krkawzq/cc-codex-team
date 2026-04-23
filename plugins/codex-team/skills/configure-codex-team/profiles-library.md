@@ -2,6 +2,8 @@
 
 These are the canonical role profiles referenced by every playbook in `skills/codex-team-playbooks/`. They ship **with the plugin** — you do NOT need to pre-configure anything in `~/.codex/config.toml`. Claude reads the definitions here and passes the fields to `session new` directly as explicit flags.
 
+Quick inspection shortcut: `codex-team profiles list` shows all bundled recipes, and `codex-team profiles show <name>` prints one profile plus a ready-to-copy `session new` command.
+
 > **Why this lives in the skill, not in `~/.codex/config.toml`:** those playbooks used to depend on user-local Codex profiles that fresh agents had no way to know about. Dogfood testing showed `--profile fixer` silently falling back to defaults when the profile wasn't defined. Now the profile IS the skill content — every agent that loads this skill gets the definitions, regardless of user-local Codex config.
 
 ## The five canonical profiles
