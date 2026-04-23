@@ -197,6 +197,37 @@ describe("doctor", () => {
     }
   });
 
+  it("treats the bundled launcher as OK when CLAUDE_PLUGIN_ROOT points at the plugin root directly", () => {
+    const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-plugin-root-"));
+    tempDirs.push(pluginRoot);
+    fs.mkdirSync(path.join(pluginRoot, "bin"), { recursive: true });
+    const launcherPath = path.join(pluginRoot, "bin", "codex-team");
+    fs.writeFileSync(launcherPath, "#!/bin/sh\n");
+    fs.chmodSync(launcherPath, 0o755);
+
+    const previousPluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    const previousArgv1 = process.argv[1];
+    process.env.CLAUDE_PLUGIN_ROOT = pluginRoot;
+    process.argv[1] = launcherPath;
+
+    try {
+      const ctx = makeContext({ packageRoot: pluginRoot, pathEnv: "" });
+      tempDirs.push(ctx.dataDir);
+
+      const result = checkLauncherOnPath(ctx, makeDeps());
+
+      expect(result).toMatchObject({
+        status: "ok",
+        name: "launcher_on_path",
+        message: `launcher=${path.resolve(launcherPath)} (plugin mode)`,
+      });
+    } finally {
+      process.argv[1] = previousArgv1;
+      if (previousPluginRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousPluginRoot;
+    }
+  });
+
   it("verifies daemon.data_dir is writable", () => {
     const ctx = makeContext();
     tempDirs.push(ctx.dataDir);
@@ -440,13 +471,10 @@ describe("doctor", () => {
     expect(code).toBe(0);
     const payload = JSON.parse(lines.join(""));
     expect(payload).toMatchObject({
-      ok: true,
-      data: {
-        verdict: "HEALTHY",
-        exit_code: 0,
-      },
+      verdict: "HEALTHY",
+      exit_code: 0,
     });
-    expect(payload.data.checks).toEqual(expect.arrayContaining([
+    expect(payload.checks).toEqual(expect.arrayContaining([
       expect.objectContaining({
         name: "node",
         status: "OK",
@@ -467,5 +495,61 @@ describe("doctor", () => {
     expect(code).toBe(1);
     expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"invalid_params\""));
     expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("--short and --json are mutually exclusive"));
+  });
+
+  it("launcher warns when src is newer than dist before execing node", () => {
+    const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-launcher-root-"));
+    tempDirs.push(pluginRoot);
+    fs.mkdirSync(path.join(pluginRoot, "dist"), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, "src"), { recursive: true });
+    const distPath = path.join(pluginRoot, "dist", "main.js");
+    const srcPath = path.join(pluginRoot, "src", "main.ts");
+    fs.writeFileSync(distPath, "process.stdout.write('launcher-ok\\n');\n");
+    fs.writeFileSync(srcPath, "export {};\n");
+    fs.utimesSync(distPath, new Date("2026-04-23T00:00:00.000Z"), new Date("2026-04-23T00:00:00.000Z"));
+    fs.utimesSync(srcPath, new Date("2026-04-23T00:01:00.000Z"), new Date("2026-04-23T00:01:00.000Z"));
+
+    const result = spawnSync("bash", [path.resolve("bin", "codex-team")], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CLAUDE_PLUGIN_ROOT: pluginRoot,
+      },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("src/ is newer than dist/main.js");
+  });
+
+  it("launcher rejects node versions older than 18", () => {
+    const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-launcher-root-"));
+    const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-fake-bin-"));
+    tempDirs.push(pluginRoot, fakeBin);
+    fs.mkdirSync(path.join(pluginRoot, "dist"), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, "dist", "main.js"), "process.exit(0);\n");
+    const fakeNode = path.join(fakeBin, "node");
+    fs.writeFileSync(
+      fakeNode,
+      "#!/usr/bin/env bash\n" +
+      "if [[ \"$1\" == \"--version\" ]]; then\n" +
+      "  printf 'v16.20.0\\n'\n" +
+      "  exit 0\n" +
+      "fi\n" +
+      "printf 'unexpected node invocation\\n' >&2\n" +
+      "exit 99\n",
+    );
+    fs.chmodSync(fakeNode, 0o755);
+
+    const result = spawnSync("bash", [path.resolve("bin", "codex-team")], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CLAUDE_PLUGIN_ROOT: pluginRoot,
+        PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("codex-team requires node >=18, found v16.20.0");
   });
 });

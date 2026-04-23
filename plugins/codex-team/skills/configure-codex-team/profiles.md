@@ -20,7 +20,7 @@ See [`profiles-library.md`](profiles-library.md) for the full definitions + quic
 
 **What**: user-defined Codex configuration profiles — a separate feature of the `codex` binary itself, not of codex-team.
 
-**How**: `codex-team` exposes a `--profile <name>` flag on `session new` / `session attach` that passes through to the codex app-server's `thread/start` RPC. codex resolves the name from `~/.codex/config.toml`. **codex-team does not read this file.**
+**How**: `codex-team` exposes a `--profile <name>` flag on `session new` that passes through to the codex app-server's `thread/start` RPC. codex resolves the name from `~/.codex/config.toml`. **codex-team does not read this file.**
 
 **Use for**: user-specific tuning that doesn't fit the canonical roles — e.g. `[profiles.my-rust-strict]` with `strict_mode = true`. If you have no custom codex profiles, you'll never touch this flag.
 

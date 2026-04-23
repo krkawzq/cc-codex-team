@@ -18,4 +18,52 @@ if [[ ! -f "${ENTRY}" ]]; then
   exit 1
 fi
 
+if ! command -v node >/dev/null 2>&1; then
+  echo "codex-team requires node >=18, but 'node' is not on PATH" >&2
+  exit 1
+fi
+
+NODE_VERSION="$(node --version 2>/dev/null || true)"
+NODE_MAJOR="${NODE_VERSION#v}"
+NODE_MAJOR="${NODE_MAJOR%%.*}"
+if [[ -z "${NODE_MAJOR}" || ! "${NODE_MAJOR}" =~ ^[0-9]+$ || "${NODE_MAJOR}" -lt 18 ]]; then
+  echo "codex-team requires node >=18, found ${NODE_VERSION:-unknown}" >&2
+  exit 1
+fi
+
+node - "${PLUGIN_ROOT}" <<'EOF' >/dev/null
+const fs = require("node:fs");
+const path = require("node:path");
+
+const pluginRoot = process.argv[2];
+const distMain = path.join(pluginRoot, "dist", "main.js");
+const srcRoot = path.join(pluginRoot, "src");
+
+function newestMtime(target) {
+  let stat;
+  try {
+    stat = fs.statSync(target);
+  } catch {
+    return null;
+  }
+  if (!stat.isDirectory()) return stat.mtimeMs;
+  let newest = null;
+  for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+    const candidate = newestMtime(path.join(target, entry.name));
+    if (candidate !== null && (newest === null || candidate > newest)) newest = candidate;
+  }
+  return newest;
+}
+
+try {
+  const distStat = fs.statSync(distMain);
+  const srcNewest = newestMtime(srcRoot);
+  if (srcNewest !== null && srcNewest > distStat.mtimeMs) {
+    fs.writeSync(2, "codex-team warning: src/ is newer than dist/main.js; run 'npm run build' in plugins/codex-team\n");
+  }
+} catch {
+  // ENTRY existence was already checked above.
+}
+EOF
+
 exec node "${ENTRY}" "$@"

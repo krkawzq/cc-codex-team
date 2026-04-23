@@ -39,6 +39,7 @@ vi.mock("../src/daemon/config", () => ({
 }));
 
 import { __private__, runCli } from "../src/cli/run";
+import { VERSION } from "../src/version";
 
 describe("runCli", () => {
   let stdoutSpy: ReturnType<typeof vi.spyOn>;
@@ -73,9 +74,24 @@ describe("runCli", () => {
       "--kind", "approval.permissions",
     ]);
 
-    expect(code).toBe(2);
+    expect(code).toBe(1);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"invalid_decision\""));
     expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("valid actions: accept, accept-session, decline"));
     expect(sockMocks.probeSock).not.toHaveBeenCalled();
+  });
+
+  it("prints the full version payload when --full is requested", async () => {
+    sockMocks.probeSock.mockResolvedValue(false);
+
+    const code = await runCli(["version", "--full"]);
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      "{\n" +
+      `  "cli_version": "${VERSION}",\n` +
+      "  \"daemon_version\": null\n" +
+      "}\n",
+    );
   });
 
   it("returns daemon_unreachable when the daemon never comes up", async () => {

@@ -155,6 +155,12 @@ describe("parseArgs", () => {
     expect(parseArgs(["-b"]).unknown).toBe("flag -b requires a value");
   });
 
+  it("rejects flag-like follow-ons for global value flags", () => {
+    expect(parseArgs(["-b", "--help", "status"]).unknown).toBe("flag -b requires a value");
+    expect(parseArgs(["--daemon-sock", "--verbose", "status"]).unknown).toBe("flag --daemon-sock requires a value");
+    expect(parseArgs(["--bearer", "--daemon-sock=/tmp/codex-team.sock", "status"]).unknown).toBe("flag --bearer requires a value");
+  });
+
   it("parses cursor commands and event-id flags", () => {
     const parsed = parseArgs([
       "-b", "token-1",

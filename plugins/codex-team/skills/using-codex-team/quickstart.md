@@ -2,7 +2,7 @@
 
 A zero-to-first-turn walkthrough. All commands assume you're already in the repo you want codex to work on.
 
-First step when stuck: run `codex-team doctor`.
+First step when stuck: run `codex-team doctor`. If your sandbox makes the default daemon data dir unwritable, retry with `CODEX_TEAM_DATA_DIR=/tmp/codex-team-$USER codex-team doctor`.
 
 ## 1. Pick a bearer token
 

@@ -109,7 +109,7 @@ export async function runCli(argv: string[]): Promise<number> {
   }
 
   if (method === "version") {
-    return await runVersion(sockPath);
+    return await runVersion(sockPath, truthy(parsed.flags.full));
   }
 
   if (isBuiltinProfilesMethod(method)) {
@@ -132,8 +132,8 @@ export async function runCli(argv: string[]): Promise<number> {
 
   const approvalValidationError = validateApprovalHint(method, parsed);
   if (approvalValidationError) {
-    process.stdout.write(JSON.stringify(err("invalid_params", approvalValidationError)) + "\n");
-    return 2;
+    process.stdout.write(JSON.stringify(err("invalid_decision", approvalValidationError)) + "\n");
+    return 1;
   }
 
   const cwdPreflightError = validateCliCwdPreflight(method, parsed);
@@ -141,6 +141,7 @@ export async function runCli(argv: string[]): Promise<number> {
     process.stdout.write(JSON.stringify(err("invalid_params", cwdPreflightError)) + "\n");
     return 1;
   }
+  canonicalizeCliCwdFlag(parsed);
 
   if (needsBearer && !clientOnlySockPath) {
     const cachedFailure = getCachedBootstrapFailure(sockPath);
@@ -175,7 +176,7 @@ function validateApprovalHint(method: string, parsed: ParsedArgs): string | null
   return validation.ok ? null : validation.message;
 }
 
-async function runVersion(sockPath: string): Promise<number> {
+async function runVersion(sockPath: string, full: boolean): Promise<number> {
   const cliVersion = getCliVersion();
   const alive = await probeSock(sockPath, 200);
   const cliConfig = readCliConfig();
@@ -192,7 +193,7 @@ async function runVersion(sockPath: string): Promise<number> {
     }
   }
   process.stdout.write(
-    renderJsonResult({ cli_version: cliVersion, daemon_version: daemonVersion }, false),
+    renderJsonResult({ cli_version: cliVersion, daemon_version: daemonVersion }, full),
   );
   return 0;
 }
@@ -868,6 +869,12 @@ function validateRequestedCwd(rawCwd: string): string | null {
   }
 
   return null;
+}
+
+function canonicalizeCliCwdFlag(parsed: ParsedArgs): void {
+  const cwd = asStringFlag(parsed.flags.cwd);
+  if (!cwd) return;
+  parsed.flags.cwd = path.normalize(path.resolve(cwd));
 }
 
 function validateDaemonDataDirWritable(dataDir: string): EnsureDaemonResult | null {
