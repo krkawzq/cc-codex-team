@@ -1,7 +1,7 @@
 ---
 name: manage-codex-team
 description: >-
-  Authoritative operational manual for driving codex-team sessions day-to-day — creating / sending / peering / interrupting / detaching sessions, arming the event stream, blocking with `message wait`, inspecting with `session health`, and responding to events (`turn.completed`, `turn.error`, `turn.queued_started`, `turn.queued_failed`, `approval.*`, `user_input.request`, `session.crashed`, `session.closed`, `session.seized`). **Proactively load this skill whenever you are about to dispatch work to a worker, read its state, respond to an event the Monitor just delivered, or handle an approval/user-input request.** Not for: one-shot CLI reference (`configure-codex-team`), failure recovery (`recover-codex-team`), picking a collaboration pattern (`codex-team-playbooks`), or first-time mental model (`using-codex-team`).
+  Authoritative operational manual for driving codex-team sessions day-to-day — creating / sending / peering / interrupting / detaching sessions, arming the event stream, blocking with `message wait`, inspecting with `session health`, and responding to events (`turn.completed`, `turn.queued_started`, `turn.queued_failed`, `approval.*`, `user_input.request`, `session.crashed`, `session.closed`, `session.seized`). **Proactively load this skill whenever you are about to dispatch work to a worker, read its state, respond to an event the Monitor just delivered, or handle an approval/user-input request.** Not for: one-shot CLI reference (`configure-codex-team`), failure recovery (`recover-codex-team`), picking a collaboration pattern (`codex-team-playbooks`), or first-time mental model (`using-codex-team`).
 ---
 
 # Manage codex-team
@@ -113,7 +113,7 @@ codex-team -b $TOKEN message send <session> --attach image.png "explain this scr
 ```
 
 - `--attach` currently accepts local image files only (`png/jpg/jpeg/gif/webp/bmp/svg`).
-- Returns immediately with `turn_id` (if started) or `started:false` + `queue_id` + `queued_depth` if a turn was already running.
+- Returns immediately with `{"status":"started","turn_id":"..."}` if dispatch starts now, or `{"status":"queued","queue_id":"...","queued_depth":N}` if a turn was already running.
 - Queue is per-session. Daemon dispatches queued prompts in order on each `turn.completed`.
 
 ### `message peer` — soft interject

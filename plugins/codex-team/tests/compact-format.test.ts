@@ -526,6 +526,11 @@ describe("formatCompact", () => {
     ],
     [
       "message:send",
+      { session: "audit", thread_id: "th-1", turn_id: "turn-7", started: true, queue_id: "q-1", queued_depth: 2 },
+      { status: "started", turn_id: "turn-7" },
+    ],
+    [
+      "message:send",
       { session: "audit", thread_id: "th-1", turn_id: "turn-7", started: false, queue_id: "q-1", queued_depth: 2 },
       { status: "queued", queue_id: "q-1", queued_depth: 2 },
     ],
@@ -602,9 +607,9 @@ describe("formatCompact", () => {
         thread_id: "th-1",
         turn_id: "turn-1",
         outcome: "error",
-        event_type: "turn.error",
+        event_type: "turn.completed",
         event_id: "evt-9",
-        error: { message: "boom" },
+        status: "failed",
         duration_ms: 1000,
         items_count: 2,
         token_usage: { total: 10 },

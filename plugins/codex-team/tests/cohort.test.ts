@@ -351,11 +351,12 @@ describe("cohort commands", () => {
       payload: { turn_id: "turn-lint" },
     });
     await events.append("user-1", {
-      type: "turn.error",
+      type: "turn.completed",
       session: "lint",
       thread_id: "th-lint",
       payload: {
         turn_id: "turn-lint",
+        status: "failed",
         error: {
           message: "boom",
           codex_error_info: "context_window_exceeded",

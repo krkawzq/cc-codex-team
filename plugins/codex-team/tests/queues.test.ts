@@ -103,7 +103,7 @@ describe("TurnQueues", () => {
     expect(queues.depth("user-1::sess-1")).toBe(0);
   });
 
-  it("preserves the current turn when turn.error willRetry is true", async () => {
+  it("preserves the current turn when a failure is marked for retry", async () => {
     const queues = new TurnQueues();
     const client = {};
     queues.setCurrentTurn("user-1::sess-1", "turn-1");

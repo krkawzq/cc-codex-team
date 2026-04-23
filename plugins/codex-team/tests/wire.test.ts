@@ -255,7 +255,7 @@ describe("wireDaemonEvents", () => {
     });
   });
 
-  it("passes willRetry=false turn errors into the queue error handler", async () => {
+  it("treats terminal turn failures as turn.completed status=failed while draining the queue", async () => {
     const pool = new FakePool();
     pool.clientForSession.mockReturnValue({});
     const ctx = makeContext(pool, {
@@ -284,7 +284,7 @@ describe("wireDaemonEvents", () => {
       user: "user-1",
       clientId: "client-1",
       notification: {
-        method: "turn/error",
+        method: "error",
         params: {
           threadId: "th-1",
           turnId: "turn-1",
@@ -299,6 +299,15 @@ describe("wireDaemonEvents", () => {
     await Promise.resolve();
     await Promise.resolve();
 
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "turn.completed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: expect.objectContaining({
+        turn_id: "turn-1",
+        status: "failed",
+      }),
+    }));
     expect(ctx.queues.onTurnErrored).toHaveBeenCalledWith(
       "user-1::sess-1",
       "turn-1",
@@ -314,7 +323,7 @@ describe("wireDaemonEvents", () => {
     }));
   });
 
-  it("passes willRetry=true turn errors into the queue error handler without clearing the active turn", async () => {
+  it("suppresses non-terminal retry failures from the event stream while preserving the active turn", async () => {
     const pool = new FakePool();
     pool.clientForSession.mockReturnValue({});
     const ctx = makeContext(pool, {
@@ -343,7 +352,7 @@ describe("wireDaemonEvents", () => {
       user: "user-1",
       clientId: "client-1",
       notification: {
-        method: "turn/error",
+        method: "error",
         params: {
           threadId: "th-1",
           turnId: "turn-1",
@@ -358,6 +367,13 @@ describe("wireDaemonEvents", () => {
     await Promise.resolve();
     await Promise.resolve();
 
+    expect(ctx.events.append).not.toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "turn.completed",
+      payload: expect.objectContaining({
+        turn_id: "turn-1",
+        status: "failed",
+      }),
+    }));
     expect(ctx.queues.onTurnErrored).toHaveBeenCalledWith(
       "user-1::sess-1",
       "turn-1",
@@ -603,12 +619,12 @@ describe("wireDaemonEvents", () => {
       }),
     }));
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
-      type: "turn.error",
+      type: "turn.completed",
       session: "sess-1",
       thread_id: "th-1",
       payload: expect.objectContaining({
         turn_id: "turn-1",
-        will_retry: false,
+        status: "failed",
       }),
     }));
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({

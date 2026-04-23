@@ -83,7 +83,7 @@ describe("messageWait", () => {
         status: "completed",
         duration_ms: 850,
         items_count: 2,
-        token_usage: { prompt: 12, completion: 8, total: 20 },
+        token_usage: { input: 12, cached_input: 0, output: 8, reasoning_output: 0, total: 20 },
         ended_at: "2025-01-01T00:00:01.000Z",
         turn_items_included: false,
       },
@@ -99,7 +99,7 @@ describe("messageWait", () => {
       status: "completed",
       duration_ms: 850,
       items_count: 2,
-      token_usage: { prompt: 12, completion: 8, total: 20 },
+      token_usage: { input: 12, cached_input: 0, output: 8, reasoning_output: 0, total: 20 },
       ended_at: "2025-01-01T00:00:01.000Z",
       turn_items_included: false,
     });
@@ -107,7 +107,7 @@ describe("messageWait", () => {
 
   it.each([
     { status: "completed", outcome: "completed" },
-    { status: "errored", outcome: "error" },
+    { status: "failed", outcome: "error" },
     { status: "cancelled", outcome: "error" },
   ])("returns status-aware terminal payloads for historical turn.completed events ($status)", async ({ status, outcome }) => {
     const dir = mkTmpDir();
@@ -135,7 +135,7 @@ describe("messageWait", () => {
         status,
         duration_ms: 1337,
         items_count: 4,
-        token_usage: { prompt: 21, completion: 13, total: 34 },
+        token_usage: { input: 21, cached_input: 0, output: 13, reasoning_output: 0, total: 34 },
         ended_at: "2025-01-01T00:00:09.000Z",
         turn_items_included: false,
       },
@@ -161,7 +161,7 @@ describe("messageWait", () => {
       status,
       duration_ms: 1337,
       items_count: 4,
-      token_usage: { prompt: 21, completion: 13, total: 34 },
+      token_usage: { input: 21, cached_input: 0, output: 13, reasoning_output: 0, total: 34 },
       ended_at: "2025-01-01T00:00:09.000Z",
       turn_items_included: false,
     });
@@ -195,7 +195,7 @@ describe("messageWait", () => {
         status: "completed",
         duration_ms: 900,
         items_count: 1,
-        token_usage: { prompt: 4, completion: 2, total: 6 },
+        token_usage: { input: 4, cached_input: 0, output: 2, reasoning_output: 0, total: 6 },
         ended_at: "2025-01-01T00:00:09.000Z",
         turn_items_included: false,
       },

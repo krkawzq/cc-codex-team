@@ -4,6 +4,7 @@ import type { DaemonContext } from "./context";
 import { normalizeNotification, normalizeServerRequest } from "./normalize";
 import {
   AUTO_APPROVED_EVENT_TYPE,
+  INTERNAL_TURN_FAILED_EVENT_TYPE,
   SESSION_CLOSED_EVENT_TYPE,
   SESSION_CRASHED_EVENT_TYPE,
 } from "./events";
@@ -15,6 +16,7 @@ import { isoFromUnixSeconds, normalizeTokenUsage } from "./sessions";
 import { logger } from "../logger";
 import { matchAutoApprovePattern } from "./auto-approve";
 import { buildApprovalShortcutResponse, preferredAutoApprovalShortcut } from "./handlers/message";
+import type { TeamEvent } from "../types";
 
 export function wireDaemonEvents(ctx: DaemonContext): void {
   ctx.pool.on("notification", (e) => {
@@ -44,22 +46,25 @@ async function handleNotification(
   const sessionName = resolveSession(ctx, e.user, norm.threadId);
   const rec = sessionName ? ctx.sessions.get(e.user, sessionName) : null;
 
-  const logged = await ctx.events.append(e.user, {
-    type: norm.type,
-    session: sessionName,
-    thread_id: norm.threadId,
-    payload: norm.payload,
-  });
+  const logged = norm.type === INTERNAL_TURN_FAILED_EVENT_TYPE
+    ? null
+    : await ctx.events.append(e.user, {
+      type: norm.type,
+      session: sessionName,
+      thread_id: norm.threadId,
+      payload: norm.payload,
+    });
 
   if (norm.type === "turn.started" && sessionName && rec) {
     const turnId = (norm.payload.turn_id as string | null) ?? null;
+    const loggedTs = logged?.ts ?? new Date().toISOString();
     ctx.queues.setCurrentTurn(keyFor(e.user, sessionName), turnId);
     ctx.sessions.update(e.user, sessionName, {
       state: "live",
       crash_reason: null,
       last_turn_id: turnId,
       current_turn_id: turnId,
-      current_turn_started_at: isoFromUnixSeconds(norm.payload.started_at, logged.ts),
+      current_turn_started_at: isoFromUnixSeconds(norm.payload.started_at, loggedTs),
       current_item_type: null,
       items_in_turn: 0,
     });
@@ -90,9 +95,12 @@ async function handleNotification(
     }
   }
 
-  if (norm.type === "turn.error" && sessionName && rec) {
+  if (norm.type === INTERNAL_TURN_FAILED_EVENT_TYPE && sessionName && rec) {
     const turnId = (norm.payload.turn_id as string | null) ?? rec.last_turn_id ?? null;
     const willRetry = Boolean(norm.payload.will_retry);
+    if (!willRetry && turnId) {
+      await appendFailedTurnCompleted(ctx, e.user, sessionName, norm.threadId ?? rec.thread_id, turnId, rec, norm.payload.error);
+    }
     ctx.sessions.update(e.user, sessionName, {
       last_turn_id: turnId,
       current_turn_id: willRetry ? (rec.current_turn_id ?? turnId) : null,
@@ -258,19 +266,10 @@ async function handleClientClose(
     });
     await appendSessionCrashed(ctx, user, rec.name, rec.thread_id, reason, currentTurnId ?? rec.last_turn_id ?? null);
     if (currentTurnId) {
-      await ctx.events.append(user, {
-        type: "turn.error",
-        session: sessionName,
-        thread_id: rec.thread_id,
-        payload: {
-          turn_id: currentTurnId,
-          will_retry: false,
-          error: {
-            message: "app-server process exited unexpectedly",
-            codex_error_info: "internal_server_error",
-            additional_details: `exit_code=${e.exitCode ?? "null"}`,
-          },
-        },
+      await appendFailedTurnCompleted(ctx, user, sessionName, rec.thread_id, currentTurnId, rec, {
+        message: "app-server process exited unexpectedly",
+        codex_error_info: "internal_server_error",
+        additional_details: `exit_code=${e.exitCode ?? "null"}`,
       });
     }
     await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, "session_crashed");
@@ -510,6 +509,49 @@ async function appendSessionClosed(
       ts: new Date().toISOString(),
     },
   });
+}
+
+async function appendFailedTurnCompleted(
+  ctx: DaemonContext,
+  user: string,
+  session: string,
+  threadId: string,
+  turnId: string,
+  rec: NonNullable<ReturnType<DaemonContext["sessions"]["get"]>>,
+  error: unknown,
+): Promise<TeamEvent> {
+  const errorPayload = asErrorPayload(error);
+  const endedAt = Date.now();
+  const durationMs = rec.current_turn_started_at
+    ? Math.max(0, endedAt - Date.parse(rec.current_turn_started_at))
+    : null;
+  return await ctx.events.append(user, {
+    type: "turn.completed",
+    session,
+    thread_id: threadId,
+    payload: {
+      turn_id: turnId,
+      status: "failed",
+      duration_ms: Number.isFinite(durationMs) ? durationMs : null,
+      items_count: rec.items_in_turn ?? 0,
+      token_usage: null,
+      ended_at: endedAt,
+      turn_items_included: false,
+      error: errorPayload,
+      codex_error_info: errorPayload.codex_error_info,
+    },
+  });
+}
+
+function asErrorPayload(value: unknown): { message: string | null; codex_error_info: string | null; additional_details: string | null } {
+  const record = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  return {
+    message: typeof record.message === "string" ? record.message : null,
+    codex_error_info: typeof record.codex_error_info === "string" ? record.codex_error_info : null,
+    additional_details: typeof record.additional_details === "string" ? record.additional_details : null,
+  };
 }
 
 async function appendSessionCrashed(

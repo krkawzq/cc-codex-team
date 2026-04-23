@@ -147,16 +147,49 @@ describe("daemon normalize", () => {
       },
     }).payload).toEqual({
       turn_id: "turn-1",
-      status: "errored",
+      status: "failed",
       duration_ms: 1000,
       items_count: 2,
       token_usage: {
-        prompt: 11,
-        completion: 7,
+        input: 11,
+        cached_input: null,
+        output: 7,
+        reasoning_output: null,
         total: 18,
       },
       ended_at: 101,
       turn_items_included: false,
+    });
+  });
+
+  it("normalizes the canonical turn.completed status enum and token usage field names", () => {
+    expect(normalizeNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "th-2",
+        turn: {
+          id: "turn-2",
+          status: "canceled",
+          items: [],
+          tokenUsage: {
+            inputTokens: 10,
+            cachedInputTokens: 3,
+            outputTokens: 6,
+            reasoningOutputTokens: 2,
+            totalTokens: 21,
+          },
+        },
+      },
+    }).payload).toMatchObject({
+      turn_id: "turn-2",
+      status: "cancelled",
+      token_usage: {
+        input: 10,
+        cached_input: 3,
+        output: 6,
+        reasoning_output: 2,
+        total: 21,
+      },
     });
   });
 });

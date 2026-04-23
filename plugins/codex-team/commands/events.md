@@ -27,6 +27,7 @@ Raw user request: $ARGUMENTS
    })
    ```
    `<extra-flags>` forwards any of `--stream` / `--filter a,b,c` / `--session name` / `--since evt-id` / `--include-delta` / `--interval N` from `$ARGUMENTS`.
+   If you need to suggest a default decision-focused filter, use `turn.completed,turn.queued_started,turn.queued_failed,approval.command_execution,approval.file_change,user_input.request,session.crashed`.
 
 4. **Short report** (one line): token, mode (`stream` or `interval=N`), filter if any.
 
