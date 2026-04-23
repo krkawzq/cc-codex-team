@@ -6,7 +6,15 @@ import type net from "node:net";
 
 import { connectSock, probeSock, writeMessage, onMessages } from "../ipc/sock";
 import type { IpcMessage, IpcRequest } from "../ipc/protocol";
-import { defaultSockPath, isFilesystemSockPath, normalizeSockPath, pidFilePath, warnLegacyWindowsDataDir } from "../paths";
+import {
+  clientOnlyDaemonSock,
+  defaultSockPath,
+  formatPathForEnvHint,
+  isFilesystemSockPath,
+  normalizeSockPath,
+  pidFilePath,
+  warnLegacyWindowsDataDir,
+} from "../paths";
 import { parseArgs, commandKey, supportsShort, type ParsedArgs } from "./args";
 import { renderHelp } from "./help";
 import { err } from "../result";
@@ -30,6 +38,15 @@ const SOCKET_BIND_DENIED_SUGGESTED_ACTION =
   "codex-team cannot bind a local IPC socket here — run `codex-team doctor` for details";
 const DATA_DIR_NOT_WRITABLE_SUGGESTED_ACTION =
   "set CODEX_TEAM_DATA_DIR to a writable path and retry, e.g. CODEX_TEAM_DATA_DIR=/tmp/codex-team-$USER. Run `codex-team doctor` to verify.";
+
+interface CachedBootstrapFailure {
+  sockPath: string;
+  code: "daemon_unreachable" | "socket_bind_denied";
+  message: string;
+  data?: Record<string, unknown>;
+}
+
+let cachedBootstrapFailure: CachedBootstrapFailure | null = null;
 
 export async function readStdinAll(): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
@@ -84,7 +101,8 @@ export async function runCli(argv: string[]): Promise<number> {
     process.stdout.write(JSON.stringify(err("invalid_params", "--short cannot be used with --format markdown or --format table")) + "\n");
     return 1;
   }
-  const sockPath = parsed.daemonSock || defaultSockPath();
+  const clientOnlySockPath = parsed.daemonSock || clientOnlyDaemonSock();
+  const sockPath = clientOnlySockPath || defaultSockPath();
 
   if (method === "doctor") {
     return await runDoctor({ short, json, sockPath });
@@ -124,8 +142,19 @@ export async function runCli(argv: string[]): Promise<number> {
     return 1;
   }
 
-  const ready = await ensureDaemon(sockPath);
+  if (needsBearer && !clientOnlySockPath) {
+    const cachedFailure = getCachedBootstrapFailure(sockPath);
+    if (cachedFailure) {
+      process.stdout.write(JSON.stringify(err(cachedFailure.code, cachedFailure.message, cachedFailure.data)) + "\n");
+      return 1;
+    }
+  }
+
+  const ready = await ensureDaemon(sockPath, { clientOnly: Boolean(clientOnlySockPath) });
   if (!ready.ok) {
+    if (needsBearer && !clientOnlySockPath) {
+      cacheBootstrapFailure(sockPath, ready);
+    }
     process.stdout.write(JSON.stringify(err(ready.code, ready.message, ready.data)) + "\n");
     return 1;
   }
@@ -486,8 +515,12 @@ interface EnsureDaemonResult {
   data?: unknown;
 }
 
-async function ensureDaemon(sockPath: string): Promise<EnsureDaemonResult> {
+async function ensureDaemon(sockPath: string, options: { clientOnly?: boolean } = {}): Promise<EnsureDaemonResult> {
   const cliConfig = readCliConfig();
+  if (options.clientOnly) {
+    return await ensureClientOnlyDaemon(sockPath, cliConfig);
+  }
+
   const config = new ConfigStore();
   const dataDir = config.resolvedDataDir();
   const pidPath = pidFilePath(dataDir);
@@ -519,7 +552,7 @@ async function ensureDaemon(sockPath: string): Promise<EnsureDaemonResult> {
       return { ok: true, code: "", message: "" };
     }
   } catch (e) {
-    return buildSpawnFailure(dataDir, e, false);
+    return buildSpawnFailure(dataDir, sockPath, e, false);
   }
 
   try {
@@ -529,24 +562,42 @@ async function ensureDaemon(sockPath: string): Promise<EnsureDaemonResult> {
       return { ok: true, code: "", message: "" };
     }
     if (secondAttempt.exited) {
-      return buildEarlyExitFailure(stderrPath, secondAttempt);
+      return buildEarlyExitFailure(sockPath, stderrPath, secondAttempt);
     }
   } catch (e) {
-    return buildSpawnFailure(dataDir, e, true);
+    return buildSpawnFailure(dataDir, sockPath, e, true);
   }
 
   const stderrTail = readTail(stderrPath, 4096);
   const parsedBootstrap = parseBootstrapStderr(stderrTail);
   if (parsedBootstrap?.code === "socket_bind_denied") {
-    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
+    return buildSocketBindDeniedFailure(sockPath, parsedBootstrap, stderrTail);
   }
 
   return {
     ok: false,
     code: "daemon_unreachable",
     message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`,
-    data: buildDaemonUnreachableData(stderrPath, stderrTail),
+    data: withDaemonSockHint(buildDaemonUnreachableData(stderrPath, stderrTail), sockPath),
   };
+}
+
+async function ensureClientOnlyDaemon(
+  sockPath: string,
+  cliConfig: ReturnType<typeof readCliConfig>,
+): Promise<EnsureDaemonResult> {
+  try {
+    const sock = await connectSockWithRetry(
+      sockPath,
+      cliConfig.connectTimeoutMs,
+      cliConfig.connectRetryAttempts,
+      cliConfig.connectRetryDelayMs,
+    );
+    sock.end();
+    return { ok: true, code: "", message: "" };
+  } catch (error) {
+    return buildClientOnlyConnectFailure(sockPath, error);
+  }
 }
 
 async function connectSockWithRetry(
@@ -684,6 +735,7 @@ interface BootstrapPayload {
 }
 
 function buildSocketBindDeniedFailure(
+  sockPath: string,
   parsedBootstrap: BootstrapPayload,
   stderrTail: string | null,
 ): EnsureDaemonResult {
@@ -691,10 +743,10 @@ function buildSocketBindDeniedFailure(
     ok: false,
     code: parsedBootstrap.code,
     message: parsedBootstrap.message,
-    data: {
+    data: withDaemonSockHint({
       ...(parsedBootstrap.data ?? {}),
       ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
-    },
+    }, sockPath),
   };
 }
 
@@ -712,18 +764,18 @@ function buildDaemonUnreachableData(
   };
 }
 
-function buildEarlyExitFailure(stderrPath: string, result: WaitForDaemonReadyResult): EnsureDaemonResult {
+function buildEarlyExitFailure(sockPath: string, stderrPath: string, result: WaitForDaemonReadyResult): EnsureDaemonResult {
   const stderrTail = readTail(stderrPath, 4096);
   const parsedBootstrap = parseBootstrapStderr(stderrTail);
   if (parsedBootstrap?.code === "socket_bind_denied") {
-    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
+    return buildSocketBindDeniedFailure(sockPath, parsedBootstrap, stderrTail);
   }
 
   return {
     ok: false,
     code: "daemon_unreachable",
     message: parsedBootstrap?.message ?? "daemon exited before becoming ready",
-    data: buildDaemonUnreachableData(stderrPath, stderrTail, result),
+    data: withDaemonSockHint(buildDaemonUnreachableData(stderrPath, stderrTail, result), sockPath),
   };
 }
 
@@ -830,6 +882,7 @@ function validateDaemonDataDirWritable(dataDir: string): EnsureDaemonResult | nu
 
 function buildSpawnFailure(
   dataDir: string,
+  sockPath: string,
   error: unknown,
   withStderrCapture: boolean,
 ): EnsureDaemonResult {
@@ -844,9 +897,9 @@ function buildSpawnFailure(
     ok: false,
     code: "daemon_unreachable",
     message: `failed to spawn daemon${withStderrCapture ? " with stderr capture" : ""}: ${errorWithCode.message}`,
-    data: {
+    data: withDaemonSockHint({
       suggested_action: DOCTOR_SUGGESTED_ACTION,
-    },
+    }, sockPath),
   };
 }
 
@@ -868,6 +921,20 @@ function buildDataDirNotWritableFailure(
   };
 }
 
+function buildClientOnlyConnectFailure(sockPath: string, error: unknown): EnsureDaemonResult {
+  const errorWithCode = error as Error & { code?: string };
+  const errno = normalizeErrno(errorWithCode.code);
+  return {
+    ok: false,
+    code: "daemon_unreachable",
+    message: `failed to connect to daemon at ${sockPath}: ${errorWithCode.message || "connect failed"}`,
+    data: withDaemonSockHint({
+      sock_path: sockPath,
+      ...(errno ? { errno } : {}),
+    }, sockPath),
+  };
+}
+
 function extractErrno(error: unknown): string | null {
   if (!error || typeof error !== "object") return null;
   return normalizeErrno((error as { code?: unknown }).code);
@@ -879,6 +946,39 @@ function normalizeErrno(value: unknown): string | null {
 
 function isDataDirWriteErrno(errno: string): boolean {
   return errno === "EACCES" || errno === "ENOENT" || errno === "EROFS";
+}
+
+function cacheBootstrapFailure(sockPath: string, result: EnsureDaemonResult): void {
+  if (result.code !== "daemon_unreachable" && result.code !== "socket_bind_denied") return;
+  cachedBootstrapFailure = {
+    sockPath,
+    code: result.code,
+    message: result.message,
+    data: asRecord(withDaemonSockHint(result.data, sockPath)) ?? undefined,
+  };
+}
+
+function getCachedBootstrapFailure(sockPath: string): CachedBootstrapFailure | null {
+  if (!cachedBootstrapFailure) return null;
+  if (cachedBootstrapFailure.sockPath !== sockPath) return null;
+  return cachedBootstrapFailure;
+}
+
+function withDaemonSockHint(data: unknown, sockPath = defaultSockPath()): Record<string, unknown> {
+  const hint = buildDaemonSockHint(sockPath);
+  return {
+    ...(asRecord(data) ?? {}),
+    hint,
+  };
+}
+
+function buildDaemonSockHint(sockPath: string): string {
+  return `If a daemon is already running on this host, set CODEX_TEAM_DAEMON_SOCK=${formatPathForEnvHint(sockPath)} and retry.`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
 }
 
 function truthy(v: unknown): boolean {
@@ -1129,3 +1229,9 @@ function formatDuration(ms: number): string {
   if (ms % 1000 === 0) return `${ms / 1000}s`;
   return `${ms}ms`;
 }
+
+export const __private__ = {
+  resetBootstrapFailureCache(): void {
+    cachedBootstrapFailure = null;
+  },
+};

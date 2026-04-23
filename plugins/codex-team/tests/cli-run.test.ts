@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const sockMocks = vi.hoisted(() => ({
@@ -35,18 +38,20 @@ vi.mock("../src/daemon/config", () => ({
   },
 }));
 
-import { runCli } from "../src/cli/run";
+import { __private__, runCli } from "../src/cli/run";
 
 describe("runCli", () => {
   let stdoutSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    __private__.resetBootstrapFailureCache();
     stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    delete process.env.CODEX_TEAM_DAEMON_SOCK;
     stdoutSpy.mockRestore();
   });
 
@@ -80,6 +85,143 @@ describe("runCli", () => {
 
     expect(code).toBe(1);
     expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"daemon_unreachable\""));
+  });
+
+  it("treats CODEX_TEAM_DAEMON_SOCK as client-only mode and returns a clean connect failure", async () => {
+    process.env.CODEX_TEAM_DAEMON_SOCK = "/tmp/fake.sock";
+    sockMocks.connectSock.mockRejectedValue(Object.assign(new Error("connect ENOENT"), { code: "ENOENT" }));
+
+    const code = await runCli(["-b", "token-1", "session", "list"]);
+
+    expect(code).toBe(1);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"daemon_unreachable\""));
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("failed to connect to daemon at /tmp/fake.sock"));
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("CODEX_TEAM_DAEMON_SOCK"));
+    expect(sockMocks.probeSock).not.toHaveBeenCalled();
+    expect(processMocks.spawn).not.toHaveBeenCalled();
+  });
+
+  it("completes a client-only session list round-trip without bootstrap", async () => {
+    process.env.CODEX_TEAM_DAEMON_SOCK = "/tmp/live.sock";
+
+    const readySocket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(),
+      once: vi.fn((event: string, handler: () => void) => {
+        if (event === "connect") handler();
+        return readySocket;
+      }),
+    };
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const requestSocket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => requestSocket),
+      once: vi.fn(() => requestSocket),
+    };
+
+    sockMocks.connectSock
+      .mockResolvedValueOnce(readySocket)
+      .mockResolvedValueOnce(requestSocket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string; bearer?: string }) => {
+      expect(req.bearer).toBe("token-1");
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            sessions: [],
+          },
+        });
+      }, 0);
+    });
+
+    const code = await runCli(["-b", "token-1", "session", "list"]);
+
+    expect(code).toBe(0);
+    expect(sockMocks.probeSock).not.toHaveBeenCalled();
+    expect(processMocks.spawn).not.toHaveBeenCalled();
+    expect(stdoutSpy).toHaveBeenCalledWith("{\"sessions\":[]}\n");
+  });
+
+  it("skips data_dir writability checks in client-only mode", async () => {
+    const accessSpy = vi.spyOn(fs, "accessSync").mockImplementation(() => {
+      throw Object.assign(new Error("read-only"), { code: "EROFS" });
+    });
+    const mkdirSpy = vi.spyOn(fs, "mkdirSync").mockImplementation(() => {
+      throw Object.assign(new Error("read-only"), { code: "EROFS" });
+    });
+    const tempSock = path.join("/tmp", "client-only.sock");
+    process.env.CODEX_TEAM_DAEMON_SOCK = tempSock;
+
+    const readySocket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(),
+      once: vi.fn((event: string, handler: () => void) => {
+        if (event === "connect") handler();
+        return readySocket;
+      }),
+    };
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const requestSocket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => requestSocket),
+      once: vi.fn(() => requestSocket),
+    };
+    sockMocks.connectSock
+      .mockResolvedValueOnce(readySocket)
+      .mockResolvedValueOnce(requestSocket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: { sessions: [] },
+        });
+      }, 0);
+    });
+
+    try {
+      const code = await runCli(["-b", "token-1", "session", "list"]);
+
+      expect(code).toBe(0);
+      expect(accessSpy).not.toHaveBeenCalled();
+      expect(mkdirSpy).not.toHaveBeenCalled();
+      expect(processMocks.spawn).not.toHaveBeenCalled();
+      expect(sockMocks.probeSock).not.toHaveBeenCalled();
+    } finally {
+      accessSpy.mockRestore();
+      mkdirSpy.mockRestore();
+    }
+  });
+
+  it("caches bootstrap failures for later bearer calls in the same process", async () => {
+    processMocks.spawn.mockImplementationOnce(() => {
+      throw Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" });
+    });
+    sockMocks.probeSock.mockResolvedValue(false);
+
+    const firstCode = await runCli(["-b", "token-1", "status"]);
+    const probeCallsAfterFirst = sockMocks.probeSock.mock.calls.length;
+    const spawnCallsAfterFirst = processMocks.spawn.mock.calls.length;
+
+    const secondCode = await runCli(["-b", "token-1", "session", "list"]);
+
+    expect(firstCode).toBe(1);
+    expect(secondCode).toBe(1);
+    expect(sockMocks.probeSock.mock.calls.length).toBe(probeCallsAfterFirst);
+    expect(processMocks.spawn.mock.calls.length).toBe(spawnCallsAfterFirst);
+    expect(stdoutSpy).toHaveBeenLastCalledWith(expect.stringContaining("\"daemon_unreachable\""));
+    expect(stdoutSpy).toHaveBeenLastCalledWith(expect.stringContaining("CODEX_TEAM_DAEMON_SOCK"));
   });
 
   it("accepts --bearer=value globals before command matching", async () => {

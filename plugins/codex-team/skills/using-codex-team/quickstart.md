@@ -31,6 +31,8 @@ Daemon auto-spawns if it wasn't running. Response (concise default):
 
 Pass `--full` to also see `created_at`. If the user already exists (e.g. you reused a token from a prior conversation), you get `{"ok":false,"error":{"code":"user_already_exists",...}}` — treat as success.
 
+If `~/.codex-team` is not writable in your environment (common in sandboxed workspaces), either set `CODEX_TEAM_DATA_DIR=/tmp/ct-$USER` before first run to start a fresh daemon there, or set `CODEX_TEAM_DAEMON_SOCK=$HOME/.codex-team/daemon.sock` to attach to an existing host daemon instead.
+
 ## 3. Create a session
 
 ```bash
