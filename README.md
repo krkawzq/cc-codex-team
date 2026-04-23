@@ -67,6 +67,13 @@ Inside a Claude Code session:
 /reload-plugins
 ```
 
+Or from a terminal:
+
+```bash
+claude plugin marketplace add krkawzq/cc-codex-team
+claude plugin install codex-team
+```
+
 Verify dependencies:
 
 ```bash

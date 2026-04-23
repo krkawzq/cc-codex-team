@@ -67,6 +67,13 @@ Claude Code 与 Codex **能力互补。Claude Code** 强在规划、创造性的
 /reload-plugins
 ```
 
+或者在终端里：
+
+```bash
+claude plugin marketplace add krkawzq/cc-codex-team
+claude plugin install codex-team
+```
+
 校验依赖：
 
 ```bash
