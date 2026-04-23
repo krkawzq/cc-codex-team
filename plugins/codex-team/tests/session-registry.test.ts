@@ -5,7 +5,11 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/codex/rpc", () => ({
+  threadArchive: vi.fn(),
+  threadRename: vi.fn(),
   threadResume: vi.fn(),
+  threadTurnsList: vi.fn(),
+  threadUnarchive: vi.fn(),
 }));
 
 import { threadResume } from "../src/codex/rpc";

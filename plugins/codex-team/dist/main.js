@@ -23,13 +23,13 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/main.ts
-var import_node_fs18 = __toESM(require("fs"));
-var import_node_path16 = __toESM(require("path"));
+var import_node_fs17 = __toESM(require("fs"));
+var import_node_path15 = __toESM(require("path"));
 
 // src/cli/run.ts
-var import_node_fs7 = __toESM(require("fs"));
-var import_node_path7 = __toESM(require("path"));
-var import_node_child_process3 = require("child_process");
+var import_node_fs5 = __toESM(require("fs"));
+var import_node_path6 = __toESM(require("path"));
+var import_node_child_process = require("child_process");
 var import_promises = require("timers/promises");
 
 // src/ipc/sock.ts
@@ -266,7 +266,6 @@ function unlinkSockIfStale(sockPath) {
 // src/cli/args.ts
 var COMMANDS = /* @__PURE__ */ new Set([
   "version",
-  "doctor",
   "status",
   "daemon:status",
   "daemon:start",
@@ -284,13 +283,15 @@ var COMMANDS = /* @__PURE__ */ new Set([
   "session:new",
   "session:attach",
   "session:detach",
+  "session:archive",
+  "session:unarchive",
   "session:fork",
   "session:rename",
+  "session:rollback",
   "session:info",
   "session:context",
   "session:list",
   "message:send",
-  "message:send-many",
   "message:peer",
   "message:interrupt",
   "message:approval",
@@ -326,30 +327,6 @@ var GLOBAL_FLAGS = {
   "--help": { name: "help", takesValue: false },
   "--daemon-sock": { name: "daemonSock", takesValue: true }
 };
-var BOOLEAN_LONG_FLAGS = /* @__PURE__ */ new Set([
-  "all",
-  "any",
-  "explicit-only",
-  "follow",
-  "force",
-  "full",
-  "graceful",
-  "help",
-  "include-delta",
-  "once",
-  "short",
-  "stdin",
-  "stream",
-  "summary",
-  "takeover",
-  "verbose",
-  "yes"
-]);
-var BOOLEAN_SHORT_FLAGS = /* @__PURE__ */ new Set([
-  "f",
-  "h",
-  "v"
-]);
 function parseArgs(argv) {
   const result = {
     commandPath: [],
@@ -408,31 +385,23 @@ function parseArgs(argv) {
         value = a.slice(eqIdx + 1);
       } else {
         key = a.slice(2);
-        if (BOOLEAN_LONG_FLAGS.has(key)) {
-          value = null;
+        const next = tail[i + 1];
+        if (next !== void 0 && !isFlagLike(next)) {
+          value = next;
+          i++;
         } else {
-          const next = tail[i + 1];
-          if (next !== void 0 && !isFlagLike(next)) {
-            value = next;
-            i++;
-          } else {
-            value = null;
-          }
+          value = null;
         }
       }
       setFlag(result.flags, key, value);
     } else if (a.length > 1 && a.startsWith("-") && !isNegativeNumber(a)) {
       const key = a.slice(1);
-      if (BOOLEAN_SHORT_FLAGS.has(key)) {
-        setFlag(result.flags, key, null);
+      const next = tail[i + 1];
+      if (next !== void 0 && !isFlagLike(next)) {
+        setFlag(result.flags, key, next);
+        i++;
       } else {
-        const next = tail[i + 1];
-        if (next !== void 0 && !isFlagLike(next)) {
-          setFlag(result.flags, key, next);
-          i++;
-        } else {
-          setFlag(result.flags, key, null);
-        }
+        setFlag(result.flags, key, null);
       }
     } else {
       result.positionals.push(a);
@@ -440,8 +409,6 @@ function parseArgs(argv) {
   }
   if (truthyFlag(result.flags.short) && truthyFlag(result.flags.full)) {
     result.unknown = "--short and --full are mutually exclusive";
-  } else if (commandKey(result.commandPath) === "message:wait" && truthyFlag(result.flags.all) && truthyFlag(result.flags.any)) {
-    result.unknown = "--all and --any are mutually exclusive";
   }
   return result;
 }
@@ -486,11 +453,10 @@ function matchCommand(tokens, available) {
   }
   return null;
 }
-function commandKey(path17) {
-  return path17.join(":");
+function commandKey(path16) {
+  return path16.join(":");
 }
 var SHORT_COMMANDS = /* @__PURE__ */ new Set([
-  "doctor",
   "status",
   "daemon:status",
   "daemon:user:list",
@@ -569,11 +535,6 @@ var LIVE_SESSION_TARGET = {
   name: "name|thread_id",
   required: true,
   description: "Target live session name or thread ID."
-};
-var LIVE_SESSION_TARGETS = {
-  name: "name|thread_id...",
-  required: true,
-  description: "One or more live session names or thread IDs."
 };
 var REQUEST_ID = {
   name: "request_id",
@@ -1006,24 +967,11 @@ var sessionGroup = {
     leaf({
       name: "detach",
       summary: "Stop tracking a live session and release its runtime.",
-      usage: "codex-team -b <token> session detach [<name|thread_id>|--all] [flags]",
+      usage: "codex-team -b <token> session detach <name|thread_id> [flags]",
       positionals: [
-        { ...SESSION_TARGET, required: false, description: "Target session unless using --all." }
+        { ...SESSION_TARGET }
       ],
       flags: [
-        {
-          long: "--all",
-          type: "bool",
-          default: "false",
-          required: false,
-          description: "Detach every live session for the current bearer."
-        },
-        {
-          long: "--match",
-          type: "glob",
-          required: false,
-          description: "Filter --all targets by session name using * and ? wildcards."
-        },
         {
           long: "--graceful",
           type: "bool",
@@ -1033,8 +981,52 @@ var sessionGroup = {
         }
       ],
       examples: [
-        "codex-team -b $TOKEN session detach audit --graceful",
-        "codex-team -b $TOKEN session detach --all --match 'mapper-*'"
+        "codex-team -b $TOKEN session detach audit --graceful"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "archive",
+      summary: "Archive a detached thread, or detach and archive a live session.",
+      usage: "codex-team -b <token> session archive <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET }
+      ],
+      flags: [
+        {
+          long: "--and-detach",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Hard-detach a live session before archiving it."
+        }
+      ],
+      notes: [
+        "Live sessions refuse without --and-detach."
+      ],
+      examples: [
+        "codex-team -b $TOKEN session archive audit --and-detach",
+        "codex-team -b $TOKEN session archive th-abc123"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "unarchive",
+      summary: "Restore an archived detached thread.",
+      usage: "codex-team -b <token> session unarchive <thread_id>",
+      positionals: [
+        {
+          name: "thread_id",
+          required: true,
+          description: "Detached archived thread ID."
+        }
+      ],
+      flags: [],
+      notes: [
+        "Fails if the thread is currently live."
+      ],
+      examples: [
+        "codex-team -b $TOKEN session unarchive th-abc123"
       ],
       needs_bearer: true
     }),
@@ -1066,8 +1058,8 @@ var sessionGroup = {
     }),
     leaf({
       name: "rename",
-      summary: "Rename a session without attaching it.",
-      usage: "codex-team -b <token> session rename <name|thread_id> <new_name>",
+      summary: "Rename a live session or, with --detached-ok, a detached thread.",
+      usage: "codex-team -b <token> session rename <name|thread_id> <new_name> [flags]",
       positionals: [
         { ...SESSION_TARGET, description: "Current session name or thread ID." },
         {
@@ -1076,9 +1068,49 @@ var sessionGroup = {
           description: "New session name."
         }
       ],
-      flags: [],
+      flags: [
+        {
+          long: "--detached-ok",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Allow renaming a detached thread via persisted thread metadata."
+        }
+      ],
       examples: [
-        "codex-team -b $TOKEN session rename audit audit-review"
+        "codex-team -b $TOKEN session rename audit audit-review",
+        "codex-team -b $TOKEN session rename th-abc123 audit-review --detached-ok"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "rollback",
+      summary: "Fork a thread at an earlier turn, archive the old thread, and move the session name forward.",
+      usage: "codex-team -b <token> session rollback <name|thread_id> --to-turn <turn_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET, description: "Source live session or detached thread." }
+      ],
+      flags: [
+        {
+          long: "--to-turn",
+          type: "string",
+          required: true,
+          description: "Turn ID to fork from."
+        },
+        {
+          long: "--detach-after",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Leave the forked thread detached instead of resuming it live."
+        }
+      ],
+      notes: [
+        "The original thread is renamed to <name>-pre-rollback-<iso8601> and archived."
+      ],
+      examples: [
+        "codex-team -b $TOKEN session rollback audit --to-turn turn-42",
+        "codex-team -b $TOKEN session rollback th-abc123 --to-turn turn-42 --detach-after"
       ],
       needs_bearer: true
     }),
@@ -1235,42 +1267,6 @@ var messageGroup = {
       examples: [
         'codex-team -b $TOKEN message send audit "Summarize the failing tests."',
         "codex-team -b $TOKEN message send audit --file prompt.md --attach screenshot.png"
-      ],
-      needs_bearer: true
-    }),
-    leaf({
-      name: "send-many",
-      summary: "Broadcast one prompt to multiple live sessions.",
-      usage: "codex-team -b <token> message send-many <name|thread_id> <name|thread_id> [...name|thread_id] [prompt] [flags]",
-      positionals: [
-        { ...LIVE_SESSION_TARGETS, description: "Two or more live sessions to broadcast to." },
-        {
-          name: "prompt",
-          required: false,
-          description: "Prompt text when not using --stdin or --file."
-        }
-      ],
-      flags: [
-        {
-          long: "--stdin",
-          type: "bool",
-          default: "false",
-          required: false,
-          description: "Read the prompt from stdin."
-        },
-        {
-          long: "--file",
-          type: "path",
-          required: false,
-          description: "Read the prompt from a file."
-        }
-      ],
-      notes: [
-        "Requires at least two explicit targets."
-      ],
-      examples: [
-        'codex-team -b $TOKEN message send-many audit lint typecheck "Run all pending checks."',
-        "codex-team -b $TOKEN message send-many audit lint typecheck --file prompt.md"
       ],
       needs_bearer: true
     }),
@@ -1455,25 +1451,11 @@ var messageGroup = {
     leaf({
       name: "wait",
       summary: "Block until a turn completes, errors, or times out.",
-      usage: "codex-team -b <token> message wait <name|thread_id>... [flags]",
+      usage: "codex-team -b <token> message wait <name|thread_id> [flags]",
       positionals: [
-        { ...LIVE_SESSION_TARGETS, description: "One session by default, or multiple with --all/--any." }
+        { ...LIVE_SESSION_TARGET, description: "Session to watch." }
       ],
       flags: [
-        {
-          long: "--all",
-          type: "bool",
-          default: "false",
-          required: false,
-          description: "Wait until every listed session reaches a terminal outcome."
-        },
-        {
-          long: "--any",
-          type: "bool",
-          default: "false",
-          required: false,
-          description: "Return when the first listed session reaches a terminal outcome."
-        },
         {
           long: "--for",
           type: "string",
@@ -1489,14 +1471,11 @@ var messageGroup = {
         }
       ],
       notes: [
-        "Without --for, waits for the current in-flight turn. If the session is idle, waits for the next turn that starts after this call.",
-        "--all and --any are mutually exclusive. --for only applies to single-session waits."
+        "Without --for, waits for the current in-flight turn. If the session is idle, waits for the next turn that starts after this call."
       ],
       examples: [
         "codex-team -b $TOKEN message wait audit",
-        "codex-team -b $TOKEN message wait audit --for turn-42 --timeout 30",
-        "codex-team -b $TOKEN message wait --all audit lint typecheck --timeout 300",
-        "codex-team -b $TOKEN message wait --any audit lint typecheck --timeout 60"
+        "codex-team -b $TOKEN message wait audit --for turn-42 --timeout 30"
       ],
       needs_bearer: true
     })
@@ -1762,31 +1741,6 @@ var HELP_TREE = {
       ],
       needs_bearer: false
     }),
-    {
-      name: "doctor",
-      summary: "Run local environment and daemon bootstrap diagnostics.",
-      usage: "codex-team doctor [flags]",
-      positionals: [],
-      flags: [
-        {
-          long: "--short",
-          type: "bool",
-          default: "false",
-          required: false,
-          description: "Print one summary line with verdict, failed checks, and warnings."
-        }
-      ],
-      examples: [
-        "codex-team doctor",
-        "codex-team doctor --short"
-      ],
-      notes: [
-        "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
-        "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness."
-      ],
-      subcommands: [],
-      needs_bearer: false
-    },
     leaf({
       name: "status",
       summary: "Show live sessions, pending events, and recent activity.",
@@ -1814,15 +1768,15 @@ var HELP_TREE = {
   ],
   needs_bearer: false
 };
-function findNode(path17, node = HELP_TREE) {
-  if (path17.length === 0) return node;
-  const [head, ...rest] = path17;
+function findNode(path16, node = HELP_TREE) {
+  if (path16.length === 0) return node;
+  const [head, ...rest] = path16;
   const child = node.subcommands.find((entry) => entry.name === head);
   if (!child) return null;
   return findNode(rest, child);
 }
-function formatCommandPath(path17) {
-  return path17.length === 0 ? "codex-team" : `codex-team ${path17.join(" ")}`;
+function formatCommandPath(path16) {
+  return path16.length === 0 ? "codex-team" : `codex-team ${path16.join(" ")}`;
 }
 function formatPositional(positional) {
   return positional.required ? `<${positional.name}>` : `[${positional.name}]`;
@@ -1902,9 +1856,9 @@ function renderExamples(node) {
     ...node.examples.map((example) => `  ${example}`)
   ];
 }
-function renderHelp(path17) {
-  const node = findNode(path17) ?? HELP_TREE;
-  const resolvedPath = findNode(path17) ? path17 : [];
+function renderHelp(path16) {
+  const node = findNode(path16) ?? HELP_TREE;
+  const resolvedPath = findNode(path16) ? path16 : [];
   const sections = [
     [formatCommandPath(resolvedPath), node.summary],
     ["USAGE", `  ${node.usage}`]
@@ -2659,7 +2613,15 @@ function formatCompact(method, data) {
         extraKeys: ["noop"]
       });
     case "session:detach":
-      return compactSessionDetach(data);
+      return compactSessionWithFlags(data, {
+        sessionOptions: {},
+        extraKeys: ["noop", "graceful"],
+        allowNullSession: true
+      });
+    case "session:archive":
+      return pickFields(data, ["thread_id", "archived"]);
+    case "session:unarchive":
+      return pickFields(data, ["thread_id", "unarchived"]);
     case "session:fork":
       return compactSessionWithFlags(data, {
         sessionOptions: {}
@@ -2668,6 +2630,8 @@ function formatCompact(method, data) {
       return compactSessionWithFlags(data, {
         sessionOptions: { nameOnly: true }
       });
+    case "session:rollback":
+      return pickFields(data, ["name", "forked_at_turn", "old_thread_id", "new_thread_id"]);
     case "session:info":
       return compactSessionInfo(data);
     case "session:context":
@@ -2693,8 +2657,6 @@ function formatCompact(method, data) {
       return compactSessionHeal(data);
     case "message:send":
       return pickFields(data, ["turn_id", "started", "queue_id", "queued_depth"]);
-    case "message:send-many":
-      return compactBatchResults(data, ["turn_id", "started", "queue_id", "queued_depth"]);
     case "message:peer":
       return pickFields(data, ["turn_id", "peered"]);
     case "message:interrupt":
@@ -2707,7 +2669,17 @@ function formatCompact(method, data) {
     case "message:tail":
       return compactMessageTail(data);
     case "message:wait":
-      return compactMessageWait(data);
+      return pickFields(data, [
+        "thread_id",
+        "turn_id",
+        "outcome",
+        "event_type",
+        "event_id",
+        "error",
+        "duration_ms",
+        "items_count",
+        "timeout_s"
+      ]);
     case "monitor:events":
       return compactMonitorEvent(data);
     case "monitor:alarm":
@@ -2778,17 +2750,6 @@ function compactSessionInfo(data) {
     }
   });
 }
-function compactSessionDetach(data) {
-  const value = asObject2(data);
-  if (Array.isArray(value.results)) {
-    return compactBatchResults(data, ["detached", "graceful"]);
-  }
-  return compactSessionWithFlags(data, {
-    sessionOptions: {},
-    extraKeys: ["noop", "graceful"],
-    allowNullSession: true
-  });
-}
 function compactSessionContext(data) {
   const value = asObject2(data);
   const out = pickFields(value, ["thread_id"]);
@@ -2839,47 +2800,6 @@ function compactMessageTail(data) {
   const thread = projectThread(value.thread);
   if (Object.keys(thread).length > 0) out.thread = thread;
   return stripUndefined(out);
-}
-function compactMessageWait(data) {
-  const value = asObject2(data);
-  if (Array.isArray(value.outcomes)) {
-    return stripUndefined({
-      outcomes: asArray(value.outcomes).map((entry) => pickFields(entry, [
-        "session",
-        "outcome",
-        "turn_id",
-        "codex_error_info"
-      ])),
-      overall: value.overall
-    });
-  }
-  if (Array.isArray(value.still_running)) {
-    return stripUndefined({
-      session: value.session,
-      outcome: value.outcome,
-      turn_id: value.turn_id,
-      codex_error_info: value.codex_error_info,
-      timeout_s: value.timeout_s,
-      still_running: asArray(value.still_running)
-    });
-  }
-  return pickFields(data, [
-    "thread_id",
-    "turn_id",
-    "outcome",
-    "event_type",
-    "event_id",
-    "error",
-    "duration_ms",
-    "items_count",
-    "timeout_s"
-  ]);
-}
-function compactBatchResults(data, successKeys) {
-  const value = asObject2(data);
-  return {
-    results: asArray(value.results).map((entry) => projectBatchResultEntry(entry, successKeys))
-  };
 }
 function compactMonitorEvent(data) {
   const value = asObject2(data);
@@ -2954,18 +2874,6 @@ function projectCursor(value, options) {
   if (options.includeAutoUpdate) copyIfPresent(out, cursor, "auto_update");
   return out;
 }
-function projectBatchResultEntry(value, successKeys) {
-  const entry = asObject2(value);
-  if (entry.ok === false) {
-    const error = asObject2(entry.error);
-    return stripUndefined({
-      session: entry.session,
-      ok: false,
-      error: Object.keys(error).length > 0 ? pickFields(error, ["code"]) : void 0
-    });
-  }
-  return pickFields(entry, ["session", ...successKeys]);
-}
 function summarizeEventKey(event) {
   const payload = asObject2(event.payload);
   const type = asString2(event.type);
@@ -3036,498 +2944,6 @@ function hasOwn2(record, key) {
   return Object.prototype.hasOwnProperty.call(record, key);
 }
 
-// src/cli/doctor.ts
-var import_node_fs6 = __toESM(require("fs"));
-var import_node_net2 = __toESM(require("net"));
-var import_node_os2 = __toESM(require("os"));
-var import_node_path6 = __toESM(require("path"));
-var import_node_child_process2 = require("child_process");
-
-// src/daemon/processes.ts
-var import_node_fs5 = __toESM(require("fs"));
-var import_node_child_process = require("child_process");
-function readLinuxCmdline(pid) {
-  try {
-    const raw = import_node_fs5.default.readFileSync(`/proc/${pid}/cmdline`);
-    const commandLine = raw.toString("utf8").replace(/\0/g, " ").trim() || null;
-    return { commandLine, source: "proc", reliable: true };
-  } catch {
-    return { commandLine: null, source: null, reliable: false };
-  }
-}
-function readLinuxStartTime(pid) {
-  try {
-    const raw = import_node_fs5.default.readFileSync(`/proc/${pid}/stat`, "utf8");
-    const lastParen = raw.lastIndexOf(")");
-    if (lastParen < 0) return null;
-    const rest = raw.slice(lastParen + 2).trim().split(/\s+/);
-    const startTime = rest[19];
-    return typeof startTime === "string" && startTime.length > 0 ? startTime : null;
-  } catch {
-    return null;
-  }
-}
-function readPsCommand(pid) {
-  try {
-    const raw = (0, import_node_child_process.execFileSync)("ps", ["-p", String(pid), "-o", "command="], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const commandLine = raw.trim();
-    return { commandLine: commandLine.length > 0 ? commandLine : null, source: "ps", reliable: true };
-  } catch {
-    return { commandLine: null, source: null, reliable: false };
-  }
-}
-function readPsStartTime(pid) {
-  try {
-    const raw = (0, import_node_child_process.execFileSync)("ps", ["-p", String(pid), "-o", "lstart="], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const startTime = raw.trim();
-    return startTime.length > 0 ? startTime : null;
-  } catch {
-    return null;
-  }
-}
-function readWindowsCommand(pid) {
-  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CommandLine) { [Console]::Out.Write($p.CommandLine) }`;
-  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
-    try {
-      const raw = (0, import_node_child_process.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
-        stdio: ["ignore", "pipe", "ignore"],
-        encoding: "utf8"
-      });
-      const commandLine = raw.trim();
-      if (commandLine.length > 0) return { commandLine, source: "powershell", reliable: true };
-    } catch {
-    }
-  }
-  try {
-    const raw = (0, import_node_child_process.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CommandLine", "/value"], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CommandLine="));
-    const commandLine = line?.slice("CommandLine=".length).trim() ?? "";
-    if (commandLine.length > 0) return { commandLine, source: "wmic", reliable: true };
-  } catch {
-  }
-  try {
-    const raw = (0, import_node_child_process.execFileSync)("tasklist", ["/FO", "LIST", "/NH", "/FI", `PID eq ${pid}`], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => /^Image Name:/i.test(entry));
-    const commandLine = line?.replace(/^Image Name:\s*/i, "").trim() ?? "";
-    if (commandLine.length > 0) return { commandLine, source: "tasklist", reliable: false };
-  } catch {
-  }
-  return { commandLine: null, source: null, reliable: false };
-}
-function readWindowsStartTime(pid) {
-  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CreationDate) { [Console]::Out.Write($p.CreationDate) }`;
-  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
-    try {
-      const raw = (0, import_node_child_process.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
-        stdio: ["ignore", "pipe", "ignore"],
-        encoding: "utf8"
-      });
-      const startTime = raw.trim();
-      if (startTime.length > 0) return startTime;
-    } catch {
-    }
-  }
-  try {
-    const raw = (0, import_node_child_process.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CreationDate", "/value"], {
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf8"
-    });
-    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CreationDate="));
-    const startTime = line?.slice("CreationDate=".length).trim() ?? "";
-    return startTime.length > 0 ? startTime : null;
-  } catch {
-    return null;
-  }
-}
-function inspectProcessCommandLine(pid) {
-  if (!Number.isFinite(pid) || pid <= 0) return { commandLine: null, source: null, reliable: false };
-  if (process.platform === "linux") return readLinuxCmdline(pid);
-  if (process.platform === "darwin" || process.platform === "freebsd") return readPsCommand(pid);
-  if (process.platform === "win32") return readWindowsCommand(pid);
-  return { commandLine: null, source: null, reliable: false };
-}
-function readProcessStartTime(pid) {
-  if (!Number.isFinite(pid) || pid <= 0) return null;
-  if (process.platform === "linux") return readLinuxStartTime(pid);
-  if (process.platform === "darwin" || process.platform === "freebsd") return readPsStartTime(pid);
-  if (process.platform === "win32") return readWindowsStartTime(pid);
-  return null;
-}
-function inspectCodexAppServerProcess(pid) {
-  const inspection = inspectProcessCommandLine(pid);
-  if (!inspection.commandLine) return "unknown";
-  if (looksLikeCodexAppServerCommand(inspection.commandLine)) return "match";
-  if (!inspection.reliable) return "unknown";
-  return "mismatch";
-}
-function isLikelyCodexTeamDaemonProcess(pid) {
-  const inspection = inspectProcessCommandLine(pid);
-  return inspection.commandLine !== null && inspection.commandLine.includes("--daemon-internal");
-}
-function looksLikeCodexAppServerCommand(commandLine) {
-  return commandLine.includes("app-server") && (commandLine.includes("codex") || commandLine.includes("codex-cli-bin"));
-}
-
-// src/cli/doctor.ts
-var DEFAULT_DEPS = {
-  fs: import_node_fs6.default,
-  spawnSync: import_node_child_process2.spawnSync,
-  createServer: import_node_net2.default.createServer,
-  createConnection: import_node_net2.default.createConnection,
-  kill: process.kill.bind(process),
-  isLikelyCodexTeamDaemonProcess
-};
-function buildDoctorContext(options = {}) {
-  const config = new ConfigStore();
-  const dataDir = options.dataDir ?? config.resolvedDataDir();
-  const sockPath = options.sockPath ?? (options.dataDir ? defaultSockPath(dataDir) : config.resolvedSockPath());
-  return {
-    packageRoot: options.packageRoot ?? PACKAGE_ROOT,
-    dataDir,
-    sockPath,
-    pidPath: pidFilePath(dataDir),
-    launcherPath: import_node_path6.default.join(options.packageRoot ?? PACKAGE_ROOT, "bin", "codex-team"),
-    pathEnv: options.pathEnv ?? process.env.PATH
-  };
-}
-function checkNode() {
-  const version2 = process.versions.node || "unknown";
-  const major = Number.parseInt(version2.split(".")[0] ?? "", 10);
-  if (!Number.isFinite(major) || major < 18) {
-    return fail("node", `node version ${version2}, need >=18`);
-  }
-  return ok2("node", `node=${version2}`);
-}
-function checkCodexBin(_ctx, deps = DEFAULT_DEPS) {
-  const result = deps.spawnSync("codex", ["--version"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  if (result.error) {
-    const err2 = result.error;
-    if (err2.code === "ENOENT") return fail("codex", "codex binary not found on PATH");
-    return fail("codex", `codex --version errored: ${err2.message}`);
-  }
-  if (result.status !== 0) {
-    return fail("codex", `codex --version errored: ${formatSpawnFailure(result)}`);
-  }
-  const version2 = firstLine(result.stdout) || firstLine(result.stderr) || "unknown";
-  return ok2("codex", `codex=${version2}`);
-}
-function checkLauncherOnPath(ctx, deps = DEFAULT_DEPS) {
-  const resolved = resolveOnPath("codex-team", ctx.pathEnv, deps.fs);
-  if (resolved) {
-    return ok2("path", `codex-team=${resolved}`);
-  }
-  return warn("path", `codex-team not on PATH; use ${ctx.launcherPath}`);
-}
-function checkDataDirWritable(ctx, deps = DEFAULT_DEPS) {
-  const testPath = import_node_path6.default.join(ctx.dataDir, ".doctor-write-test");
-  try {
-    deps.fs.mkdirSync(ctx.dataDir, { recursive: true });
-    deps.fs.writeFileSync(testPath, "ok");
-    deps.fs.unlinkSync(testPath);
-    return ok2("data_dir", `data_dir=${ctx.dataDir} writable`);
-  } catch (e) {
-    try {
-      deps.fs.unlinkSync(testPath);
-    } catch {
-    }
-    return fail("data_dir", `data_dir not writable: ${ctx.dataDir}`);
-  }
-}
-async function checkSocketBind(_ctx, deps = DEFAULT_DEPS) {
-  const sockPath = import_node_path6.default.join(import_node_os2.default.tmpdir(), `ct-doctor-${process.pid}-${Date.now()}.sock`);
-  const endpoint = normalizeSockPath(sockPath);
-  const server = deps.createServer();
-  const cleanup = async () => {
-    await new Promise((resolve) => {
-      try {
-        server.close(() => resolve());
-      } catch {
-        resolve();
-      }
-    });
-    if (isFilesystemSockPath(sockPath)) {
-      try {
-        deps.fs.unlinkSync(endpoint);
-      } catch {
-      }
-    }
-  };
-  if (isFilesystemSockPath(sockPath)) {
-    try {
-      deps.fs.unlinkSync(endpoint);
-    } catch {
-    }
-  }
-  const listenResult = await new Promise((resolve) => {
-    const onError = (error) => {
-      server.off("listening", onListening);
-      resolve({ ok: false, error });
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      resolve({ ok: true });
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(endpoint);
-  });
-  if (!listenResult.ok) {
-    await cleanup();
-    const code = listenResult.error.code ?? "UNKNOWN";
-    if (code === "EPERM" || code === "EACCES") {
-      return fail("socket_bind", `socket_bind ${code} - sandbox forbids listen(); codex-team won't work here`);
-    }
-    return fail("socket_bind", `socket_bind ${code} - listen() failed: ${listenResult.error.message}`);
-  }
-  await cleanup();
-  return ok2("socket_bind", "socket_bind permitted");
-}
-function checkDaemonPid(ctx, deps = DEFAULT_DEPS) {
-  const record = readPidRecord(ctx.pidPath, deps.fs);
-  if (!record) {
-    return {
-      ...ok2("daemon_pid", "daemon not running (will auto-spawn on first `-b` call)"),
-      daemonState: "not_running",
-      pid: null
-    };
-  }
-  const alive = isPidReachable(record.pid, deps.kill);
-  const isDaemon = alive && deps.isLikelyCodexTeamDaemonProcess(record.pid);
-  if (isDaemon) {
-    return {
-      ...ok2("daemon_pid", `daemon running, pid=${record.pid}`),
-      daemonState: "running",
-      pid: record.pid
-    };
-  }
-  const reason = alive ? `pid ${record.pid} is not a codex-team daemon` : `pid ${record.pid} is not running`;
-  return {
-    ...warn("daemon_pid", `stale pidfile: ${reason}. Safe to remove manually: \`rm ${ctx.pidPath}\``),
-    daemonState: "not_running",
-    pid: record.pid
-  };
-}
-async function checkDaemonSocket(ctx, pidResult, deps = DEFAULT_DEPS) {
-  if (pidResult.daemonState !== "running") {
-    return skip("daemon_socket", "daemon_socket (daemon not running)");
-  }
-  const result = await connectSockOnce(ctx.sockPath, 2e3, deps.createConnection);
-  if (result.ok) {
-    return ok2("daemon_socket", "daemon_socket reachable");
-  }
-  const code = result.code ?? "UNKNOWN";
-  return fail("daemon_socket", `daemon_socket ${code} - ${interpretSocketConnectError(code, result.message)}`);
-}
-function checkDistFreshness(ctx, deps = DEFAULT_DEPS) {
-  const distPath = import_node_path6.default.join(ctx.packageRoot, "dist", "main.js");
-  const distStat = statIfExists(distPath, deps.fs);
-  if (!distStat) {
-    return warn("dist", "dist missing; run `npm run build` in plugins/codex-team");
-  }
-  const sourceNewest = newestMtime(import_node_path6.default.join(ctx.packageRoot, "src"), deps.fs);
-  if (sourceNewest !== null && sourceNewest > distStat.mtimeMs) {
-    return warn("dist", "source newer than dist; run `npm run build` in plugins/codex-team");
-  }
-  return ok2("dist", "dist current");
-}
-async function runDoctor(options = {}, deps = DEFAULT_DEPS) {
-  const ctx = buildDoctorContext(options);
-  const write = options.write ?? ((line) => process.stdout.write(line));
-  const results = [];
-  results.push(checkNode());
-  results.push(checkCodexBin(ctx, deps));
-  results.push(checkLauncherOnPath(ctx, deps));
-  results.push(checkDataDirWritable(ctx, deps));
-  results.push(await checkSocketBind(ctx, deps));
-  const daemonPid = checkDaemonPid(ctx, deps);
-  results.push(daemonPid);
-  results.push(await checkDaemonSocket(ctx, daemonPid, deps));
-  results.push(checkDistFreshness(ctx, deps));
-  const verdict = summarizeVerdict(results);
-  if (options.short) {
-    const failed = summarizeIds(results, "fail");
-    const warned = summarizeIds(results, "warn");
-    write(`doctor=${verdict} failed=${failed} warned=${warned}
-`);
-    return exitCodeForVerdict(verdict);
-  }
-  for (const result of results) {
-    write(`[${renderStatus(result.status)}] ${result.message}
-`);
-  }
-  write(`=== ${verdict} ===
-`);
-  return exitCodeForVerdict(verdict);
-}
-function summarizeVerdict(results) {
-  if (results.some((result) => result.status === "fail")) return "BROKEN";
-  if (results.some((result) => result.status === "warn")) return "DEGRADED";
-  return "HEALTHY";
-}
-function summarizeIds(results, status2) {
-  const ids = results.filter((result) => result.status === status2).map((result) => result.id);
-  return ids.length > 0 ? ids.join(",") : "none";
-}
-function exitCodeForVerdict(verdict) {
-  if (verdict === "BROKEN") return 2;
-  if (verdict === "DEGRADED") return 1;
-  return 0;
-}
-function renderStatus(status2) {
-  switch (status2) {
-    case "warn":
-      return "WARN";
-    case "fail":
-      return "FAIL";
-    case "skip":
-      return "SKIP";
-    case "ok":
-    default:
-      return "OK";
-  }
-}
-function ok2(id, message) {
-  return { id, status: "ok", message };
-}
-function warn(id, message) {
-  return { id, status: "warn", message };
-}
-function fail(id, message) {
-  return { id, status: "fail", message };
-}
-function skip(id, message) {
-  return { id, status: "skip", message };
-}
-function resolveOnPath(command, pathEnv, doctorFs) {
-  const segments = (pathEnv ?? "").split(import_node_path6.default.delimiter).filter(Boolean);
-  const candidates = process.platform === "win32" ? windowsExecutableCandidates(command) : [command];
-  for (const segment of segments) {
-    for (const candidate of candidates) {
-      const target = import_node_path6.default.join(segment, candidate);
-      try {
-        const stat = doctorFs.statSync(target);
-        if (!stat.isFile()) continue;
-        if (process.platform === "win32" || (stat.mode & 73) !== 0) return target;
-      } catch {
-      }
-    }
-  }
-  return null;
-}
-function windowsExecutableCandidates(command) {
-  const pathext = (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").map((entry) => entry.trim()).filter(Boolean);
-  if (/\.[^./\\]+$/.test(command)) return [command];
-  return [command, ...pathext.map((ext) => `${command}${ext.toLowerCase()}`), ...pathext.map((ext) => `${command}${ext.toUpperCase()}`)];
-}
-function readPidRecord(pidPath, doctorFs) {
-  try {
-    const raw = doctorFs.readFileSync(pidPath, "utf8");
-    const parsed = JSON.parse(raw);
-    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
-    return { pid: Math.floor(parsed.pid) };
-  } catch {
-    return null;
-  }
-}
-function isPidReachable(pid, kill) {
-  try {
-    kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function statIfExists(target, doctorFs) {
-  try {
-    return doctorFs.statSync(target);
-  } catch {
-    return null;
-  }
-}
-function newestMtime(target, doctorFs) {
-  const stat = statIfExists(target, doctorFs);
-  if (!stat) return null;
-  if (!stat.isDirectory()) return stat.mtimeMs;
-  let newest = null;
-  let entries;
-  try {
-    entries = doctorFs.readdirSync(target, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  for (const entry of entries) {
-    const childNewest = newestMtime(import_node_path6.default.join(target, entry.name), doctorFs);
-    if (childNewest !== null && (newest === null || childNewest > newest)) {
-      newest = childNewest;
-    }
-  }
-  return newest;
-}
-function firstLine(value) {
-  const text = typeof value === "string" ? value : value ? value.toString("utf8") : "";
-  return text.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
-}
-function formatSpawnFailure(result) {
-  const signal = result.signal ? `signal ${result.signal}` : null;
-  const status2 = typeof result.status === "number" ? `exit ${result.status}` : null;
-  const detail = firstLine(result.stderr) || firstLine(result.stdout);
-  return [status2 ?? signal ?? "unknown failure", detail].filter(Boolean).join(": ");
-}
-function connectSockOnce(sockPath, timeoutMs, createConnection) {
-  return new Promise((resolve) => {
-    const sock = createConnection(normalizeSockPath(sockPath));
-    let settled = false;
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try {
-        sock.destroy();
-      } catch {
-      }
-      resolve(result);
-    };
-    const timer = setTimeout(() => {
-      finish({ ok: false, code: "ETIMEDOUT", message: `connect timed out after ${timeoutMs}ms` });
-    }, timeoutMs);
-    timer.unref();
-    sock.once("connect", () => finish({ ok: true }));
-    sock.once("error", (error) => {
-      finish({ ok: false, code: error.code, message: error.message });
-    });
-  });
-}
-function interpretSocketConnectError(code, message) {
-  switch (code) {
-    case "ENOENT":
-      return "sock file missing";
-    case "ECONNREFUSED":
-      return "sock exists but nothing is accepting connections";
-    case "EACCES":
-    case "EPERM":
-      return "permission denied while connecting";
-    case "ETIMEDOUT":
-      return message;
-    default:
-      return message || "connect failed";
-  }
-}
-
 // src/cli/run.ts
 var DAEMON_POLL_INTERVAL_MS = 100;
 var DEFAULT_DAEMON_READY_TIMEOUT_MS = 15e3;
@@ -3556,20 +2972,14 @@ async function runCli(argv) {
     process.stdout.write(renderHelp(parsed.commandPath));
     return 0;
   }
+  warnLegacyWindowsDataDir((warning) => {
+    process.stderr.write(warning.message + "\n");
+  });
   const method = commandKey(parsed.commandPath);
-  if (method !== "doctor") {
-    warnLegacyWindowsDataDir((warning) => {
-      process.stderr.write(warning.message + "\n");
-    });
-  }
   const short = truthy(parsed.flags.short);
   const format = flagString(parsed.flags.format);
   if (short && !supportsShort(method)) {
     process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
-    return 1;
-  }
-  if (method === "doctor" && truthy(parsed.flags.full)) {
-    process.stdout.write(JSON.stringify(err("invalid_params", `--full is not supported for '${method}'`)) + "\n");
     return 1;
   }
   if (short && (format === "markdown" || format === "table")) {
@@ -3577,9 +2987,6 @@ async function runCli(argv) {
     return 1;
   }
   const sockPath = parsed.daemonSock || defaultSockPath();
-  if (method === "doctor") {
-    return await runDoctor({ short, sockPath });
-  }
   if (method === "version") {
     return await runVersion(sockPath);
   }
@@ -3602,7 +3009,7 @@ async function runCli(argv) {
   }
   const ready = await ensureDaemon(sockPath);
   if (!ready.ok) {
-    process.stdout.write(JSON.stringify(err(ready.code, ready.message, ready.data)) + "\n");
+    process.stdout.write(JSON.stringify(err("daemon_unreachable", ready.message)) + "\n");
     return 1;
   }
   return await dispatchCommand(sockPath, parsed, method);
@@ -3696,24 +3103,9 @@ async function dispatchCommand(sockPath, parsed, method) {
   }
 }
 function exitCodeForResult(method, result) {
-  if (!result || typeof result !== "object") return 0;
-  if (method === "message:send-many" || method === "session:detach") {
-    const results = result.results;
-    if (Array.isArray(results) && results.some((entry) => entry && typeof entry === "object" && entry.ok === false)) {
-      return 1;
-    }
-    return 0;
-  }
-  if (method !== "message:wait") return 0;
-  const value = result;
-  const outcomes = Array.isArray(value.outcomes) ? value.outcomes.map((entry) => entry && typeof entry === "object" ? entry.outcome : null).filter((entry) => typeof entry === "string") : [];
-  if (outcomes.length > 0) {
-    if (outcomes.includes("error") || outcomes.includes("interrupted")) return 1;
-    if (outcomes.includes("timeout")) return 124;
-    return 0;
-  }
-  const outcome = value.outcome;
-  if (outcome === "error" || outcome === "interrupted") return 1;
+  if (method !== "message:wait" || !result || typeof result !== "object") return 0;
+  const outcome = result.outcome;
+  if (outcome === "error") return 1;
   if (outcome === "timeout") return 124;
   return 0;
 }
@@ -3745,8 +3137,8 @@ async function runStream(sock, parsed, method) {
       if (stdoutBlocked) return;
       while (stdoutQueue.length > 0) {
         const next = stdoutQueue[0];
-        const ok3 = process.stdout.write(next.line);
-        if (!ok3) {
+        const ok2 = process.stdout.write(next.line);
+        if (!ok2) {
           stdoutBlocked = true;
           if (!socketPaused && typeof sock.pause === "function") {
             socketPaused = true;
@@ -3889,76 +3281,35 @@ async function requestOnceWithRetry(sockPath, opts, cliConfig, allowRetry) {
 }
 async function ensureDaemon(sockPath) {
   const cliConfig = readCliConfig();
-  const config = new ConfigStore();
-  const dataDir = config.resolvedDataDir();
-  const pidPath = pidFilePath(dataDir);
-  const stderrPath = daemonSpawnStderrPath(dataDir);
   if (await probeSock(sockPath, 200)) {
-    return { ok: true, code: "", message: "" };
-  }
-  const staleState = detectStaleDaemonArtifacts(sockPath, pidPath);
-  if (staleState) {
-    return {
-      ok: false,
-      code: "daemon_unreachable",
-      message: `stale daemon.pid + daemon.sock (pid ${staleState.pid} is not running); remove them and retry`,
-      data: {
-        pid_path: pidPath,
-        sock_path: staleState.sockPath,
-        pid: staleState.pid
-      }
-    };
+    return { ok: true, message: "" };
   }
   try {
-    const child = spawnDaemon();
-    const firstAttempt = await waitForDaemonReady(sockPath, child, cliConfig.readyTimeoutMs);
-    if (firstAttempt.ready) {
-      return { ok: true, code: "", message: "" };
+    spawnDaemon();
+    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
+      return { ok: true, message: "" };
     }
   } catch (e) {
     return {
       ok: false,
-      code: "daemon_unreachable",
       message: `failed to spawn daemon: ${e.message}`
     };
   }
+  const stderrPath = daemonSpawnStderrPath();
   try {
-    const child = spawnDaemon(stderrPath);
-    const secondAttempt = await waitForDaemonReady(sockPath, child, cliConfig.readyTimeoutMs);
-    if (secondAttempt.ready) {
-      return { ok: true, code: "", message: "" };
-    }
-    if (secondAttempt.exited) {
-      return buildEarlyExitFailure(stderrPath, secondAttempt);
+    spawnDaemon(stderrPath);
+    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
+      return { ok: true, message: "" };
     }
   } catch (e) {
     return {
       ok: false,
-      code: "daemon_unreachable",
       message: `failed to spawn daemon with stderr capture: ${e.message}`
-    };
-  }
-  const stderrTail = readTail(stderrPath, 4096);
-  const parsedBootstrap = parseBootstrapStderr(stderrTail);
-  if (parsedBootstrap?.code === "socket_bind_denied") {
-    return {
-      ok: false,
-      code: parsedBootstrap.code,
-      message: parsedBootstrap.message,
-      data: {
-        ...parsedBootstrap.data ?? {},
-        ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-      }
     };
   }
   return {
     ok: false,
-    code: "daemon_unreachable",
-    message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`,
-    data: {
-      stderr_path: stderrPath,
-      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-    }
+    message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`
   };
 }
 async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDelayMs) {
@@ -3977,48 +3328,32 @@ async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDel
   }
   throw lastError ?? new Error("connect failed");
 }
-async function waitForDaemonReady(sockPath, child, timeoutMs) {
-  let exited = false;
-  let exitCode = null;
-  let signal = null;
-  const onExit = (code, nextSignal) => {
-    exited = true;
-    exitCode = code;
-    signal = nextSignal;
-  };
-  child.once("exit", onExit);
+async function waitForDaemonReady(sockPath, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
-  try {
-    while (Date.now() < deadline) {
-      await (0, import_promises.setTimeout)(DAEMON_POLL_INTERVAL_MS);
-      if (await probeSock(sockPath, 200)) return { ready: true, exited, exitCode, signal };
-      if (exited) return { ready: false, exited, exitCode, signal };
-    }
-  } finally {
-    if (typeof child.off === "function") child.off("exit", onExit);
-    else if (typeof child.removeListener === "function") child.removeListener("exit", onExit);
+  while (Date.now() < deadline) {
+    await (0, import_promises.setTimeout)(DAEMON_POLL_INTERVAL_MS);
+    if (await probeSock(sockPath, 200)) return true;
   }
-  return { ready: false, exited, exitCode, signal };
+  return false;
 }
 function spawnDaemon(stderrPath) {
   const args = [process.argv[1], "--daemon-internal"];
   let stderrFd = null;
   try {
     if (stderrPath) {
-      import_node_fs7.default.mkdirSync(import_node_path7.default.dirname(stderrPath), { recursive: true });
-      stderrFd = import_node_fs7.default.openSync(stderrPath, "w");
+      import_node_fs5.default.mkdirSync(import_node_path6.default.dirname(stderrPath), { recursive: true });
+      stderrFd = import_node_fs5.default.openSync(stderrPath, "w");
       args.push(DAEMON_STDERR_FLAG, stderrPath);
     }
-    const child = (0, import_node_child_process3.spawn)(process.execPath, args, {
+    const child = (0, import_node_child_process.spawn)(process.execPath, args, {
       detached: true,
       stdio: stderrFd === null ? "ignore" : ["ignore", "ignore", stderrFd],
       env: process.env,
       windowsHide: true
     });
     child.unref();
-    return child;
   } finally {
-    if (stderrFd !== null) import_node_fs7.default.closeSync(stderrFd);
+    if (stderrFd !== null) import_node_fs5.default.closeSync(stderrFd);
   }
 }
 function getCliVersion() {
@@ -4027,93 +3362,8 @@ function getCliVersion() {
 function randomId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
-function daemonSpawnStderrPath(dataDir) {
-  return import_node_path7.default.join(dataDir, "daemon-spawn.stderr");
-}
-function detectStaleDaemonArtifacts(sockPath, pidPath) {
-  const pidRecord = readPidFile(pidPath);
-  if (!pidRecord) return null;
-  if (isPidAlive(pidRecord.pid)) return null;
-  if (!isFilesystemSockPath(sockPath)) return null;
-  const normalizedSockPath = normalizeSockPath(sockPath);
-  if (!import_node_fs7.default.existsSync(normalizedSockPath)) return null;
-  return {
-    pid: pidRecord.pid,
-    sockPath: normalizedSockPath
-  };
-}
-function readPidFile(targetPath) {
-  try {
-    const raw = import_node_fs7.default.readFileSync(targetPath, "utf8");
-    const parsed = JSON.parse(raw);
-    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
-    return { pid: Math.floor(parsed.pid) };
-  } catch {
-    return null;
-  }
-}
-function isPidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function buildEarlyExitFailure(stderrPath, result) {
-  const stderrTail = readTail(stderrPath, 4096);
-  const parsedBootstrap = parseBootstrapStderr(stderrTail);
-  if (parsedBootstrap?.code === "socket_bind_denied") {
-    return {
-      ok: false,
-      code: parsedBootstrap.code,
-      message: parsedBootstrap.message,
-      data: {
-        ...parsedBootstrap.data ?? {},
-        ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-      }
-    };
-  }
-  return {
-    ok: false,
-    code: "daemon_unreachable",
-    message: parsedBootstrap?.message ?? "daemon exited before becoming ready",
-    data: {
-      stderr_path: stderrPath,
-      ...typeof result.exitCode === "number" ? { exit_code: result.exitCode } : {},
-      ...result.signal ? { signal: result.signal } : {},
-      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-    }
-  };
-}
-function readTail(filePath, maxBytes) {
-  try {
-    const raw = import_node_fs7.default.readFileSync(filePath, "utf8");
-    if (raw.length <= maxBytes) return raw.trim();
-    return raw.slice(-maxBytes).trim();
-  } catch {
-    return null;
-  }
-}
-function parseBootstrapStderr(stderrTail) {
-  if (!stderrTail) return null;
-  const prefix = "[codex-team-daemon-bootstrap] ";
-  const lines = stderrTail.split(/\r?\n/).reverse();
-  for (const line of lines) {
-    if (!line.startsWith(prefix)) continue;
-    try {
-      const parsed = JSON.parse(line.slice(prefix.length));
-      if (typeof parsed.code !== "string" || typeof parsed.message !== "string") continue;
-      return {
-        code: parsed.code,
-        message: parsed.message,
-        data: parsed.data && typeof parsed.data === "object" && !Array.isArray(parsed.data) ? parsed.data : void 0
-      };
-    } catch {
-      continue;
-    }
-  }
-  return null;
+function daemonSpawnStderrPath() {
+  return import_node_path6.default.join(defaultDataDir(), "daemon-spawn.stderr");
 }
 function truthy(v) {
   return v === true || v === "true" || v === "1";
@@ -4160,24 +3410,10 @@ function forwardDaemonError(error) {
   return JSON.stringify(err(error.code, error.message, error.data)) + "\n";
 }
 function validateCliFlags(parsed, method) {
-  if (method === "monitor:events") {
-    if (parsed.flags.cursor === true) return "--cursor requires a value";
-    if (parsed.flags.since !== void 0 && parsed.flags.cursor !== void 0) {
-      return "--since and --cursor are mutually exclusive";
-    }
-    return null;
-  }
-  if (method === "message:wait") {
-    if ((truthy(parsed.flags.all) || truthy(parsed.flags.any)) && parsed.flags.for !== void 0) {
-      return "--for is only supported when waiting on a single session";
-    }
-    return null;
-  }
-  if (method === "session:detach") {
-    if (parsed.flags.match !== void 0 && !truthy(parsed.flags.all)) {
-      return "--match requires --all";
-    }
-    return null;
+  if (method !== "monitor:events") return null;
+  if (parsed.flags.cursor === true) return "--cursor requires a value";
+  if (parsed.flags.since !== void 0 && parsed.flags.cursor !== void 0) {
+    return "--since and --cursor are mutually exclusive";
   }
   return null;
 }
@@ -4218,8 +3454,12 @@ function formatDuration(ms) {
 }
 
 // src/daemon/run.ts
-var import_node_fs17 = __toESM(require("fs"));
-var import_node_path15 = __toESM(require("path"));
+var import_node_fs16 = __toESM(require("fs"));
+var import_node_path14 = __toESM(require("path"));
+
+// src/daemon/users.ts
+var import_node_fs6 = __toESM(require("fs"));
+var import_node_path7 = __toESM(require("path"));
 
 // src/errors.ts
 var CodexTeamError = class extends Error {
@@ -4240,8 +3480,6 @@ function methodNotFound(method) {
 }
 
 // src/daemon/users.ts
-var import_node_fs8 = __toESM(require("fs"));
-var import_node_path8 = __toESM(require("path"));
 var SCHEMA_VERSION = 1;
 var UserRegistry = class {
   users = /* @__PURE__ */ new Map();
@@ -4252,12 +3490,12 @@ var UserRegistry = class {
   }
   loadFromDisk() {
     const root = usersDir(this.dataDir);
-    if (!import_node_fs8.default.existsSync(root)) return;
-    for (const dirname of import_node_fs8.default.readdirSync(root)) {
-      const metaPath = import_node_path8.default.join(root, dirname, "metadata.json");
-      if (import_node_fs8.default.existsSync(metaPath)) {
+    if (!import_node_fs6.default.existsSync(root)) return;
+    for (const dirname of import_node_fs6.default.readdirSync(root)) {
+      const metaPath = import_node_path7.default.join(root, dirname, "metadata.json");
+      if (import_node_fs6.default.existsSync(metaPath)) {
         try {
-          const raw = import_node_fs8.default.readFileSync(metaPath, "utf8");
+          const raw = import_node_fs6.default.readFileSync(metaPath, "utf8");
           const parsed = JSON.parse(raw);
           const user = normalizePersistedUser(parsed);
           if (user && typeof user.token === "string") {
@@ -4312,7 +3550,7 @@ var UserRegistry = class {
     this.users.delete(token);
     const dir = userDir(token, this.dataDir);
     try {
-      import_node_fs8.default.rmSync(dir, { recursive: true, force: true });
+      import_node_fs6.default.rmSync(dir, { recursive: true, force: true });
     } catch {
     }
   }
@@ -4324,14 +3562,14 @@ var UserRegistry = class {
   }
   persist(user) {
     const dir = userDir(user.token, this.dataDir);
-    import_node_fs8.default.mkdirSync(dir, { recursive: true });
+    import_node_fs6.default.mkdirSync(dir, { recursive: true });
     const metaPath = userMetadataPath(user.token, this.dataDir);
     const tmp = metaPath + ".tmp";
-    import_node_fs8.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs6.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION,
       user
     }, null, 2));
-    import_node_fs8.default.renameSync(tmp, metaPath);
+    import_node_fs6.default.renameSync(tmp, metaPath);
   }
 };
 function validateToken(token) {
@@ -4363,8 +3601,8 @@ function isCanonicalUserDir(dirname) {
 
 // src/daemon/sessions.ts
 var import_node_crypto2 = __toESM(require("crypto"));
-var import_node_fs9 = __toESM(require("fs"));
-var import_node_path9 = __toESM(require("path"));
+var import_node_fs7 = __toESM(require("fs"));
+var import_node_path8 = __toESM(require("path"));
 var NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var SCHEMA_VERSION2 = 1;
@@ -4381,12 +3619,12 @@ var SessionRegistry = class {
     if (this.users.has(user)) return;
     const bucket = this.emptyBucket();
     const p = userSessionsPath(user, this.dataDir);
-    if (!import_node_fs9.default.existsSync(p)) {
+    if (!import_node_fs7.default.existsSync(p)) {
       this.users.set(user, bucket);
       return;
     }
     try {
-      const raw = import_node_fs9.default.readFileSync(p, "utf8");
+      const raw = import_node_fs7.default.readFileSync(p, "utf8");
       const parsed = JSON.parse(raw);
       if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION2) {
         throw new Error(`sessions.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION2}`);
@@ -4545,7 +3783,7 @@ var SessionRegistry = class {
   }
   async persistAsync(user) {
     const dir = userDir(user, this.dataDir);
-    await import_node_fs9.default.promises.mkdir(dir, { recursive: true });
+    await import_node_fs7.default.promises.mkdir(dir, { recursive: true });
     const p = userSessionsPath(user, this.dataDir);
     const bucket = this.users.get(user);
     const payload = {
@@ -4553,8 +3791,8 @@ var SessionRegistry = class {
       sessions: bucket ? Array.from(bucket.byName.values()) : []
     };
     const tmp = p + ".tmp";
-    await import_node_fs9.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
-    await import_node_fs9.default.promises.rename(tmp, p);
+    await import_node_fs7.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
+    await import_node_fs7.default.promises.rename(tmp, p);
   }
   schedulePersist(user, delayMs) {
     const existing = this.touchTimers.get(user);
@@ -4706,8 +3944,8 @@ function normalizeOptionalNumber(value) {
 }
 
 // src/daemon/events.ts
-var import_node_fs10 = __toESM(require("fs"));
-var import_node_path10 = __toESM(require("path"));
+var import_node_fs8 = __toESM(require("fs"));
+var import_node_path9 = __toESM(require("path"));
 var DELTA_SUFFIX = "_delta";
 var SCHEMA_VERSION3 = 1;
 var DEFAULT_FLUSH_DELAY_MS = 25;
@@ -4750,13 +3988,13 @@ var EventLog = class {
       return;
     }
     const filePath = userEventLogPath(user, this.dataDir);
-    if (!import_node_fs10.default.existsSync(filePath)) {
+    if (!import_node_fs8.default.existsSync(filePath)) {
       this.ensureUserState(user);
       this.loaded.add(user);
       this.loadPromises.delete(user);
       return;
     }
-    const raw = import_node_fs10.default.readFileSync(filePath, "utf8");
+    const raw = import_node_fs8.default.readFileSync(filePath, "utf8");
     const lines = raw.split("\n").filter(Boolean);
     const { events, totalLines } = parsePersistedEvents(lines);
     const buf = events.slice(Math.max(0, events.length - this.retention));
@@ -4914,7 +4152,7 @@ var EventLog = class {
         return;
       }
       const filePath = userEventLogPath(user, this.dataDir);
-      const raw = await import_node_fs10.default.promises.readFile(filePath, "utf8");
+      const raw = await import_node_fs8.default.promises.readFile(filePath, "utf8");
       const lines = raw.split("\n").filter(Boolean);
       const { events, totalLines } = parsePersistedEvents(lines);
       const buf = events.slice(Math.max(0, events.length - this.retention));
@@ -5045,11 +4283,11 @@ var EventLog = class {
     const filePath = userEventLogPath(user, this.dataDir);
     void this.enqueueFsOp(user, async () => {
       try {
-        await import_node_fs10.default.promises.mkdir(import_node_path10.default.dirname(filePath), { recursive: true });
-        await import_node_fs10.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+        await import_node_fs8.default.promises.mkdir(import_node_path9.default.dirname(filePath), { recursive: true });
+        await import_node_fs8.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
         const tmp = filePath + ".tmp";
-        await import_node_fs10.default.promises.writeFile(tmp, serializeEventFile(buf));
-        await import_node_fs10.default.promises.rename(tmp, filePath);
+        await import_node_fs8.default.promises.writeFile(tmp, serializeEventFile(buf));
+        await import_node_fs8.default.promises.rename(tmp, filePath);
         this.rotatedSinceCompact.set(user, 0);
       } catch (e) {
         logger.warn("event log compaction failed", { user, err: e.message });
@@ -5088,14 +4326,14 @@ var EventLog = class {
     });
     if (!snapshot) return;
     const filePath = userEventLogPath(user, this.dataDir);
-    const ok3 = await this.enqueueFsOp(user, async () => {
+    const ok2 = await this.enqueueFsOp(user, async () => {
       try {
-        await import_node_fs10.default.promises.mkdir(import_node_path10.default.dirname(filePath), { recursive: true });
-        await import_node_fs10.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
-        if (!import_node_fs10.default.existsSync(filePath)) {
-          await import_node_fs10.default.promises.writeFile(filePath, serializeHeaderLine() + snapshot.lines.join(""));
+        await import_node_fs8.default.promises.mkdir(import_node_path9.default.dirname(filePath), { recursive: true });
+        await import_node_fs8.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+        if (!import_node_fs8.default.existsSync(filePath)) {
+          await import_node_fs8.default.promises.writeFile(filePath, serializeHeaderLine() + snapshot.lines.join(""));
         } else {
-          await import_node_fs10.default.promises.appendFile(filePath, snapshot.lines.join(""));
+          await import_node_fs8.default.promises.appendFile(filePath, snapshot.lines.join(""));
         }
         return true;
       } catch (e) {
@@ -5103,7 +4341,7 @@ var EventLog = class {
         return false;
       }
     });
-    if (!ok3) {
+    if (!ok2) {
       await this.withUserLock(user, async () => {
         const pending = this.pendingLines.get(user) ?? [];
         this.pendingLines.set(user, [...snapshot.lines, ...pending]);
@@ -5201,9 +4439,9 @@ function serializeEventFile(buf) {
 }
 
 // src/daemon/cursors.ts
-var import_node_fs11 = __toESM(require("fs"));
-var import_node_os3 = __toESM(require("os"));
-var import_node_path11 = __toESM(require("path"));
+var import_node_fs9 = __toESM(require("fs"));
+var import_node_os2 = __toESM(require("os"));
+var import_node_path10 = __toESM(require("path"));
 var import_promises2 = require("timers/promises");
 var CURSOR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 var SCHEMA_VERSION4 = 1;
@@ -5306,9 +4544,9 @@ var CursorStore = class {
     if (this.loaded.has(user)) return;
     const bucket = /* @__PURE__ */ new Map();
     const filePath = cursorFilePath(user, this.dataDir);
-    if (import_node_fs11.default.existsSync(filePath)) {
+    if (import_node_fs9.default.existsSync(filePath)) {
       try {
-        for (const cursor of loadEnvelopeFromText(import_node_fs11.default.readFileSync(filePath, "utf8")).cursors.values()) {
+        for (const cursor of loadEnvelopeFromText(import_node_fs9.default.readFileSync(filePath, "utf8")).cursors.values()) {
           bucket.set(cursor.name, cloneCursor(cursor));
         }
       } catch (error) {
@@ -5326,7 +4564,7 @@ var CursorStore = class {
   }
   async persistAsync(user, op) {
     const dir = userDir(user, this.dataDir);
-    await import_node_fs11.default.promises.mkdir(dir, { recursive: true });
+    await import_node_fs9.default.promises.mkdir(dir, { recursive: true });
     const filePath = cursorFilePath(user, this.dataDir);
     const releaseLock = await acquireCursorLock(filePath);
     const tmpPath = makeTempPath(filePath);
@@ -5337,37 +4575,37 @@ var CursorStore = class {
         schema_version: SCHEMA_VERSION4,
         cursors: sorted(persisted)
       };
-      await import_node_fs11.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
-      await import_node_fs11.default.promises.rename(tmpPath, filePath);
+      await import_node_fs9.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
+      await import_node_fs9.default.promises.rename(tmpPath, filePath);
     } finally {
-      await import_node_fs11.default.promises.unlink(tmpPath).catch(() => void 0);
+      await import_node_fs9.default.promises.unlink(tmpPath).catch(() => void 0);
       await releaseLock();
     }
   }
 };
 function cursorFilePath(user, dataDir) {
-  return import_node_path11.default.join(userDir(user, dataDir), "cursors.json");
+  return import_node_path10.default.join(userDir(user, dataDir), "cursors.json");
 }
 async function acquireCursorLock(filePath) {
   const lockPath = `${filePath}.lock`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (true) {
     try {
-      const handle = await import_node_fs11.default.promises.open(lockPath, "wx");
+      const handle = await import_node_fs9.default.promises.open(lockPath, "wx");
       try {
         await handle.writeFile(JSON.stringify(makeCursorLockRecord()));
       } finally {
         await handle.close();
       }
       return async () => {
-        await import_node_fs11.default.promises.unlink(lockPath).catch(() => void 0);
+        await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
       };
     } catch (error) {
       const err2 = error;
       if (err2.code !== "EEXIST") throw error;
       if (await reclaimStaleCursorLock(lockPath)) {
         return async () => {
-          await import_node_fs11.default.promises.unlink(lockPath).catch(() => void 0);
+          await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
         };
       }
       if (Date.now() >= deadline) {
@@ -5381,20 +4619,20 @@ async function reclaimStaleCursorLock(lockPath) {
   const lock = await readCursorLock(lockPath);
   if (!lock || !isStaleCursorLock(lock)) return false;
   const tmpPath = `${lockPath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
-  await import_node_fs11.default.promises.writeFile(tmpPath, JSON.stringify(makeCursorLockRecord()));
+  await import_node_fs9.default.promises.writeFile(tmpPath, JSON.stringify(makeCursorLockRecord()));
   try {
-    await import_node_fs11.default.promises.rename(tmpPath, lockPath);
+    await import_node_fs9.default.promises.rename(tmpPath, lockPath);
     return true;
   } catch (error) {
     const err2 = error;
     if (err2.code === "EEXIST" || err2.code === "EPERM") {
-      await import_node_fs11.default.promises.unlink(lockPath).catch(() => void 0);
-      await import_node_fs11.default.promises.rename(tmpPath, lockPath);
+      await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
+      await import_node_fs9.default.promises.rename(tmpPath, lockPath);
       return true;
     }
     return false;
   } finally {
-    await import_node_fs11.default.promises.unlink(tmpPath).catch(() => void 0);
+    await import_node_fs9.default.promises.unlink(tmpPath).catch(() => void 0);
   }
 }
 function makeTempPath(filePath) {
@@ -5404,12 +4642,12 @@ function makeCursorLockRecord() {
   return {
     pid: process.pid,
     started_at: (/* @__PURE__ */ new Date()).toISOString(),
-    host: import_node_os3.default.hostname()
+    host: import_node_os2.default.hostname()
   };
 }
 async function loadEnvelopeFromFile(filePath) {
   try {
-    const raw = await import_node_fs11.default.promises.readFile(filePath, "utf8");
+    const raw = await import_node_fs9.default.promises.readFile(filePath, "utf8");
     return loadEnvelopeFromText(raw).cursors;
   } catch (error) {
     const err2 = error;
@@ -5431,7 +4669,7 @@ function loadEnvelopeFromText(raw) {
 }
 async function readCursorLock(lockPath) {
   try {
-    const raw = await import_node_fs11.default.promises.readFile(lockPath, "utf8");
+    const raw = await import_node_fs9.default.promises.readFile(lockPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || typeof parsed.started_at !== "string" || typeof parsed.host !== "string") {
       return null;
@@ -5446,12 +4684,12 @@ async function readCursorLock(lockPath) {
   }
 }
 function isStaleCursorLock(lock) {
-  if (!isPidAlive2(lock.pid)) return true;
+  if (!isPidAlive(lock.pid)) return true;
   if (lock.pid === process.pid) return false;
   const startedAt = Date.parse(lock.started_at);
   return Number.isFinite(startedAt) && Date.now() - startedAt > LOCK_STALE_MS;
 }
-function isPidAlive2(pid) {
+function isPidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
@@ -5791,6 +5029,15 @@ async function threadFork(client, threadId, atTurnId, retry = DEFAULT_RETRY) {
   const result = await retryOnOverload(() => client.request("thread/fork", params), retry);
   return coerceLifecycle(result, "thread/fork");
 }
+async function threadArchive(client, threadId, retry = DEFAULT_RETRY) {
+  await retryOnOverload(() => client.request("thread/archive", { threadId }), retry);
+}
+async function threadUnarchive(client, threadId, retry = DEFAULT_RETRY) {
+  await retryOnOverload(() => client.request("thread/unarchive", { threadId }), retry);
+}
+async function threadRename(client, threadId, name, retry = DEFAULT_RETRY) {
+  await retryOnOverload(() => client.request("thread/name/set", { threadId, name }), retry);
+}
 async function threadSetName(client, threadId, name, retry = DEFAULT_RETRY) {
   await retryOnOverload(() => client.request("thread/name/set", { threadId, name }), retry);
 }
@@ -6053,21 +5300,160 @@ function isStateUsable(state, generation) {
 
 // src/daemon/orphans.ts
 var import_node_crypto5 = __toESM(require("crypto"));
-var import_node_fs12 = __toESM(require("fs"));
-var import_node_path12 = __toESM(require("path"));
+var import_node_fs11 = __toESM(require("fs"));
+var import_node_path11 = __toESM(require("path"));
 var import_promises4 = require("timers/promises");
+
+// src/daemon/processes.ts
+var import_node_fs10 = __toESM(require("fs"));
+var import_node_child_process2 = require("child_process");
+function readLinuxCmdline(pid) {
+  try {
+    const raw = import_node_fs10.default.readFileSync(`/proc/${pid}/cmdline`);
+    const commandLine = raw.toString("utf8").replace(/\0/g, " ").trim() || null;
+    return { commandLine, source: "proc", reliable: true };
+  } catch {
+    return { commandLine: null, source: null, reliable: false };
+  }
+}
+function readLinuxStartTime(pid) {
+  try {
+    const raw = import_node_fs10.default.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const lastParen = raw.lastIndexOf(")");
+    if (lastParen < 0) return null;
+    const rest = raw.slice(lastParen + 2).trim().split(/\s+/);
+    const startTime = rest[19];
+    return typeof startTime === "string" && startTime.length > 0 ? startTime : null;
+  } catch {
+    return null;
+  }
+}
+function readPsCommand(pid) {
+  try {
+    const raw = (0, import_node_child_process2.execFileSync)("ps", ["-p", String(pid), "-o", "command="], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const commandLine = raw.trim();
+    return { commandLine: commandLine.length > 0 ? commandLine : null, source: "ps", reliable: true };
+  } catch {
+    return { commandLine: null, source: null, reliable: false };
+  }
+}
+function readPsStartTime(pid) {
+  try {
+    const raw = (0, import_node_child_process2.execFileSync)("ps", ["-p", String(pid), "-o", "lstart="], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const startTime = raw.trim();
+    return startTime.length > 0 ? startTime : null;
+  } catch {
+    return null;
+  }
+}
+function readWindowsCommand(pid) {
+  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CommandLine) { [Console]::Out.Write($p.CommandLine) }`;
+  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
+    try {
+      const raw = (0, import_node_child_process2.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8"
+      });
+      const commandLine = raw.trim();
+      if (commandLine.length > 0) return { commandLine, source: "powershell", reliable: true };
+    } catch {
+    }
+  }
+  try {
+    const raw = (0, import_node_child_process2.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CommandLine", "/value"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CommandLine="));
+    const commandLine = line?.slice("CommandLine=".length).trim() ?? "";
+    if (commandLine.length > 0) return { commandLine, source: "wmic", reliable: true };
+  } catch {
+  }
+  try {
+    const raw = (0, import_node_child_process2.execFileSync)("tasklist", ["/FO", "LIST", "/NH", "/FI", `PID eq ${pid}`], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => /^Image Name:/i.test(entry));
+    const commandLine = line?.replace(/^Image Name:\s*/i, "").trim() ?? "";
+    if (commandLine.length > 0) return { commandLine, source: "tasklist", reliable: false };
+  } catch {
+  }
+  return { commandLine: null, source: null, reliable: false };
+}
+function readWindowsStartTime(pid) {
+  const script = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p -and $null -ne $p.CreationDate) { [Console]::Out.Write($p.CreationDate) }`;
+  for (const bin of ["powershell.exe", "powershell", "pwsh"]) {
+    try {
+      const raw = (0, import_node_child_process2.execFileSync)(bin, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8"
+      });
+      const startTime = raw.trim();
+      if (startTime.length > 0) return startTime;
+    } catch {
+    }
+  }
+  try {
+    const raw = (0, import_node_child_process2.execFileSync)("wmic", ["process", "where", `processid=${pid}`, "get", "CreationDate", "/value"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8"
+    });
+    const line = raw.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith("CreationDate="));
+    const startTime = line?.slice("CreationDate=".length).trim() ?? "";
+    return startTime.length > 0 ? startTime : null;
+  } catch {
+    return null;
+  }
+}
+function inspectProcessCommandLine(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return { commandLine: null, source: null, reliable: false };
+  if (process.platform === "linux") return readLinuxCmdline(pid);
+  if (process.platform === "darwin" || process.platform === "freebsd") return readPsCommand(pid);
+  if (process.platform === "win32") return readWindowsCommand(pid);
+  return { commandLine: null, source: null, reliable: false };
+}
+function readProcessStartTime(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  if (process.platform === "linux") return readLinuxStartTime(pid);
+  if (process.platform === "darwin" || process.platform === "freebsd") return readPsStartTime(pid);
+  if (process.platform === "win32") return readWindowsStartTime(pid);
+  return null;
+}
+function inspectCodexAppServerProcess(pid) {
+  const inspection = inspectProcessCommandLine(pid);
+  if (!inspection.commandLine) return "unknown";
+  if (looksLikeCodexAppServerCommand(inspection.commandLine)) return "match";
+  if (!inspection.reliable) return "unknown";
+  return "mismatch";
+}
+function isLikelyCodexTeamDaemonProcess(pid) {
+  const inspection = inspectProcessCommandLine(pid);
+  return inspection.commandLine !== null && inspection.commandLine.includes("--daemon-internal");
+}
+function looksLikeCodexAppServerCommand(commandLine) {
+  return commandLine.includes("app-server") && (commandLine.includes("codex") || commandLine.includes("codex-cli-bin"));
+}
+
+// src/daemon/orphans.ts
 var SCHEMA_VERSION5 = 2;
 var TERM_GRACE_MS = 2e3;
 var KILL_GRACE_MS = 500;
 var POLL_MS = 100;
 function orphanPidsPath(dataDir) {
-  return import_node_path12.default.join(dataDir, "codex-pids.json");
+  return import_node_path11.default.join(dataDir, "codex-pids.json");
 }
-function readPidFile2(dataDir) {
+function readPidFile(dataDir) {
   const p = orphanPidsPath(dataDir);
-  if (!import_node_fs12.default.existsSync(p)) return [];
+  if (!import_node_fs11.default.existsSync(p)) return [];
   try {
-    const raw = import_node_fs12.default.readFileSync(p, "utf8");
+    const raw = import_node_fs11.default.readFileSync(p, "utf8");
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
       return parsed.filter((x) => typeof x === "number" && Number.isFinite(x)).map((pid) => ({
@@ -6092,19 +5478,19 @@ function readPidFile2(dataDir) {
 function writePidFile(dataDir, pids) {
   const p = orphanPidsPath(dataDir);
   try {
-    import_node_fs12.default.mkdirSync(import_node_path12.default.dirname(p), { recursive: true });
+    import_node_fs11.default.mkdirSync(import_node_path11.default.dirname(p), { recursive: true });
     const tmp = p + ".tmp";
-    import_node_fs12.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs11.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION5,
       processes: pids
     }));
-    import_node_fs12.default.renameSync(tmp, p);
+    import_node_fs11.default.renameSync(tmp, p);
   } catch (e) {
     logger.warn("failed to persist codex pid file", { err: e.message });
   }
 }
 async function reapOrphans(dataDir) {
-  const pids = readPidFile2(dataDir);
+  const pids = readPidFile(dataDir);
   let killed = 0;
   const retryPids = [];
   for (const tracked of pids) {
@@ -6232,10 +5618,10 @@ async function waitForTrackedExit(tracked, timeoutMs) {
 var import_node_events2 = require("events");
 
 // src/codex/appServerClient.ts
-var import_node_child_process4 = require("child_process");
+var import_node_child_process3 = require("child_process");
 var import_node_events = require("events");
 var import_node_crypto6 = require("crypto");
-var import_node_path13 = __toESM(require("path"));
+var import_node_path12 = __toESM(require("path"));
 var STDERR_TAIL_LINES = 400;
 var DEFAULT_REQUEST_TIMEOUT_MS = 12e4;
 var AppServerClient = class extends import_node_events.EventEmitter {
@@ -6277,7 +5663,7 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     const launch = resolveLaunch(this.options.bin, args);
     const env = { ...process.env, ...this.options.env ?? {} };
     logger.debug("spawning app-server", { bin: launch.command, args: launch.args });
-    this.proc = (0, import_node_child_process4.spawn)(launch.command, launch.args, {
+    this.proc = (0, import_node_child_process3.spawn)(launch.command, launch.args, {
       cwd: this.options.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -6497,9 +5883,9 @@ function resolveLaunch(bin, args) {
   return { command: resolved, args };
 }
 function resolveWindowsCommand(bin) {
-  if (bin.includes("\\") || bin.includes("/") || import_node_path13.default.extname(bin).length > 0) return bin;
+  if (bin.includes("\\") || bin.includes("/") || import_node_path12.default.extname(bin).length > 0) return bin;
   try {
-    const raw = (0, import_node_child_process4.execFileSync)("where", [bin], {
+    const raw = (0, import_node_child_process3.execFileSync)("where", [bin], {
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf8"
     });
@@ -6905,12 +6291,12 @@ var status = async (ctx, req) => {
 };
 
 // src/daemon/handlers/daemon.ts
-var import_node_fs14 = __toESM(require("fs"));
-var import_node_path14 = __toESM(require("path"));
-var import_node_child_process5 = require("child_process");
+var import_node_fs13 = __toESM(require("fs"));
+var import_node_path13 = __toESM(require("path"));
+var import_node_child_process4 = require("child_process");
 
 // src/daemon/shutdown.ts
-var import_node_fs13 = __toESM(require("fs"));
+var import_node_fs12 = __toESM(require("fs"));
 var shuttingDown = false;
 async function shutdownDaemon(ctx, reason, exitCode = 0) {
   if (shuttingDown) return;
@@ -6952,7 +6338,7 @@ async function shutdownDaemon(ctx, reason, exitCode = 0) {
   }
   unlinkSockIfStale(ctx.sockPath);
   try {
-    import_node_fs13.default.unlinkSync(pidFilePath(ctx.dataDir));
+    import_node_fs12.default.unlinkSync(pidFilePath(ctx.dataDir));
   } catch {
   }
   setTimeout(() => process.exit(exitCode), 10);
@@ -6995,7 +6381,7 @@ var daemonStop = async (ctx, req) => {
 };
 var daemonRestart = async (ctx) => {
   const entry = process.argv[1];
-  (0, import_node_child_process5.spawn)(process.execPath, [entry, "--daemon-internal"], {
+  (0, import_node_child_process4.spawn)(process.execPath, [entry, "--daemon-internal"], {
     detached: true,
     stdio: "ignore",
     env: process.env,
@@ -7157,7 +6543,7 @@ var daemonLogsStream = async (ctx, req, stream) => {
   }
   const syncAppended = async () => {
     try {
-      const stat = await import_node_fs14.default.promises.stat(logPath);
+      const stat = await import_node_fs13.default.promises.stat(logPath);
       if (stat.size < offset) offset = 0;
       if (stat.size === offset) return;
       const chunk = await readBytes(logPath, offset, stat.size - offset);
@@ -7179,8 +6565,8 @@ var daemonLogsStream = async (ctx, req, stream) => {
     }, 50);
     debounceTimer.unref();
   };
-  const watcher = import_node_fs14.default.watch(import_node_path14.default.dirname(logPath), { persistent: true }, (_event, filename) => {
-    if (!filename || filename.toString() === import_node_path14.default.basename(logPath)) scheduleSync();
+  const watcher = import_node_fs13.default.watch(import_node_path13.default.dirname(logPath), { persistent: true }, (_event, filename) => {
+    if (!filename || filename.toString() === import_node_path13.default.basename(logPath)) scheduleSync();
   });
   stream.onClose(() => {
     closed = true;
@@ -7233,7 +6619,7 @@ function safeParseOr(line, fallback) {
 }
 async function readTextIfExists(filePath) {
   try {
-    return await import_node_fs14.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs13.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw e;
@@ -7241,7 +6627,7 @@ async function readTextIfExists(filePath) {
 }
 async function readBytes(filePath, start, length) {
   if (length <= 0) return "";
-  const handle = await import_node_fs14.default.promises.open(filePath, "r");
+  const handle = await import_node_fs13.default.promises.open(filePath, "r");
   try {
     const buffer = Buffer.alloc(length);
     const { bytesRead } = await handle.read(buffer, 0, length, start);
@@ -7254,8 +6640,8 @@ function getPkgVersion() {
   return VERSION;
 }
 async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
-  const distPath = import_node_path14.default.join(packageRoot, "dist", "main.js");
-  const distStat = await statIfExists2(distPath);
+  const distPath = import_node_path13.default.join(packageRoot, "dist", "main.js");
+  const distStat = await statIfExists(distPath);
   if (!distStat) {
     return {
       dist_built_at: null,
@@ -7264,16 +6650,16 @@ async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
     };
   }
   const builtAt = new Date(distStat.mtimeMs).toISOString();
-  const sourceNewestMtime = await getNewestMtime(import_node_path14.default.join(packageRoot, "src"));
+  const sourceNewestMtime = await getNewestMtime(import_node_path13.default.join(packageRoot, "src"));
   return {
     dist_built_at: builtAt,
     dist_age_seconds: Math.max(0, Math.floor((Date.now() - distStat.mtimeMs) / 1e3)),
     source_newer_than_dist: sourceNewestMtime === null ? null : sourceNewestMtime > distStat.mtimeMs
   };
 }
-async function statIfExists2(filePath) {
+async function statIfExists(filePath) {
   try {
-    return await import_node_fs14.default.promises.stat(filePath);
+    return await import_node_fs13.default.promises.stat(filePath);
   } catch (e) {
     if (e.code === "ENOENT") return null;
     return null;
@@ -7282,27 +6668,27 @@ async function statIfExists2(filePath) {
 async function getNewestMtime(dirPath) {
   let entries;
   try {
-    entries = await import_node_fs14.default.promises.readdir(dirPath, { withFileTypes: true });
+    entries = await import_node_fs13.default.promises.readdir(dirPath, { withFileTypes: true });
   } catch (e) {
     if (e.code === "ENOENT") return null;
     return null;
   }
   let newest = null;
   for (const entry of entries) {
-    const entryPath = import_node_path14.default.join(dirPath, entry.name);
+    const entryPath = import_node_path13.default.join(dirPath, entry.name);
     if (entry.isDirectory()) {
       const childNewest = await getNewestMtime(entryPath);
       if (childNewest !== null && (newest === null || childNewest > newest)) newest = childNewest;
       continue;
     }
-    const stat = await statIfExists2(entryPath);
+    const stat = await statIfExists(entryPath);
     if (stat && (newest === null || stat.mtimeMs > newest)) newest = stat.mtimeMs;
   }
   return newest;
 }
 
 // src/daemon/handlers/session.ts
-var import_node_fs15 = __toESM(require("fs"));
+var import_node_fs14 = __toESM(require("fs"));
 
 // src/daemon/experimentalTools.ts
 var TOOL_SPECS = [
@@ -7563,8 +6949,8 @@ function renderCommandExecution(item, ctx) {
 }
 function renderFileChange(item, ctx) {
   const attrs = baseItemAttrs(item, { includeType: false });
-  const path17 = asString4(item.path);
-  if (path17) attrs.path = path17;
+  const path16 = asString4(item.path);
+  if (path16) attrs.path = path16;
   if (item.status !== void 0) attrs.status = item.status;
   const diffBody = extractDiff(item) ?? "";
   return renderBodyTag("file-patch", attrs, diffBody, ctx);
@@ -7866,22 +7252,6 @@ function stringify(v) {
   }
 }
 
-// src/util/glob.ts
-function escapeRegex(text) {
-  return text.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
-}
-function globToRegExp(pattern) {
-  const source = Array.from(pattern, (char) => {
-    if (char === "*") return ".*";
-    if (char === "?") return ".";
-    return escapeRegex(char);
-  }).join("");
-  return new RegExp(`^${source}$`);
-}
-function matchesGlob(pattern, value) {
-  return globToRegExp(pattern).test(value);
-}
-
 // src/daemon/handlers/session.ts
 var attachLocks = /* @__PURE__ */ new Map();
 var sessionNew = async (ctx, req) => {
@@ -8011,43 +7381,38 @@ var sessionAttach = async (ctx, req) => {
 var sessionDetach = async (ctx, req) => {
   requireUser(ctx, req);
   const user = req.bearer;
-  const flags = asFlags(req);
-  const detachAll = isTrue2(flags["all"]);
-  const match = asString5(flags["match"]);
-  const graceful = isTrue2(flags["graceful"]);
-  if (!detachAll && match !== null) {
-    throw invalidParams("--match requires --all");
-  }
-  if (detachAll) {
-    if (asPositionals(req).length > 0) {
-      throw invalidParams("session detach --all does not accept positional targets");
-    }
-    const live = ctx.sessions.listLive(user).filter((rec2) => match === null || matchesGlob(match, rec2.name));
-    const results = await Promise.all(live.map(async (rec2) => {
-      try {
-        const detached2 = await detachSessionRecord(ctx, user, rec2, graceful);
-        return {
-          session: detached2.name,
-          detached: true,
-          graceful
-        };
-      } catch (error) {
-        return {
-          session: rec2.name,
-          ok: false,
-          error: normalizeDetachError(error)
-        };
-      }
-    }));
-    return { results };
-  }
   const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const graceful = isTrue2(flags["graceful"]);
   const rec = ctx.sessions.get(user, identifier);
   if (!rec) {
     return { session: null, noop: true };
   }
-  const detached = await detachSessionRecord(ctx, user, rec, graceful);
-  return { session: detached, noop: false, graceful };
+  const sessionKey = keyFor(user, rec.name);
+  const teardown = await ctx.queues.beginTeardown(sessionKey);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const turnId = teardown.currentTurnId;
+  if (client && !graceful && turnId) {
+    try {
+      await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions());
+    } catch {
+    }
+  }
+  if (graceful) {
+    await ctx.queues.waitForIdle(sessionKey);
+  }
+  if (client) {
+    try {
+      await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions());
+    } catch {
+    }
+  }
+  ctx.pool.release(sessionKey);
+  ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
+  ctx.sessions.remove(user, rec.name);
+  await appendSessionClosed(ctx, user, rec, "user_detach");
+  return { session: rec, noop: false, graceful };
 };
 var sessionRename = async (ctx, req) => {
   requireUser(ctx, req);
@@ -8390,45 +7755,6 @@ function validateSessionAutoApprovePatterns(patterns) {
   if (validationError) throw invalidParams(validationError);
   return [...patterns];
 }
-async function detachSessionRecord(ctx, user, rec, graceful) {
-  const sessionKey = keyFor(user, rec.name);
-  const teardown = await ctx.queues.beginTeardown(sessionKey);
-  const client = ctx.pool.clientForSession(sessionKey);
-  const turnId = teardown.currentTurnId;
-  if (client && !graceful && turnId) {
-    try {
-      await turnInterrupt(client, rec.thread_id, turnId, ctx.retryOptions());
-    } catch {
-    }
-  }
-  if (graceful) {
-    await ctx.queues.waitForIdle(sessionKey);
-  }
-  if (client) {
-    try {
-      await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions());
-    } catch {
-    }
-  }
-  ctx.pool.release(sessionKey);
-  ctx.queues.dispose(sessionKey);
-  await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
-  ctx.sessions.remove(user, rec.name);
-  await appendSessionClosed(ctx, user, rec, "user_detach");
-  return rec;
-}
-function normalizeDetachError(error) {
-  if (error instanceof CodexTeamError) {
-    return {
-      code: error.code,
-      message: error.message
-    };
-  }
-  return {
-    code: "internal",
-    message: error instanceof Error ? error.message : String(error)
-  };
-}
 function deriveNameFromThreadId(threadId, ctx, user) {
   const existing = ctx.sessions.get(user, threadId);
   if (existing) return existing.name;
@@ -8471,7 +7797,7 @@ async function readInstructionFile(value, flag) {
   const filePath = asString5(value);
   if (!filePath) return null;
   try {
-    return await import_node_fs15.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs14.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     throw invalidParams(`${flag} not readable: ${e.message}`);
   }
@@ -8529,9 +7855,336 @@ function sortSessions(rows, field) {
   });
   return copy;
 }
+var sessionArchive = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const andDetach = isTrue2(flags["and-detach"]);
+  const live = ctx.sessions.get(user, identifier);
+  if (live) {
+    if (!andDetach) {
+      throw invalidParams("session is live; pass --and-detach or run `session detach` first");
+    }
+    await detachLiveSessionHard(ctx, req, live);
+    const archivedAt2 = (/* @__PURE__ */ new Date()).toISOString();
+    const client2 = await ctx.pool.acquireForAdhoc(user);
+    await threadArchive(client2, live.thread_id, ctx.retryOptions());
+    return {
+      thread_id: live.thread_id,
+      archived: true,
+      detached: true,
+      archived_at: archivedAt2
+    };
+  }
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "live") {
+    if (target.session.name !== identifier && target.threadId !== identifier) {
+      throw new CodexTeamError("session_busy", `session '${identifier}' is live under user '${user}'`);
+    }
+    if (!andDetach) {
+      throw invalidParams("session is live; pass --and-detach or run `session detach` first");
+    }
+    await detachLiveSessionHard(ctx, req, target.session);
+    const archivedAt2 = (/* @__PURE__ */ new Date()).toISOString();
+    const client2 = await ctx.pool.acquireForAdhoc(user);
+    await threadArchive(client2, target.threadId, ctx.retryOptions());
+    return {
+      thread_id: target.threadId,
+      archived: true,
+      detached: true,
+      archived_at: archivedAt2
+    };
+  }
+  const archivedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const client = await ctx.pool.acquireForAdhoc(user);
+  await threadArchive(client, target.threadId, ctx.retryOptions());
+  return {
+    thread_id: target.threadId,
+    archived: true,
+    archived_at: archivedAt
+  };
+};
+var sessionUnarchive = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const threadId = asPositional(req, 0, "thread_id");
+  const live = ctx.sessions.findLiveAnywhere(threadId);
+  if (live) {
+    throw invalidParams("thread is live; unarchive applies only to detached archived threads");
+  }
+  await readDetachedThreadById(ctx, user, threadId);
+  const unarchivedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const client = await ctx.pool.acquireForAdhoc(user);
+  await threadUnarchive(client, threadId, ctx.retryOptions());
+  return {
+    thread_id: threadId,
+    unarchived: true,
+    unarchived_at: unarchivedAt
+  };
+};
+var sessionRenameExtended = async (ctx, req) => {
+  requireUser(ctx, req);
+  const flags = asFlags(req);
+  if (!isTrue2(flags["detached-ok"])) {
+    return await sessionRename(ctx, req);
+  }
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const newName = asPositional(req, 1, "new_name");
+  validateSessionName(newName);
+  const live = ctx.sessions.get(user, identifier);
+  if (live) {
+    return await sessionRename(ctx, req);
+  }
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "live") {
+    return await sessionRename(ctx, req);
+  }
+  const renamedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const client = await ctx.pool.acquireForAdhoc(user);
+  await threadRename(client, target.threadId, newName, ctx.retryOptions());
+  return {
+    session: { name: newName },
+    thread_id: target.threadId,
+    detached: true,
+    renamed_at: renamedAt
+  };
+};
+var sessionRollback = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const toTurnId = asString5(flags["to-turn"]);
+  const detachAfter = isTrue2(flags["detach-after"]);
+  if (!toTurnId) {
+    throw invalidParams("--to-turn requires a value");
+  }
+  const source = await resolveSessionTarget(ctx, user, identifier);
+  const sourceName = resolveRollbackSessionName(source, ctx, user);
+  const sourceRecord = source.kind === "live" ? source.session : null;
+  const sourceThread = source.kind === "live" ? { id: source.threadId, name: source.name, cwd: source.session.cwd } : source.thread;
+  const sourceDefaults = resolveRollbackDefaults(ctx, sourceRecord, sourceThread);
+  if (!detachAfter) {
+    validateSessionName(sourceName);
+    const existing = ctx.sessions.get(user, sourceName);
+    if (existing && (source.kind !== "live" || existing.thread_id !== source.threadId)) {
+      throw invalidParams(`session '${sourceName}' already exists`);
+    }
+  }
+  const sourceClient = await clientForThreadTarget(ctx, user, source);
+  await ensureRollbackTurnExists(ctx, sourceClient, source.threadId, toTurnId);
+  const forkResult = await threadFork(sourceClient, source.threadId, toTurnId, ctx.retryOptions());
+  const newThreadId = threadIdOf(forkResult);
+  if (source.kind === "live") {
+    await detachLiveSessionHard(ctx, req, source.session);
+  }
+  const archivedSourceName = `${sourceName}-pre-rollback-${(/* @__PURE__ */ new Date()).toISOString()}`;
+  const lifecycleClient = await ctx.pool.acquireForAdhoc(user);
+  await threadRename(lifecycleClient, source.threadId, archivedSourceName, ctx.retryOptions());
+  await threadArchive(lifecycleClient, source.threadId, ctx.retryOptions());
+  await threadRename(lifecycleClient, newThreadId, sourceName, ctx.retryOptions());
+  if (!detachAfter) {
+    await attachRollbackThread(ctx, user, sourceName, newThreadId, sourceDefaults);
+  }
+  return {
+    name: sourceName,
+    old_thread_id: source.threadId,
+    new_thread_id: newThreadId,
+    forked_at_turn: toTurnId,
+    archived_source_name: archivedSourceName,
+    detach_after: detachAfter
+  };
+};
+function resolveRollbackSessionName(source, ctx, user) {
+  if (source.kind === "live") return source.session.name;
+  return source.name ?? deriveNameFromThreadId(source.threadId, ctx, user);
+}
+function resolveRollbackDefaults(ctx, sourceRecord, sourceThread) {
+  const experimentalTools = sourceRecord?.experimental_tools ? [...sourceRecord.experimental_tools] : parseExperimentalTools(resolveDefault(ctx, "experimental.default_tools"));
+  const autoApprovePatterns = sourceRecord ? validateSessionAutoApprovePatterns(sourceRecord.autoApprovePatterns ?? []) : validateSessionAutoApprovePatterns(
+    parseConfiguredAutoApprovePatterns(ctx.config.getEffective("session.auto_approve_command_patterns"))
+  );
+  return {
+    model: sourceRecord?.model ?? void 0,
+    cwd: sourceRecord?.cwd ?? asString5(sourceThread.cwd) ?? process.cwd(),
+    sandbox: sourceRecord?.sandbox ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
+    approval: sourceRecord?.approval ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
+    effort: sourceRecord?.effort ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
+    profile: sourceRecord?.profile ?? void 0,
+    baseInstructions: sourceRecord?.base_instructions ?? void 0,
+    developerInstructions: sourceRecord?.developer_instructions ?? void 0,
+    experimentalTools,
+    autoApprovePatterns
+  };
+}
+async function attachRollbackThread(ctx, user, name, threadId, defaults) {
+  const sessionKey = keyFor(user, name);
+  const client = await ctx.pool.acquire(
+    user,
+    sessionKey,
+    buildExperimentalToolAppServerOptions(defaults.experimentalTools)
+  );
+  let result;
+  try {
+    result = await threadResume(client, threadId, ctx.retryOptions());
+  } catch (e) {
+    ctx.pool.release(sessionKey);
+    throw e;
+  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const record = {
+    name,
+    thread_id: threadId,
+    state: "live",
+    model: defaults.model ?? asString5(result.model) ?? void 0,
+    cwd: defaults.cwd ?? asString5(result.cwd) ?? asString5(result.thread.cwd) ?? process.cwd(),
+    sandbox: defaults.sandbox,
+    approval: defaults.approval ?? asString5(result.approvalPolicy) ?? void 0,
+    effort: defaults.effort,
+    profile: defaults.profile,
+    base_instructions: defaults.baseInstructions,
+    developer_instructions: defaults.developerInstructions,
+    experimental_tools: defaults.experimentalTools.length > 0 ? defaults.experimentalTools : void 0,
+    autoApprovePatterns: defaults.autoApprovePatterns,
+    created_at: now,
+    last_active_at: now,
+    turn_count: 0,
+    ...sessionRuntimeDefaults()
+  };
+  ctx.sessions.add(user, record);
+  ctx.users.touch(user);
+  return record;
+}
+async function ensureRollbackTurnExists(ctx, client, threadId, turnId) {
+  let cursor;
+  let hasCompletedTurn = false;
+  do {
+    const page = await threadTurnsList(client, threadId, {
+      limit: 100,
+      ...cursor ? { cursor } : {},
+      sortDirection: "desc"
+    }, ctx.retryOptions());
+    for (const turn of page.data) {
+      if (turn.status === "completed") hasCompletedTurn = true;
+      if (turn.id === turnId) return;
+    }
+    cursor = page.nextCursor ?? void 0;
+  } while (cursor);
+  if (!hasCompletedTurn) {
+    throw invalidParams("session has no completed turns yet; rollback requires a completed turn from `message history`");
+  }
+  throw invalidParams(`turn '${turnId}' not found in thread '${threadId}'`);
+}
+async function clientForThreadTarget(ctx, user, target) {
+  if (target.kind === "live") {
+    const client = ctx.pool.clientForSession(keyFor(user, target.session.name));
+    if (client) return client;
+  }
+  return await ctx.pool.acquireForAdhoc(user);
+}
+async function detachLiveSessionHard(ctx, req, rec) {
+  await sessionDetach(ctx, {
+    ...req,
+    method: "session:detach",
+    params: {
+      positionals: [rec.name],
+      flags: {}
+    }
+  });
+}
+async function resolveSessionTarget(ctx, user, identifier) {
+  const live = ctx.sessions.get(user, identifier);
+  if (live) {
+    return {
+      kind: "live",
+      session: live,
+      threadId: live.thread_id,
+      name: live.name
+    };
+  }
+  if (looksLikeThreadId(identifier)) {
+    const owner = ctx.sessions.findLiveAnywhere(identifier);
+    if (owner) {
+      if (owner.user !== user) {
+        throw new CodexTeamError("session_busy", `thread '${identifier}' is live under user '${owner.user}'`);
+      }
+      return {
+        kind: "live",
+        session: owner.record,
+        threadId: owner.record.thread_id,
+        name: owner.record.name
+      };
+    }
+    const thread = await readDetachedThreadById(ctx, user, identifier);
+    return {
+      kind: "detached",
+      thread,
+      threadId: thread.id,
+      name: asString5(thread.name)
+    };
+  }
+  const liveByName = ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
+  if (liveByName === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id`);
+  }
+  if (liveByName) {
+    if (liveByName.user !== user) {
+      throw new CodexTeamError("session_busy", `session '${identifier}' is live under user '${liveByName.user}'`);
+    }
+    return {
+      kind: "live",
+      session: liveByName.record,
+      threadId: liveByName.record.thread_id,
+      name: liveByName.record.name
+    };
+  }
+  const detached = await findDetachedThreadByName(ctx, user, identifier);
+  if (detached === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across detached threads; use a thread_id`);
+  }
+  if (!detached) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+  }
+  return {
+    kind: "detached",
+    thread: detached,
+    threadId: detached.id,
+    name: asString5(detached.name)
+  };
+}
+async function readDetachedThreadById(ctx, user, threadId) {
+  try {
+    const client = await ctx.pool.acquireForAdhoc(user);
+    const result = await threadRead(client, threadId, ctx.retryOptions());
+    return result.thread;
+  } catch (e) {
+    throw new CodexTeamError("session_not_found", `session '${threadId}' not found: ${e.message}`);
+  }
+}
+async function findDetachedThreadByName(ctx, user, name) {
+  const client = await ctx.pool.acquireForAdhoc(user);
+  let cursor;
+  let match = null;
+  do {
+    const page = await threadList(client, {
+      limit: 200,
+      includeArchived: true,
+      ...cursor ? { cursor } : {}
+    }, ctx.retryOptions());
+    for (const thread of page.data) {
+      if (asString5(thread.name) !== name) continue;
+      if (match) return "ambiguous";
+      match = thread;
+    }
+    cursor = page.nextCursor ?? void 0;
+  } while (cursor);
+  return match;
+}
 
 // src/daemon/handlers/message.ts
-var import_node_fs16 = __toESM(require("fs"));
+var import_node_fs15 = __toESM(require("fs"));
 var messageSend = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const prompt = await readPromptInput(req);
@@ -8548,40 +8201,6 @@ var messageSend = async (ctx, req) => {
     queue_id: result.queue_id,
     queued_depth: result.queued_depth
   };
-};
-var messageSendMany = async (ctx, req) => {
-  const user = requireUser2(ctx, req);
-  const positionals = asPositionals2(req);
-  const promptPositional = hasPromptFlagSource(req) ? null : positionals[positionals.length - 1] ?? null;
-  const identifiers = hasPromptFlagSource(req) ? positionals : positionals.slice(0, -1);
-  if (identifiers.length < 2) {
-    throw invalidParams("message send-many requires at least two target sessions");
-  }
-  const prompt = await readPromptInput(req, promptPositional);
-  const input = await buildUserInput(prompt, []);
-  const retry = ctx.retryOptions();
-  const results = await Promise.all(identifiers.map(async (identifier) => {
-    try {
-      const { rec, client } = await resolveLiveTarget(ctx, user, identifier);
-      const sessionKey = keyFor2(user, rec.name);
-      const result = await ctx.queues.sendOrQueue(sessionKey, client, rec.thread_id, input, retry);
-      ctx.sessions.touch(user, rec.name);
-      return {
-        session: rec.name,
-        turn_id: result.turn_id,
-        started: result.started,
-        queue_id: result.queue_id,
-        queued_depth: result.queued_depth
-      };
-    } catch (error) {
-      return {
-        session: identifier,
-        ok: false,
-        error: normalizeHandlerError(error)
-      };
-    }
-  }));
-  return { results };
 };
 var messagePeer = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
@@ -8769,39 +8388,146 @@ var messageTail = async (ctx, req, stream) => {
   return { streaming: true };
 };
 var messageWait = async (ctx, req) => {
-  const user = requireUser2(ctx, req);
-  const waitAll = isTrue3(getFlag2(req, "all"));
-  const waitAny = isTrue3(getFlag2(req, "any"));
-  if (waitAll && waitAny) {
-    throw invalidParams("--all and --any are mutually exclusive");
+  const { user, rec } = await resolveSessionRecord(ctx, req);
+  if (rec.state !== "live") {
+    return {
+      session: rec.name,
+      thread_id: rec.thread_id,
+      turn_id: rec.current_turn_id ?? rec.last_turn_id ?? null,
+      outcome: "error",
+      event_type: SESSION_CRASHED_EVENT_TYPE,
+      error: {
+        reason: rec.crash_reason ?? "session_crashed"
+      }
+    };
   }
-  const positionals = asPositionals2(req);
   const requestedTurnId = asString6(getFlag2(req, "for"));
   const timeoutSeconds = parseTimeoutSeconds(getFlag2(req, "timeout"));
-  if (!waitAll && !waitAny) {
-    if (positionals.length !== 1) {
-      throw invalidParams("message wait accepts exactly one session unless --all or --any is set");
-    }
-    const rec = resolveSessionRecordTarget(ctx, user, positionals[0]);
-    return await waitForSingleSession(ctx, user, rec, requestedTurnId, timeoutSeconds);
-  }
+  const sessionKey = keyFor2(user, rec.name);
+  const initialTurnId = requestedTurnId ?? rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
   if (requestedTurnId) {
-    throw invalidParams("--for is only supported when waiting on a single session");
+    const historical = await findTerminalEvent(ctx, user, rec.name, requestedTurnId);
+    if (historical) return terminalWaitResult(rec.name, rec.thread_id, requestedTurnId, historical);
+  } else if (initialTurnId) {
+    const historical = await findTerminalEvent(ctx, user, rec.name, initialTurnId);
+    if (historical) return terminalWaitResult(rec.name, rec.thread_id, initialTurnId, historical);
   }
-  if (positionals.length === 0) {
-    throw invalidParams("message wait requires at least one session");
-  }
-  const records = positionals.map((identifier) => resolveSessionRecordTarget(ctx, user, identifier));
-  if (waitAll) {
-    return await waitForAllSessions(ctx, user, records, timeoutSeconds);
-  }
-  return await waitForAnySession(ctx, user, records, timeoutSeconds);
+  return await new Promise((resolve) => {
+    let settled = false;
+    let targetTurnId = requestedTurnId;
+    let timer = null;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      sub.dispose();
+      resolve(result);
+    };
+    const sub = ctx.events.subscribe(user, (event) => {
+      if (event.session !== rec.name) return;
+      if (event.thread_id !== rec.thread_id) return;
+      if (!targetTurnId) {
+        targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+      }
+      if (!targetTurnId) {
+        if (event.type === "turn.started") {
+          const turnId = eventTurnId(event);
+          if (!turnId) return;
+          targetTurnId = turnId;
+        } else if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
+          settle({
+            session: rec.name,
+            thread_id: rec.thread_id,
+            turn_id: null,
+            outcome: "error",
+            event_type: event.type,
+            event_id: event.id,
+            error: event.payload
+          });
+        }
+        return;
+      }
+      if (event.type === "turn.completed" && eventTurnId(event) === targetTurnId) {
+        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
+        return;
+      }
+      if (event.type === "turn.error" && eventTurnId(event) === targetTurnId) {
+        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
+        return;
+      }
+      if (event.type === SESSION_CRASHED_EVENT_TYPE && eventCrashTurnId(event) === targetTurnId) {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId,
+          outcome: "error",
+          event_type: event.type,
+          event_id: event.id,
+          error: event.payload
+        });
+        return;
+      }
+      if (event.type === SESSION_CLOSED_EVENT_TYPE) {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId,
+          outcome: "error",
+          event_type: event.type,
+          event_id: event.id,
+          error: event.payload
+        });
+      }
+    });
+    if (!targetTurnId && !requestedTurnId) {
+      targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+    }
+    if (timeoutSeconds > 0) {
+      timer = setTimeout(() => {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId ?? null,
+          outcome: "timeout",
+          timeout_s: timeoutSeconds
+        });
+      }, timeoutSeconds * 1e3);
+      timer.unref();
+    }
+  });
 };
 async function resolveLive(ctx, req) {
-  const user = requireUser2(ctx, req);
+  const user = req.bearer;
+  if (!user) throw invalidParams("bearer token required");
+  if (!ctx.users.has(user)) {
+    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
+  }
   const identifier = asPositional2(req, 0, "session");
-  const resolved = await resolveLiveTarget(ctx, user, identifier);
-  return { user, ...resolved };
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
+  }
+  if (rec.state === "crashed") {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is crashed; run 'codex-team -b ${user} session heal ${rec.name}'`);
+  }
+  const client = ctx.pool.clientForSession(keyFor2(user, rec.name));
+  if (!isClientAlive2(client)) {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
+  }
+  return { user, rec, client };
+}
+async function resolveSessionRecord(ctx, req) {
+  const user = req.bearer;
+  if (!user) throw invalidParams("bearer token required");
+  if (!ctx.users.has(user)) {
+    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
+  }
+  const identifier = asPositional2(req, 0, "session");
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
+  }
+  return { user, rec };
 }
 function requirePending(ctx, user, requestId) {
   const p = ctx.pending.get(requestId);
@@ -8824,7 +8550,8 @@ function emitPendingWarning(ctx, user, session, threadId, payload) {
     }).catch(() => void 0);
   });
 }
-async function readPromptInput(req, positional = asPositionalOptional2(req, 1)) {
+async function readPromptInput(req) {
+  const positional = asPositionalOptional2(req, 1);
   const fromFile = asString6(getFlag2(req, "file"));
   const fromStdin = isTrue3(getFlag2(req, "stdin"));
   const sources = [positional, fromFile, fromStdin].filter((v) => v !== null && v !== false).length;
@@ -8837,7 +8564,7 @@ async function readPromptInput(req, positional = asPositionalOptional2(req, 1)) 
   if (positional) return positional;
   if (fromFile) {
     try {
-      return await import_node_fs16.default.promises.readFile(fromFile, "utf8");
+      return await import_node_fs15.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -8857,7 +8584,7 @@ async function readJsonInput(req) {
   if (jsonRaw) raw = jsonRaw;
   else if (fromFile) {
     try {
-      raw = await import_node_fs16.default.promises.readFile(fromFile, "utf8");
+      raw = await import_node_fs15.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -8874,9 +8601,9 @@ async function readJsonInput(req) {
 }
 async function buildUserInput(text, attachments) {
   const items = [{ type: "text", text }];
-  for (const path17 of attachments) {
-    await assertAttachable(path17);
-    items.push({ type: "localImage", path: path17 });
+  for (const path16 of attachments) {
+    await assertAttachable(path16);
+    items.push({ type: "localImage", path: path16 });
   }
   return items;
 }
@@ -8958,23 +8685,21 @@ async function buildAnswerResponse(req, pending, inline) {
 function keyFor2(user, name) {
   return `${user}::${name}`;
 }
-function asPositionals2(req) {
-  const positionals = req.params.positionals;
-  return Array.isArray(positionals) ? positionals.filter((value) => typeof value === "string") : [];
-}
 function getFlag2(req, key) {
   const flags = req.params.flags;
   if (flags && typeof flags === "object") return flags[key];
   return void 0;
 }
 function asPositional2(req, idx, name) {
-  const list = asPositionals2(req);
+  const positionals = req.params.positionals;
+  const list = Array.isArray(positionals) ? positionals : [];
   const v = list[idx];
   if (typeof v !== "string" || v.length === 0) throw invalidParams(`missing positional '${name}'`);
   return v;
 }
 function asPositionalOptional2(req, idx) {
-  const list = asPositionals2(req);
+  const positionals = req.params.positionals;
+  const list = Array.isArray(positionals) ? positionals : [];
   const v = list[idx];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
@@ -9005,9 +8730,6 @@ function parseTimeoutSeconds(value) {
 function isTrue3(v) {
   return v === true || v === "true" || v === "1";
 }
-function hasPromptFlagSource(req) {
-  return asString6(getFlag2(req, "file")) !== null || isTrue3(getFlag2(req, "stdin"));
-}
 function eventTurnId(event) {
   const turnId = event.payload.turn_id;
   return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
@@ -9030,7 +8752,7 @@ function terminalWaitResult(session, threadId, turnId, event) {
     session,
     thread_id: threadId,
     turn_id: turnId,
-    outcome: event.type === "turn.interrupted" ? "interrupted" : event.type === "turn.completed" && completedStatus === "completed" ? "completed" : "error",
+    outcome: event.type === "turn.completed" && completedStatus === "completed" ? "completed" : "error",
     event_type: event.type,
     event_id: event.id,
     ...completedFields,
@@ -9043,290 +8765,11 @@ async function findTerminalEvent(ctx, user, session, turnId) {
   for (let i = listed.events.length - 1; i >= 0; i--) {
     const event = listed.events[i];
     if (event.session !== session) continue;
-    if (event.type !== "turn.completed" && event.type !== "turn.error" && event.type !== "turn.interrupted") continue;
+    if (event.type !== "turn.completed" && event.type !== "turn.error") continue;
     if (eventTurnId(event) !== turnId) continue;
     return event;
   }
   return null;
-}
-function requireUser2(ctx, req) {
-  const user = req.bearer;
-  if (!user) throw invalidParams("bearer token required");
-  if (!ctx.users.has(user)) {
-    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
-  }
-  return user;
-}
-async function resolveLiveTarget(ctx, user, identifier) {
-  const rec = resolveSessionRecordTarget(ctx, user, identifier);
-  if (rec.state === "crashed") {
-    throw new CodexTeamError("session_not_live", `session '${rec.name}' is crashed; run 'codex-team -b ${user} session heal ${rec.name}'`);
-  }
-  const client = ctx.pool.clientForSession(keyFor2(user, rec.name));
-  if (!isClientAlive2(client)) {
-    throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
-  }
-  return { rec, client };
-}
-function resolveSessionRecordTarget(ctx, user, identifier) {
-  const rec = ctx.sessions.get(user, identifier);
-  if (!rec) {
-    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
-  }
-  return rec;
-}
-function normalizeHandlerError(error) {
-  if (error instanceof CodexTeamError) {
-    return {
-      code: error.code,
-      message: error.message
-    };
-  }
-  const message = error instanceof Error ? error.message : String(error);
-  return {
-    code: "internal",
-    message
-  };
-}
-async function waitForSingleSession(ctx, user, rec, requestedTurnId, timeoutSeconds) {
-  const observer = await createWaitObserver(ctx, user, rec, requestedTurnId);
-  if (observer.immediateResult) return observer.immediateResult;
-  return await new Promise((resolve) => {
-    let settled = false;
-    let timer = null;
-    const settle = (result) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      observer.cancel();
-      resolve(result);
-    };
-    void observer.promise.then((result) => {
-      if (!result) return;
-      settle(result);
-    });
-    if (timeoutSeconds > 0) {
-      timer = setTimeout(() => {
-        settle(timeoutWaitResult(rec, observer.currentTurnId(), timeoutSeconds));
-      }, timeoutSeconds * 1e3);
-      timer.unref();
-    }
-  });
-}
-async function waitForAllSessions(ctx, user, records, timeoutSeconds) {
-  const observers = await Promise.all(records.map((rec) => createWaitObserver(ctx, user, rec, null)));
-  const outcomes = observers.map((observer) => observer.immediateResult ? projectBatchWaitOutcome(observer.immediateResult) : null);
-  let pending = outcomes.filter((outcome) => outcome === null).length;
-  if (pending === 0) {
-    const finalized = outcomes.filter((outcome) => outcome !== null);
-    return {
-      outcomes: finalized,
-      overall: overallWaitOutcome(finalized)
-    };
-  }
-  return await new Promise((resolve) => {
-    let settled = false;
-    let timer = null;
-    const finalize = () => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      for (const observer of observers) observer.cancel();
-      const finalized = outcomes.map((outcome, index) => outcome ?? timeoutBatchWaitOutcome(records[index], observers[index], timeoutSeconds));
-      resolve({
-        outcomes: finalized,
-        overall: overallWaitOutcome(finalized)
-      });
-    };
-    observers.forEach((observer, index) => {
-      if (outcomes[index] !== null) return;
-      void observer.promise.then((result) => {
-        if (settled || !result) return;
-        outcomes[index] = projectBatchWaitOutcome(result);
-        pending -= 1;
-        if (pending === 0) finalize();
-      });
-    });
-    if (timeoutSeconds > 0) {
-      timer = setTimeout(finalize, timeoutSeconds * 1e3);
-      timer.unref();
-    }
-  });
-}
-async function waitForAnySession(ctx, user, records, timeoutSeconds) {
-  const observers = await Promise.all(records.map((rec) => createWaitObserver(ctx, user, rec, null)));
-  const immediateIndex = observers.findIndex((observer) => observer.immediateResult !== void 0);
-  if (immediateIndex >= 0) {
-    observers.forEach((observer, index) => {
-      if (index !== immediateIndex) observer.cancel();
-    });
-    return projectAnyWaitResult(
-      observers[immediateIndex].immediateResult,
-      records.filter((_rec, index) => index !== immediateIndex && observers[index].immediateResult === void 0).map((rec) => rec.name)
-    );
-  }
-  return await new Promise((resolve) => {
-    let settled = false;
-    let timer = null;
-    const settle = (result) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      observers.forEach((observer) => observer.cancel());
-      resolve(result);
-    };
-    observers.forEach((observer, index) => {
-      void observer.promise.then((result) => {
-        if (settled || !result) return;
-        settle(projectAnyWaitResult(
-          result,
-          records.filter((_rec, otherIndex) => otherIndex !== index).map((rec) => rec.name)
-        ));
-      });
-    });
-    if (timeoutSeconds > 0) {
-      timer = setTimeout(() => {
-        settle({
-          outcome: "timeout",
-          timeout_s: timeoutSeconds,
-          still_running: records.map((rec) => rec.name)
-        });
-      }, timeoutSeconds * 1e3);
-      timer.unref();
-    }
-  });
-}
-async function createWaitObserver(ctx, user, rec, requestedTurnId) {
-  if (rec.state !== "live") {
-    return immediateWaitObserver(crashedWaitResult(rec));
-  }
-  const sessionKey = keyFor2(user, rec.name);
-  let targetTurnId = requestedTurnId ?? rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
-  if (requestedTurnId) {
-    const historical = await findTerminalEvent(ctx, user, rec.name, requestedTurnId);
-    if (historical) return immediateWaitObserver(terminalWaitResult(rec.name, rec.thread_id, requestedTurnId, historical));
-  } else if (targetTurnId) {
-    const historical = await findTerminalEvent(ctx, user, rec.name, targetTurnId);
-    if (historical) return immediateWaitObserver(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, historical));
-  }
-  let settled = false;
-  let sub = null;
-  let resolvePromise;
-  const promise = new Promise((resolve) => {
-    resolvePromise = resolve;
-  });
-  const settle = (result) => {
-    if (settled) return;
-    settled = true;
-    sub?.dispose();
-    resolvePromise(result);
-  };
-  sub = ctx.events.subscribe(user, (event) => {
-    if (event.session !== rec.name) return;
-    if (event.thread_id !== rec.thread_id) return;
-    if (!targetTurnId) {
-      targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
-    }
-    if (!targetTurnId) {
-      if (event.type === "turn.started") {
-        const turnId = eventTurnId(event);
-        if (!turnId) return;
-        targetTurnId = turnId;
-      } else if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
-        settle(waitErrorResult(rec, null, event.type, event.id, event.payload));
-      }
-      return;
-    }
-    if (isTurnTerminalEvent(event) && eventTurnId(event) === targetTurnId) {
-      settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
-      return;
-    }
-    if (event.type === SESSION_CRASHED_EVENT_TYPE && eventCrashTurnId(event) === targetTurnId) {
-      settle(waitErrorResult(rec, targetTurnId, event.type, event.id, event.payload));
-      return;
-    }
-    if (event.type === SESSION_CLOSED_EVENT_TYPE) {
-      settle(waitErrorResult(rec, targetTurnId, event.type, event.id, event.payload));
-    }
-  });
-  return {
-    promise,
-    cancel: () => settle(null),
-    currentTurnId: () => targetTurnId ?? null
-  };
-}
-function immediateWaitObserver(result) {
-  return {
-    immediateResult: result,
-    promise: Promise.resolve(result),
-    cancel: () => void 0,
-    currentTurnId: () => asString6(result.turn_id) ?? null
-  };
-}
-function crashedWaitResult(rec) {
-  return waitErrorResult(
-    rec,
-    rec.current_turn_id ?? rec.last_turn_id ?? null,
-    SESSION_CRASHED_EVENT_TYPE,
-    null,
-    { reason: rec.crash_reason ?? "session_crashed" }
-  );
-}
-function waitErrorResult(rec, turnId, eventType, eventId, error) {
-  const result = {
-    session: rec.name,
-    thread_id: rec.thread_id,
-    turn_id: turnId,
-    outcome: "error",
-    event_type: eventType,
-    error
-  };
-  if (eventId !== null) result.event_id = eventId;
-  return result;
-}
-function timeoutWaitResult(rec, turnId, timeoutSeconds) {
-  return {
-    session: rec.name,
-    thread_id: rec.thread_id,
-    turn_id: turnId,
-    outcome: "timeout",
-    timeout_s: timeoutSeconds
-  };
-}
-function isTurnTerminalEvent(event) {
-  return event.type === "turn.completed" || event.type === "turn.error" || event.type === "turn.interrupted";
-}
-function projectBatchWaitOutcome(result) {
-  const projected = pickDefined(result, ["session", "outcome", "turn_id"]);
-  const codexErrorInfo = extractCodexErrorInfo2(result);
-  if (codexErrorInfo) projected.codex_error_info = codexErrorInfo;
-  return projected;
-}
-function timeoutBatchWaitOutcome(rec, observer, timeoutSeconds) {
-  return projectBatchWaitOutcome(timeoutWaitResult(rec, observer.currentTurnId(), timeoutSeconds));
-}
-function projectAnyWaitResult(result, stillRunning) {
-  const projected = pickDefined(result, ["session", "outcome", "turn_id", "timeout_s"]);
-  const codexErrorInfo = extractCodexErrorInfo2(result);
-  if (codexErrorInfo) projected.codex_error_info = codexErrorInfo;
-  projected.still_running = stillRunning;
-  return projected;
-}
-function extractCodexErrorInfo2(result) {
-  const error = result.error;
-  if (!error || typeof error !== "object" || Array.isArray(error)) return null;
-  const info = error.codex_error_info;
-  return typeof info === "string" && info.length > 0 ? info : null;
-}
-function overallWaitOutcome(outcomes) {
-  const values = outcomes.map((outcome) => outcome.outcome);
-  if (values.every((value) => value === "completed")) return "completed";
-  const hasError = values.includes("error");
-  const hasTimeout = values.includes("timeout");
-  if (hasError && hasTimeout) return "partial";
-  if (hasError) return "error";
-  if (hasTimeout) return "timeout";
-  return "partial";
 }
 function parseTruncateFlag(value) {
   if (value === void 0) return void 0;
@@ -9350,7 +8793,7 @@ function pickDefined(source, keys) {
 async function assertAttachable(filePath) {
   let stat;
   try {
-    stat = await import_node_fs16.default.promises.stat(filePath);
+    stat = await import_node_fs15.default.promises.stat(filePath);
   } catch (e) {
     throw invalidParams(`--attach not readable: ${filePath}: ${e.message}`);
   }
@@ -9362,8 +8805,8 @@ async function assertAttachable(filePath) {
   }
 }
 async function listTurnsFromRelativeOffset(client, threadId, relativeSince, limit, retry) {
-  const skip2 = Math.max(0, relativeSince - 1);
-  let remainingSkip = skip2;
+  const skip = Math.max(0, relativeSince - 1);
+  let remainingSkip = skip;
   let cursor;
   const data = [];
   let nextCursor = null;
@@ -9402,7 +8845,7 @@ async function listTurnsFromRelativeOffset(client, threadId, relativeSince, limi
 
 // src/daemon/handlers/cursor.ts
 var cursorSave = async (ctx, req) => {
-  const user = requireUser3(ctx, req);
+  const user = requireUser2(ctx, req);
   const name = reqPositional2(req, 0, "name");
   const explicitEventId = asString7(getFlag3(req, "event-id"));
   const eventId = explicitEventId ?? await currentTailEventId(ctx, user);
@@ -9414,18 +8857,18 @@ var cursorSave = async (ctx, req) => {
   return { cursor };
 };
 var cursorList = async (ctx, req) => {
-  const user = requireUser3(ctx, req);
+  const user = requireUser2(ctx, req);
   return { cursors: ctx.cursors.list(user) };
 };
 var cursorGet = async (ctx, req) => {
-  const user = requireUser3(ctx, req);
+  const user = requireUser2(ctx, req);
   const name = reqPositional2(req, 0, "name");
   const cursor = ctx.cursors.get(user, name);
   if (!cursor) throw invalidParams(`cursor '${name}' not found`);
   return { event_id: cursor.event_id };
 };
 var cursorDelete = async (ctx, req) => {
-  const user = requireUser3(ctx, req);
+  const user = requireUser2(ctx, req);
   const name = reqPositional2(req, 0, "name");
   const deleted = await ctx.cursors.delete(user, name);
   if (!deleted) throw invalidParams(`cursor '${name}' not found`);
@@ -9439,7 +8882,7 @@ async function currentTailEventId(ctx, user) {
   const last = listed.events[listed.events.length - 1];
   return last?.id ?? null;
 }
-function requireUser3(ctx, req) {
+function requireUser2(ctx, req) {
   const user = req.bearer;
   if (!user) throw invalidParams("bearer token required");
   if (!ctx.users.has(user)) {
@@ -9448,11 +8891,11 @@ function requireUser3(ctx, req) {
   return user;
 }
 function reqPositional2(req, index, name) {
-  const value = asPositionals3(req)[index];
+  const value = asPositionals2(req)[index];
   if (!value) throw invalidParams(`missing positional '${name}'`);
   return value;
 }
-function asPositionals3(req) {
+function asPositionals2(req) {
   const positionals = req.params.positionals;
   return Array.isArray(positionals) ? positionals.filter((value) => typeof value === "string") : [];
 }
@@ -9470,7 +8913,7 @@ function asString7(value) {
 }
 
 // src/daemon/handlers/monitor.ts
-var import_node_child_process6 = require("child_process");
+var import_node_child_process5 = require("child_process");
 var MAX_INTERVAL_QUEUE_EVENTS = 512;
 var MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
 var MAX_FLUSH_EVENTS_PER_TICK = 64;
@@ -9655,7 +9098,7 @@ var monitorEvents = async (ctx, req, stream) => {
 };
 var monitorAlarm = async (_ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor alarm requires streaming");
-  const positionals = asPositionals4(req);
+  const positionals = asPositionals3(req);
   const intervalS = toInt4(positionals[0], 0);
   if (intervalS <= 0) throw invalidParams("first positional must be interval seconds (positive integer)");
   const command = positionals[1];
@@ -9682,7 +9125,7 @@ var monitorAlarm = async (_ctx, req, stream) => {
     try {
       await new Promise((resolve) => {
         const { file, args } = shellCommand(command);
-        const child = (0, import_node_child_process6.spawn)(file, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+        const child = (0, import_node_child_process5.spawn)(file, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         activeChild = child;
         activeTimedOut = false;
         let stdoutBuf = "";
@@ -9801,7 +9244,7 @@ function asFlags2(req) {
   const f = req.params.flags;
   return f && typeof f === "object" ? f : {};
 }
-function asPositionals4(req) {
+function asPositionals3(req) {
   const p = req.params.positionals;
   return Array.isArray(p) ? p.filter((x) => typeof x === "string") : [];
 }
@@ -9896,13 +9339,15 @@ var HANDLERS = {
   "session:new": sessionNew,
   "session:attach": sessionAttach,
   "session:detach": sessionDetach,
+  "session:archive": sessionArchive,
+  "session:unarchive": sessionUnarchive,
   "session:fork": sessionFork,
-  "session:rename": sessionRename,
+  "session:rename": sessionRenameExtended,
+  "session:rollback": sessionRollback,
   "session:info": sessionInfo,
   "session:context": sessionContext,
   "session:list": sessionList,
   "message:send": messageSend,
-  "message:send-many": messageSendMany,
   "message:peer": messagePeer,
   "message:interrupt": messageInterrupt,
   "message:approval": messageApproval,
@@ -10813,7 +10258,7 @@ async function runDaemon() {
   const cleanup = () => {
     unlinkSockIfStale(ctx.sockPath);
     try {
-      import_node_fs17.default.unlinkSync(pidPath);
+      import_node_fs16.default.unlinkSync(pidPath);
     } catch {
     }
   };
@@ -10833,10 +10278,10 @@ async function runDaemon() {
   } catch (e) {
     logger.error("failed to start server", { err: e.message });
     try {
-      import_node_fs17.default.unlinkSync(pidPath);
+      import_node_fs16.default.unlinkSync(pidPath);
     } catch {
     }
-    throw translateBootstrapError(e, ctx.sockPath);
+    return 1;
   }
   scheduleIdleShutdown(ctx);
   return await new Promise(() => {
@@ -10906,15 +10351,15 @@ async function reconcileLoadedSessionsAfterRestart(ctx) {
 }
 function acquirePid(pidPath) {
   try {
-    import_node_fs17.default.mkdirSync(import_node_path15.default.dirname(pidPath), { recursive: true });
-    const fd = import_node_fs17.default.openSync(pidPath, "wx");
+    import_node_fs16.default.mkdirSync(import_node_path14.default.dirname(pidPath), { recursive: true });
+    const fd = import_node_fs16.default.openSync(pidPath, "wx");
     try {
-      import_node_fs17.default.writeFileSync(fd, JSON.stringify({
+      import_node_fs16.default.writeFileSync(fd, JSON.stringify({
         pid: process.pid,
         created_at: (/* @__PURE__ */ new Date()).toISOString()
       }));
     } finally {
-      import_node_fs17.default.closeSync(fd);
+      import_node_fs16.default.closeSync(fd);
     }
     return true;
   } catch (e) {
@@ -10960,10 +10405,10 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
   const legacyPidPath = legacyWindowsPidFilePath(pidPath);
   for (; ; ) {
     const sockReachable = await probeSock(sockPath, 200);
-    const pidRecord = readPidFile3(pidPath);
+    const pidRecord = readPidFile2(pidPath);
     const pid = pidRecord?.pid ?? null;
     const pidAlive = pid !== null && isDaemonPidAlive(pid);
-    const legacyPidRecord = legacyPidPath ? readPidFile3(legacyPidPath) : null;
+    const legacyPidRecord = legacyPidPath ? readPidFile2(legacyPidPath) : null;
     const legacyPid = legacyPidRecord?.pid ?? null;
     const legacyPidAlive = legacyPid !== null && isDaemonPidAlive(legacyPid);
     if (sockReachable) {
@@ -11001,13 +10446,13 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
     }
     if (pid !== null && !pidAlive) {
       try {
-        import_node_fs17.default.unlinkSync(pidPath);
+        import_node_fs16.default.unlinkSync(pidPath);
       } catch {
       }
     }
     if (legacyPidPath && legacyPid !== null && !legacyPidAlive) {
       try {
-        import_node_fs17.default.unlinkSync(legacyPidPath);
+        import_node_fs16.default.unlinkSync(legacyPidPath);
       } catch {
       }
     }
@@ -11025,9 +10470,9 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
     await sleep5(150);
   }
 }
-function readPidFile3(pidPath) {
+function readPidFile2(pidPath) {
   try {
-    const raw = import_node_fs17.default.readFileSync(pidPath, "utf8");
+    const raw = import_node_fs16.default.readFileSync(pidPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
     return {
@@ -11050,7 +10495,7 @@ function legacyWindowsPidFilePath(currentPidPath) {
   if (process.platform !== "win32") return null;
   const legacyHome = process.env.HOME;
   if (!legacyHome) return null;
-  const legacyPath = import_node_path15.default.join(legacyHome, `.${APP}`, "daemon.pid");
+  const legacyPath = import_node_path14.default.join(legacyHome, `.${APP}`, "daemon.pid");
   if (legacyPath === currentPidPath) return null;
   if (legacyHome === homeDir()) return null;
   return legacyPath;
@@ -11060,23 +10505,6 @@ function sleep5(ms) {
     const timer = setTimeout(resolve, ms);
     timer.unref();
   });
-}
-function translateBootstrapError(error, sockPath) {
-  if (error instanceof CodexTeamError) return error;
-  const err2 = error;
-  if (err2?.code === "EPERM" || err2?.code === "EACCES") {
-    return new CodexTeamError(
-      "socket_bind_denied",
-      `local Unix socket bind denied by environment (error: ${err2.code}). codex-team requires socket bind for daemon IPC - likely running in a restricted sandbox.`,
-      {
-        error: err2.code,
-        sock_path: sockPath,
-        suggested_action: "run `codex-team doctor` to diagnose"
-      }
-    );
-  }
-  if (error instanceof Error) return error;
-  return new Error(String(error));
 }
 
 // src/main.ts
@@ -11088,7 +10516,7 @@ async function main() {
   if (daemonIdx >= 0) {
     argv.splice(daemonIdx, 1);
     if (stderrPath) redirectProcessStderr(stderrPath);
-    const code2 = await runDaemonWithBootstrapReporting();
+    const code2 = await runDaemon();
     process.exit(code2);
   }
   const code = await runCli(argv);
@@ -11099,22 +10527,6 @@ main().catch((e) => {
 `);
   process.exit(1);
 });
-async function runDaemonWithBootstrapReporting() {
-  try {
-    return await runDaemon();
-  } catch (e) {
-    writeDaemonBootstrapError(e);
-    return 1;
-  }
-}
-function writeDaemonBootstrapError(error) {
-  const payload = error instanceof CodexTeamError ? { code: error.code, message: error.message, ...error.data !== void 0 ? { data: error.data } : {} } : {
-    code: "internal",
-    message: error instanceof Error ? error.message : String(error)
-  };
-  process.stderr.write(`[codex-team-daemon-bootstrap] ${JSON.stringify(payload)}
-`);
-}
 function takeOptionValue(argv, flag) {
   const idx = argv.indexOf(flag);
   if (idx < 0) return null;
@@ -11126,8 +10538,8 @@ function takeOptionValue(argv, flag) {
   return value;
 }
 function redirectProcessStderr(stderrPath) {
-  import_node_fs18.default.mkdirSync(import_node_path16.default.dirname(stderrPath), { recursive: true });
-  const stream = import_node_fs18.default.createWriteStream(stderrPath, { flags: "a" });
+  import_node_fs17.default.mkdirSync(import_node_path15.default.dirname(stderrPath), { recursive: true });
+  const stream = import_node_fs17.default.createWriteStream(stderrPath, { flags: "a" });
   stream.on("error", () => void 0);
   const write = stream.write.bind(stream);
   process.stderr.write = ((chunk, encoding, cb) => {
