@@ -10,11 +10,10 @@ import {
 import { cancelPendingWithEvent } from "./pending-cancel";
 import type { PoolClientClose, PoolNotification, PoolServerRequest } from "../codex/pool";
 import type { JsonValue } from "../codex/errors";
-import { threadResume, threadUnsubscribe } from "../codex/rpc";
+import { threadUnsubscribe } from "../codex/rpc";
 import { isoFromUnixSeconds, normalizeTokenUsage } from "./sessions";
 import { logger } from "../logger";
 import { matchAutoApprovePattern } from "./auto-approve";
-import { buildExperimentalToolAppServerOptions } from "./experimentalTools";
 import { buildApprovalShortcutResponse, preferredAutoApprovalShortcut } from "./handlers/message";
 
 export function wireDaemonEvents(ctx: DaemonContext): void {
@@ -92,16 +91,35 @@ async function handleNotification(
   }
 
   if (norm.type === "turn.error" && sessionName && rec) {
+    const turnId = (norm.payload.turn_id as string | null) ?? rec.last_turn_id ?? null;
+    const willRetry = Boolean(norm.payload.will_retry);
     ctx.sessions.update(e.user, sessionName, {
-      last_turn_id: (norm.payload.turn_id as string | null) ?? rec.last_turn_id ?? null,
-      current_turn_id: null,
-      current_turn_started_at: null,
+      last_turn_id: turnId,
+      current_turn_id: willRetry ? (rec.current_turn_id ?? turnId) : null,
+      current_turn_started_at: willRetry ? (rec.current_turn_started_at ?? null) : null,
       current_item_type: null,
-      items_in_turn: 0,
+      items_in_turn: willRetry ? (rec.items_in_turn ?? 0) : 0,
+    });
+    const client = ctx.pool.clientForSession(keyFor(e.user, sessionName));
+    void ctx.queues.onTurnErrored(
+      keyFor(e.user, sessionName),
+      turnId,
+      { willRetry },
+      client,
+      norm.threadId ?? rec.thread_id,
+      ctx.retryOptions(),
+    ).then(async (next) => {
+      await appendQueueDrainEvents(ctx, e.user, sessionName, norm.threadId ?? rec.thread_id, next, false);
+    }).catch((err) => {
+      logger.warn("turn error queue drain failed", {
+        session: sessionName,
+        err: (err as Error).message,
+      });
     });
   }
 
   if (norm.type === "turn.completed" && sessionName && norm.threadId) {
+    const threadId = norm.threadId;
     if (rec) {
       ctx.sessions.update(e.user, sessionName, {
         last_turn_id: (norm.payload.turn_id as string | null) ?? rec.last_turn_id ?? null,
@@ -113,39 +131,8 @@ async function handleNotification(
       });
     }
     const client = ctx.pool.clientForSession(keyFor(e.user, sessionName));
-    void ctx.queues.onTurnCompleted(keyFor(e.user, sessionName), client, norm.threadId, ctx.retryOptions()).then(async (next) => {
-      if (next.turn_id) {
-        logger.debug("drained queued turn", { session: sessionName, turn_id: next.turn_id, queue_id: next.queue_id });
-        await ctx.events.append(e.user, {
-          type: "turn.queued_started",
-          session: sessionName,
-          thread_id: norm.threadId,
-          payload: {
-            turn_id: next.turn_id,
-            queue_id: next.queue_id,
-          },
-        });
-        return;
-      }
-
-      if (next.failed && next.queue_id) {
-        logger.warn("queued turn remains enqueued after dispatch failure", {
-          session: sessionName,
-          queue_id: next.queue_id,
-          err: next.error_message,
-        });
-        await ctx.events.append(e.user, {
-          type: "turn.queued_failed",
-          session: sessionName,
-          thread_id: norm.threadId,
-          payload: {
-            queue_id: next.queue_id,
-            error: {
-              message: next.error_message,
-            },
-          },
-        });
-      }
+    void ctx.queues.onTurnCompleted(keyFor(e.user, sessionName), client, threadId, ctx.retryOptions()).then(async (next) => {
+      await appendQueueDrainEvents(ctx, e.user, sessionName, threadId, next, true);
     }).catch((err) => {
       logger.warn("turn completion queue drain failed", {
         session: sessionName,
@@ -204,8 +191,14 @@ async function handleServerRequest(
     return;
   }
 
+  const rec = ctx.sessions.get(e.user, sessionName);
+  if (!rec || rec.state !== "live" || rec.thread_id !== norm.threadId) {
+    e.respondError(-32000, "session torn down");
+    return;
+  }
+
   if (ctx.queues.isTeardown(keyFor(e.user, sessionName))) {
-    e.respondError(-32000, "session detached");
+    e.respondError(-32000, "session torn down");
     return;
   }
 
@@ -418,15 +411,85 @@ async function closeSession(
   const rec = ctx.sessions.get(user, sessionName);
   if (!rec) return;
   const sessionKey = keyFor(user, sessionName);
+  ctx.queues.markTeardown(sessionKey);
   const client = ctx.pool.clientForSession(sessionKey);
   if (unsubscribe && client) {
     try { await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions()); } catch { /* ignore */ }
   }
   ctx.pool.release(sessionKey);
-  ctx.queues.dispose(sessionKey);
   await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, reason);
   ctx.sessions.remove(user, sessionName);
+  ctx.queues.finalDispose(sessionKey);
   await appendSessionClosed(ctx, user, rec.name, rec.thread_id, reason);
+}
+
+async function appendQueueDrainEvents(
+  ctx: DaemonContext,
+  user: string,
+  sessionName: string,
+  threadId: string,
+  result: {
+    turn_id: string | null;
+    queue_id: string | null;
+    failed: boolean;
+    error_message?: string;
+    dropped: Array<{ queue_id: string; error_message: string; failure_count: number }>;
+  },
+  emitQueuedStarted: boolean,
+): Promise<void> {
+  for (const dropped of result.dropped) {
+    logger.warn("dropping queued turn after repeated dispatch failures", {
+      session: sessionName,
+      queue_id: dropped.queue_id,
+      err: dropped.error_message,
+      failure_count: dropped.failure_count,
+    });
+    await ctx.events.append(user, {
+      type: "turn.queued_dropped",
+      session: sessionName,
+      thread_id: threadId,
+      payload: {
+        queue_id: dropped.queue_id,
+        error: {
+          message: dropped.error_message,
+        },
+        failure_count: dropped.failure_count,
+      },
+    });
+  }
+
+  if (result.turn_id && emitQueuedStarted) {
+    logger.debug("drained queued turn", { session: sessionName, turn_id: result.turn_id, queue_id: result.queue_id });
+    await ctx.events.append(user, {
+      type: "turn.queued_started",
+      session: sessionName,
+      thread_id: threadId,
+      payload: {
+        turn_id: result.turn_id,
+        queue_id: result.queue_id,
+      },
+    });
+    return;
+  }
+
+  if (result.failed && result.queue_id) {
+    logger.warn("queued turn remains enqueued after dispatch failure", {
+      session: sessionName,
+      queue_id: result.queue_id,
+      err: result.error_message,
+    });
+    await ctx.events.append(user, {
+      type: "turn.queued_failed",
+      session: sessionName,
+      thread_id: threadId,
+      payload: {
+        queue_id: result.queue_id,
+        error: {
+          message: result.error_message,
+        },
+      },
+    });
+  }
 }
 
 async function appendSessionClosed(

@@ -6,10 +6,21 @@ import type { RetryOptions } from "../codex/retry";
 import { turnStart } from "../codex/rpc";
 import { logger } from "../logger";
 
+// Queue contract:
+// - `currentTurnId` tracks the single in-flight turn for a session.
+// - Any queued head keeps FIFO ownership until it either starts successfully or
+//   is dropped after repeated dispatch failures.
+// - `turn.error` with `willRetry=true` preserves `currentTurnId` so the retry
+//   path can continue the same logical turn; `willRetry=false` releases the
+//   turn and drains the queued head.
+// - Teardown is tombstoned before the session record is removed so late
+//   app-server requests are rejected until the queue is finally disposed.
+
 interface QueuedInput {
   id: string;
   input: JsonValue;
   enqueuedAt: string;
+  failedAttempts: number;
 }
 
 interface QueueState {
@@ -23,10 +34,19 @@ interface QueueState {
   idleWaiters: Set<() => void>;
 }
 
-type QueueDrainResult =
-  | { turn_id: string; queue_id: string; failed: false }
-  | { turn_id: null; queue_id: string | null; failed: false }
-  | { turn_id: null; queue_id: string; failed: true; error_message: string };
+export interface QueueDropResult {
+  queue_id: string;
+  error_message: string;
+  failure_count: number;
+}
+
+export interface QueueDrainResult {
+  turn_id: string | null;
+  queue_id: string | null;
+  failed: boolean;
+  error_message?: string;
+  dropped: QueueDropResult[];
+}
 
 export class QueueTeardownError extends Error {
   constructor(message = "session queue is tearing down") {
@@ -47,8 +67,8 @@ export class TurnQueues {
   ): Promise<{ started: boolean; turn_id: string | null; queue_id: string | null; queued_depth: number }> {
     return await this.withSessionLock(sessionKey, async (state) => {
       assertActive(state);
-      if (state.currentTurnId || state.draining) {
-        const queued = { id: queueId(), input, enqueuedAt: new Date().toISOString() };
+      if (state.currentTurnId || state.draining || state.pending.length > 0) {
+        const queued = { id: queueId(), input, enqueuedAt: new Date().toISOString(), failedAttempts: 0 };
         state.pending.push(queued);
         return { started: false, turn_id: state.currentTurnId, queue_id: queued.id, queued_depth: state.pending.length };
       }
@@ -76,12 +96,19 @@ export class TurnQueues {
   }
 
   isTeardown(sessionKey: string): boolean {
-    return this.states.get(sessionKey)?.tearingDown ?? false;
+    const state = this.states.get(sessionKey);
+    if (!state) return true;
+    return state.tearingDown;
+  }
+
+  markTeardown(sessionKey: string): void {
+    const state = this.getOrInit(sessionKey);
+    state.tearingDown = true;
   }
 
   async beginTeardown(sessionKey: string): Promise<{ currentTurnId: string | null }> {
+    this.markTeardown(sessionKey);
     const state = this.getOrInit(sessionKey);
-    state.tearingDown = true;
     await state.serial;
     return { currentTurnId: state.currentTurnId };
   }
@@ -129,51 +156,32 @@ export class TurnQueues {
     retry?: RetryOptions,
   ): Promise<QueueDrainResult> {
     return await this.withSessionLock(sessionKey, async (state) => {
-      state.draining = true;
-      state.currentTurnId = null;
-      this.resolveIdleWaiters(state);
-
-      if (state.pending.length === 0 || !client || state.disposed || state.tearingDown) {
-        state.draining = false;
-        this.resolveIdleWaiters(state);
-        return { turn_id: null, queue_id: null, failed: false };
-      }
-
-      const next = state.pending[0]!;
-      const generation = state.generation;
-      try {
-        if (!isStateUsable(state, generation)) {
-          return { turn_id: null, queue_id: null, failed: false };
-        }
-        const res = await turnStart(client, threadId, next.input, retry);
-        if (!isStateUsable(state, generation)) {
-          return { turn_id: null, queue_id: null, failed: false };
-        }
-        state.pending.shift();
-        state.currentTurnId = res.turnId;
-        return { turn_id: res.turnId, queue_id: next.id, failed: false };
-      } catch (e) {
-        if (!isStateUsable(state, generation)) {
-          return { turn_id: null, queue_id: null, failed: false };
-        }
-        const err = e as Error;
-        logger.warn("failed to dispatch queued turn", { session: sessionKey, err: err.message, queue_id: next.id });
-        return {
-          turn_id: null,
-          queue_id: next.id,
-          failed: true,
-          error_message: err.message,
-        };
-      } finally {
-        if (isSameGeneration(state, generation)) {
-          state.draining = false;
-          this.resolveIdleWaiters(state);
-        }
-      }
+      return await this.releaseCurrentTurnAndDrain(state, sessionKey, client, threadId, retry);
     });
   }
 
-  dispose(sessionKey: string): { dropped: number } {
+  async onTurnErrored(
+    sessionKey: string,
+    turnId: string | null,
+    options: { willRetry: boolean },
+    client: AppServerClient | null,
+    threadId: string,
+    retry?: RetryOptions,
+  ): Promise<QueueDrainResult> {
+    return await this.withSessionLock(sessionKey, async (state) => {
+      if (options.willRetry) {
+        return { turn_id: null, queue_id: null, failed: false, dropped: [] };
+      }
+
+      if (state.currentTurnId && turnId && state.currentTurnId !== turnId) {
+        return { turn_id: null, queue_id: null, failed: false, dropped: [] };
+      }
+
+      return await this.releaseCurrentTurnAndDrain(state, sessionKey, client, threadId, retry);
+    });
+  }
+
+  finalDispose(sessionKey: string): { dropped: number } {
     const state = this.states.get(sessionKey);
     if (!state) return { dropped: 0 };
     state.disposed = true;
@@ -186,6 +194,10 @@ export class TurnQueues {
     this.resolveIdleWaiters(state);
     this.states.delete(sessionKey);
     return { dropped };
+  }
+
+  dispose(sessionKey: string): { dropped: number } {
+    return this.finalDispose(sessionKey);
   }
 
   private getOrInit(sessionKey: string): QueueState {
@@ -222,6 +234,79 @@ export class TurnQueues {
     }
   }
 
+  private async releaseCurrentTurnAndDrain(
+    state: QueueState,
+    sessionKey: string,
+    client: AppServerClient | null,
+    threadId: string,
+    retry?: RetryOptions,
+  ): Promise<QueueDrainResult> {
+    state.draining = true;
+    state.currentTurnId = null;
+    this.resolveIdleWaiters(state);
+
+    const generation = state.generation;
+    const dropped: QueueDropResult[] = [];
+    try {
+      while (state.pending.length > 0 && client && !state.disposed && !state.tearingDown) {
+        const next = state.pending[0]!;
+        try {
+          if (!isStateUsable(state, generation)) {
+            return { turn_id: null, queue_id: null, failed: false, dropped };
+          }
+          const res = await turnStart(client, threadId, next.input, retry);
+          if (!isStateUsable(state, generation)) {
+            return { turn_id: null, queue_id: null, failed: false, dropped };
+          }
+          state.pending.shift();
+          state.currentTurnId = res.turnId;
+          return { turn_id: res.turnId, queue_id: next.id, failed: false, dropped };
+        } catch (e) {
+          if (!isStateUsable(state, generation)) {
+            return { turn_id: null, queue_id: null, failed: false, dropped };
+          }
+          const err = e as Error;
+          next.failedAttempts += 1;
+          logger.warn("failed to dispatch queued turn", {
+            session: sessionKey,
+            err: err.message,
+            queue_id: next.id,
+            failure_count: next.failedAttempts,
+          });
+          if (next.failedAttempts < queueHeadRetryMax(retry)) {
+            return {
+              turn_id: null,
+              queue_id: next.id,
+              failed: true,
+              error_message: err.message,
+              dropped,
+            };
+          }
+
+          state.pending.shift();
+          dropped.push({
+            queue_id: next.id,
+            error_message: err.message,
+            failure_count: next.failedAttempts,
+          });
+          logger.warn("dropping queued turn after repeated dispatch failures", {
+            session: sessionKey,
+            err: err.message,
+            queue_id: next.id,
+            failure_count: next.failedAttempts,
+          });
+        }
+      }
+
+      return { turn_id: null, queue_id: null, failed: false, dropped };
+    } finally {
+      if (isSameGeneration(state, generation)) {
+        state.draining = false;
+        this.resolveIdleWaiters(state);
+      }
+    }
+  }
+
   private isIdle(state: QueueState): boolean {
     return state.currentTurnId === null && !state.draining;
   }
@@ -249,4 +334,12 @@ function isSameGeneration(state: QueueState, generation: number): boolean {
 
 function isStateUsable(state: QueueState, generation: number): boolean {
   return !state.disposed && !state.tearingDown && isSameGeneration(state, generation);
+}
+
+function queueHeadRetryMax(retry?: RetryOptions): number {
+  const candidate = retry?.maxAttempts;
+  if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) {
+    return Math.floor(candidate);
+  }
+  return 3;
 }

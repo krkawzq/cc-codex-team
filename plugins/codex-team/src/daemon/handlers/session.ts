@@ -209,9 +209,9 @@ export const sessionDetach: HandlerFn = async (ctx, req) => {
   }
 
   ctx.pool.release(sessionKey);
-  ctx.queues.dispose(sessionKey);
   await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
   ctx.sessions.remove(user, rec.name);
+  ctx.queues.finalDispose(sessionKey);
   await appendSessionClosed(ctx, user, rec, "user_detach");
   return { session: rec, noop: false, graceful };
 };
@@ -682,9 +682,9 @@ async function seizeFromOtherUser(
     try { await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions()); } catch { /* ignore */ }
   }
   ctx.pool.release(sessionKey);
-  ctx.queues.dispose(sessionKey);
   await cancelPendingWithEvent(ctx, fromUser, rec.name, rec.thread_id, "session_seized");
   ctx.sessions.remove(fromUser, rec.name);
+  ctx.queues.finalDispose(sessionKey);
 
   await ctx.events.append(fromUser, {
     type: "session.seized",

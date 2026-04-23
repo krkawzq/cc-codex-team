@@ -263,7 +263,7 @@ describe("session handlers", () => {
       queues: {
         beginTeardown: vi.fn().mockResolvedValue({ currentTurnId: "turn-1" }),
         waitForIdle: vi.fn().mockResolvedValue(undefined),
-        dispose: vi.fn(),
+        finalDispose: vi.fn(),
       },
       pending: {
         listForUser: vi.fn().mockReturnValue([pendingEntry]),
@@ -279,7 +279,7 @@ describe("session handlers", () => {
 
     expect(vi.mocked(turnInterrupt)).toHaveBeenCalledWith({}, "th-1", "turn-1", {});
     expect(vi.mocked(threadUnsubscribe)).toHaveBeenCalledWith({}, "th-1", {});
-    expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
+    expect(ctx.queues.finalDispose).toHaveBeenCalledWith("user-1::sess-1");
     expect(pendingClient.respondError).toHaveBeenCalledWith(42, -32000, "session detached");
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
       type: "approval.request_cancelled",
@@ -319,7 +319,7 @@ describe("session handlers", () => {
       queues: {
         beginTeardown: vi.fn().mockResolvedValue({ currentTurnId: "turn-1" }),
         waitForIdle: vi.fn().mockImplementation(() => idlePromise),
-        dispose: vi.fn(),
+        finalDispose: vi.fn(),
       },
       pending: {
         removeForSession: vi.fn().mockReturnValue([]),
@@ -411,7 +411,7 @@ describe("session handlers", () => {
       },
       queues: {
         beginTeardown: vi.fn().mockResolvedValue({ currentTurnId: null }),
-        dispose: vi.fn(),
+        finalDispose: vi.fn(),
       },
       pending: {
         removeForSession: vi.fn().mockReturnValue([]),
@@ -509,7 +509,7 @@ describe("session handlers", () => {
       },
       queues: {
         beginTeardown: vi.fn().mockResolvedValue({ currentTurnId: null }),
-        dispose: vi.fn(),
+        finalDispose: vi.fn(),
       },
       pending: {
         removeForSession: vi.fn().mockReturnValue([]),
