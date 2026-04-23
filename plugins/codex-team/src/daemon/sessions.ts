@@ -123,9 +123,13 @@ export class SessionRegistry {
     for (const u of userTokens) this.loadForUser(u);
   }
 
-  listLive(user: string): SessionRecord[] {
+  listAll(user: string): SessionRecord[] {
     this.loadForUser(user);
     return Array.from(this.users.get(user)!.byName.values());
+  }
+
+  listLive(user: string): SessionRecord[] {
+    return this.listAll(user).filter((record) => record.state === "live");
   }
 
   get(user: string, identifier: string): SessionRecord | null {
@@ -142,7 +146,7 @@ export class SessionRegistry {
     const ownerByThread = this.globalByThreadId.get(identifier);
     if (ownerByThread) {
       const rec = this.users.get(ownerByThread)?.byThreadId.get(identifier);
-      if (rec) return { user: ownerByThread, record: rec };
+      if (rec?.state === "live") return { user: ownerByThread, record: rec };
     }
     return null;
   }
@@ -151,7 +155,7 @@ export class SessionRegistry {
     let match: SessionLocator | null = null;
     for (const [user, bucket] of this.users) {
       const rec = bucket.byName.get(name);
-      if (!rec) continue;
+      if (!rec || rec.state !== "live") continue;
       if (match) return "ambiguous";
       match = { user, record: rec };
     }

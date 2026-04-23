@@ -1,6 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { CursorStore } from "../src/daemon/cursors";
+import { EventLog } from "../src/daemon/events";
 import { daemonUserDestroy } from "../src/daemon/handlers/daemon";
+import { encodeToken } from "../src/paths";
+import { SessionRegistry } from "../src/daemon/sessions";
+import { UserRegistry } from "../src/daemon/users";
 
 function makeReq(token: string, flags: Record<string, unknown> = {}) {
   return {
@@ -15,6 +24,16 @@ function makeReq(token: string, flags: Record<string, unknown> = {}) {
 }
 
 describe("daemon:user:destroy", () => {
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    for (const dir of dirs.splice(0, dirs.length)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("destroys a user when no live sessions remain", async () => {
     const pendingClient = { respondError: vi.fn() };
     const pendingEntries = [
@@ -69,6 +88,9 @@ describe("daemon:user:destroy", () => {
         append: vi.fn().mockResolvedValue(undefined),
         clearUser: vi.fn().mockResolvedValue(undefined),
       },
+      cursors: {
+        clearUser: vi.fn().mockResolvedValue(undefined),
+      },
     };
 
     const result = await daemonUserDestroy(ctx as never, makeReq("user-1") as never);
@@ -114,6 +136,7 @@ describe("daemon:user:destroy", () => {
     expect(ctx.queues.dispose).toHaveBeenNthCalledWith(1, "user-1::sess-1");
     expect(ctx.queues.dispose).toHaveBeenNthCalledWith(2, "user-1::sess-2");
     expect(ctx.events.clearUser).toHaveBeenCalledWith("user-1");
+    expect(ctx.cursors.clearUser).toHaveBeenCalledWith("user-1");
     expect(pendingClient.respondError).toHaveBeenCalledWith(7, -32000, "user destroyed");
     expect(pendingClient.respondError).toHaveBeenCalledWith(8, -32000, "user destroyed");
     expect(ctx.users.destroy).toHaveBeenCalledWith("user-1");
@@ -146,6 +169,9 @@ describe("daemon:user:destroy", () => {
       },
       events: {
         append: vi.fn(),
+        clearUser: vi.fn(),
+      },
+      cursors: {
         clearUser: vi.fn(),
       },
     };
@@ -183,6 +209,9 @@ describe("daemon:user:destroy", () => {
         append: vi.fn().mockResolvedValue(undefined),
         clearUser: vi.fn().mockResolvedValue(undefined),
       },
+      cursors: {
+        clearUser: vi.fn().mockResolvedValue(undefined),
+      },
     };
 
     const result = await daemonUserDestroy(ctx as never, makeReq("user-1", { force: true }) as never);
@@ -195,11 +224,99 @@ describe("daemon:user:destroy", () => {
       payload: expect.objectContaining({ reason: "user_destroyed" }),
     }));
     expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
+    expect(ctx.cursors.clearUser).toHaveBeenCalledWith("user-1");
     expect(ctx.users.destroy).toHaveBeenCalledWith("user-1");
     expect(result).toEqual({
       destroyed: "user-1",
       sessions_closed: 1,
       pending_canceled: 0,
     });
+  });
+
+  it("re-creating a destroyed user starts with empty cursor state and does not resurrect cursors.json", async () => {
+    vi.useFakeTimers();
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-daemon-destroy-"));
+    dirs.push(dir);
+    const users = new UserRegistry(dir);
+    users.create("user-1");
+    const sessions = new SessionRegistry(dir);
+    const events = new EventLog(100, dir);
+    const cursors = new CursorStore(dir);
+    const cursorPath = path.join(dir, "users", encodeToken("user-1"), "cursors.json");
+
+    await cursors.save("user-1", {
+      name: "audit-tail",
+      event_id: "evt-1",
+      auto_update: true,
+    });
+    cursors.saveBestEffortDebounced("user-1", {
+      name: "audit-tail",
+      event_id: "evt-2",
+      auto_update: true,
+    }, 500);
+
+    await daemonUserDestroy({
+      users,
+      pending: {
+        listForUser: () => [],
+        remove: () => null,
+      },
+      pool: {
+        closeUser: vi.fn().mockResolvedValue(undefined),
+      },
+      sessions,
+      queues: {
+        dispose: vi.fn(),
+      },
+      events,
+      cursors,
+    } as never, makeReq("user-1") as never);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    users.create("user-1");
+
+    expect(cursors.get("user-1", "audit-tail")).toBeNull();
+    expect(fs.existsSync(cursorPath)).toBe(false);
+  });
+
+  it("cancels pending debounced cursor flushes during destroy", async () => {
+    vi.useFakeTimers();
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-daemon-destroy-"));
+    dirs.push(dir);
+    const users = new UserRegistry(dir);
+    users.create("user-1");
+    const sessions = new SessionRegistry(dir);
+    const events = new EventLog(100, dir);
+    const cursors = new CursorStore(dir);
+    const cursorPath = path.join(dir, "users", encodeToken("user-1"), "cursors.json");
+
+    cursors.saveBestEffortDebounced("user-1", {
+      name: "audit-tail",
+      event_id: "evt-9",
+      auto_update: true,
+    }, 500);
+
+    await daemonUserDestroy({
+      users,
+      pending: {
+        listForUser: () => [],
+        remove: () => null,
+      },
+      pool: {
+        closeUser: vi.fn().mockResolvedValue(undefined),
+      },
+      sessions,
+      queues: {
+        dispose: vi.fn(),
+      },
+      events,
+      cursors,
+    } as never, makeReq("user-1") as never);
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(fs.existsSync(cursorPath)).toBe(false);
   });
 });

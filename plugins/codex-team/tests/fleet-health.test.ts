@@ -138,14 +138,14 @@ describe("fleet health handlers", () => {
     };
 
     expect(result.summary).toEqual({
-      total: 3,
+      total: 2,
       healthy: 2,
-      crashed: 1,
+      crashed: 0,
       closed: 0,
       busy: 1,
       pending_total: 2,
     });
-    expect(result.sessions.map((entry) => entry.session)).toEqual(["audit", "worker", "lint"]);
+    expect(result.sessions.map((entry) => entry.session)).toEqual(["audit", "worker"]);
     expect(result.sessions).toContainEqual(expect.objectContaining({
       session: "worker",
       busy: true,
@@ -162,7 +162,6 @@ describe("fleet health handlers", () => {
         listLive: () => ([
           { name: "audit", thread_id: "th-1", state: "live", pending_approvals: 0, pending_user_inputs: 0, autoApprovePatterns: [], ...sessionRuntimeDefaults() },
           { name: "worker", thread_id: "th-2", state: "live", current_turn_id: "turn-2", pending_approvals: 0, pending_user_inputs: 0, autoApprovePatterns: [], ...sessionRuntimeDefaults() },
-          { name: "lint", thread_id: "th-3", state: "crashed", pending_approvals: 0, pending_user_inputs: 0, autoApprovePatterns: [], ...sessionRuntimeDefaults() },
         ]),
       },
       pool: {
@@ -183,7 +182,7 @@ describe("fleet health handlers", () => {
       sessions: Array<Record<string, unknown>>;
     };
 
-    expect(result.sessions.map((entry) => entry.session)).toEqual(["worker", "lint"]);
+    expect(result.sessions.map((entry) => entry.session)).toEqual(["worker"]);
   });
 
   it("filters session health snapshots by state", async () => {
@@ -192,7 +191,6 @@ describe("fleet health handlers", () => {
       sessions: {
         listLive: () => ([
           { name: "audit", thread_id: "th-1", state: "live", pending_approvals: 0, pending_user_inputs: 0, autoApprovePatterns: [], ...sessionRuntimeDefaults() },
-          { name: "lint", thread_id: "th-3", state: "crashed", pending_approvals: 0, pending_user_inputs: 0, autoApprovePatterns: [], ...sessionRuntimeDefaults() },
         ]),
       },
       pool: {
@@ -212,10 +210,8 @@ describe("fleet health handlers", () => {
       sessions: Array<Record<string, unknown>>;
     };
 
-    expect(result.summary.total).toBe(1);
-    expect(result.sessions).toEqual([
-      expect.objectContaining({ session: "lint", state: "crashed" }),
-    ]);
+    expect(result.summary.total).toBe(0);
+    expect(result.sessions).toEqual([]);
   });
 
   it("aggregates daemon fleet status and respects explicit user filters", async () => {

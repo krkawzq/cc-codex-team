@@ -37,7 +37,9 @@ export const daemonStatus: HandlerFn = async (ctx) => {
 export const daemonFleetStatus: HandlerFn = async (ctx, req) => {
   const tokens = resolveFleetUsers(ctx, asString(getFlag(req.params, "users")));
   const perUser = tokens.map((token) => {
-    const sessions = ctx.sessions.listLive(token);
+    const sessions = typeof ctx.sessions.listAll === "function"
+      ? ctx.sessions.listAll(token)
+      : ctx.sessions.listLive(token);
     const live = sessions.filter((session) => session.state === "live").length;
     const crashed = sessions.filter((session) => session.state === "crashed").length;
     const busy = sessions.filter((session) => {
@@ -149,6 +151,7 @@ export const daemonUserDestroy: HandlerFn = async (ctx, req) => {
     ctx.queues.dispose(`${token}::${rec.name}`);
   }
   await ctx.events.clearUser(token);
+  await ctx.cursors.clearUser(token);
   ctx.users.destroy(token);
   return { destroyed: token, sessions_closed: sessions.length, pending_canceled: pending.length };
 };
