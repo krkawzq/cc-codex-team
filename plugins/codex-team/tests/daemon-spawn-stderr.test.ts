@@ -122,6 +122,47 @@ describe("daemon spawn stderr retry", () => {
     expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("daemon-spawn.stderr"));
   });
 
+  it("translates pre-spawn EROFS data-dir failures into data_dir_not_writable", async () => {
+    sockMocks.probeSock.mockResolvedValue(false);
+    const mkdirSpy = vi.spyOn(fs, "mkdirSync").mockImplementationOnce(() => {
+      throw Object.assign(new Error("read-only file system"), { code: "EROFS" });
+    });
+
+    try {
+      const code = await runCli(["-b", "token-1", "status"]);
+
+      expect(code).toBe(1);
+      expect(processMocks.spawn).not.toHaveBeenCalled();
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"data_dir_not_writable\""));
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining(`"${"data_dir"}":"${path.join(tempHome, ".codex-team")}"`));
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"errno\":\"EROFS\""));
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("CODEX_TEAM_DATA_DIR"));
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("codex-team doctor"));
+    } finally {
+      mkdirSpy.mockRestore();
+    }
+  });
+
+  it("translates pre-spawn EACCES data-dir failures into data_dir_not_writable", async () => {
+    sockMocks.probeSock.mockResolvedValue(false);
+    const accessSpy = vi.spyOn(fs, "accessSync").mockImplementationOnce(() => {
+      throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+    });
+
+    try {
+      const code = await runCli(["-b", "token-1", "status"]);
+
+      expect(code).toBe(1);
+      expect(processMocks.spawn).not.toHaveBeenCalled();
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"data_dir_not_writable\""));
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"errno\":\"EACCES\""));
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("CODEX_TEAM_DATA_DIR"));
+      expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("codex-team doctor"));
+    } finally {
+      accessSpy.mockRestore();
+    }
+  });
+
   it("writes a raw socket_bind_denied diagnostic during daemon preflight", async () => {
     vi.resetModules();
     const stderrPath = path.join(tempHome, ".codex-team", "daemon-spawn.stderr");
@@ -211,6 +252,22 @@ describe("daemon spawn stderr retry", () => {
       expect.stringContaining("codex-team cannot bind a local IPC socket here"),
     );
     expect(stdoutSpy).not.toHaveBeenCalledWith(expect.stringContaining("\"daemon_unreachable\""));
+  });
+
+  it("adds a doctor suggested_action when daemon spawn fails for a non-data-dir reason", async () => {
+    sockMocks.probeSock.mockResolvedValue(false);
+    processMocks.spawn.mockImplementationOnce(() => {
+      throw Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" });
+    });
+
+    const code = await runCli(["-b", "token-1", "status"]);
+
+    expect(code).toBe(1);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"daemon_unreachable\""));
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      expect.stringContaining("\"suggested_action\":\"run `codex-team doctor` to diagnose\""),
+    );
+    expect(stdoutSpy).not.toHaveBeenCalledWith(expect.stringContaining("\"data_dir_not_writable\""));
   });
 
   it("adds a doctor suggested_action when the daemon exits without bootstrap stderr", async () => {

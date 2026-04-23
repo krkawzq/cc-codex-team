@@ -1,5 +1,6 @@
 export type ErrorCode =
   | "daemon_unreachable"
+  | "data_dir_not_writable"
   | "socket_bind_denied"
   | "internal"
   | "user_not_found"
