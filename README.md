@@ -82,38 +82,54 @@ codex --version
 codex login
 ```
 
-Claude can now drive the plugin through the `codex-team` CLI and the bundled slash commands.
+## Using it
 
-**If `codex-team` is not on your `PATH`** (happens in some sandboxes), invoke it through the bundled launcher: `$CLAUDE_PLUGIN_ROOT/plugins/codex-team/bin/codex-team ...`. When in doubt, run `codex-team doctor` (or `<launcher> doctor`) first — it checks `PATH`, `codex` binary, socket-bind permissions, stale pidfile, and dist freshness, and exits non-zero with a specific diagnostic message on failure.
+**You don't drive codex-team by hand.** Once installed, just tell Claude Code what you want. When the task decomposes into parallel, long-running, or multi-agent work, Claude auto-loads the `using-codex-team` skill and orchestrates Codex workers through the plugin.
 
-## First run
+To load the skill explicitly at the start of a session:
 
-Pick a bearer token, spawn a worker, arm the event stream, send work:
+```text
+/using-codex-team
+```
+
+Once loaded, Claude picks a bearer token, spawns workers, arms the event stream, sends prompts, sleeps, wakes on `turn.completed`, and returns summaries — all through the plugin's CLI. Your context stays free while workers run.
+
+### Slash commands
+
+| Command | Purpose |
+|---|---|
+| `/codex-team:events` | Arm a persistent Monitor subscribed to the codex-team event stream for your bearer token. |
+| `/codex-team:logs` | Follow the daemon log file for daemon-level debugging (not per-session events — use `events` for those). |
+| `/codex-team:tutorial` | Interactive branching walkthrough of the mental model + concepts. Read-only. |
+
+### Long-horizon tasks: set an alarm
+
+For tasks that may run for hours, have Claude arm a **periodic alarm** so it wakes on a schedule even if the event stream stays quiet — guards against silent hangs:
+
+```bash
+# From Claude's side: every 10 minutes, nudge itself to check in
+codex-team -b $TOK monitor alarm 600 "echo '[alarm] status check — inspect session health and queued turns'"
+```
+
+Each stdout line from the alarmed shell command is a Monitor notification, so that line is the reminder prose that wakes Claude. Interval and message are Claude's to pick — it can tune based on task shape.
+
+### Daemon lifecycle
+
+The daemon is **auto-managed**. It spawns on the first `-b` call and shuts itself down after 6h idle. You don't start, stop, or restart it. If something feels off, run `codex-team doctor` — it checks `PATH`, `codex` binary, socket-bind permissions, stale pidfile, and dist freshness, and exits non-zero with a specific diagnostic message on failure.
+
+**If `codex-team` is not on your `PATH`** (happens in some sandboxes), invoke it through the bundled launcher: `$CLAUDE_PLUGIN_ROOT/plugins/codex-team/bin/codex-team ...`.
+
+## Power-user CLI
+
+<details>
+<summary>Drive codex-team directly, bypassing Claude (rarely needed).</summary>
+
+Pick a bearer token — any string you'll reuse:
 
 ```bash
 TOKEN=claude-$(date +%s)
-
-# Register once (idempotent; daemon auto-spawns on first -b call)
-codex-team daemon user create $TOKEN
-
-# Spawn a long-lived worker session in your repo
-codex-team -b $TOKEN session new refactor --cwd /abs/path/to/repo \
-  --model gpt-5.4 --sandbox workspace-write --approval on-request
-
-# Named cursor for resumable tailing
-codex-team -b $TOKEN cursor save refactor-tail
-
-# Arm the events Monitor — or from Claude Code: /codex-team:events -b $TOKEN
-codex-team -b $TOKEN monitor events --stream --cursor refactor-tail
+codex-team daemon user create $TOKEN    # idempotent; daemon auto-spawns on first -b call
 ```
-
-Now tell Claude what you want:
-
-> *"Have `refactor` audit the auth module for risk, then rewrite the token-validation path. I'll review the diff."*
-
-Claude sends the prompt via `message send`, sleeps, wakes on `turn.completed`, and fetches detail with `message tail`. When you're done: `codex-team -b $TOKEN session detach refactor` — the thread persists in codex for future resume.
-
-## Day-to-day operations
 
 **Session lifecycle**
 
@@ -144,9 +160,11 @@ codex-team -b $TOK cursor list                                       # named cur
 codex-team -b $TOK cursor get NAME                                   # {"event_id":"evt-..."}
 ```
 
-**Output & status**
+**Output modes**
 
 Successful non-streaming commands emit concise single-line JSONL by default. Pass `--full` to print the complete response body as multi-line JSON. All status-returning commands also accept `--short` for compact plain-text output (friendly for grep and dashboards). `message history` and `message tail` accept `--truncate <bytes>` to clip long bodies; `--truncate 0` disables clipping. Tagged-markdown output (`--format markdown`) follows [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md). It is a tagged markdown interchange format, not plain prose markdown: container tags like `<history>` / `<tail>` / `<turn>` carry metadata, and item tags like `<message>`, `<shell>`, `<file-patch>`, `tool.<name>`, `hook.<name>`, `<reasoning>`, and `<auto-approval-review>` carry content.
+
+</details>
 
 ## Playbooks
 

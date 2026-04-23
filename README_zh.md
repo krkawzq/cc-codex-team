@@ -82,38 +82,54 @@ codex --version
 codex login
 ```
 
-装好后 Claude 就能通过 `codex-team` CLI 和自带的 slash 命令操作插件了。
+## 怎么用
 
-**如果 `codex-team` 不在 `PATH` 上**（某些沙盒会），用自带的 launcher：`$CLAUDE_PLUGIN_ROOT/plugins/codex-team/bin/codex-team ...`。遇到问题先跑 `codex-team doctor`（或 `<launcher> doctor`）—— 它检查 `PATH`、`codex` 二进制、socket bind 权限、stale pidfile、dist 新鲜度，失败时非零退出并给出具体诊断。
+**不需要手动驱动 codex-team。** 装好后，直接告诉 Claude Code 你想干什么。遇到能拆成并行、长程、多 agent 的任务，Claude 会自动加载 `using-codex-team` skill，通过插件调度 Codex worker。
 
-## 首次上手
+如果想在会话开头显式加载 skill：
 
-选个 bearer token，开一个 worker，接上事件流，派任务：
+```text
+/using-codex-team
+```
+
+skill 加载之后，Claude 自己选 bearer token、开 worker、接事件流、发 prompt、休眠、在 `turn.completed` 时醒来、把结果汇总给你——全走插件的 CLI。worker 干活的时候你的上下文是空闲的。
+
+### Slash 命令
+
+| 命令 | 作用 |
+|---|---|
+| `/codex-team:events` | 把一个持久 Monitor 订阅到你 bearer token 对应的 codex-team 事件流。 |
+| `/codex-team:logs` | 跟 daemon 日志（daemon 层级调试，不是每个 session 的事件 —— 那个用 `events`）。 |
+| `/codex-team:tutorial` | 分支式交互教程，讲心智模型 + 概念。只读。 |
+
+### 长程任务：让 Claude 自己定 alarm
+
+对可能跑几个小时的任务，让 Claude 武装一个**定时 alarm**——即使事件流长时间没动静，它也能按时醒来，防止卡死无感知：
+
+```bash
+# Claude 自己发起：每 10 分钟给自己一个 check-in 提示
+codex-team -b $TOK monitor alarm 600 "echo '[alarm] 状态检查 —— 看一下 session health 和队列里的 turn'"
+```
+
+被 alarm 执行的 shell 命令每一行 stdout 都是一条 Monitor 通知，那行内容就是唤醒 Claude 的提示词。间隔和提示内容都由 Claude 根据任务形状自选。
+
+### Daemon 生命周期
+
+daemon 是**自动管理的**。第一次 `-b` 调用时自动拉起，6 小时无活动时自动关停。你不需要 start/stop/restart。怀疑出问题时跑 `codex-team doctor` —— 它检查 `PATH`、`codex` 二进制、socket bind 权限、stale pidfile、dist 新鲜度，失败时非零退出并给出具体诊断。
+
+**如果 `codex-team` 不在 `PATH` 上**（某些沙盒会），用自带的 launcher：`$CLAUDE_PLUGIN_ROOT/plugins/codex-team/bin/codex-team ...`。
+
+## Power-user CLI
+
+<details>
+<summary>绕开 Claude 直接操作 codex-team（基本用不上）</summary>
+
+选个 bearer token —— 任意字符串，你会反复用：
 
 ```bash
 TOKEN=claude-$(date +%s)
-
-# 注册 user（幂等；第一次 -b 调用时 daemon 自动拉起）
-codex-team daemon user create $TOKEN
-
-# 在仓库里开一个常驻 worker session
-codex-team -b $TOKEN session new refactor --cwd /abs/path/to/repo \
-  --model gpt-5.4 --sandbox workspace-write --approval on-request
-
-# 持久化 cursor，断线可恢复
-codex-team -b $TOKEN cursor save refactor-tail
-
-# 开事件 Monitor（或在 Claude Code 里：/codex-team:events -b $TOKEN）
-codex-team -b $TOKEN monitor events --stream --cursor refactor-tail
+codex-team daemon user create $TOKEN    # 幂等；第一次 -b 调用时 daemon 自动拉起
 ```
-
-然后告诉 Claude：
-
-> *"让 `refactor` 审阅 auth 模块找风险，然后重写 token-validation 路径。改完给我过 diff。"*
-
-Claude 用 `message send` 投递 prompt，休眠，`turn.completed` 到达时醒来，`message tail` 取详情。收工时 `codex-team -b $TOKEN session detach refactor`——线程留在 codex 里，下次可以 resume。
-
-## 日常操作
 
 **Session 生命周期**
 
@@ -144,9 +160,11 @@ codex-team -b $TOK cursor list                                       # 所有命
 codex-team -b $TOK cursor get NAME                                   # {"event_id":"evt-..."}
 ```
 
-**输出与状态**
+**输出模式**
 
 默认情况下，成功的非流式命令会输出单行精简 JSONL。传 `--full` 可改为多行完整 JSON；很多状态类命令还支持 `--short`，输出更适合 grep 和 dashboard 的纯文本单行结果。`message history` / `message tail` 支持 `--truncate <bytes>` 裁剪长内容；`--truncate 0` 表示不裁剪。带标签的 markdown 输出（`--format markdown`）遵循 [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md)。这不是普通 prose markdown，而是标签化的 markdown 交换格式：`<history>` / `<tail>` / `<turn>` 这类容器 tag 承载元数据，`<message>`、`<shell>`、`<file-patch>`、`tool.<name>`、`hook.<name>`、`<reasoning>`、`<auto-approval-review>` 这类 item tag 承载正文。
+
+</details>
 
 ## Playbooks
 
