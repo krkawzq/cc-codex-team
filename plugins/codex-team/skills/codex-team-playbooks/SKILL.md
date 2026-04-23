@@ -31,6 +31,8 @@ Is the task one unit of mechanical work?
     └── Lots of loosely-related tasks, collaborate on demand → swarm.md
 ```
 
+**Prelude topology**: before any N-worker pattern where every worker would re-ingest the same codebase, layer a `survey-and-fork.md` prelude. One surveyor reads broadly; fork N workers from it; each inherits the survey context. Pays off from N≥3.
+
 ## Playbooks in this skill
 
 | File | Use when |
@@ -44,6 +46,7 @@ Is the task one unit of mechanical work?
 | `debate.md` | Advocate session vs opposing session, judge synthesises |
 | `hierarchical.md` | Manager session delegates to worker sub-sessions it spawns |
 | `swarm.md` | Independent workers handoff tasks by mutual agreement |
+| `survey-and-fork.md` | **Prelude**: one surveyor ingests the codebase, then fork N workers from it so each starts with full context. Combines with any N-worker pattern above. |
 | `anti-patterns.md` | Topologies that sound right but fail in practice — read before designing your own |
 
 ## Common substrate

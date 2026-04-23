@@ -103,6 +103,24 @@ The daemon auto-spawned on step 1. No explicit bootstrap. No workspaces. No hook
 
 If you see `session.crashed`, inspect the live snapshot with `session health` and repair with `session heal`. `session.closed` means the live binding was torn down intentionally; if the underlying thread still exists, re-attach it.
 
+## Fan-out tip — survey once, fork N times
+
+When you're about to spawn ≥3 workers on the **same codebase**, don't let each one re-ingest it. Run a single **surveyor** session first (read-only, `explorer` or `planner` profile), have it survey the repo and file findings to `.codex-team/survey.md`, then `codex-team session fork surveyor worker-<i>` for each worker. Each fork inherits the surveyor's full context turn-for-turn, so you pay the research cost once and every worker starts with complete understanding.
+
+```bash
+codex-team -b $TOK session new surveyor --cwd /repo --sandbox read-only --approval never
+codex-team -b $TOK message send surveyor "Survey this repo. Architecture, conventions, risky areas. Write to .codex-team/survey.md."
+codex-team -b $TOK message wait surveyor --timeout 0
+
+for i in 0 1 2 3; do
+  codex-team -b $TOK session fork surveyor "worker-$i"      # inherits survey context
+  codex-team -b $TOK message send "worker-$i" "Your task: <subtask-$i>."
+done
+codex-team -b $TOK session detach surveyor                    # thread persists for re-forking later
+```
+
+Break-even is ~N≥3. For detailed rules (reconfiguring fork sandbox, composition with map-reduce / worker-reviewer, anti-patterns) see `codex-team-playbooks/survey-and-fork.md`.
+
 ## Skill map
 
 | You need to … | Read |

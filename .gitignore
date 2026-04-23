@@ -2,3 +2,7 @@ node_modules/
 *.tsbuildinfo
 
 forks/
+.codex-team/
+.claude/
+
+plugins/codex-team/package-lock.json
