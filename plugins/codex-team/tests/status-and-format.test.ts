@@ -204,6 +204,19 @@ describe("format helpers", () => {
     expect(rendered).toContain("<user-input> {\"id\":\"item-5\"}");
     expect(rendered).not.toContain("\"text\":");
   });
+
+  it("disables markdown truncation when truncate is 0", () => {
+    const longText = "0123456789".repeat(INLINE_MAX_BYTES / 2 + 1024);
+    const rendered = renderItem({
+      id: "item-no-truncate",
+      type: "userMessage",
+      text: longText,
+    }, "", { truncate: 0 });
+
+    expect(rendered).toContain("<user-input> {\"id\":\"item-no-truncate\"}");
+    expect(rendered).toContain(longText);
+    expect(rendered).not.toContain("bytes truncated");
+  });
 });
 
 describe("error/result helpers", () => {

@@ -103,7 +103,7 @@ Session auto-goes live on creation. Name rules: `^[A-Za-z0-9_\-]{1,128}$`, not U
 
 Notes:
 - By name, attach only resolves your own live registry entry or a uniquely live session under another user.
-- For detached threads, use the `thread_id`.
+- Detached threads can be addressed by either session name or `thread_id`.
 - If another user has the same session name live and the name is ambiguous, attach errors instead of picking one arbitrarily.
 
 ### `session detach <name|thread_id>`
@@ -124,7 +124,7 @@ No flags. Target must already be live in your user registry.
 
 ### `session info <name|thread_id>`
 
-No flags. Live names work directly; detached lookup is only reliable by `thread_id`, and the fallback returns thread metadata only.
+No flags. Live and detached sessions can be addressed by either session name or `thread_id`; detached results return thread metadata only.
 
 ### `session context <name|thread_id>`
 

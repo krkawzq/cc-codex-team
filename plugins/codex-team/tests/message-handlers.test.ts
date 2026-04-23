@@ -6,6 +6,7 @@ import { performance } from "node:perf_hooks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/codex/rpc", () => ({
+  threadList: vi.fn(),
   threadRead: vi.fn(),
   threadTurnsList: vi.fn(),
   turnInterrupt: vi.fn(),
@@ -13,7 +14,7 @@ vi.mock("../src/codex/rpc", () => ({
 }));
 
 import { messageApproval, messageHistory, messageInterrupt, messageSend, messageTail } from "../src/daemon/handlers/message";
-import { threadRead, threadTurnsList, turnInterrupt } from "../src/codex/rpc";
+import { threadList, threadRead, threadTurnsList, turnInterrupt } from "../src/codex/rpc";
 import { PendingRegistry } from "../src/daemon/pending";
 
 function makeReq(positionals: string[], flags: Record<string, unknown> = {}) {
@@ -63,6 +64,54 @@ function makeLiveContext(overrides: Record<string, unknown> = {}) {
     },
     events: {
       append: vi.fn().mockResolvedValue(undefined),
+    },
+    retryOptions: vi.fn().mockReturnValue({}),
+    ...overrides,
+  };
+}
+
+function makeDetachedContext(overrides: Record<string, unknown> = {}) {
+  const client = {
+    respondAck: vi.fn().mockResolvedValue({ backpressured: false }),
+  };
+  return {
+    users: {
+      has: vi.fn().mockReturnValue(true),
+    },
+    sessions: {
+      get: vi.fn().mockReturnValue(null),
+      findLiveAnywhere: vi.fn().mockReturnValue(null),
+      findUniqueLiveByNameAnywhere: vi.fn().mockReturnValue(null),
+      listAll: vi.fn().mockReturnValue([]),
+      touch: vi.fn(),
+    },
+    pool: {
+      clientForSession: vi.fn().mockReturnValue(null),
+      acquire: vi.fn().mockResolvedValue(client),
+      acquireForAdhoc: vi.fn().mockResolvedValue(client),
+    },
+    queues: {
+      sendOrQueue: vi.fn().mockResolvedValue({ started: true, turn_id: "turn-1", queue_id: null, queued_depth: 0 }),
+      getCurrentTurn: vi.fn().mockReturnValue("turn-1"),
+      setCurrentTurn: vi.fn(),
+    },
+    pending: {
+      get: vi.fn(),
+      claim: vi.fn(),
+      releaseClaim: vi.fn(),
+      markResponded: vi.fn(),
+      remove: vi.fn(),
+    },
+    events: {
+      append: vi.fn().mockResolvedValue(undefined),
+      listSince: vi.fn().mockResolvedValue({
+        ok: true,
+        events: [{
+          type: "session.closed",
+          session: "writer",
+          thread_id: "th-detached",
+        }],
+      }),
     },
     retryOptions: vi.fn().mockReturnValue({}),
     ...overrides,
@@ -397,5 +446,93 @@ describe("message handlers", () => {
     expect(tail.markdown).toContain("Inspect the failing turn.");
     expect(tail.markdown).toContain("<message> {\"role\":\"assistant\"}");
     expect(tail.markdown).toContain("I found the missing turn items.");
+  });
+
+  it("reads detached message history by session name", async () => {
+    const detachedTurn = {
+      id: "turn-2",
+      status: "completed",
+      items: [
+        {
+          id: "user-2",
+          type: "userMessage",
+          content: [{ type: "text", text: "Explain the event stream." }],
+        },
+      ],
+    };
+    vi.mocked(threadList).mockResolvedValue({
+      data: [{ id: "th-detached", name: "writer" }],
+      nextCursor: null,
+    } as never);
+    vi.mocked(threadRead).mockResolvedValue({
+      thread: {
+        id: "th-detached",
+        name: "writer",
+        turns: [detachedTurn],
+      },
+    } as never);
+
+    const ctx = makeDetachedContext();
+    const result = await messageHistory(ctx as never, makeReq(["writer"], { format: "markdown" }) as never);
+
+    expect(result).toMatchObject({
+      session: "writer",
+      thread_id: "th-detached",
+      turns: [detachedTurn],
+      next_cursor: null,
+      format: "markdown",
+    });
+    expect(result.markdown).toContain("Explain the event stream.");
+    expect(vi.mocked(threadTurnsList)).not.toHaveBeenCalled();
+  });
+
+  it("reads detached message tail by session name", async () => {
+    const detachedTurns = [
+      {
+        id: "turn-3",
+        status: "completed",
+        items: [
+          {
+            id: "user-3",
+            type: "userMessage",
+            content: [{ type: "text", text: "Summarize the latest turn." }],
+          },
+        ],
+      },
+      {
+        id: "turn-2",
+        status: "completed",
+        items: [
+          {
+            id: "agent-2",
+            type: "agentMessage",
+            content: [{ type: "text", text: "Latest turn summary." }],
+          },
+        ],
+      },
+    ];
+    vi.mocked(threadList).mockResolvedValue({
+      data: [{ id: "th-detached", name: "writer" }],
+      nextCursor: null,
+    } as never);
+    vi.mocked(threadRead).mockResolvedValue({
+      thread: {
+        id: "th-detached",
+        name: "writer",
+        turns: detachedTurns,
+      },
+    } as never);
+
+    const ctx = makeDetachedContext();
+    const result = await messageTail(ctx as never, makeReq(["writer"], { format: "markdown", n: 1 }) as never);
+
+    expect(result).toMatchObject({
+      session: "writer",
+      format: "markdown",
+      follow: false,
+    });
+    expect(result.turns).toEqual([detachedTurns[0]]);
+    expect(result.markdown).toContain("Summarize the latest turn.");
+    expect(vi.mocked(threadTurnsList)).not.toHaveBeenCalled();
   });
 });

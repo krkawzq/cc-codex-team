@@ -232,6 +232,17 @@ describe("session logs", () => {
 
     const ctx = makeCtx({ session: undefined, client: null });
     ctx.sessions.get.mockReturnValue(null);
+    ctx.sessions.listAll = vi.fn().mockReturnValue([]);
+    ctx.events = {
+      listSince: vi.fn().mockResolvedValue({
+        ok: true,
+        events: [{
+          type: "session.closed",
+          session: "audit",
+          thread_id: "th-detached",
+        }],
+      }),
+    };
 
     await expect(sessionLogs(ctx as never, makeReq("audit") as never)).rejects.toMatchObject({
       code: "session_not_live",

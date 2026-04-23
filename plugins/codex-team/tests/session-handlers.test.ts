@@ -21,7 +21,17 @@ vi.mock("../src/codex/rpc", () => ({
   turnInterrupt: vi.fn(),
 }));
 
-import { sessionAttach, sessionDetach, sessionFork, sessionList, sessionNew, sessionRename } from "../src/daemon/handlers/session";
+import {
+  sessionAttach,
+  sessionContext,
+  sessionDetach,
+  sessionFork,
+  sessionHeal,
+  sessionInfo,
+  sessionList,
+  sessionNew,
+  sessionRename,
+} from "../src/daemon/handlers/session";
 import {
   threadFork,
   threadList,
@@ -450,12 +460,23 @@ describe("session handlers", () => {
         get: vi.fn().mockReturnValue(null),
         findLiveAnywhere: vi.fn().mockReturnValue(null),
         findUniqueLiveByNameAnywhere: vi.fn().mockReturnValue(null),
+        listAll: vi.fn().mockReturnValue([]),
         add: vi.fn(),
       },
       pool: {
         acquireForAdhoc: vi.fn().mockResolvedValue(adhocClient),
         acquire: vi.fn().mockResolvedValue(liveClient),
         release: vi.fn(),
+      },
+      events: {
+        listSince: vi.fn().mockResolvedValue({
+          ok: true,
+          events: [{
+            type: "session.closed",
+            session: "refactor",
+            thread_id: "th-detached",
+          }],
+        }),
       },
       config: {
         getEffective: vi.fn().mockReturnValue(null),
@@ -478,6 +499,196 @@ describe("session handlers", () => {
     }, {});
     expect(vi.mocked(threadResume)).toHaveBeenCalledWith(liveClient, "th-detached", {});
     expect(ctx.pool.acquire).toHaveBeenCalledWith("user-1", "user-1::refactor", undefined);
+  });
+
+  it("resolves detached session info by name", async () => {
+    const adhocClient = { kind: "adhoc-client" };
+    vi.mocked(threadList).mockResolvedValue({
+      data: [{ id: "th-detached", name: "writer" }],
+      nextCursor: null,
+    } as never);
+    vi.mocked(threadRead).mockResolvedValue({
+      thread: { id: "th-detached", name: "writer", turns: [{ id: "turn-1" }] },
+    } as never);
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue(null),
+        findLiveAnywhere: vi.fn().mockReturnValue(null),
+        findUniqueLiveByNameAnywhere: vi.fn().mockReturnValue(null),
+        listAll: vi.fn().mockReturnValue([]),
+      },
+      pool: {
+        acquireForAdhoc: vi.fn().mockResolvedValue(adhocClient),
+      },
+      events: {
+        listSince: vi.fn().mockResolvedValue({
+          ok: true,
+          events: [{
+            type: "session.closed",
+            session: "writer",
+            thread_id: "th-detached",
+          }],
+        }),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    const result = await sessionInfo(ctx as never, makeReq("session:info", ["writer"]) as never);
+
+    expect(result).toMatchObject({
+      session: null,
+      live: false,
+      thread: { id: "th-detached", name: "writer" },
+    });
+    expect(vi.mocked(threadRead)).toHaveBeenCalledWith(adhocClient, "th-detached", {});
+  });
+
+  it("resolves detached session context by name", async () => {
+    const adhocClient = { kind: "adhoc-client" };
+    vi.mocked(threadList).mockResolvedValue({
+      data: [{ id: "th-detached", name: "writer", turns: [{ id: "turn-1" }] }],
+      nextCursor: null,
+    } as never);
+    vi.mocked(threadRead).mockResolvedValue({
+      thread: { id: "th-detached", name: "writer", turns: [{ id: "turn-1" }] },
+    } as never);
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue(null),
+        findLiveAnywhere: vi.fn().mockReturnValue(null),
+        findUniqueLiveByNameAnywhere: vi.fn().mockReturnValue(null),
+        listAll: vi.fn().mockReturnValue([]),
+      },
+      pool: {
+        acquireForAdhoc: vi.fn().mockResolvedValue(adhocClient),
+        clientForSession: vi.fn().mockReturnValue(null),
+      },
+      events: {
+        listSince: vi.fn().mockResolvedValue({
+          ok: true,
+          events: [{
+            type: "session.closed",
+            session: "writer",
+            thread_id: "th-detached",
+          }],
+        }),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    const result = await sessionContext(ctx as never, makeReq("session:context", ["writer"], { format: "markdown" }) as never);
+
+    expect(result).toMatchObject({
+      session: "writer",
+      thread_id: "th-detached",
+      format: "markdown",
+    });
+    expect(result.markdown).toContain("thread");
+  });
+
+  it("rejects healing a detached session by name with an attach hint", async () => {
+    const adhocClient = { kind: "adhoc-client" };
+    vi.mocked(threadList).mockResolvedValue({
+      data: [{ id: "th-detached", name: "writer" }],
+      nextCursor: null,
+    } as never);
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue(null),
+        findLiveAnywhere: vi.fn().mockReturnValue(null),
+        findUniqueLiveByNameAnywhere: vi.fn().mockReturnValue(null),
+        listAll: vi.fn().mockReturnValue([]),
+      },
+      pool: {
+        acquireForAdhoc: vi.fn().mockResolvedValue(adhocClient),
+        clientForSession: vi.fn().mockReturnValue(null),
+        acquire: vi.fn(),
+      },
+      events: {
+        listSince: vi.fn().mockResolvedValue({
+          ok: true,
+          events: [{
+            type: "session.closed",
+            session: "writer",
+            thread_id: "th-detached",
+          }],
+        }),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    await expect(sessionHeal(ctx as never, makeReq("session:heal", ["writer"]) as never)).rejects.toMatchObject({
+      code: "session_not_live",
+      message: "session 'writer' is detached; re-attach the session with 'codex-team -b user-1 session attach writer' first",
+    });
+  });
+
+  it("forks a detached session by name", async () => {
+    const adhocClient = { kind: "adhoc-client" };
+    const liveClient = { kind: "live-client" };
+    vi.mocked(threadList).mockResolvedValue({
+      data: [{ id: "th-detached", name: "writer", cwd: "/repo", model_provider: "gpt-5.4" }],
+      nextCursor: null,
+    } as never);
+    vi.mocked(threadFork).mockResolvedValue({
+      thread: { id: "th-forked" },
+    } as never);
+    vi.mocked(threadSetName).mockResolvedValue(undefined as never);
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue(null),
+        findLiveAnywhere: vi.fn().mockReturnValue(null),
+        findUniqueLiveByNameAnywhere: vi.fn().mockReturnValue(null),
+        listAll: vi.fn().mockReturnValue([]),
+        add: vi.fn(),
+      },
+      pool: {
+        acquireForAdhoc: vi.fn().mockResolvedValue(adhocClient),
+        acquire: vi.fn().mockResolvedValue(liveClient),
+        release: vi.fn(),
+      },
+      config: {
+        getEffective: vi.fn().mockReturnValue(null),
+      },
+      events: {
+        listSince: vi.fn().mockResolvedValue({
+          ok: true,
+          events: [{
+            type: "session.closed",
+            session: "writer",
+            thread_id: "th-detached",
+          }],
+        }),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    const result = await sessionFork(ctx as never, makeReq("session:fork", ["writer", "writer-copy"]) as never);
+
+    expect(result).toMatchObject({
+      forked_from: "writer",
+      session: {
+        name: "writer-copy",
+        thread_id: "th-forked",
+      },
+    });
+    expect(vi.mocked(threadFork)).toHaveBeenCalledWith(adhocClient, "th-detached", undefined, {});
   });
 
   it("keeps direct UUID attach on the existing thread-id path", async () => {
@@ -755,6 +966,58 @@ describe("session handlers", () => {
         thread_id: "th-crashed",
         state: "crashed",
         busy: false,
+      }),
+    ]);
+  });
+
+  it("keeps session list --all isolated to the calling user's detached threads", async () => {
+    vi.mocked(threadList).mockResolvedValue({
+      data: [
+        { id: "th-user-1", name: "resume-test" },
+        { id: "th-user-2", name: "worker" },
+      ],
+      nextCursor: null,
+    } as never);
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions: {
+        findLiveAnywhere: vi.fn().mockReturnValue(null),
+        listAll: vi.fn((token: string) => token === "user-1"
+          ? [{ name: "live-user-1", thread_id: "th-live-user-1", state: "live" }]
+          : [{ name: "live-user-2", thread_id: "th-live-user-2", state: "live" }]),
+      },
+      pool: {
+        acquireForAdhoc: vi.fn().mockResolvedValue({}),
+        clientForSession: vi.fn().mockReturnValue(null),
+      },
+      queues: {
+        getCurrentTurn: vi.fn().mockReturnValue(null),
+      },
+      events: {
+        listSince: vi.fn((token: string) => Promise.resolve({
+          ok: true,
+          events: token === "user-1"
+            ? [{ type: "session.closed", session: "resume-test", thread_id: "th-user-1" }]
+            : [{ type: "session.closed", session: "worker", thread_id: "th-user-2" }],
+        })),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    const result = await sessionList(ctx as never, makeReq("session:list", [], {
+      all: true,
+      limit: "10",
+      owner: "self",
+    }) as never) as { sessions: Array<Record<string, unknown>> };
+
+    expect(result.sessions).toEqual([
+      expect.objectContaining({
+        name: "resume-test",
+        thread_id: "th-user-1",
+        state: "closed",
       }),
     ]);
   });
