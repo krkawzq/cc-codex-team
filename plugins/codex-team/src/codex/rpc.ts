@@ -4,6 +4,7 @@ import { retryOnOverload, type RetryOptions, DEFAULT_RETRY } from "./retry";
 
 export interface Thread {
   id: string;
+  name?: string;
   preview?: string;
   status?: string;
   cwd?: string;
@@ -66,6 +67,31 @@ export async function threadFork(
   if (atTurnId) params.atTurnId = atTurnId;
   const result = await retryOnOverload(() => client.request("thread/fork", params as JsonValue), retry);
   return coerceLifecycle(result, "thread/fork");
+}
+
+export async function threadArchive(
+  client: AppServerClient,
+  threadId: string,
+  retry: RetryOptions = DEFAULT_RETRY,
+): Promise<void> {
+  await retryOnOverload(() => client.request("thread/archive", { threadId }), retry);
+}
+
+export async function threadUnarchive(
+  client: AppServerClient,
+  threadId: string,
+  retry: RetryOptions = DEFAULT_RETRY,
+): Promise<void> {
+  await retryOnOverload(() => client.request("thread/unarchive", { threadId }), retry);
+}
+
+export async function threadRename(
+  client: AppServerClient,
+  threadId: string,
+  name: string,
+  retry: RetryOptions = DEFAULT_RETRY,
+): Promise<void> {
+  await retryOnOverload(() => client.request("thread/name/set", { threadId, name }), retry);
 }
 
 export async function threadSetName(

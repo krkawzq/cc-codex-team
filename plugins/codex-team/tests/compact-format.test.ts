@@ -154,6 +154,31 @@ describe("formatCompact", () => {
       },
     ],
     [
+      "session:archive",
+      {
+        thread_id: "th-1",
+        archived: true,
+        archived_at: "2026-04-23T00:00:00.000Z",
+        detached: true,
+      },
+      {
+        thread_id: "th-1",
+        archived: true,
+      },
+    ],
+    [
+      "session:unarchive",
+      {
+        thread_id: "th-1",
+        unarchived: true,
+        unarchived_at: "2026-04-23T00:00:00.000Z",
+      },
+      {
+        thread_id: "th-1",
+        unarchived: true,
+      },
+    ],
+    [
       "session:fork",
       {
         session: { name: "audit-fix", thread_id: "th-2", state: "live", model: "gpt-5.4" },
@@ -168,6 +193,22 @@ describe("formatCompact", () => {
         session: { name: "audit-renamed", thread_id: "th-2", state: "live", model: "gpt-5.4" },
       },
       { session: { name: "audit-renamed" } },
+    ],
+    [
+      "session:rollback",
+      {
+        name: "audit",
+        old_thread_id: "th-1",
+        new_thread_id: "th-2",
+        forked_at_turn: "turn-1",
+        archived_source_name: "audit-pre-rollback-2026-04-23T00:00:00.000Z",
+      },
+      {
+        name: "audit",
+        forked_at_turn: "turn-1",
+        old_thread_id: "th-1",
+        new_thread_id: "th-2",
+      },
     ],
     [
       "session:info",

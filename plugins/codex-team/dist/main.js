@@ -283,8 +283,11 @@ var COMMANDS = /* @__PURE__ */ new Set([
   "session:new",
   "session:attach",
   "session:detach",
+  "session:archive",
+  "session:unarchive",
   "session:fork",
   "session:rename",
+  "session:rollback",
   "session:info",
   "session:context",
   "session:list",
@@ -983,6 +986,51 @@ var sessionGroup = {
       needs_bearer: true
     }),
     leaf({
+      name: "archive",
+      summary: "Archive a detached thread, or detach and archive a live session.",
+      usage: "codex-team -b <token> session archive <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET }
+      ],
+      flags: [
+        {
+          long: "--and-detach",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Hard-detach a live session before archiving it."
+        }
+      ],
+      notes: [
+        "Live sessions refuse without --and-detach."
+      ],
+      examples: [
+        "codex-team -b $TOKEN session archive audit --and-detach",
+        "codex-team -b $TOKEN session archive th-abc123"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "unarchive",
+      summary: "Restore an archived detached thread.",
+      usage: "codex-team -b <token> session unarchive <thread_id>",
+      positionals: [
+        {
+          name: "thread_id",
+          required: true,
+          description: "Detached archived thread ID."
+        }
+      ],
+      flags: [],
+      notes: [
+        "Fails if the thread is currently live."
+      ],
+      examples: [
+        "codex-team -b $TOKEN session unarchive th-abc123"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
       name: "fork",
       summary: "Fork a session into a new live session.",
       usage: "codex-team -b <token> session fork <name|thread_id> [new_name] [flags]",
@@ -1010,8 +1058,8 @@ var sessionGroup = {
     }),
     leaf({
       name: "rename",
-      summary: "Rename a session without attaching it.",
-      usage: "codex-team -b <token> session rename <name|thread_id> <new_name>",
+      summary: "Rename a live session or, with --detached-ok, a detached thread.",
+      usage: "codex-team -b <token> session rename <name|thread_id> <new_name> [flags]",
       positionals: [
         { ...SESSION_TARGET, description: "Current session name or thread ID." },
         {
@@ -1020,9 +1068,49 @@ var sessionGroup = {
           description: "New session name."
         }
       ],
-      flags: [],
+      flags: [
+        {
+          long: "--detached-ok",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Allow renaming a detached thread via persisted thread metadata."
+        }
+      ],
       examples: [
-        "codex-team -b $TOKEN session rename audit audit-review"
+        "codex-team -b $TOKEN session rename audit audit-review",
+        "codex-team -b $TOKEN session rename th-abc123 audit-review --detached-ok"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "rollback",
+      summary: "Fork a thread at an earlier turn, archive the old thread, and move the session name forward.",
+      usage: "codex-team -b <token> session rollback <name|thread_id> --to-turn <turn_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET, description: "Source live session or detached thread." }
+      ],
+      flags: [
+        {
+          long: "--to-turn",
+          type: "string",
+          required: true,
+          description: "Turn ID to fork from."
+        },
+        {
+          long: "--detach-after",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Leave the forked thread detached instead of resuming it live."
+        }
+      ],
+      notes: [
+        "The original thread is renamed to <name>-pre-rollback-<iso8601> and archived."
+      ],
+      examples: [
+        "codex-team -b $TOKEN session rollback audit --to-turn turn-42",
+        "codex-team -b $TOKEN session rollback th-abc123 --to-turn turn-42 --detach-after"
       ],
       needs_bearer: true
     }),
@@ -2530,6 +2618,10 @@ function formatCompact(method, data) {
         extraKeys: ["noop", "graceful"],
         allowNullSession: true
       });
+    case "session:archive":
+      return pickFields(data, ["thread_id", "archived"]);
+    case "session:unarchive":
+      return pickFields(data, ["thread_id", "unarchived"]);
     case "session:fork":
       return compactSessionWithFlags(data, {
         sessionOptions: {}
@@ -2538,6 +2630,8 @@ function formatCompact(method, data) {
       return compactSessionWithFlags(data, {
         sessionOptions: { nameOnly: true }
       });
+    case "session:rollback":
+      return pickFields(data, ["name", "forked_at_turn", "old_thread_id", "new_thread_id"]);
     case "session:info":
       return compactSessionInfo(data);
     case "session:context":
@@ -4934,6 +5028,15 @@ async function threadFork(client, threadId, atTurnId, retry = DEFAULT_RETRY) {
   if (atTurnId) params.atTurnId = atTurnId;
   const result = await retryOnOverload(() => client.request("thread/fork", params), retry);
   return coerceLifecycle(result, "thread/fork");
+}
+async function threadArchive(client, threadId, retry = DEFAULT_RETRY) {
+  await retryOnOverload(() => client.request("thread/archive", { threadId }), retry);
+}
+async function threadUnarchive(client, threadId, retry = DEFAULT_RETRY) {
+  await retryOnOverload(() => client.request("thread/unarchive", { threadId }), retry);
+}
+async function threadRename(client, threadId, name, retry = DEFAULT_RETRY) {
+  await retryOnOverload(() => client.request("thread/name/set", { threadId, name }), retry);
 }
 async function threadSetName(client, threadId, name, retry = DEFAULT_RETRY) {
   await retryOnOverload(() => client.request("thread/name/set", { threadId, name }), retry);
@@ -7752,6 +7855,333 @@ function sortSessions(rows, field) {
   });
   return copy;
 }
+var sessionArchive = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const andDetach = isTrue2(flags["and-detach"]);
+  const live = ctx.sessions.get(user, identifier);
+  if (live) {
+    if (!andDetach) {
+      throw invalidParams("session is live; pass --and-detach or run `session detach` first");
+    }
+    await detachLiveSessionHard(ctx, req, live);
+    const archivedAt2 = (/* @__PURE__ */ new Date()).toISOString();
+    const client2 = await ctx.pool.acquireForAdhoc(user);
+    await threadArchive(client2, live.thread_id, ctx.retryOptions());
+    return {
+      thread_id: live.thread_id,
+      archived: true,
+      detached: true,
+      archived_at: archivedAt2
+    };
+  }
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "live") {
+    if (target.session.name !== identifier && target.threadId !== identifier) {
+      throw new CodexTeamError("session_busy", `session '${identifier}' is live under user '${user}'`);
+    }
+    if (!andDetach) {
+      throw invalidParams("session is live; pass --and-detach or run `session detach` first");
+    }
+    await detachLiveSessionHard(ctx, req, target.session);
+    const archivedAt2 = (/* @__PURE__ */ new Date()).toISOString();
+    const client2 = await ctx.pool.acquireForAdhoc(user);
+    await threadArchive(client2, target.threadId, ctx.retryOptions());
+    return {
+      thread_id: target.threadId,
+      archived: true,
+      detached: true,
+      archived_at: archivedAt2
+    };
+  }
+  const archivedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const client = await ctx.pool.acquireForAdhoc(user);
+  await threadArchive(client, target.threadId, ctx.retryOptions());
+  return {
+    thread_id: target.threadId,
+    archived: true,
+    archived_at: archivedAt
+  };
+};
+var sessionUnarchive = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const threadId = asPositional(req, 0, "thread_id");
+  const live = ctx.sessions.findLiveAnywhere(threadId);
+  if (live) {
+    throw invalidParams("thread is live; unarchive applies only to detached archived threads");
+  }
+  await readDetachedThreadById(ctx, user, threadId);
+  const unarchivedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const client = await ctx.pool.acquireForAdhoc(user);
+  await threadUnarchive(client, threadId, ctx.retryOptions());
+  return {
+    thread_id: threadId,
+    unarchived: true,
+    unarchived_at: unarchivedAt
+  };
+};
+var sessionRenameExtended = async (ctx, req) => {
+  requireUser(ctx, req);
+  const flags = asFlags(req);
+  if (!isTrue2(flags["detached-ok"])) {
+    return await sessionRename(ctx, req);
+  }
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const newName = asPositional(req, 1, "new_name");
+  validateSessionName(newName);
+  const live = ctx.sessions.get(user, identifier);
+  if (live) {
+    return await sessionRename(ctx, req);
+  }
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "live") {
+    return await sessionRename(ctx, req);
+  }
+  const renamedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const client = await ctx.pool.acquireForAdhoc(user);
+  await threadRename(client, target.threadId, newName, ctx.retryOptions());
+  return {
+    session: { name: newName },
+    thread_id: target.threadId,
+    detached: true,
+    renamed_at: renamedAt
+  };
+};
+var sessionRollback = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const toTurnId = asString5(flags["to-turn"]);
+  const detachAfter = isTrue2(flags["detach-after"]);
+  if (!toTurnId) {
+    throw invalidParams("--to-turn requires a value");
+  }
+  const source = await resolveSessionTarget(ctx, user, identifier);
+  const sourceName = resolveRollbackSessionName(source, ctx, user);
+  const sourceRecord = source.kind === "live" ? source.session : null;
+  const sourceThread = source.kind === "live" ? { id: source.threadId, name: source.name, cwd: source.session.cwd } : source.thread;
+  const sourceDefaults = resolveRollbackDefaults(ctx, sourceRecord, sourceThread);
+  if (!detachAfter) {
+    validateSessionName(sourceName);
+    const existing = ctx.sessions.get(user, sourceName);
+    if (existing && (source.kind !== "live" || existing.thread_id !== source.threadId)) {
+      throw invalidParams(`session '${sourceName}' already exists`);
+    }
+  }
+  const sourceClient = await clientForThreadTarget(ctx, user, source);
+  await ensureRollbackTurnExists(ctx, sourceClient, source.threadId, toTurnId);
+  const forkResult = await threadFork(sourceClient, source.threadId, toTurnId, ctx.retryOptions());
+  const newThreadId = threadIdOf(forkResult);
+  if (source.kind === "live") {
+    await detachLiveSessionHard(ctx, req, source.session);
+  }
+  const archivedSourceName = `${sourceName}-pre-rollback-${(/* @__PURE__ */ new Date()).toISOString()}`;
+  const lifecycleClient = await ctx.pool.acquireForAdhoc(user);
+  await threadRename(lifecycleClient, source.threadId, archivedSourceName, ctx.retryOptions());
+  await threadArchive(lifecycleClient, source.threadId, ctx.retryOptions());
+  await threadRename(lifecycleClient, newThreadId, sourceName, ctx.retryOptions());
+  if (!detachAfter) {
+    await attachRollbackThread(ctx, user, sourceName, newThreadId, sourceDefaults);
+  }
+  return {
+    name: sourceName,
+    old_thread_id: source.threadId,
+    new_thread_id: newThreadId,
+    forked_at_turn: toTurnId,
+    archived_source_name: archivedSourceName,
+    detach_after: detachAfter
+  };
+};
+function resolveRollbackSessionName(source, ctx, user) {
+  if (source.kind === "live") return source.session.name;
+  return source.name ?? deriveNameFromThreadId(source.threadId, ctx, user);
+}
+function resolveRollbackDefaults(ctx, sourceRecord, sourceThread) {
+  const experimentalTools = sourceRecord?.experimental_tools ? [...sourceRecord.experimental_tools] : parseExperimentalTools(resolveDefault(ctx, "experimental.default_tools"));
+  const autoApprovePatterns = sourceRecord ? validateSessionAutoApprovePatterns(sourceRecord.autoApprovePatterns ?? []) : validateSessionAutoApprovePatterns(
+    parseConfiguredAutoApprovePatterns(ctx.config.getEffective("session.auto_approve_command_patterns"))
+  );
+  return {
+    model: sourceRecord?.model ?? void 0,
+    cwd: sourceRecord?.cwd ?? asString5(sourceThread.cwd) ?? process.cwd(),
+    sandbox: sourceRecord?.sandbox ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
+    approval: sourceRecord?.approval ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
+    effort: sourceRecord?.effort ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
+    profile: sourceRecord?.profile ?? void 0,
+    baseInstructions: sourceRecord?.base_instructions ?? void 0,
+    developerInstructions: sourceRecord?.developer_instructions ?? void 0,
+    experimentalTools,
+    autoApprovePatterns
+  };
+}
+async function attachRollbackThread(ctx, user, name, threadId, defaults) {
+  const sessionKey = keyFor(user, name);
+  const client = await ctx.pool.acquire(
+    user,
+    sessionKey,
+    buildExperimentalToolAppServerOptions(defaults.experimentalTools)
+  );
+  let result;
+  try {
+    result = await threadResume(client, threadId, ctx.retryOptions());
+  } catch (e) {
+    ctx.pool.release(sessionKey);
+    throw e;
+  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const record = {
+    name,
+    thread_id: threadId,
+    state: "live",
+    model: defaults.model ?? asString5(result.model) ?? void 0,
+    cwd: defaults.cwd ?? asString5(result.cwd) ?? asString5(result.thread.cwd) ?? process.cwd(),
+    sandbox: defaults.sandbox,
+    approval: defaults.approval ?? asString5(result.approvalPolicy) ?? void 0,
+    effort: defaults.effort,
+    profile: defaults.profile,
+    base_instructions: defaults.baseInstructions,
+    developer_instructions: defaults.developerInstructions,
+    experimental_tools: defaults.experimentalTools.length > 0 ? defaults.experimentalTools : void 0,
+    autoApprovePatterns: defaults.autoApprovePatterns,
+    created_at: now,
+    last_active_at: now,
+    turn_count: 0,
+    ...sessionRuntimeDefaults()
+  };
+  ctx.sessions.add(user, record);
+  ctx.users.touch(user);
+  return record;
+}
+async function ensureRollbackTurnExists(ctx, client, threadId, turnId) {
+  let cursor;
+  let hasCompletedTurn = false;
+  do {
+    const page = await threadTurnsList(client, threadId, {
+      limit: 100,
+      ...cursor ? { cursor } : {},
+      sortDirection: "desc"
+    }, ctx.retryOptions());
+    for (const turn of page.data) {
+      if (turn.status === "completed") hasCompletedTurn = true;
+      if (turn.id === turnId) return;
+    }
+    cursor = page.nextCursor ?? void 0;
+  } while (cursor);
+  if (!hasCompletedTurn) {
+    throw invalidParams("session has no completed turns yet; rollback requires a completed turn from `message history`");
+  }
+  throw invalidParams(`turn '${turnId}' not found in thread '${threadId}'`);
+}
+async function clientForThreadTarget(ctx, user, target) {
+  if (target.kind === "live") {
+    const client = ctx.pool.clientForSession(keyFor(user, target.session.name));
+    if (client) return client;
+  }
+  return await ctx.pool.acquireForAdhoc(user);
+}
+async function detachLiveSessionHard(ctx, req, rec) {
+  await sessionDetach(ctx, {
+    ...req,
+    method: "session:detach",
+    params: {
+      positionals: [rec.name],
+      flags: {}
+    }
+  });
+}
+async function resolveSessionTarget(ctx, user, identifier) {
+  const live = ctx.sessions.get(user, identifier);
+  if (live) {
+    return {
+      kind: "live",
+      session: live,
+      threadId: live.thread_id,
+      name: live.name
+    };
+  }
+  if (looksLikeThreadId(identifier)) {
+    const owner = ctx.sessions.findLiveAnywhere(identifier);
+    if (owner) {
+      if (owner.user !== user) {
+        throw new CodexTeamError("session_busy", `thread '${identifier}' is live under user '${owner.user}'`);
+      }
+      return {
+        kind: "live",
+        session: owner.record,
+        threadId: owner.record.thread_id,
+        name: owner.record.name
+      };
+    }
+    const thread = await readDetachedThreadById(ctx, user, identifier);
+    return {
+      kind: "detached",
+      thread,
+      threadId: thread.id,
+      name: asString5(thread.name)
+    };
+  }
+  const liveByName = ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
+  if (liveByName === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id`);
+  }
+  if (liveByName) {
+    if (liveByName.user !== user) {
+      throw new CodexTeamError("session_busy", `session '${identifier}' is live under user '${liveByName.user}'`);
+    }
+    return {
+      kind: "live",
+      session: liveByName.record,
+      threadId: liveByName.record.thread_id,
+      name: liveByName.record.name
+    };
+  }
+  const detached = await findDetachedThreadByName(ctx, user, identifier);
+  if (detached === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across detached threads; use a thread_id`);
+  }
+  if (!detached) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+  }
+  return {
+    kind: "detached",
+    thread: detached,
+    threadId: detached.id,
+    name: asString5(detached.name)
+  };
+}
+async function readDetachedThreadById(ctx, user, threadId) {
+  try {
+    const client = await ctx.pool.acquireForAdhoc(user);
+    const result = await threadRead(client, threadId, ctx.retryOptions());
+    return result.thread;
+  } catch (e) {
+    throw new CodexTeamError("session_not_found", `session '${threadId}' not found: ${e.message}`);
+  }
+}
+async function findDetachedThreadByName(ctx, user, name) {
+  const client = await ctx.pool.acquireForAdhoc(user);
+  let cursor;
+  let match = null;
+  do {
+    const page = await threadList(client, {
+      limit: 200,
+      includeArchived: true,
+      ...cursor ? { cursor } : {}
+    }, ctx.retryOptions());
+    for (const thread of page.data) {
+      if (asString5(thread.name) !== name) continue;
+      if (match) return "ambiguous";
+      match = thread;
+    }
+    cursor = page.nextCursor ?? void 0;
+  } while (cursor);
+  return match;
+}
 
 // src/daemon/handlers/message.ts
 var import_node_fs15 = __toESM(require("fs"));
@@ -8909,8 +9339,11 @@ var HANDLERS = {
   "session:new": sessionNew,
   "session:attach": sessionAttach,
   "session:detach": sessionDetach,
+  "session:archive": sessionArchive,
+  "session:unarchive": sessionUnarchive,
   "session:fork": sessionFork,
-  "session:rename": sessionRename,
+  "session:rename": sessionRenameExtended,
+  "session:rollback": sessionRollback,
   "session:info": sessionInfo,
   "session:context": sessionContext,
   "session:list": sessionList,

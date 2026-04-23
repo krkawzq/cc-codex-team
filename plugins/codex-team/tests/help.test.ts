@@ -97,6 +97,24 @@ describe("renderHelp", () => {
     expect(wait).toContain("If the session is idle, waits for the next turn");
   });
 
+  it("renders the lifecycle session archive, unarchive, rename, and rollback commands", () => {
+    const archive = renderHelp(["session", "archive"]);
+    expect(archive).toContain("codex-team session archive");
+    expect(archive).toContain("--and-detach");
+
+    const unarchive = renderHelp(["session", "unarchive"]);
+    expect(unarchive).toContain("codex-team session unarchive");
+    expect(unarchive).toContain("Fails if the thread is currently live.");
+
+    const rename = renderHelp(["session", "rename"]);
+    expect(rename).toContain("--detached-ok");
+
+    const rollback = renderHelp(["session", "rollback"]);
+    expect(rollback).toContain("codex-team session rollback");
+    expect(rollback).toContain("--to-turn");
+    expect(rollback).toContain("--detach-after");
+  });
+
   it("renders cursor subcommands and the explicit event-id flag", () => {
     const help = renderHelp(["cursor", "save"]);
 

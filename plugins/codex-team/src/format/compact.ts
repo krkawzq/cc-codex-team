@@ -62,6 +62,10 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
         extraKeys: ["noop", "graceful"],
         allowNullSession: true,
       });
+    case "session:archive":
+      return pickFields(data, ["thread_id", "archived"]);
+    case "session:unarchive":
+      return pickFields(data, ["thread_id", "unarchived"]);
     case "session:fork":
       return compactSessionWithFlags(data, {
         sessionOptions: {},
@@ -70,6 +74,8 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
       return compactSessionWithFlags(data, {
         sessionOptions: { nameOnly: true },
       });
+    case "session:rollback":
+      return pickFields(data, ["name", "forked_at_turn", "old_thread_id", "new_thread_id"]);
     case "session:info":
       return compactSessionInfo(data);
     case "session:context":

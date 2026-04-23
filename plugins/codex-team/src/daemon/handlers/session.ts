@@ -1,5 +1,6 @@
 import fs from "node:fs";
 
+import type { AppServerClient } from "../../codex/appServerClient";
 import type { HandlerFn } from "../dispatch";
 import type { DaemonContext } from "../context";
 import type { IpcRequest } from "../../ipc/protocol";
@@ -13,13 +14,18 @@ import {
   validateSessionName,
 } from "../sessions";
 import {
+  type Thread,
+  threadArchive,
   threadFork,
   threadIdOf,
   threadList,
+  threadRename,
   threadRead,
   threadResume,
   threadSetName,
   threadStart,
+  threadTurnsList,
+  threadUnarchive,
   threadUnsubscribe,
   turnInterrupt,
 } from "../../codex/rpc";
@@ -728,4 +734,449 @@ function sortSessions(rows: SessionRecord[], field: string): SessionRecord[] {
     return 0;
   });
   return copy;
+}
+
+interface ResolvedDetachedThreadTarget {
+  kind: "detached";
+  thread: Thread;
+  threadId: string;
+  name: string | null;
+}
+
+interface ResolvedLiveSessionTarget {
+  kind: "live";
+  session: SessionRecord;
+  threadId: string;
+  name: string;
+}
+
+type ResolvedSessionTarget = ResolvedDetachedThreadTarget | ResolvedLiveSessionTarget;
+
+export const sessionArchive: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const andDetach = isTrue(flags["and-detach"]);
+  const live = ctx.sessions.get(user, identifier);
+
+  if (live) {
+    if (!andDetach) {
+      throw invalidParams("session is live; pass --and-detach or run `session detach` first");
+    }
+    await detachLiveSessionHard(ctx, req, live);
+    const archivedAt = new Date().toISOString();
+    const client = await ctx.pool.acquireForAdhoc(user);
+    await threadArchive(client, live.thread_id, ctx.retryOptions());
+    return {
+      thread_id: live.thread_id,
+      archived: true,
+      detached: true,
+      archived_at: archivedAt,
+    };
+  }
+
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "live") {
+    if (target.session.name !== identifier && target.threadId !== identifier) {
+      throw new CodexTeamError("session_busy", `session '${identifier}' is live under user '${user}'`);
+    }
+    if (!andDetach) {
+      throw invalidParams("session is live; pass --and-detach or run `session detach` first");
+    }
+    await detachLiveSessionHard(ctx, req, target.session);
+    const archivedAt = new Date().toISOString();
+    const client = await ctx.pool.acquireForAdhoc(user);
+    await threadArchive(client, target.threadId, ctx.retryOptions());
+    return {
+      thread_id: target.threadId,
+      archived: true,
+      detached: true,
+      archived_at: archivedAt,
+    };
+  }
+
+  const archivedAt = new Date().toISOString();
+  const client = await ctx.pool.acquireForAdhoc(user);
+  await threadArchive(client, target.threadId, ctx.retryOptions());
+  return {
+    thread_id: target.threadId,
+    archived: true,
+    archived_at: archivedAt,
+  };
+};
+
+export const sessionUnarchive: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const threadId = asPositional(req, 0, "thread_id");
+  const live = ctx.sessions.findLiveAnywhere(threadId);
+  if (live) {
+    throw invalidParams("thread is live; unarchive applies only to detached archived threads");
+  }
+
+  await readDetachedThreadById(ctx, user, threadId);
+  const unarchivedAt = new Date().toISOString();
+  const client = await ctx.pool.acquireForAdhoc(user);
+  await threadUnarchive(client, threadId, ctx.retryOptions());
+  return {
+    thread_id: threadId,
+    unarchived: true,
+    unarchived_at: unarchivedAt,
+  };
+};
+
+export const sessionRenameExtended: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const flags = asFlags(req);
+  if (!isTrue(flags["detached-ok"])) {
+    return await sessionRename(ctx, req);
+  }
+
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const newName = asPositional(req, 1, "new_name");
+  validateSessionName(newName);
+
+  const live = ctx.sessions.get(user, identifier);
+  if (live) {
+    return await sessionRename(ctx, req);
+  }
+
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "live") {
+    return await sessionRename(ctx, req);
+  }
+
+  const renamedAt = new Date().toISOString();
+  const client = await ctx.pool.acquireForAdhoc(user);
+  await threadRename(client, target.threadId, newName, ctx.retryOptions());
+  return {
+    session: { name: newName },
+    thread_id: target.threadId,
+    detached: true,
+    renamed_at: renamedAt,
+  };
+};
+
+export const sessionRollback: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const toTurnId = asString(flags["to-turn"]);
+  const detachAfter = isTrue(flags["detach-after"]);
+  if (!toTurnId) {
+    throw invalidParams("--to-turn requires a value");
+  }
+
+  const source = await resolveSessionTarget(ctx, user, identifier);
+  const sourceName = resolveRollbackSessionName(source, ctx, user);
+  const sourceRecord = source.kind === "live" ? source.session : null;
+  const sourceThread = source.kind === "live"
+    ? { id: source.threadId, name: source.name, cwd: source.session.cwd }
+    : source.thread;
+  const sourceDefaults = resolveRollbackDefaults(ctx, sourceRecord, sourceThread);
+
+  if (!detachAfter) {
+    validateSessionName(sourceName);
+    const existing = ctx.sessions.get(user, sourceName);
+    if (existing && (source.kind !== "live" || existing.thread_id !== source.threadId)) {
+      throw invalidParams(`session '${sourceName}' already exists`);
+    }
+  }
+
+  const sourceClient = await clientForThreadTarget(ctx, user, source);
+  await ensureRollbackTurnExists(ctx, sourceClient, source.threadId, toTurnId);
+
+  const forkResult = await threadFork(sourceClient, source.threadId, toTurnId, ctx.retryOptions());
+  const newThreadId = threadIdOf(forkResult);
+
+  if (source.kind === "live") {
+    await detachLiveSessionHard(ctx, req, source.session);
+  }
+
+  const archivedSourceName = `${sourceName}-pre-rollback-${new Date().toISOString()}`;
+  const lifecycleClient = await ctx.pool.acquireForAdhoc(user);
+  await threadRename(lifecycleClient, source.threadId, archivedSourceName, ctx.retryOptions());
+  await threadArchive(lifecycleClient, source.threadId, ctx.retryOptions());
+  await threadRename(lifecycleClient, newThreadId, sourceName, ctx.retryOptions());
+
+  if (!detachAfter) {
+    await attachRollbackThread(ctx, user, sourceName, newThreadId, sourceDefaults);
+  }
+
+  return {
+    name: sourceName,
+    old_thread_id: source.threadId,
+    new_thread_id: newThreadId,
+    forked_at_turn: toTurnId,
+    archived_source_name: archivedSourceName,
+    detach_after: detachAfter,
+  };
+};
+
+function resolveRollbackSessionName(
+  source: ResolvedSessionTarget,
+  ctx: DaemonContext,
+  user: string,
+): string {
+  if (source.kind === "live") return source.session.name;
+  return source.name ?? deriveNameFromThreadId(source.threadId, ctx, user);
+}
+
+function resolveRollbackDefaults(
+  ctx: DaemonContext,
+  sourceRecord: SessionRecord | null,
+  sourceThread: Thread,
+): {
+  model?: string;
+  cwd?: string;
+  sandbox?: string;
+  approval?: string;
+  effort?: string;
+  profile?: string;
+  baseInstructions?: string;
+  developerInstructions?: string;
+  experimentalTools: string[];
+  autoApprovePatterns: string[];
+} {
+  const experimentalTools = sourceRecord?.experimental_tools
+    ? [...sourceRecord.experimental_tools]
+    : parseExperimentalTools(resolveDefault(ctx, "experimental.default_tools"));
+  const autoApprovePatterns = sourceRecord
+    ? validateSessionAutoApprovePatterns(sourceRecord.autoApprovePatterns ?? [])
+    : validateSessionAutoApprovePatterns(
+        parseConfiguredAutoApprovePatterns(ctx.config.getEffective("session.auto_approve_command_patterns")),
+      );
+
+  return {
+    model: sourceRecord?.model ?? undefined,
+    cwd: sourceRecord?.cwd ?? asString(sourceThread.cwd) ?? process.cwd(),
+    sandbox: sourceRecord?.sandbox ?? resolveDefault(ctx, "codex.default_sandbox") ?? undefined,
+    approval: sourceRecord?.approval ?? resolveDefault(ctx, "codex.default_approval") ?? undefined,
+    effort: sourceRecord?.effort ?? resolveDefault(ctx, "codex.default_effort") ?? undefined,
+    profile: sourceRecord?.profile ?? undefined,
+    baseInstructions: sourceRecord?.base_instructions ?? undefined,
+    developerInstructions: sourceRecord?.developer_instructions ?? undefined,
+    experimentalTools,
+    autoApprovePatterns,
+  };
+}
+
+async function attachRollbackThread(
+  ctx: DaemonContext,
+  user: string,
+  name: string,
+  threadId: string,
+  defaults: {
+    model?: string;
+    cwd?: string;
+    sandbox?: string;
+    approval?: string;
+    effort?: string;
+    profile?: string;
+    baseInstructions?: string;
+    developerInstructions?: string;
+    experimentalTools: string[];
+    autoApprovePatterns: string[];
+  },
+): Promise<SessionRecord> {
+  const sessionKey = keyFor(user, name);
+  const client = await ctx.pool.acquire(
+    user,
+    sessionKey,
+    buildExperimentalToolAppServerOptions(defaults.experimentalTools),
+  );
+  let result;
+  try {
+    result = await threadResume(client, threadId, ctx.retryOptions());
+  } catch (e) {
+    ctx.pool.release(sessionKey);
+    throw e;
+  }
+
+  const now = new Date().toISOString();
+  const record: SessionRecord = {
+    name,
+    thread_id: threadId,
+    state: "live",
+    model: defaults.model ?? asString(result.model) ?? undefined,
+    cwd: defaults.cwd ?? asString(result.cwd) ?? asString(result.thread.cwd) ?? process.cwd(),
+    sandbox: defaults.sandbox,
+    approval: defaults.approval ?? asString(result.approvalPolicy) ?? undefined,
+    effort: defaults.effort,
+    profile: defaults.profile,
+    base_instructions: defaults.baseInstructions,
+    developer_instructions: defaults.developerInstructions,
+    experimental_tools: defaults.experimentalTools.length > 0 ? defaults.experimentalTools : undefined,
+    autoApprovePatterns: defaults.autoApprovePatterns,
+    created_at: now,
+    last_active_at: now,
+    turn_count: 0,
+    ...sessionRuntimeDefaults(),
+  };
+  ctx.sessions.add(user, record);
+  ctx.users.touch(user);
+  return record;
+}
+
+async function ensureRollbackTurnExists(
+  ctx: DaemonContext,
+  client: AppServerClient,
+  threadId: string,
+  turnId: string,
+): Promise<void> {
+  let cursor: string | undefined;
+  let hasCompletedTurn = false;
+  do {
+    const page = await threadTurnsList(client, threadId, {
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+      sortDirection: "desc",
+    }, ctx.retryOptions());
+    for (const turn of page.data) {
+      if (turn.status === "completed") hasCompletedTurn = true;
+      if (turn.id === turnId) return;
+    }
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+
+  if (!hasCompletedTurn) {
+    throw invalidParams("session has no completed turns yet; rollback requires a completed turn from `message history`");
+  }
+  throw invalidParams(`turn '${turnId}' not found in thread '${threadId}'`);
+}
+
+async function clientForThreadTarget(
+  ctx: DaemonContext,
+  user: string,
+  target: ResolvedSessionTarget,
+): Promise<AppServerClient> {
+  if (target.kind === "live") {
+    const client = ctx.pool.clientForSession(keyFor(user, target.session.name));
+    if (client) return client;
+  }
+  return await ctx.pool.acquireForAdhoc(user);
+}
+
+async function detachLiveSessionHard(
+  ctx: DaemonContext,
+  req: IpcRequest,
+  rec: SessionRecord,
+): Promise<void> {
+  await sessionDetach(ctx, {
+    ...req,
+    method: "session:detach",
+    params: {
+      positionals: [rec.name],
+      flags: {},
+    },
+  });
+}
+
+async function resolveSessionTarget(
+  ctx: DaemonContext,
+  user: string,
+  identifier: string,
+): Promise<ResolvedSessionTarget> {
+  const live = ctx.sessions.get(user, identifier);
+  if (live) {
+    return {
+      kind: "live",
+      session: live,
+      threadId: live.thread_id,
+      name: live.name,
+    };
+  }
+
+  if (looksLikeThreadId(identifier)) {
+    const owner = ctx.sessions.findLiveAnywhere(identifier);
+    if (owner) {
+      if (owner.user !== user) {
+        throw new CodexTeamError("session_busy", `thread '${identifier}' is live under user '${owner.user}'`);
+      }
+      return {
+        kind: "live",
+        session: owner.record,
+        threadId: owner.record.thread_id,
+        name: owner.record.name,
+      };
+    }
+    const thread = await readDetachedThreadById(ctx, user, identifier);
+    return {
+      kind: "detached",
+      thread,
+      threadId: thread.id,
+      name: asString(thread.name),
+    };
+  }
+
+  const liveByName = ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
+  if (liveByName === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id`);
+  }
+  if (liveByName) {
+    if (liveByName.user !== user) {
+      throw new CodexTeamError("session_busy", `session '${identifier}' is live under user '${liveByName.user}'`);
+    }
+    return {
+      kind: "live",
+      session: liveByName.record,
+      threadId: liveByName.record.thread_id,
+      name: liveByName.record.name,
+    };
+  }
+
+  const detached = await findDetachedThreadByName(ctx, user, identifier);
+  if (detached === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across detached threads; use a thread_id`);
+  }
+  if (!detached) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+  }
+  return {
+    kind: "detached",
+    thread: detached,
+    threadId: detached.id,
+    name: asString(detached.name),
+  };
+}
+
+async function readDetachedThreadById(
+  ctx: DaemonContext,
+  user: string,
+  threadId: string,
+): Promise<Thread> {
+  try {
+    const client = await ctx.pool.acquireForAdhoc(user);
+    const result = await threadRead(client, threadId, ctx.retryOptions());
+    return result.thread;
+  } catch (e) {
+    throw new CodexTeamError("session_not_found", `session '${threadId}' not found: ${(e as Error).message}`);
+  }
+}
+
+async function findDetachedThreadByName(
+  ctx: DaemonContext,
+  user: string,
+  name: string,
+): Promise<Thread | "ambiguous" | null> {
+  const client = await ctx.pool.acquireForAdhoc(user);
+  let cursor: string | undefined;
+  let match: Thread | null = null;
+  do {
+    const page = await threadList(client, {
+      limit: 200,
+      includeArchived: true,
+      ...(cursor ? { cursor } : {}),
+    }, ctx.retryOptions());
+    for (const thread of page.data) {
+      if (asString(thread.name) !== name) continue;
+      if (match) return "ambiguous";
+      match = thread;
+    }
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return match;
 }

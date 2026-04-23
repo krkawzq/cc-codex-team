@@ -550,6 +550,51 @@ const sessionGroup: HelpNode = {
       needs_bearer: true,
     }),
     leaf({
+      name: "archive",
+      summary: "Archive a detached thread, or detach and archive a live session.",
+      usage: "codex-team -b <token> session archive <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET },
+      ],
+      flags: [
+        {
+          long: "--and-detach",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Hard-detach a live session before archiving it.",
+        },
+      ],
+      notes: [
+        "Live sessions refuse without --and-detach.",
+      ],
+      examples: [
+        "codex-team -b $TOKEN session archive audit --and-detach",
+        "codex-team -b $TOKEN session archive th-abc123",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "unarchive",
+      summary: "Restore an archived detached thread.",
+      usage: "codex-team -b <token> session unarchive <thread_id>",
+      positionals: [
+        {
+          name: "thread_id",
+          required: true,
+          description: "Detached archived thread ID.",
+        },
+      ],
+      flags: [],
+      notes: [
+        "Fails if the thread is currently live.",
+      ],
+      examples: [
+        "codex-team -b $TOKEN session unarchive th-abc123",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
       name: "fork",
       summary: "Fork a session into a new live session.",
       usage: "codex-team -b <token> session fork <name|thread_id> [new_name] [flags]",
@@ -577,8 +622,8 @@ const sessionGroup: HelpNode = {
     }),
     leaf({
       name: "rename",
-      summary: "Rename a session without attaching it.",
-      usage: "codex-team -b <token> session rename <name|thread_id> <new_name>",
+      summary: "Rename a live session or, with --detached-ok, a detached thread.",
+      usage: "codex-team -b <token> session rename <name|thread_id> <new_name> [flags]",
       positionals: [
         { ...SESSION_TARGET, description: "Current session name or thread ID." },
         {
@@ -587,9 +632,49 @@ const sessionGroup: HelpNode = {
           description: "New session name.",
         },
       ],
-      flags: [],
+      flags: [
+        {
+          long: "--detached-ok",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Allow renaming a detached thread via persisted thread metadata.",
+        },
+      ],
       examples: [
         "codex-team -b $TOKEN session rename audit audit-review",
+        "codex-team -b $TOKEN session rename th-abc123 audit-review --detached-ok",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "rollback",
+      summary: "Fork a thread at an earlier turn, archive the old thread, and move the session name forward.",
+      usage: "codex-team -b <token> session rollback <name|thread_id> --to-turn <turn_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET, description: "Source live session or detached thread." },
+      ],
+      flags: [
+        {
+          long: "--to-turn",
+          type: "string",
+          required: true,
+          description: "Turn ID to fork from.",
+        },
+        {
+          long: "--detach-after",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Leave the forked thread detached instead of resuming it live.",
+        },
+      ],
+      notes: [
+        "The original thread is renamed to <name>-pre-rollback-<iso8601> and archived.",
+      ],
+      examples: [
+        "codex-team -b $TOKEN session rollback audit --to-turn turn-42",
+        "codex-team -b $TOKEN session rollback th-abc123 --to-turn turn-42 --detach-after",
       ],
       needs_bearer: true,
     }),

@@ -216,6 +216,28 @@ describe("parseArgs", () => {
     expect(wait.flags.timeout).toBe("30");
   });
 
+  it("parses the session archive, unarchive, rename, and rollback lifecycle commands", () => {
+    const archive = parseArgs(["-b", "token-1", "session", "archive", "sess-1", "--and-detach"]);
+    expect(archive.commandPath).toEqual(["session", "archive"]);
+    expect(archive.positionals).toEqual(["sess-1"]);
+    expect(archive.flags["and-detach"]).toBe(true);
+
+    const unarchive = parseArgs(["-b", "token-1", "session", "unarchive", "th-1"]);
+    expect(unarchive.commandPath).toEqual(["session", "unarchive"]);
+    expect(unarchive.positionals).toEqual(["th-1"]);
+
+    const rename = parseArgs(["-b", "token-1", "session", "rename", "th-1", "audit", "--detached-ok"]);
+    expect(rename.commandPath).toEqual(["session", "rename"]);
+    expect(rename.positionals).toEqual(["th-1", "audit"]);
+    expect(rename.flags["detached-ok"]).toBe(true);
+
+    const rollback = parseArgs(["-b", "token-1", "session", "rollback", "audit", "--to-turn", "turn-1", "--detach-after"]);
+    expect(rollback.commandPath).toEqual(["session", "rollback"]);
+    expect(rollback.positionals).toEqual(["audit"]);
+    expect(rollback.flags["to-turn"]).toBe("turn-1");
+    expect(rollback.flags["detach-after"]).toBe(true);
+  });
+
   it("treats --short and --full as mutually exclusive output modes", () => {
     const parsed = parseArgs(["-b", "token-1", "status", "--short", "--full"]);
 
