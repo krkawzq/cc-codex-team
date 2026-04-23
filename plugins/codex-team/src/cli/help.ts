@@ -1648,12 +1648,21 @@ const HELP_TREE: HelpNode = {
           required: false,
           description: "Print one summary line with verdict, failed checks, and warnings.",
         },
+        {
+          long: "--json",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Emit one JSON object with verdict, checks, and exit_code for automation.",
+        },
       ],
       examples: [
         "codex-team doctor",
+        "codex-team doctor --json",
         "codex-team doctor --short",
       ],
       notes: [
+        "Human-readable by default. Use --json for programmatic consumption; --short stays plain-text and cannot be combined with --json.",
         "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
         "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness.",
       ],

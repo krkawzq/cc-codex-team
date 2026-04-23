@@ -18,9 +18,9 @@ import {
   checkNode,
   checkSocketBind,
   runDoctor,
-  type DoctorCheckResult,
   type DoctorDeps,
 } from "../src/cli/doctor";
+import { runCli } from "../src/cli/run";
 
 class FakeServer extends EventEmitter {
   private readonly mode: "success" | "error";
@@ -89,7 +89,29 @@ function makeContext(overrides: Partial<Parameters<typeof buildDoctorContext>[0]
     dataDir: overrides.dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-doctor-data-")),
     sockPath: overrides.sockPath ?? path.join(os.tmpdir(), `codex-team-${Date.now()}.sock`),
     pathEnv: overrides.pathEnv ?? process.env.PATH,
+    pluginRoot: overrides.pluginRoot,
+    invokedAs: overrides.invokedAs,
   });
+}
+
+function createDoctorPackageRoot(tempDirs: string[]): string {
+  const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-doctor-pkg-"));
+  tempDirs.push(packageRoot);
+  fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true });
+  fs.mkdirSync(path.join(packageRoot, "src"), { recursive: true });
+  fs.writeFileSync(path.join(packageRoot, "dist", "main.js"), "dist");
+  fs.writeFileSync(path.join(packageRoot, "src", "main.ts"), "src");
+  fs.utimesSync(path.join(packageRoot, "src", "main.ts"), new Date(0), new Date(0));
+  return packageRoot;
+}
+
+function createLauncherDir(tempDirs: string[]): { launcherDir: string; launcherPath: string } {
+  const launcherDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-bin-"));
+  tempDirs.push(launcherDir);
+  const launcherPath = path.join(launcherDir, "codex-team");
+  fs.writeFileSync(launcherPath, "#!/bin/sh\n");
+  fs.chmodSync(launcherPath, 0o755);
+  return { launcherDir, launcherPath };
 }
 
 describe("doctor", () => {
@@ -122,17 +144,57 @@ describe("doctor", () => {
     });
   });
 
-  it("warns when the plugin launcher is not on PATH", () => {
+  it("warns when the plugin launcher is not on PATH outside plugin mode", () => {
+    const previousPluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    delete process.env.CLAUDE_PLUGIN_ROOT;
     const ctx = makeContext({ pathEnv: "" });
     tempDirs.push(ctx.dataDir);
 
-    const result = checkLauncherOnPath(ctx, makeDeps());
+    try {
+      const result = checkLauncherOnPath(ctx, makeDeps());
 
-    expect(result).toMatchObject({
-      status: "warn",
-    });
-    expect(result.message).toContain("codex-team not on PATH");
-    expect(result.message).toContain(path.join(path.resolve("plugins/codex-team"), "bin", "codex-team"));
+      expect(result).toMatchObject({
+        status: "warn",
+        name: "launcher_on_path",
+      });
+      expect(result.message).toContain("codex-team not on PATH");
+      expect(result.message).toContain(path.join(path.resolve("plugins/codex-team"), "bin", "codex-team"));
+    } finally {
+      if (previousPluginRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousPluginRoot;
+    }
+  });
+
+  it("treats the bundled launcher as OK in plugin mode", () => {
+    const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-plugin-root-"));
+    tempDirs.push(pluginRoot);
+    const packageRoot = path.join(pluginRoot, "plugins", "codex-team");
+    fs.mkdirSync(path.join(packageRoot, "bin"), { recursive: true });
+    const launcherPath = path.join(packageRoot, "bin", "codex-team");
+    fs.writeFileSync(launcherPath, "#!/bin/sh\n");
+    fs.chmodSync(launcherPath, 0o755);
+
+    const previousPluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    const previousArgv1 = process.argv[1];
+    process.env.CLAUDE_PLUGIN_ROOT = pluginRoot;
+    process.argv[1] = launcherPath;
+
+    try {
+      const ctx = makeContext({ packageRoot, pathEnv: "" });
+      tempDirs.push(ctx.dataDir);
+
+      const result = checkLauncherOnPath(ctx, makeDeps());
+
+      expect(result).toMatchObject({
+        status: "ok",
+        name: "launcher_on_path",
+        message: `launcher=${path.resolve(launcherPath)} (plugin mode)`,
+      });
+    } finally {
+      process.argv[1] = previousArgv1;
+      if (previousPluginRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = previousPluginRoot;
+    }
   });
 
   it("verifies daemon.data_dir is writable", () => {
@@ -147,22 +209,40 @@ describe("doctor", () => {
     });
   });
 
+  it("prints a writable tmpdir suggestion when data_dir is not writable", async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-doctor-data-"));
+    tempDirs.push(dataDir);
+    const packageRoot = createDoctorPackageRoot(tempDirs);
+    const { launcherDir } = createLauncherDir(tempDirs);
+
+    const lines: string[] = [];
+    const code = await runDoctor({
+      packageRoot,
+      dataDir,
+      pathEnv: launcherDir,
+      write: (line) => { lines.push(line); },
+    }, makeDeps({
+      fs: {
+        ...fs,
+        writeFileSync: ((target: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, options?: fs.WriteFileOptions) => {
+          if (typeof target === "string" && target.endsWith(".doctor-write-test")) {
+            throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+          }
+          return fs.writeFileSync(target as never, data as never, options as never);
+        }) as typeof fs.writeFileSync,
+      },
+    }));
+
+    expect(code).toBe(2);
+    expect(lines.join("")).toContain(`[FAIL] data_dir=${dataDir} not writable`);
+    expect(lines.join("")).toMatch(/Try: CODEX_TEAM_DATA_DIR=.*codex-team doctor/);
+  });
+
   it("fails doctor when local socket listen is denied", async () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-doctor-data-"));
     tempDirs.push(dataDir);
-    const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-doctor-pkg-"));
-    tempDirs.push(packageRoot);
-    fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true });
-    fs.mkdirSync(path.join(packageRoot, "src"), { recursive: true });
-    fs.writeFileSync(path.join(packageRoot, "dist", "main.js"), "dist");
-    fs.writeFileSync(path.join(packageRoot, "src", "main.ts"), "src");
-    fs.utimesSync(path.join(packageRoot, "src", "main.ts"), new Date(0), new Date(0));
-
-    const launcherDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-bin-"));
-    tempDirs.push(launcherDir);
-    const launcherPath = path.join(launcherDir, "codex-team");
-    fs.writeFileSync(launcherPath, "#!/bin/sh\n");
-    fs.chmodSync(launcherPath, 0o755);
+    const packageRoot = createDoctorPackageRoot(tempDirs);
+    const { launcherDir } = createLauncherDir(tempDirs);
 
     const lines: string[] = [];
     const code = await runDoctor({
@@ -178,11 +258,32 @@ describe("doctor", () => {
     }));
 
     expect(code).toBe(2);
-    expect(lines.join("")).toContain("[FAIL] socket_bind EPERM - sandbox forbids listen(); codex-team won't work here");
+    expect(lines.join("")).toContain("[FAIL] socket_bind EPERM - sandbox forbids listen()");
+    expect(lines.join("")).toContain("Hint: no workaround here; this environment cannot host the daemon.");
+    expect(lines.join("")).toContain("codex-team version");
     expect(lines.join("")).toContain("=== BROKEN ===");
   });
 
-  it("reports stale pidfiles with a manual recovery hint", () => {
+  it("surfaces socket bind probe setup errors instead of aborting doctor", async () => {
+    const ctx = makeContext();
+    tempDirs.push(ctx.dataDir);
+
+    const result = await checkSocketBind(ctx, makeDeps({
+      fs: {
+        ...fs,
+        mkdirSync: (() => {
+          throw Object.assign(new Error("no such file or directory"), { code: "ENOENT" });
+        }) as typeof fs.mkdirSync,
+      },
+    }));
+
+    expect(result).toMatchObject({
+      status: "fail",
+      message: expect.stringContaining("socket_bind ENOENT - probe setup failed"),
+    });
+  });
+
+  it("reports stale pidfiles with the auto-cleanup hint", () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-doctor-data-"));
     tempDirs.push(dataDir);
     const ctx = makeContext({ dataDir });
@@ -199,7 +300,7 @@ describe("doctor", () => {
 
     expect(result.status).toBe("warn");
     expect(result.message).toContain("stale pidfile");
-    expect(result.message).toContain("Safe to remove manually");
+    expect(result.hint).toContain("auto-cleans stale daemon.pid and daemon.sock");
   });
 
   it("surfaces daemon socket connect errors with the code and interpretation", async () => {
@@ -207,8 +308,10 @@ describe("doctor", () => {
     tempDirs.push(ctx.dataDir);
     const result = await checkDaemonSocket(ctx, {
       id: "daemon_pid",
+      name: "daemon_pid",
       status: "ok",
       message: "daemon running, pid=10",
+      detail: "daemon running, pid=10",
       daemonState: "running",
       pid: 10,
     }, makeDeps({
@@ -250,9 +353,10 @@ describe("doctor", () => {
 
   it("runs the full doctor suite and returns HEALTHY on the happy path", async () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-doctor-data-"));
+    tempDirs.push(dataDir);
     const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-doctor-pkg-"));
     const launcherDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-bin-"));
-    tempDirs.push(dataDir, packageRoot, launcherDir);
+    tempDirs.push(packageRoot, launcherDir);
 
     fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true });
     fs.mkdirSync(path.join(packageRoot, "src"), { recursive: true });
@@ -281,5 +385,52 @@ describe("doctor", () => {
     expect(lines.join("")).toContain("[OK] daemon not running (will auto-spawn on first `-b` call)");
     expect(lines.join("")).toContain("[SKIP] daemon_socket (daemon not running)");
     expect(lines.join("")).toContain("=== HEALTHY ===");
+  });
+
+  it("emits structured JSON for doctor --json", async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-doctor-data-"));
+    tempDirs.push(dataDir);
+    const packageRoot = createDoctorPackageRoot(tempDirs);
+    const { launcherDir } = createLauncherDir(tempDirs);
+
+    const lines: string[] = [];
+    const code = await runDoctor({
+      json: true,
+      packageRoot,
+      dataDir,
+      pathEnv: launcherDir,
+      write: (line) => { lines.push(line); },
+    }, makeDeps());
+
+    expect(code).toBe(0);
+    const payload = JSON.parse(lines.join(""));
+    expect(payload).toMatchObject({
+      ok: true,
+      data: {
+        verdict: "HEALTHY",
+        exit_code: 0,
+      },
+    });
+    expect(payload.data.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: "node",
+        status: "OK",
+        detail: expect.stringContaining("node="),
+      }),
+      expect.objectContaining({
+        name: "launcher_on_path",
+        status: "OK",
+      }),
+    ]));
+  });
+
+  it("rejects doctor --short with --json", async () => {
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    const code = await runCli(["doctor", "--short", "--json"]);
+
+    expect(code).toBe(1);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"invalid_params\""));
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("--short and --json are mutually exclusive"));
   });
 });
