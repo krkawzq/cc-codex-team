@@ -53,17 +53,21 @@ Every playbook assumes:
 - One bearer token `$TOK` for the whole orchestration
 - `daemon user create $TOK` run once
 - The `events` Monitor armed for `$TOK`
-- Codex profiles pre-defined in `~/.codex/config.toml` for each role (see `skills/configure-codex-team/profiles.md`)
+- Role profiles applied via the **built-in skill library** — see [`skills/configure-codex-team/profiles-library.md`](../configure-codex-team/profiles-library.md)
 
-The profile names used across playbooks:
+The five canonical profiles (full flag bundles in `profiles-library.md`):
 
-- `reviewer` — `sandbox_mode=read-only`, `effort=xhigh`, `approval=never`
-- `fixer` — `sandbox_mode=workspace-write`, `effort=high`, `approval=on-request`
-- `tester` — `sandbox_mode=workspace-write`, `effort=medium`, `approval=never`
-- `planner` — `sandbox_mode=read-only`, `effort=xhigh`, `approval=never`
-- `explorer` — `sandbox_mode=read-only`, `effort=medium`, `approval=never`
+| Profile | Writes? | Effort | Approval | One-line summary |
+|---|---|---|---|---|
+| `fixer` | yes (workspace-write) | high | on-request | Default worker — edits code, asks before risky ops |
+| `reviewer` | no (read-only) | xhigh | never | Critic — reads diffs, produces verdicts |
+| `planner` | no (read-only) | xhigh | never | Strategist — produces plans, delegations |
+| `tester` | yes (workspace-write) | medium | never | Trusted automation — runs test commands |
+| `explorer` | no (read-only) | medium | never | Cheap investigator — summarizes code |
 
-Feel free to add your own.
+**How to apply a profile**: do NOT pass `--profile <name>` — that targets user-local Codex config which fresh agents don't have. Expand the flag bundle from `profiles-library.md` explicitly on `session new`. The library shows the exact `session new ...` command for each role.
+
+(`--profile <name>` on `session new` still works — it passes through to codex's own profile system — but is reserved for *user-defined* tuning. See `configure-codex-team/profiles.md` for the distinction.)
 
 ## Shared artefacts convention
 

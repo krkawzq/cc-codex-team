@@ -16,7 +16,9 @@ One session. Role: worker. Profile: `fixer` (or task-specific).
 TOK=claude-$(date +%s)
 codex-team daemon user create $TOK >/dev/null
 
-codex-team -b $TOK session new worker --profile fixer --cwd /repo \
+# fixer profile (see configure-codex-team/profiles-library.md)
+codex-team -b $TOK session new worker --cwd /repo \
+  --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high \
   --auto-approve 'git*,npm test,vitest*'
 codex-team -b $TOK cursor save solo-tail
 

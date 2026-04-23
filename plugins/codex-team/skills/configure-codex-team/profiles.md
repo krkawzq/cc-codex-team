@@ -1,106 +1,76 @@
-# Codex profiles
+# Profiles — two separate systems
 
-codex-team does not own the profile concept — it's native to Codex. `session new --profile <name>` passes the selected profile through to app-server as part of the thread-start config payload; codex then resolves that profile from its own config.
+codex-team has two profile concepts that are often confused. Make sure you're using the right one.
 
-## Where profiles live
+## 1. codex-team built-in profile library (what you want for playbooks)
 
-Codex reads profiles from `~/.codex/config.toml` (or wherever `CODEX_HOME` points). The codex-team daemon does NOT read this file.
+**Where**: `profiles-library.md` in this skill directory.
 
-Example `~/.codex/config.toml`:
+**What**: five canonical role profiles — `fixer`, `reviewer`, `planner`, `tester`, `explorer` — defined as `session new` flag bundles.
+
+**How**: Claude reads the library and expands the flags explicitly when spawning a session. **No external config needed.** Every agent that loads the `configure-codex-team` skill has these definitions.
+
+**Use for**: every session in every playbook in `skills/codex-team-playbooks/`. This is the default path.
+
+See [`profiles-library.md`](profiles-library.md) for the full definitions + quick recipes.
+
+## 2. Codex app-server `--profile <name>` (user-local customization)
+
+**Where**: `~/.codex/config.toml` (or wherever `$CODEX_HOME` points).
+
+**What**: user-defined Codex configuration profiles — a separate feature of the `codex` binary itself, not of codex-team.
+
+**How**: `codex-team` exposes a `--profile <name>` flag on `session new` / `session attach` that passes through to the codex app-server's `thread/start` RPC. codex resolves the name from `~/.codex/config.toml`. **codex-team does not read this file.**
+
+**Use for**: user-specific tuning that doesn't fit the canonical roles — e.g. `[profiles.my-rust-strict]` with `strict_mode = true`. If you have no custom codex profiles, you'll never touch this flag.
+
+Example user config:
 
 ```toml
-[profiles.reviewer]
+# ~/.codex/config.toml — OPTIONAL, user-local
+[profiles.my-rust-strict]
 model = "gpt-5.4"
 reasoning_effort = "xhigh"
-approval_policy = "never"
-sandbox_mode = "read-only"
-
-[profiles.fixer]
-model = "gpt-5.4"
-reasoning_effort = "high"
-approval_policy = "on-request"
+approval_policy = "untrusted"
 sandbox_mode = "workspace-write"
-
-[profiles.explorer]
-model = "gpt-5.4-mini"
-reasoning_effort = "medium"
-approval_policy = "never"
-sandbox_mode = "read-only"
+# plus any custom codex knobs
 ```
 
-## Usage with codex-team
+Usage:
 
 ```bash
-codex-team -b $TOK session new review-worker --profile reviewer --cwd /repo
+codex-team -b $TOK session new careful-rust --profile my-rust-strict --cwd /repo
 ```
 
-Precedence when `--profile` is combined with individual flags:
+Precedence (same as before):
 
 ```
   explicit single flag  >  profile field  >  codex-team default  >  codex internal default
 ```
 
-So:
+## When to use which
 
-```bash
-# profile says sandbox=read-only, but we override just for this session
-codex-team -b $TOK session new demo --profile reviewer --sandbox workspace-write
-```
+| You want… | Use |
+|---|---|
+| One of the five canonical roles | Skill library (`profiles-library.md`) — expand flags explicitly |
+| A reusable recipe for your own workflow | Your own entry in `~/.codex/config.toml` + `--profile <name>` |
+| Daemon-wide defaults (all sessions on this daemon) | `daemon config set codex.default_*` — see `config-keys.md` |
 
-## Recipe: worker roles
+## Inspecting what was requested
 
-Define once, reuse:
-
-```toml
-# ~/.codex/config.toml
-[profiles.reviewer]
-model = "gpt-5.4"
-reasoning_effort = "xhigh"
-approval_policy = "never"
-sandbox_mode = "read-only"
-
-[profiles.fixer]
-model = "gpt-5.4"
-reasoning_effort = "high"
-approval_policy = "on-request"
-sandbox_mode = "workspace-write"
-
-[profiles.tester]
-model = "gpt-5.4-mini"
-reasoning_effort = "medium"
-approval_policy = "never"
-sandbox_mode = "workspace-write"
-```
-
-Spin up a review-fix-test team:
-
-```bash
-TOK=claude-$(date +%s)
-codex-team daemon user create $TOK
-
-for role in reviewer fixer tester; do
-  codex-team -b $TOK session new "$role" --profile "$role" --cwd /repo
-done
-```
-
-See `skills/codex-team-playbooks/worker-reviewer.md` for orchestration.
-
-## Inspecting a loaded profile
-
-After `session new`, the session record shows what codex-team requested / defaulted locally (`model`, `sandbox`, `approval`, `effort`, `profile`). Codex does not echo a fully expanded "resolved profile" object back over `thread/start`, so treat this as the requested launch shape, not a proof that every profile field was applied.
-
-Check the stored session metadata with:
+After `session new`, the session record shows what codex-team requested (model, sandbox, approval, effort, profile). Codex does not echo a fully expanded "resolved profile" object back over `thread/start`, so treat this as the launch shape, not a proof that every field was applied as you expect.
 
 ```bash
 codex-team -b $TOK session info <name>
+# or with --full for the whole record including auto-approve patterns
 ```
 
 ## Not profiles
 
-These belong to `daemon config`, not `~/.codex/config.toml`:
+These belong to `daemon config`, not to either profile system:
 
-- daemon-side defaults for when `--profile` is unused: `codex.default_*`
+- daemon-side defaults: `codex.default_*`
 - retry behaviour
-- sock path / log path
+- sock / log path
 
 See `config-keys.md`.

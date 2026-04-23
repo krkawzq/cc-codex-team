@@ -51,7 +51,9 @@ EOF
 
 N=4
 for i in $(seq 0 $((N-1))); do
-  codex-team -b $TOK session new "explorer-$i" --profile explorer --cwd "$(pwd)"
+  # explorer profile (see configure-codex-team/profiles-library.md)
+  codex-team -b $TOK session new "explorer-$i" --cwd "$(pwd)" \
+    --model gpt-5.4-mini --sandbox read-only --approval never --effort medium
 done
 codex-team -b $TOK monitor events --stream --summary --cursor swarm-tail
 ```
@@ -135,7 +137,9 @@ Refill doesn't restart the workers — they pick up on their next loop iteration
 Always end a swarm with a synthesis. The done/ files are raw notes; you want a digest:
 
 ```bash
-codex-team -b $TOK session new digest --profile reviewer --cwd "$(pwd)"
+# reviewer profile (see configure-codex-team/profiles-library.md)
+codex-team -b $TOK session new digest --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
 codex-team -b $TOK message send digest "
   Read .codex-team/brief.md, .codex-team/backlog.md, every .codex-team/done/*.md
   and .codex-team/skipped/*.md.

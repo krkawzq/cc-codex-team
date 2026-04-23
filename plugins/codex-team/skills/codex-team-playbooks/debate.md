@@ -47,9 +47,13 @@ cat > .codex-team/position-b.md <<'EOF'
 <one-paragraph summary of position B>
 EOF
 
-codex-team -b $TOK session new advocate-a --profile planner  --cwd "$(pwd)"
-codex-team -b $TOK session new advocate-b --profile planner  --cwd "$(pwd)"
-codex-team -b $TOK session new judge      --profile reviewer --cwd "$(pwd)"
+# planner + planner + reviewer profile bundles (see configure-codex-team/profiles-library.md)
+codex-team -b $TOK session new advocate-a --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
+codex-team -b $TOK session new advocate-b --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
+codex-team -b $TOK session new judge      --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
 
 # Optional long-running monitor for resumable orchestration
 codex-team -b $TOK monitor events --stream --summary --cursor debate-tail

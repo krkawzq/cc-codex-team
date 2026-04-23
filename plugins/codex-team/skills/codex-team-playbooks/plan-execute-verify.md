@@ -34,10 +34,14 @@ cd /repo
 mkdir -p .codex-team
 echo "$BRIEF" > .codex-team/brief.md
 
-codex-team -b $TOK session new planner  --profile planner  --cwd "$(pwd)"
-codex-team -b $TOK session new executor --profile fixer    --cwd "$(pwd)" \
+# planner + fixer + reviewer profile bundles (see configure-codex-team/profiles-library.md)
+codex-team -b $TOK session new planner  --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
+codex-team -b $TOK session new executor --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high \
   --auto-approve 'git*,npm test,vitest*'
-codex-team -b $TOK session new verifier --profile reviewer --cwd "$(pwd)"
+codex-team -b $TOK session new verifier --cwd "$(pwd)" \
+  --model gpt-5.4 --sandbox read-only --approval never --effort xhigh
 codex-team -b $TOK monitor events --stream --summary --cursor pev-tail
 ```
 

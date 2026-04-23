@@ -14,7 +14,8 @@ description: >-
 |---|---|
 | `cli-reference.md` | Every CLI command, positional, flag, error code |
 | `config-keys.md` | Every `daemon config` key: type, default, hot vs restart |
-| `profiles.md` | How to use codex profiles (`--profile`) with session new |
+| `profiles-library.md` | **Built-in role profiles (`fixer` / `reviewer` / `planner` / `tester` / `explorer`) — read this before any playbook work** |
+| `profiles.md` | The two profile systems: skill-bundled library vs user-local `~/.codex/config.toml` `--profile <name>` |
 | `env-vars.md` | `CODEX_TEAM_DATA_DIR`, `CODEX_TEAM_SOCK`, `CLAUDE_PLUGIN_DATA` routing |
 
 ## Quick lookups
