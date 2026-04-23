@@ -267,6 +267,7 @@ function unlinkSockIfStale(sockPath) {
 var COMMANDS = /* @__PURE__ */ new Set([
   "version",
   "status",
+  "daemon:fleet:status",
   "daemon:status",
   "daemon:start",
   "daemon:stop",
@@ -288,6 +289,7 @@ var COMMANDS = /* @__PURE__ */ new Set([
   "session:info",
   "session:context",
   "session:list",
+  "session:events",
   "message:send",
   "message:peer",
   "message:interrupt",
@@ -308,6 +310,7 @@ var COMMANDS = /* @__PURE__ */ new Set([
 var HELP_PATHS = /* @__PURE__ */ new Set([
   ...COMMANDS,
   "daemon",
+  "daemon:fleet",
   "daemon:user",
   "daemon:config",
   "session",
@@ -455,9 +458,12 @@ function commandKey(path16) {
 }
 var SHORT_COMMANDS = /* @__PURE__ */ new Set([
   "status",
+  "daemon:fleet:status",
   "daemon:status",
   "daemon:user:list",
   "session:info",
+  "session:health",
+  "session:health:all",
   "session:list",
   "message:history"
 ]);
@@ -720,6 +726,46 @@ var daemonConfigGroup = {
   ],
   needs_bearer: false
 };
+var daemonFleetGroup = {
+  name: "fleet",
+  summary: "Inspect daemon-wide user and session health at a glance.",
+  usage: "codex-team daemon fleet <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team daemon fleet status"
+  ],
+  subcommands: [
+    leaf({
+      name: "status",
+      summary: "Show a cross-user live-session fleet snapshot.",
+      usage: "codex-team daemon fleet status [flags]",
+      positionals: [],
+      flags: [
+        {
+          long: "--users",
+          type: "csv|all",
+          default: "all known users",
+          required: false,
+          description: "Limit the snapshot to 'all' or a comma-separated token list."
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per user to stdout."
+        }
+      ],
+      examples: [
+        "codex-team daemon fleet status",
+        "codex-team daemon fleet status --users claude-alice,claude-bob"
+      ],
+      needs_bearer: false
+    })
+  ],
+  needs_bearer: false
+};
 var daemonGroup = {
   name: "daemon",
   summary: "Manage the shared daemon and daemon-owned resources.",
@@ -728,6 +774,7 @@ var daemonGroup = {
   flags: [],
   examples: [
     "codex-team daemon status",
+    "codex-team daemon fleet status",
     "codex-team daemon logs -f --level warn"
   ],
   subcommands: [
@@ -824,6 +871,7 @@ var daemonGroup = {
       ],
       needs_bearer: false
     }),
+    daemonFleetGroup,
     daemonUserGroup,
     daemonConfigGroup
   ],
@@ -1110,17 +1158,127 @@ var sessionGroup = {
     }),
     leaf({
       name: "health",
-      summary: "Show a compact live health snapshot for one session.",
-      usage: "codex-team -b <token> session health <name|thread_id>",
+      summary: "Show a live health snapshot for one session or every tracked session.",
+      usage: "codex-team -b <token> session health [<name|thread_id>] [flags]",
+      positionals: [
+        {
+          ...SESSION_TARGET,
+          required: false,
+          description: "Session name or thread ID when not using --all."
+        }
+      ],
+      flags: [
+        {
+          long: "--all",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Return one health snapshot per tracked session instead of a single target."
+        },
+        {
+          long: "--only-unhealthy",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "With --all, hide idle live sessions whose app-server is healthy."
+        },
+        {
+          long: "--state",
+          type: "csv",
+          required: false,
+          description: "With --all, limit results to live, crashed, and/or closed states."
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per returned session to stdout."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN session health audit",
+        "codex-team -b $TOKEN session health --all --only-unhealthy",
+        "codex-team -b $TOKEN session health --all --state live,crashed"
+      ],
+      notes: [
+        "Without --all, current single-session behavior stays in place.",
+        "If the session is crashed or the app-server is dead, run 'codex-team -b <token> session heal <name|thread_id>'."
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "events",
+      summary: "Replay retained normalized events for one session, with optional follow mode.",
+      usage: "codex-team -b <token> session events <name|thread_id> [flags]",
       positionals: [
         { ...SESSION_TARGET }
       ],
-      flags: [],
+      flags: [
+        {
+          long: "--type",
+          type: "csv",
+          required: false,
+          description: "Only include matching event types such as turn.completed,item.completed."
+        },
+        {
+          long: "--turn",
+          type: "string",
+          required: false,
+          description: "Only include events associated with one turn ID."
+        },
+        {
+          long: "--since",
+          type: "event_id",
+          required: false,
+          description: "Start after this retained event ID."
+        },
+        {
+          long: "--limit",
+          type: "int",
+          default: "50",
+          required: false,
+          description: "Cap the initial backlog size; when --since is absent, uses the most recent N events."
+        },
+        {
+          long: "--follow",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Keep streaming future matching events after the initial backlog."
+        },
+        {
+          long: "--summary",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Emit the same compact event summaries as monitor events --summary."
+        },
+        {
+          long: "--by-tool",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Count item.completed events by rendered tool bucket; cannot be used with --follow or --summary."
+        },
+        {
+          long: "--by-item-kind",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Count item.completed events by normalized item kind; cannot be used with --follow or --summary."
+        }
+      ],
       examples: [
-        "codex-team -b $TOKEN session health audit"
+        "codex-team -b $TOKEN session events audit --limit 10",
+        "codex-team -b $TOKEN session events audit --type turn.completed,item.completed",
+        "codex-team -b $TOKEN session events audit --turn turn-42",
+        "codex-team -b $TOKEN session events audit --follow --summary",
+        "codex-team -b $TOKEN session events audit --by-tool"
       ],
       notes: [
-        "If the session is crashed or the app-server is dead, run 'codex-team -b <token> session heal <name|thread_id>'."
+        "Default output is chronological oldest-to-newest NDJSON for the retained event window.",
+        "Use --since to page forward from a prior event ID."
       ],
       needs_bearer: true
     }),
@@ -2160,11 +2318,18 @@ function formatShort(method, data) {
     case "status":
       body = formatStatus(data);
       break;
+    case "daemon:fleet:status":
+      body = formatDaemonFleetStatus(data);
+      break;
     case "daemon:status":
       body = formatDaemonStatus(data);
       break;
     case "daemon:user:list":
       body = formatDaemonUserList(data);
+      break;
+    case "session:health":
+    case "session:health:all":
+      body = formatSessionHealth(data);
       break;
     case "session:info":
       body = formatSessionInfo(data);
@@ -2211,6 +2376,23 @@ function formatDaemonStatus(data) {
     `dist_age=${typeof distAge === "number" && Number.isFinite(distAge) ? humanizeMs(distAge * 1e3) : "unknown"}`
   ].join(" ");
 }
+function formatDaemonFleetStatus(data) {
+  const value = asObject(data);
+  const users = Array.isArray(value.per_user) ? value.per_user : [];
+  if (users.length === 0) return "(no users)";
+  return users.map((entry) => {
+    const user = asObject(entry);
+    return [
+      `user=${formatScalar(user.token)}`,
+      `live=${formatCount(user.live)}`,
+      `busy=${formatCount(user.busy)}`,
+      `pending=${formatCount(user.pending)}`,
+      `crashed=${formatCount(user.crashed)}`,
+      `last_event=${formatNullableScalar(asString(user.last_event_id))}`,
+      `last_seen=${formatFleetAge(user)}`
+    ].join(" ");
+  }).join("\n");
+}
 function formatDaemonAge(data) {
   if (typeof data.uptime_s === "number" && Number.isFinite(data.uptime_s)) {
     return humanizeMs(data.uptime_s * 1e3);
@@ -2235,6 +2417,15 @@ function formatSessionInfo(data) {
     `turn=${formatNullableScalar(turnId)}`,
     `items=${formatNullableCount(itemsInTurn)}`
   ].join(" ");
+}
+function formatSessionHealth(data) {
+  const value = asObject(data);
+  const sessions = Array.isArray(value.sessions) ? value.sessions : null;
+  if (sessions) {
+    if (sessions.length === 0) return "(no sessions)";
+    return sessions.map((entry) => formatSessionHealthEntry(asObject(entry))).join("\n");
+  }
+  return formatSessionHealthEntry(value);
 }
 function formatSessionList(data) {
   const value = asObject(data);
@@ -2282,10 +2473,25 @@ function formatMessageHistory(data) {
     ].join(" ");
   }).join("\n");
 }
+function formatSessionHealthEntry(session) {
+  return [
+    formatScalar(session.session ?? session.name),
+    `state=${formatScalar(session.state)}`,
+    `busy=${busyFlag(session.busy, asString(session.current_turn_id), null, hasOwn(session, "current_turn_id"))}`,
+    `pending=${formatCount(numericValue(session.pending_approval_requests) + numericValue(session.pending_user_input_requests))}`,
+    `app_server=${booleanFlag(session.app_server_alive)}`,
+    `turn=${formatNullableScalar(asString(session.current_turn_id))}`
+  ].join(" ");
+}
 function formatAgeFromDateish(value) {
   const date = parseDate(value);
   if (!date) return "unknown";
   return humanizeMs(Math.max(0, Date.now() - date.getTime()));
+}
+function formatFleetAge(value) {
+  const ageSeconds = asFiniteNumber(value.last_activity_age_s);
+  if (ageSeconds !== null) return humanizeMs(ageSeconds * 1e3);
+  return formatAgeFromDateish(value.last_active_at ?? value.created_at);
 }
 function humanizeMs(ms) {
   if (!Number.isFinite(ms) || ms < 0) return "unknown";
@@ -2409,6 +2615,14 @@ function formatScalar(value) {
   if (typeof value === "boolean") return value ? "true" : "false";
   return "unknown";
 }
+function booleanFlag(value) {
+  if (value === true) return "y";
+  if (value === false) return "n";
+  return "unknown";
+}
+function numericValue(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
 function shortTokenPrefix(token) {
   const encoded = typeof token === "string" && token.length > 0 ? encodeToken(token) : "unknown";
   return `${encoded.slice(0, 10)}...`;
@@ -2479,6 +2693,8 @@ function formatCompact(method, data) {
         "pending_requests",
         "app_server_count"
       ]);
+    case "daemon:fleet:status":
+      return compactDaemonFleetStatus(data);
     case "daemon:status":
       return pickFields(data, [
         "pid",
@@ -2559,6 +2775,10 @@ function formatCompact(method, data) {
         "app_server_alive",
         "last_event_id"
       ]);
+    case "session:health:all":
+      return compactSessionHealthAll(data);
+    case "session:events":
+      return asObject2(data);
     case "session:heal":
       return compactSessionHeal(data);
     case "message:send":
@@ -2618,6 +2838,24 @@ function compactDaemonConfigList(data) {
       "explicit",
       "needs_restart",
       "type"
+    ]))
+  };
+}
+function compactDaemonFleetStatus(data) {
+  const value = asObject2(data);
+  return {
+    total_users: value.total_users,
+    total_live_sessions: value.total_live_sessions,
+    total_pending: value.total_pending,
+    total_app_servers: value.total_app_servers,
+    per_user: asArray(value.per_user).map((entry) => pickFields(entry, [
+      "token",
+      "live",
+      "busy",
+      "pending",
+      "crashed",
+      "last_event_id",
+      "last_activity_age_s"
     ]))
   };
 }
@@ -2684,6 +2922,26 @@ function compactSessionHeal(data) {
   copyIfPresent(out, value, "healed");
   copyIfPresent(out, value, "note");
   return out;
+}
+function compactSessionHealthAll(data) {
+  const value = asObject2(data);
+  return {
+    summary: pickFields(value.summary, ["total", "healthy", "crashed", "closed", "busy", "pending_total"]),
+    sessions: asArray(value.sessions).map((entry) => pickFields(entry, [
+      "session",
+      "thread_id",
+      "state",
+      "busy",
+      "current_turn_id",
+      "current_turn_elapsed_ms",
+      "current_item_type",
+      "items_done_in_turn",
+      "pending_approval_requests",
+      "pending_user_input_requests",
+      "app_server_alive",
+      "last_event_id"
+    ]))
+  };
 }
 function compactMessageHistory(data) {
   const value = asObject2(data);
@@ -2882,9 +3140,10 @@ async function runCli(argv) {
     process.stderr.write(warning.message + "\n");
   });
   const method = commandKey(parsed.commandPath);
+  const effectiveMethod = resolveMethod(method, parsed);
   const short = truthy(parsed.flags.short);
   const format = flagString(parsed.flags.format);
-  if (short && !supportsShort(method)) {
+  if (short && !supportsShort(effectiveMethod)) {
     process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
     return 1;
   }
@@ -2896,14 +3155,14 @@ async function runCli(argv) {
   if (method === "version") {
     return await runVersion(sockPath);
   }
-  const needsBearer = !isDaemonLevel(method);
+  const needsBearer = !isDaemonLevel(effectiveMethod);
   if (needsBearer && !parsed.bearer) {
     process.stdout.write(
       JSON.stringify(err("invalid_params", `bearer token required for '${method}'; pass -b <token>`)) + "\n"
     );
     return 1;
   }
-  const cliValidationError = validateCliFlags(parsed, method);
+  const cliValidationError = validateCliFlags(parsed, method, effectiveMethod);
   if (cliValidationError) {
     process.stdout.write(JSON.stringify(err("invalid_params", cliValidationError)) + "\n");
     return 1;
@@ -2918,7 +3177,7 @@ async function runCli(argv) {
     process.stdout.write(JSON.stringify(err("daemon_unreachable", ready.message)) + "\n");
     return 1;
   }
-  return await dispatchCommand(sockPath, parsed, method);
+  return await dispatchCommand(sockPath, parsed, effectiveMethod);
 }
 function isDaemonLevel(method) {
   return method === "version" || method === "daemon:status" || method.startsWith("daemon:");
@@ -2953,7 +3212,7 @@ async function runVersion(sockPath) {
 }
 async function dispatchCommand(sockPath, parsed, method) {
   const cliConfig = readCliConfig();
-  const needsStreaming = method === "monitor:events" || method === "monitor:alarm" || method === "daemon:logs" || method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]);
+  const needsStreaming = method === "monitor:events" || method === "session:events" || method === "monitor:alarm" || method === "daemon:logs" || method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]);
   if (truthy(parsed.flags["stdin"]) && !("stdin_content" in parsed.flags)) {
     try {
       const content = await readStdinAll();
@@ -3315,13 +3574,43 @@ function sendStreamAck(sock, reqId, eventId) {
 function forwardDaemonError(error) {
   return JSON.stringify(err(error.code, error.message, error.data)) + "\n";
 }
-function validateCliFlags(parsed, method) {
-  if (method !== "monitor:events") return null;
-  if (parsed.flags.cursor === true) return "--cursor requires a value";
-  if (parsed.flags.since !== void 0 && parsed.flags.cursor !== void 0) {
-    return "--since and --cursor are mutually exclusive";
+function validateCliFlags(parsed, method, effectiveMethod) {
+  if (method === "monitor:events") {
+    if (parsed.flags.cursor === true) return "--cursor requires a value";
+    if (parsed.flags.since !== void 0 && parsed.flags.cursor !== void 0) {
+      return "--since and --cursor are mutually exclusive";
+    }
+  }
+  if (method === "session:health" && effectiveMethod === "session:health") {
+    if (parsed.flags["only-unhealthy"] !== void 0 || parsed.flags.state !== void 0) {
+      return "--only-unhealthy and --state require --all";
+    }
+  }
+  if (effectiveMethod === "daemon:fleet:status" && parsed.flags.users === true) {
+    return "--users requires a value";
+  }
+  if (effectiveMethod === "session:events") {
+    if (parsed.flags.type === true) return "--type requires a value";
+    if (parsed.flags.turn === true) return "--turn requires a value";
+    if (parsed.flags.since === true) return "--since requires a value";
+    if (parsed.flags.limit === true) return "--limit requires a value";
+    if (truthy(parsed.flags["by-tool"]) && truthy(parsed.flags["by-item-kind"])) {
+      return "--by-tool and --by-item-kind are mutually exclusive";
+    }
+    if (truthy(parsed.flags.follow) && (truthy(parsed.flags["by-tool"]) || truthy(parsed.flags["by-item-kind"]))) {
+      return "--follow cannot be used with --by-tool or --by-item-kind";
+    }
+    if (truthy(parsed.flags.summary) && (truthy(parsed.flags["by-tool"]) || truthy(parsed.flags["by-item-kind"]))) {
+      return "--summary cannot be used with --by-tool or --by-item-kind";
+    }
   }
   return null;
+}
+function resolveMethod(method, parsed) {
+  if (method === "session:health" && truthy(parsed.flags.all)) {
+    return "session:health:all";
+  }
+  return method;
 }
 function asStringFlag(value) {
   if (Array.isArray(value)) {
@@ -3337,7 +3626,7 @@ function isTransientRequestError(err2) {
   return isTransientConnectError(err2) || err2.message === "daemon closed connection";
 }
 function isReadOnlyMethod(method) {
-  return method === "version" || method === "status" || method === "daemon:status" || method === "daemon:user:list" || method === "daemon:config:get" || method === "daemon:config:list" || method === "cursor:list" || method === "cursor:get" || method === "session:info" || method === "session:context" || method === "session:list" || method === "message:history";
+  return method === "version" || method === "status" || method === "daemon:fleet:status" || method === "daemon:status" || method === "daemon:user:list" || method === "daemon:config:get" || method === "daemon:config:list" || method === "cursor:list" || method === "cursor:get" || method === "session:health" || method === "session:health:all" || method === "session:events" || method === "session:info" || method === "session:context" || method === "session:list" || method === "message:history";
 }
 function readCliConfig() {
   const config = new ConfigStore();
@@ -6264,6 +6553,40 @@ var daemonStatus = async (ctx) => {
     ...distFreshness
   };
 };
+var daemonFleetStatus = async (ctx, req) => {
+  const tokens = resolveFleetUsers(ctx, asString3(getFlag(req.params, "users")));
+  const perUser = tokens.map((token) => {
+    const sessions = ctx.sessions.listLive(token);
+    const live = sessions.filter((session) => session.state === "live").length;
+    const crashed = sessions.filter((session) => session.state === "crashed").length;
+    const busy = sessions.filter((session) => {
+      const sessionKey = `${token}::${session.name}`;
+      const busyTurnId = session.current_turn_id ?? ctx.queues?.getCurrentTurn?.(sessionKey) ?? null;
+      const client = ctx.pool?.clientForSession?.(sessionKey);
+      const appServerAlive = typeof client?.isAlive === "function" ? client.isAlive() : Boolean(client);
+      return session.state === "live" && appServerAlive && busyTurnId !== null;
+    }).length;
+    const pending = typeof ctx.pending?.listForUser === "function" ? ctx.pending.listForUser(token).length : 0;
+    const user = ctx.users.get(token);
+    const activitySource = user?.last_active_at ?? user?.created_at ?? null;
+    return {
+      token,
+      live,
+      busy,
+      pending,
+      crashed,
+      last_event_id: ctx.events?.latestEvent?.(token)?.id ?? null,
+      last_activity_age_s: activitySource ? Math.max(0, Math.floor((Date.now() - Date.parse(activitySource)) / 1e3)) : null
+    };
+  });
+  return {
+    total_users: perUser.length,
+    total_live_sessions: perUser.reduce((sum, user) => sum + user.live, 0),
+    total_pending: perUser.reduce((sum, user) => sum + user.pending, 0),
+    total_app_servers: typeof ctx.pool?.processCount === "function" ? ctx.pool.processCount() : null,
+    per_user: perUser
+  };
+};
 var daemonStart = async () => {
   return { already_running: true };
 };
@@ -6498,6 +6821,22 @@ function toInt3(v, fallback) {
 }
 function asString3(v) {
   return typeof v === "string" ? v : null;
+}
+function resolveFleetUsers(ctx, rawUsers) {
+  if (!rawUsers || rawUsers === "all") {
+    return ctx.users.list().map((user) => user.token);
+  }
+  const requested = Array.from(new Set(
+    rawUsers.split(",").map((token) => token.trim()).filter(Boolean)
+  ));
+  if (requested.length === 0) {
+    throw invalidParams("--users requires 'all' or a comma-separated token list");
+  }
+  const missing = requested.filter((token) => !ctx.users.has(token));
+  if (missing.length > 0) {
+    throw invalidParams(`unknown user token(s): ${missing.join(", ")}`);
+  }
+  return requested;
 }
 function lineMatchesLevel(line, level) {
   try {
@@ -7752,6 +8091,267 @@ function sortSessions(rows, field) {
   });
   return copy;
 }
+var sessionHealthAll = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const flags = asFlags(req);
+  const positionals = asPositionals(req);
+  if (positionals.length > 0) {
+    throw invalidParams("session health --all does not take a session positional");
+  }
+  const onlyUnhealthy = isTrue2(flags["only-unhealthy"]);
+  const stateFilter = parseSessionHealthStates(asString5(flags["state"]));
+  const sessions = ctx.sessions.listLive(user).map((record) => buildSessionHealthSnapshot(ctx, user, record)).filter((snapshot) => matchesSessionHealthState(snapshot, stateFilter)).filter((snapshot) => !onlyUnhealthy || !isQuietHealthySession(snapshot));
+  return {
+    summary: summarizeSessionHealthSnapshots(sessions),
+    sessions
+  };
+};
+var sessionEvents = async (ctx, req, stream) => {
+  if (!stream) throw new CodexTeamError("internal", "session events requires streaming");
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const target = asPositional(req, 0, "name|thread_id");
+  const flags = asFlags(req);
+  const follow = isTrue2(flags["follow"]);
+  const summaryMode = isTrue2(flags["summary"]);
+  const byTool = isTrue2(flags["by-tool"]);
+  const byItemKind = isTrue2(flags["by-item-kind"]);
+  if (byTool && byItemKind) throw invalidParams("--by-tool and --by-item-kind are mutually exclusive");
+  if (follow && (byTool || byItemKind)) throw invalidParams("--follow cannot be used with --by-tool or --by-item-kind");
+  if (summaryMode && (byTool || byItemKind)) throw invalidParams("--summary cannot be used with --by-tool or --by-item-kind");
+  const typeFilter = parseCsvFlag(flags["type"]);
+  const turnFilter = asString5(flags["turn"]);
+  const sinceId = asString5(flags["since"]);
+  const limit = parseSessionEventsLimit(flags["limit"], 50);
+  const matchesTarget = buildSessionEventMatcher(ctx, user, target);
+  const listed = await ctx.events.listSince(user, sinceId, { includeDelta: true });
+  if (!listed.ok) {
+    if (listed.reason === "id_rotated") {
+      stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
+        oldest_available_id: listed.oldest_available_id
+      }));
+    } else {
+      stream.end(invalidParams(`event '${sinceId}' not found`));
+    }
+    return { streaming: true };
+  }
+  const accept = (event) => {
+    if (isSessionEventDeltaType(event.type)) return false;
+    if (!matchesTarget(event)) return false;
+    if (typeFilter && typeFilter.length > 0 && !typeFilter.includes(event.type)) return false;
+    if (turnFilter && !eventMatchesTurn(event, turnFilter)) return false;
+    return true;
+  };
+  const initialMatching = listed.events.filter(accept);
+  const initialWindow = sinceId ? initialMatching.slice(0, limit) : initialMatching.slice(Math.max(0, initialMatching.length - limit));
+  if (byTool || byItemKind) {
+    const grouping = byTool ? "tool" : "item_kind";
+    const counts = tallySessionEvents(initialWindow, grouping);
+    stream.chunk({
+      target,
+      group_by: grouping,
+      summary: formatSessionEventTally(counts),
+      counts,
+      item_completed_events: Object.values(counts).reduce((sum, count) => sum + count, 0)
+    });
+    stream.end();
+    return { streaming: true };
+  }
+  for (const event of initialWindow) {
+    stream.chunk(summaryMode ? summarizeSessionEvent(event) : event);
+  }
+  if (!follow) {
+    stream.end();
+    return { streaming: true };
+  }
+  const sub = ctx.events.subscribe(user, (event) => {
+    if (!accept(event)) return;
+    stream.chunk(summaryMode ? summarizeSessionEvent(event) : event);
+  });
+  stream.onClose(() => sub.dispose());
+  return { streaming: true };
+};
+function buildSessionHealthSnapshot(ctx, user, rec) {
+  const sessionKey = keyFor(user, rec.name);
+  const busyTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const appServerAlive = isClientAlive(client);
+  const currentTurnStartedAt = rec.current_turn_started_at ?? null;
+  const pending = typeof ctx.pending.listForUser === "function" ? ctx.pending.listForUser(user).filter((entry) => entry.session_name === rec.name) : null;
+  const pendingApprovals = pending ? pending.filter((entry) => entry.kind.startsWith("approval.")).length : rec.pending_approvals ?? 0;
+  const pendingUserInputs = pending ? pending.filter((entry) => entry.kind === "user_input.request").length : rec.pending_user_inputs ?? 0;
+  return {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    state: rec.state,
+    busy: rec.state === "live" && appServerAlive && busyTurnId !== null,
+    current_turn_id: busyTurnId,
+    current_turn_started_at: currentTurnStartedAt,
+    current_turn_elapsed_ms: currentTurnStartedAt ? Math.max(0, Date.now() - Date.parse(currentTurnStartedAt)) : null,
+    current_item_type: rec.current_item_type ?? null,
+    items_done_in_turn: rec.items_in_turn ?? 0,
+    pending_approval_requests: pendingApprovals,
+    pending_user_input_requests: pendingUserInputs,
+    token_usage_last_turn: rec.token_usage_last_turn ?? null,
+    app_server_alive: appServerAlive,
+    last_event_id: ctx.events.latestEvent(user, { session: rec.name, thread_id: rec.thread_id })?.id ?? null
+  };
+}
+function parseSessionHealthStates(value) {
+  if (!value) return null;
+  const states = /* @__PURE__ */ new Set();
+  for (const raw of value.split(",")) {
+    const state = raw.trim();
+    if (!state) continue;
+    if (state !== "live" && state !== "crashed" && state !== "closed") {
+      throw invalidParams(`--state must be a comma-separated list of live, crashed, or closed`);
+    }
+    states.add(state);
+  }
+  return states.size > 0 ? states : null;
+}
+function matchesSessionHealthState(snapshot, states) {
+  if (!states) return true;
+  const state = asString5(snapshot.state);
+  return state !== null && states.has(state);
+}
+function isQuietHealthySession(snapshot) {
+  return snapshot.state === "live" && snapshot.busy === false && snapshot.app_server_alive === true;
+}
+function isHealthySession(snapshot) {
+  return snapshot.state === "live" && snapshot.app_server_alive === true;
+}
+function summarizeSessionHealthSnapshots(snapshots) {
+  return {
+    total: snapshots.length,
+    healthy: snapshots.filter((snapshot) => isHealthySession(snapshot)).length,
+    crashed: snapshots.filter((snapshot) => snapshot.state === "crashed").length,
+    closed: snapshots.filter((snapshot) => snapshot.state === "closed").length,
+    busy: snapshots.filter((snapshot) => snapshot.busy === true).length,
+    pending_total: snapshots.reduce((sum, snapshot) => sum + numericValue2(snapshot.pending_approval_requests) + numericValue2(snapshot.pending_user_input_requests), 0)
+  };
+}
+function parseSessionEventsLimit(value, fallback) {
+  if (value === void 0) return fallback;
+  const raw = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(raw) || raw < 0) throw invalidParams("--limit must be a non-negative integer");
+  return Math.floor(raw);
+}
+function parseCsvFlag(value) {
+  const raw = asString5(value);
+  if (!raw) return null;
+  const parts = raw.split(",").map((part) => part.trim()).filter(Boolean);
+  return parts.length > 0 ? parts : null;
+}
+function buildSessionEventMatcher(ctx, user, target) {
+  const aliases = /* @__PURE__ */ new Set([target]);
+  const rec = ctx.sessions.get(user, target);
+  if (rec) {
+    aliases.add(rec.name);
+    aliases.add(rec.thread_id);
+  }
+  return (event) => {
+    if (event.session && aliases.has(event.session)) return true;
+    if (event.thread_id && aliases.has(event.thread_id)) return true;
+    return false;
+  };
+}
+function eventMatchesTurn(event, turnId) {
+  return scalarString2(event.payload.turn_id) === turnId || scalarString2(event.payload.last_turn_id) === turnId;
+}
+function summarizeSessionEvent(event) {
+  return {
+    id: event.id,
+    ts: event.ts,
+    type: event.type,
+    session: event.session,
+    key: summarizeSessionEventKey(event)
+  };
+}
+function summarizeSessionEventKey(event) {
+  const payload = event.payload;
+  if (event.type.startsWith("turn.")) return scalarString2(payload.turn_id);
+  if (event.type === "session.crashed" || event.type === "session.closed") {
+    return labeledSessionEventValue("reason", payload.reason ?? payload.crash_reason ?? payload.why);
+  }
+  if (event.type === "auto_approved") {
+    return labeledSessionEventValue("matched_pattern", payload.matched_pattern ?? payload.matchedPattern) ?? scalarString2(payload.request_id);
+  }
+  if (event.type.startsWith("approval.") || event.type === "user_input.request" || event.type === "server_request_resolved") {
+    return scalarString2(payload.request_id);
+  }
+  if (event.type.startsWith("item.")) {
+    return scalarString2(payload.type) ?? scalarString2(payload.item_type) ?? scalarString2(payload.item_id);
+  }
+  if (event.type.startsWith("thread.")) return scalarString2(payload.thread_id) ?? event.thread_id;
+  if (event.type.startsWith("hook.")) return scalarString2(payload.hook_id);
+  if (event.type.startsWith("mcp_server.")) return scalarString2(payload.name);
+  if (event.type.startsWith("fuzzy_file_search.")) return scalarString2(payload.search_session_id);
+  if (event.type === "monitor.overflow") return scalarString2(payload.dropped_count);
+  return scalarString2(payload.turn_id) ?? scalarString2(payload.request_id) ?? scalarString2(payload.type) ?? scalarString2(payload.item_id) ?? scalarString2(payload.thread_id) ?? scalarString2(payload.name) ?? event.thread_id;
+}
+function labeledSessionEventValue(label, value) {
+  const rendered = scalarString2(value);
+  return rendered ? `${label}=${rendered}` : null;
+}
+function tallySessionEvents(events, grouping) {
+  const counts = {};
+  for (const event of events) {
+    if (event.type !== "item.completed") continue;
+    const itemKind = normalizeSessionEventItemKind(event.payload.type ?? event.payload.item_type ?? event.payload.item_id);
+    const bucket = grouping === "tool" ? sessionEventToolBucket(itemKind) : itemKind;
+    counts[bucket] = (counts[bucket] ?? 0) + 1;
+  }
+  return counts;
+}
+function formatSessionEventTally(counts) {
+  const entries = Object.entries(counts);
+  if (entries.length === 0) return "(no item.completed events)";
+  return entries.map(([key, value]) => `${key}=${value}`).join(" ");
+}
+function normalizeSessionEventItemKind(value) {
+  const raw = scalarString2(value);
+  if (!raw) return "unknown";
+  const normalized = raw.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[\s./-]+/g, "_").toLowerCase();
+  switch (normalized) {
+    case "agentmessage":
+      return "agent_message";
+    case "autoapprovalreview":
+      return "auto_approval_review";
+    case "commandexecution":
+      return "command_execution";
+    case "filechange":
+      return "file_change";
+    case "mcptoolcall":
+      return "mcp_tool_call";
+    case "usermessage":
+      return "user_message";
+    default:
+      return normalized;
+  }
+}
+function sessionEventToolBucket(itemKind) {
+  switch (itemKind) {
+    case "command_execution":
+      return "shell";
+    case "file_patch":
+      return "file_change";
+    default:
+      return itemKind;
+  }
+}
+function scalarString2(value) {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+function numericValue2(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function isSessionEventDeltaType(type) {
+  return type.endsWith("_delta");
+}
 
 // src/daemon/handlers/message.ts
 var import_node_fs15 = __toESM(require("fs"));
@@ -8894,6 +9494,7 @@ var HANDLERS = {
   "version": version,
   "status": status,
   "daemon:status": daemonStatus,
+  "daemon:fleet:status": daemonFleetStatus,
   "daemon:start": daemonStart,
   "daemon:stop": daemonStop,
   "daemon:restart": daemonRestart,
@@ -8914,6 +9515,8 @@ var HANDLERS = {
   "session:info": sessionInfo,
   "session:context": sessionContext,
   "session:list": sessionList,
+  "session:health:all": sessionHealthAll,
+  "session:events": sessionEvents,
   "message:send": messageSend,
   "message:peer": messagePeer,
   "message:interrupt": messageInterrupt,

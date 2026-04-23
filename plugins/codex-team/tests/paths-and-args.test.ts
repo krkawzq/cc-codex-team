@@ -216,6 +216,27 @@ describe("parseArgs", () => {
     expect(wait.flags.timeout).toBe("30");
   });
 
+  it("parses daemon fleet status and session events commands", () => {
+    const fleet = parseArgs(["daemon", "fleet", "status", "--users", "claude-a,claude-b"]);
+    expect(fleet.commandPath).toEqual(["daemon", "fleet", "status"]);
+    expect(fleet.flags.users).toBe("claude-a,claude-b");
+
+    const events = parseArgs([
+      "-b", "token-1",
+      "session", "events", "audit",
+      "--type", "turn.completed,item.completed",
+      "--since", "evt-10",
+      "--limit", "25",
+      "--follow",
+    ]);
+    expect(events.commandPath).toEqual(["session", "events"]);
+    expect(events.positionals).toEqual(["audit"]);
+    expect(events.flags.type).toBe("turn.completed,item.completed");
+    expect(events.flags.since).toBe("evt-10");
+    expect(events.flags.limit).toBe("25");
+    expect(events.flags.follow).toBe(true);
+  });
+
   it("treats --short and --full as mutually exclusive output modes", () => {
     const parsed = parseArgs(["-b", "token-1", "status", "--short", "--full"]);
 

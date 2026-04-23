@@ -702,6 +702,80 @@ describe("runCli", () => {
     );
   });
 
+  it("routes session health --all to the fleet RPC shape", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementationOnce((_sock, req: { id: string; method: string }) => {
+      expect(req.method).toBe("session:health:all");
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            summary: { total: 1, healthy: 1, crashed: 0, closed: 0, busy: 0, pending_total: 0 },
+            sessions: [{ session: "audit", thread_id: "th-1", state: "live", busy: false, app_server_alive: true }],
+          },
+        });
+      }, 0);
+    });
+
+    const code = await runCli(["-b", "token-1", "session", "health", "--all"]);
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      "{\"ok\":true,\"data\":{\"summary\":{\"total\":1,\"healthy\":1,\"crashed\":0,\"closed\":0,\"busy\":0,\"pending_total\":0},\"sessions\":[{\"session\":\"audit\",\"thread_id\":\"th-1\",\"state\":\"live\",\"busy\":false,\"app_server_alive\":true}]}}\n",
+    );
+  });
+
+  it("streams session events even without --follow", async () => {
+    let streamHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      streamHandler = handler;
+    });
+
+    const pending = runCli(["-b", "token-1", "session", "events", "audit", "--limit", "1"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sockMocks.writeMessage.mock.calls[0]?.[1]?.method).toBe("session:events");
+    const reqId = sockMocks.writeMessage.mock.calls[0]?.[1]?.id;
+
+    streamHandler?.({
+      kind: "stream_chunk",
+      id: reqId,
+      data: { id: "evt-2", type: "turn.completed", session: "audit" },
+    });
+    streamHandler?.({
+      kind: "stream_end",
+      id: reqId,
+    });
+
+    const code = await pending;
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith("{\"id\":\"evt-2\",\"type\":\"turn.completed\",\"session\":\"audit\"}\n");
+  });
+
   it("maps message wait outcomes to CLI exit codes", async () => {
     let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
     const socket = {

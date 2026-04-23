@@ -34,6 +34,45 @@ export const daemonStatus: HandlerFn = async (ctx) => {
   };
 };
 
+export const daemonFleetStatus: HandlerFn = async (ctx, req) => {
+  const tokens = resolveFleetUsers(ctx, asString(getFlag(req.params, "users")));
+  const perUser = tokens.map((token) => {
+    const sessions = ctx.sessions.listLive(token);
+    const live = sessions.filter((session) => session.state === "live").length;
+    const crashed = sessions.filter((session) => session.state === "crashed").length;
+    const busy = sessions.filter((session) => {
+      const sessionKey = `${token}::${session.name}`;
+      const busyTurnId = session.current_turn_id ?? ctx.queues?.getCurrentTurn?.(sessionKey) ?? null;
+      const client = ctx.pool?.clientForSession?.(sessionKey);
+      const appServerAlive = typeof client?.isAlive === "function" ? client.isAlive() : Boolean(client);
+      return session.state === "live" && appServerAlive && busyTurnId !== null;
+    }).length;
+    const pending = typeof ctx.pending?.listForUser === "function"
+      ? ctx.pending.listForUser(token).length
+      : 0;
+    const user = ctx.users.get(token);
+    const activitySource = user?.last_active_at ?? user?.created_at ?? null;
+
+    return {
+      token,
+      live,
+      busy,
+      pending,
+      crashed,
+      last_event_id: ctx.events?.latestEvent?.(token)?.id ?? null,
+      last_activity_age_s: activitySource ? Math.max(0, Math.floor((Date.now() - Date.parse(activitySource)) / 1000)) : null,
+    };
+  });
+
+  return {
+    total_users: perUser.length,
+    total_live_sessions: perUser.reduce((sum, user) => sum + user.live, 0),
+    total_pending: perUser.reduce((sum, user) => sum + user.pending, 0),
+    total_app_servers: typeof ctx.pool?.processCount === "function" ? ctx.pool.processCount() : null,
+    per_user: perUser,
+  };
+};
+
 export const daemonStart: HandlerFn = async () => {
   return { already_running: true };
 };
@@ -291,6 +330,29 @@ function toInt(v: unknown, fallback: number): number {
 
 function asString(v: unknown): string | null {
   return typeof v === "string" ? v : null;
+}
+
+function resolveFleetUsers(
+  ctx: { users: { list(): Array<{ token: string }>; has(token: string): boolean } },
+  rawUsers: string | null,
+): string[] {
+  if (!rawUsers || rawUsers === "all") {
+    return ctx.users.list().map((user) => user.token);
+  }
+
+  const requested = Array.from(new Set(
+    rawUsers.split(",").map((token) => token.trim()).filter(Boolean),
+  ));
+  if (requested.length === 0) {
+    throw invalidParams("--users requires 'all' or a comma-separated token list");
+  }
+
+  const missing = requested.filter((token) => !ctx.users.has(token));
+  if (missing.length > 0) {
+    throw invalidParams(`unknown user token(s): ${missing.join(", ")}`);
+  }
+
+  return requested;
 }
 
 function lineMatchesLevel(line: string, level: string): boolean {

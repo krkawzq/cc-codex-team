@@ -729,3 +729,348 @@ function sortSessions(rows: SessionRecord[], field: string): SessionRecord[] {
   });
   return copy;
 }
+
+export const sessionHealthAll: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const flags = asFlags(req);
+  const positionals = asPositionals(req);
+  if (positionals.length > 0) {
+    throw invalidParams("session health --all does not take a session positional");
+  }
+
+  const onlyUnhealthy = isTrue(flags["only-unhealthy"]);
+  const stateFilter = parseSessionHealthStates(asString(flags["state"]));
+  const sessions = ctx.sessions.listLive(user)
+    .map((record) => buildSessionHealthSnapshot(ctx, user, record))
+    .filter((snapshot) => matchesSessionHealthState(snapshot, stateFilter))
+    .filter((snapshot) => !onlyUnhealthy || !isQuietHealthySession(snapshot));
+
+  return {
+    summary: summarizeSessionHealthSnapshots(sessions),
+    sessions,
+  };
+};
+
+export const sessionEvents: HandlerFn = async (ctx, req, stream) => {
+  if (!stream) throw new CodexTeamError("internal", "session events requires streaming");
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const target = asPositional(req, 0, "name|thread_id");
+  const flags = asFlags(req);
+  const follow = isTrue(flags["follow"]);
+  const summaryMode = isTrue(flags["summary"]);
+  const byTool = isTrue(flags["by-tool"]);
+  const byItemKind = isTrue(flags["by-item-kind"]);
+  if (byTool && byItemKind) throw invalidParams("--by-tool and --by-item-kind are mutually exclusive");
+  if (follow && (byTool || byItemKind)) throw invalidParams("--follow cannot be used with --by-tool or --by-item-kind");
+  if (summaryMode && (byTool || byItemKind)) throw invalidParams("--summary cannot be used with --by-tool or --by-item-kind");
+
+  const typeFilter = parseCsvFlag(flags["type"]);
+  const turnFilter = asString(flags["turn"]);
+  const sinceId = asString(flags["since"]);
+  const limit = parseSessionEventsLimit(flags["limit"], 50);
+  const matchesTarget = buildSessionEventMatcher(ctx, user, target);
+
+  const listed = await ctx.events.listSince(user, sinceId, { includeDelta: true });
+  if (!listed.ok) {
+    if (listed.reason === "id_rotated") {
+      stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
+        oldest_available_id: listed.oldest_available_id,
+      }));
+    } else {
+      stream.end(invalidParams(`event '${sinceId}' not found`));
+    }
+    return { streaming: true };
+  }
+
+  const accept = (event: import("../../types").TeamEvent): boolean => {
+    if (isSessionEventDeltaType(event.type)) return false;
+    if (!matchesTarget(event)) return false;
+    if (typeFilter && typeFilter.length > 0 && !typeFilter.includes(event.type)) return false;
+    if (turnFilter && !eventMatchesTurn(event, turnFilter)) return false;
+    return true;
+  };
+
+  const initialMatching = listed.events.filter(accept);
+  const initialWindow = sinceId
+    ? initialMatching.slice(0, limit)
+    : initialMatching.slice(Math.max(0, initialMatching.length - limit));
+
+  if (byTool || byItemKind) {
+    const grouping = byTool ? "tool" : "item_kind";
+    const counts = tallySessionEvents(initialWindow, grouping);
+    stream.chunk({
+      target,
+      group_by: grouping,
+      summary: formatSessionEventTally(counts),
+      counts,
+      item_completed_events: Object.values(counts).reduce((sum, count) => sum + count, 0),
+    });
+    stream.end();
+    return { streaming: true };
+  }
+
+  for (const event of initialWindow) {
+    stream.chunk(summaryMode ? summarizeSessionEvent(event) : event);
+  }
+
+  if (!follow) {
+    stream.end();
+    return { streaming: true };
+  }
+
+  const sub = ctx.events.subscribe(user, (event) => {
+    if (!accept(event)) return;
+    stream.chunk(summaryMode ? summarizeSessionEvent(event) : event);
+  });
+  stream.onClose(() => sub.dispose());
+  return { streaming: true };
+};
+
+function buildSessionHealthSnapshot(
+  ctx: DaemonContext,
+  user: string,
+  rec: SessionRecord,
+): Record<string, unknown> {
+  const sessionKey = keyFor(user, rec.name);
+  const busyTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const appServerAlive = isClientAlive(client);
+  const currentTurnStartedAt = rec.current_turn_started_at ?? null;
+  const pending = typeof ctx.pending.listForUser === "function"
+    ? ctx.pending.listForUser(user).filter((entry) => entry.session_name === rec.name)
+    : null;
+  const pendingApprovals = pending
+    ? pending.filter((entry) => entry.kind.startsWith("approval.")).length
+    : rec.pending_approvals ?? 0;
+  const pendingUserInputs = pending
+    ? pending.filter((entry) => entry.kind === "user_input.request").length
+    : rec.pending_user_inputs ?? 0;
+
+  return {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    state: rec.state,
+    busy: rec.state === "live" && appServerAlive && busyTurnId !== null,
+    current_turn_id: busyTurnId,
+    current_turn_started_at: currentTurnStartedAt,
+    current_turn_elapsed_ms: currentTurnStartedAt ? Math.max(0, Date.now() - Date.parse(currentTurnStartedAt)) : null,
+    current_item_type: rec.current_item_type ?? null,
+    items_done_in_turn: rec.items_in_turn ?? 0,
+    pending_approval_requests: pendingApprovals,
+    pending_user_input_requests: pendingUserInputs,
+    token_usage_last_turn: rec.token_usage_last_turn ?? null,
+    app_server_alive: appServerAlive,
+    last_event_id: ctx.events.latestEvent(user, { session: rec.name, thread_id: rec.thread_id })?.id ?? null,
+  };
+}
+
+function parseSessionHealthStates(value: string | null): Set<string> | null {
+  if (!value) return null;
+  const states = new Set<string>();
+  for (const raw of value.split(",")) {
+    const state = raw.trim();
+    if (!state) continue;
+    if (state !== "live" && state !== "crashed" && state !== "closed") {
+      throw invalidParams(`--state must be a comma-separated list of live, crashed, or closed`);
+    }
+    states.add(state);
+  }
+  return states.size > 0 ? states : null;
+}
+
+function matchesSessionHealthState(snapshot: Record<string, unknown>, states: Set<string> | null): boolean {
+  if (!states) return true;
+  const state = asString(snapshot.state);
+  return state !== null && states.has(state);
+}
+
+function isQuietHealthySession(snapshot: Record<string, unknown>): boolean {
+  return snapshot.state === "live" && snapshot.busy === false && snapshot.app_server_alive === true;
+}
+
+function isHealthySession(snapshot: Record<string, unknown>): boolean {
+  return snapshot.state === "live" && snapshot.app_server_alive === true;
+}
+
+function summarizeSessionHealthSnapshots(
+  snapshots: Record<string, unknown>[],
+): {
+  total: number;
+  healthy: number;
+  crashed: number;
+  closed: number;
+  busy: number;
+  pending_total: number;
+} {
+  return {
+    total: snapshots.length,
+    healthy: snapshots.filter((snapshot) => isHealthySession(snapshot)).length,
+    crashed: snapshots.filter((snapshot) => snapshot.state === "crashed").length,
+    closed: snapshots.filter((snapshot) => snapshot.state === "closed").length,
+    busy: snapshots.filter((snapshot) => snapshot.busy === true).length,
+    pending_total: snapshots.reduce((sum, snapshot) => (
+      sum + numericValue(snapshot.pending_approval_requests) + numericValue(snapshot.pending_user_input_requests)
+    ), 0),
+  };
+}
+
+function parseSessionEventsLimit(value: unknown, fallback: number): number {
+  if (value === undefined) return fallback;
+  const raw = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(raw) || raw < 0) throw invalidParams("--limit must be a non-negative integer");
+  return Math.floor(raw);
+}
+
+function parseCsvFlag(value: unknown): string[] | null {
+  const raw = asString(value);
+  if (!raw) return null;
+  const parts = raw.split(",").map((part) => part.trim()).filter(Boolean);
+  return parts.length > 0 ? parts : null;
+}
+
+function buildSessionEventMatcher(
+  ctx: DaemonContext,
+  user: string,
+  target: string,
+): (event: import("../../types").TeamEvent) => boolean {
+  const aliases = new Set<string>([target]);
+  const rec = ctx.sessions.get(user, target);
+  if (rec) {
+    aliases.add(rec.name);
+    aliases.add(rec.thread_id);
+  }
+
+  return (event) => {
+    if (event.session && aliases.has(event.session)) return true;
+    if (event.thread_id && aliases.has(event.thread_id)) return true;
+    return false;
+  };
+}
+
+function eventMatchesTurn(event: { payload: Record<string, unknown> }, turnId: string): boolean {
+  return scalarString(event.payload.turn_id) === turnId || scalarString(event.payload.last_turn_id) === turnId;
+}
+
+function summarizeSessionEvent(event: import("../../types").TeamEvent): {
+  id: string;
+  ts: string;
+  type: string;
+  session: string | null;
+  key: string | null;
+} {
+  return {
+    id: event.id,
+    ts: event.ts,
+    type: event.type,
+    session: event.session,
+    key: summarizeSessionEventKey(event),
+  };
+}
+
+function summarizeSessionEventKey(event: { type: string; thread_id: string | null; payload: Record<string, unknown> }): string | null {
+  const payload = event.payload;
+  if (event.type.startsWith("turn.")) return scalarString(payload.turn_id);
+  if (event.type === "session.crashed" || event.type === "session.closed") {
+    return labeledSessionEventValue("reason", payload.reason ?? payload.crash_reason ?? payload.why);
+  }
+  if (event.type === "auto_approved") {
+    return labeledSessionEventValue("matched_pattern", payload.matched_pattern ?? payload.matchedPattern)
+      ?? scalarString(payload.request_id);
+  }
+  if (event.type.startsWith("approval.") || event.type === "user_input.request" || event.type === "server_request_resolved") {
+    return scalarString(payload.request_id);
+  }
+  if (event.type.startsWith("item.")) {
+    return scalarString(payload.type) ?? scalarString(payload.item_type) ?? scalarString(payload.item_id);
+  }
+  if (event.type.startsWith("thread.")) return scalarString(payload.thread_id) ?? event.thread_id;
+  if (event.type.startsWith("hook.")) return scalarString(payload.hook_id);
+  if (event.type.startsWith("mcp_server.")) return scalarString(payload.name);
+  if (event.type.startsWith("fuzzy_file_search.")) return scalarString(payload.search_session_id);
+  if (event.type === "monitor.overflow") return scalarString(payload.dropped_count);
+
+  return scalarString(payload.turn_id)
+    ?? scalarString(payload.request_id)
+    ?? scalarString(payload.type)
+    ?? scalarString(payload.item_id)
+    ?? scalarString(payload.thread_id)
+    ?? scalarString(payload.name)
+    ?? event.thread_id;
+}
+
+function labeledSessionEventValue(label: string, value: unknown): string | null {
+  const rendered = scalarString(value);
+  return rendered ? `${label}=${rendered}` : null;
+}
+
+function tallySessionEvents(
+  events: import("../../types").TeamEvent[],
+  grouping: "tool" | "item_kind",
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const event of events) {
+    if (event.type !== "item.completed") continue;
+    const itemKind = normalizeSessionEventItemKind(event.payload.type ?? event.payload.item_type ?? event.payload.item_id);
+    const bucket = grouping === "tool" ? sessionEventToolBucket(itemKind) : itemKind;
+    counts[bucket] = (counts[bucket] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function formatSessionEventTally(counts: Record<string, number>): string {
+  const entries = Object.entries(counts);
+  if (entries.length === 0) return "(no item.completed events)";
+  return entries.map(([key, value]) => `${key}=${value}`).join(" ");
+}
+
+function normalizeSessionEventItemKind(value: unknown): string {
+  const raw = scalarString(value);
+  if (!raw) return "unknown";
+  const normalized = raw
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[\s./-]+/g, "_")
+    .toLowerCase();
+  switch (normalized) {
+    case "agentmessage":
+      return "agent_message";
+    case "autoapprovalreview":
+      return "auto_approval_review";
+    case "commandexecution":
+      return "command_execution";
+    case "filechange":
+      return "file_change";
+    case "mcptoolcall":
+      return "mcp_tool_call";
+    case "usermessage":
+      return "user_message";
+    default:
+      return normalized;
+  }
+}
+
+function sessionEventToolBucket(itemKind: string): string {
+  switch (itemKind) {
+    case "command_execution":
+      return "shell";
+    case "file_patch":
+      return "file_change";
+    default:
+      return itemKind;
+  }
+}
+
+function scalarString(value: unknown): string | null {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function numericValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function isSessionEventDeltaType(type: string): boolean {
+  return type.endsWith("_delta");
+}

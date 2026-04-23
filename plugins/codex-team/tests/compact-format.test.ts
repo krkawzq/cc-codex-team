@@ -27,6 +27,44 @@ describe("formatCompact", () => {
       },
     ],
     [
+      "daemon:fleet:status",
+      {
+        total_users: 2,
+        total_live_sessions: 3,
+        total_pending: 1,
+        total_app_servers: 4,
+        per_user: [
+          {
+            token: "claude-a",
+            live: 2,
+            busy: 1,
+            pending: 1,
+            crashed: 0,
+            last_event_id: "evt-1",
+            last_activity_age_s: 42,
+            ignored: true,
+          },
+        ],
+      },
+      {
+        total_users: 2,
+        total_live_sessions: 3,
+        total_pending: 1,
+        total_app_servers: 4,
+        per_user: [
+          {
+            token: "claude-a",
+            live: 2,
+            busy: 1,
+            pending: 1,
+            crashed: 0,
+            last_event_id: "evt-1",
+            last_activity_age_s: 42,
+          },
+        ],
+      },
+    ],
+    [
       "daemon:status",
       {
         pid: 42,
@@ -261,6 +299,63 @@ describe("formatCompact", () => {
       },
     ],
     [
+      "session:health:all",
+      {
+        summary: {
+          total: 2,
+          healthy: 1,
+          crashed: 1,
+          closed: 0,
+          busy: 1,
+          pending_total: 2,
+          ignored: true,
+        },
+        sessions: [
+          {
+            session: "audit",
+            thread_id: "th-1",
+            state: "live",
+            busy: true,
+            current_turn_id: "turn-7",
+            current_turn_elapsed_ms: 2500,
+            current_item_type: "agent_message",
+            items_done_in_turn: 2,
+            pending_approval_requests: 1,
+            pending_user_input_requests: 1,
+            app_server_alive: true,
+            last_event_id: "evt-8",
+            token_usage_last_turn: { total: 10 },
+          },
+        ],
+      },
+      {
+        summary: {
+          total: 2,
+          healthy: 1,
+          crashed: 1,
+          closed: 0,
+          busy: 1,
+          pending_total: 2,
+        },
+        sessions: [
+          {
+            session: "audit",
+            thread_id: "th-1",
+            state: "live",
+            busy: true,
+            current_turn_id: "turn-7",
+            current_turn_elapsed_ms: 2500,
+            current_item_type: "agent_message",
+            items_done_in_turn: 2,
+            pending_approval_requests: 1,
+            pending_user_input_requests: 1,
+            app_server_alive: true,
+            last_event_id: "evt-8",
+          },
+        ],
+      },
+    ],
+    [
       "session:health",
       {
         session: "audit",
@@ -290,6 +385,25 @@ describe("formatCompact", () => {
         pending_user_input_requests: 1,
         app_server_alive: true,
         last_event_id: "evt-8",
+      },
+    ],
+    [
+      "session:events",
+      {
+        id: "evt-7",
+        ts: "2026-04-23T00:00:00.000Z",
+        type: "turn.completed",
+        session: "audit",
+        thread_id: "th-1",
+        payload: { turn_id: "turn-7" },
+      },
+      {
+        id: "evt-7",
+        ts: "2026-04-23T00:00:00.000Z",
+        type: "turn.completed",
+        session: "audit",
+        thread_id: "th-1",
+        payload: { turn_id: "turn-7" },
       },
     ],
     [

@@ -6,6 +6,7 @@ import { version } from "./handlers/version";
 import { status } from "./handlers/status";
 import {
   daemonStatus,
+  daemonFleetStatus,
   daemonStart,
   daemonStop,
   daemonRestart,
@@ -29,6 +30,8 @@ import {
   sessionInfo,
   sessionContext,
   sessionList,
+  sessionHealthAll,
+  sessionEvents,
 } from "./handlers/session";
 import {
   messageSend,
@@ -70,6 +73,7 @@ const HANDLERS: Record<string, HandlerFn> = {
   "version": version,
   "status": status,
   "daemon:status": daemonStatus,
+  "daemon:fleet:status": daemonFleetStatus,
   "daemon:start": daemonStart,
   "daemon:stop": daemonStop,
   "daemon:restart": daemonRestart,
@@ -91,6 +95,8 @@ const HANDLERS: Record<string, HandlerFn> = {
   "session:info": sessionInfo,
   "session:context": sessionContext,
   "session:list": sessionList,
+  "session:health:all": sessionHealthAll,
+  "session:events": sessionEvents,
 
   "message:send": messageSend,
   "message:peer": messagePeer,
