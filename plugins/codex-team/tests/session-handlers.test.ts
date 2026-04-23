@@ -64,8 +64,10 @@ describe("session handlers", () => {
   it("maps session:new flags into supported thread/start params", async () => {
     const basePath = path.join(tmpRoot, "base.md");
     const devPath = path.join(tmpRoot, "dev.md");
+    const projectDir = path.join(tmpRoot, "project");
     fs.writeFileSync(basePath, "base instructions");
     fs.writeFileSync(devPath, "developer instructions");
+    fs.mkdirSync(projectDir);
 
     vi.mocked(threadStart).mockResolvedValue({
       thread: { id: "th-1" },
@@ -94,7 +96,7 @@ describe("session handlers", () => {
 
     await sessionNew(ctx as never, makeReq("session:new", ["sess-1"], {
       model: "gpt-5.4",
-      cwd: "/tmp/project",
+      cwd: projectDir,
       sandbox: "workspace-write",
       approval: "on-request",
       effort: "high",
@@ -108,7 +110,7 @@ describe("session handlers", () => {
     const params = vi.mocked(threadStart).mock.calls[0]?.[1] as Record<string, unknown>;
     expect(params).toMatchObject({
       model: "gpt-5.4",
-      cwd: "/tmp/project",
+      cwd: projectDir,
       sandbox: "workspace-write",
       approvalPolicy: "on-request",
       baseInstructions: "base instructions",
