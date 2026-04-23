@@ -2,78 +2,60 @@
 
 # cc-codex-team
 
-**Give Claude Code a Codex team.**
-A Claude Code plugin that lets Claude orchestrate long-lived OpenAI Codex workers in parallel.
+**A team of long-lived Codex workers, orchestrated by Claude Code.**
 
 [English](./README.md) · [简体中文](./README_zh.md)
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/Node-18%2B-brightgreen.svg)](#requirements)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A4FFF.svg)](https://code.claude.com/docs/en/plugins)
+[![Release](https://img.shields.io/badge/Release-0.5.3-success.svg)](plugins/codex-team/docs/releases/0.5.3.md)
 
 </div>
 
 ---
 
-## At a glance
+Claude Code and Codex have **complementary strengths.** Claude Code is at its best planning work, decomposing problems creatively, prototyping MVPs, orchestrating tasks, and running long-horizon autonomous loops. Codex is more careful in the small — stronger at detailed code implementation and rigorous review.
 
-|  |  |
-| --- | --- |
-| **What** | Turns Claude Code into the orchestrator of a team of Codex workers |
-| **Workers** | One `codex app-server` subprocess per session, each with its own thread, queue, and work doc |
-| **Parallelism** | N workers run asynchronously; Claude stays free to schedule, audit, merge |
-| **Playbooks** | 9 multi-agent collaboration patterns bundled — worker+reviewer, map-reduce, pipeline, plan-execute-verify, debate, reflexion, hierarchical, swarm, solo-worker |
-| **Isolation** | One daemon per user / plugin, partitioned into workspaces so projects and Claude Code windows don't cross-talk |
-| **Status updates** | Per-turn events pushed back to Claude through Monitor subscriptions |
+**cc-codex-team combines the two.** Claude Code stays at the top of the stack as the orchestrator — decomposing work, assigning subtasks, making judgment calls, reviewing output — while a fleet of long-lived Codex workers handles the fine-grained coding in parallel. If you pay for both subscriptions, usage balances naturally across them instead of one sitting idle.
 
----
+- Claude decomposes work, spawns workers, and waits on events.
+- Workers run as real `codex app-server` processes with their own threads, queues, and logs.
+- Approvals, user-input prompts, crashes, turn completions — everything is a line on the event stream.
 
-## Why
+## Mental model
 
-Claude Code is great at conversation, context, planning, and code review. Codex is great at long-running autonomous code execution. But each is single-track by default — one Claude session, one Codex thread.
-
-This plugin bridges them:
-
-- You describe work to Claude; Claude decomposes it into independent subtasks.
-- Claude spawns one Codex worker per subtask.
-- Workers run in parallel, asynchronously.
-- Claude is notified through an event stream when a worker needs attention, finishes a turn, errors, or approaches a token threshold.
-
-**Claude decides. Codex executes. In parallel.**
-
----
-
-## When it's worth setting up
-
-- Refactor, port, or review across many files, modules, or repositories (≥3 independent subtasks).
-- Bulk review or mass debug of the same class of problem.
-- Long-horizon coding work you want to leave running.
-- Any situation where a single Claude or a single Codex is the bottleneck and the work naturally parallelizes.
-
-> Single-file one-shot fixes don't need this — the setup cost isn't worth it.
-
----
-
-## Architecture
-
-```text
-     Claude Code  (the orchestrator — you talk to it)
-            │
-            │   codex-team CLI                Monitor events ▲
-            │                                                 │
-            ▼                                                 │
-     codex-team daemon  (local IPC, multi-tenant)
-      │   │   │   │
-      N × codex app-server subprocesses  (workers, run in parallel)
+```
+   Claude (orchestrator)
+      │   codex-team -b <token> ...   (stateless CLI)
+      ▼
+   codex-team daemon   (one per OS user, multi-tenant by bearer token)
+      │   JSON-RPC 2.0 over stdio
+      ▼
+   N × codex app-server processes   (workers, parallel)
+      │
+      └── sessions (persistent codex threads, one live binding each)
 ```
 
-- **Daemon** — one local Node process per `CLAUDE_PLUGIN_DATA`, partitioned into **workspaces** so different projects / Claude Code windows stay isolated.
-- **Workers** — each a real `codex app-server` subprocess with its own thread, history, queue, and work doc.
-- **Events** — Claude subscribes to a workspace-scoped stream; each worker turn produces one structured notification.
+Four concepts:
 
-Orchestration discipline and collaboration norms: [`skills/using-codex-team/philosophy.md`](plugins/codex-team/skills/using-codex-team/philosophy.md).
+| | |
+| --- | --- |
+| **bearer token** | Any string you pick. Namespaces your sessions from other agents sharing the daemon. |
+| **session** | A codex thread with a human name. Persistent on disk by codex; codex-team owns the **live binding** to an app-server. |
+| **event** | A NDJSON summary line pushed by the daemon when something happens (turn started/completed/errored, approval request, session crashed, …). |
+| **named cursor** | Daemon-maintained resume point in the event stream. Survives restarts. |
 
----
+Daemon-per-OS-user. Isolation-per-token. No per-project workspaces — just token scoping.
+
+## When to reach for it
+
+- **Parallel coding** — a task decomposes into ≥2 mechanically independent subtasks
+- **Long-horizon work** — bulk refactors, multi-module migrations, audit + fix across a repo
+- **Multi-agent patterns** — worker+reviewer, map-reduce, plan→execute→verify, debate, swarm
+- **Autonomy with checkpoints** — fire off work, let Claude's context stay free, wake on events
+
+Not the right tool for one-shot edits (use `codex` CLI directly or the `codex:codex-rescue` subagent), or anything you want to micromanage step-by-step.
 
 ## Install
 
@@ -93,59 +75,111 @@ codex --version
 codex login
 ```
 
-After install, Claude can drive the plugin through the `codex-team` CLI and the bundled slash commands.
+Claude can now drive the plugin through the `codex-team` CLI and the bundled slash commands.
 
----
+**If `codex-team` is not on your `PATH`** (happens in some sandboxes), invoke it through the bundled launcher: `$CLAUDE_PLUGIN_ROOT/plugins/codex-team/bin/codex-team ...`. When in doubt, run `codex-team doctor` (or `<launcher> doctor`) first — it checks `PATH`, `codex` binary, socket-bind permissions, stale pidfile, and dist freshness, and exits non-zero with a specific diagnostic message on failure.
 
-## Your first task, end to end
+## First run
 
-In a Claude Code chat:
+Pick a bearer token, spawn a worker, arm the event stream, send work:
 
-```text
-/codex-team:bootstrap reviewer:/abs/path/to/repo fixer:/abs/path/to/repo
+```bash
+TOKEN=claude-$(date +%s)
+
+# Register once (idempotent; daemon auto-spawns on first -b call)
+codex-team daemon user create $TOKEN
+
+# Spawn a long-lived worker session in your repo
+codex-team -b $TOKEN session new refactor --cwd /abs/path/to/repo \
+  --model gpt-5.4 --sandbox workspace-write --approval on-request
+
+# Named cursor for resumable tailing
+codex-team -b $TOKEN cursor save refactor-tail
+
+# Arm the events Monitor — or from Claude Code: /codex-team:events -b $TOKEN
+codex-team -b $TOKEN monitor events --stream --summary --cursor refactor-tail
 ```
 
-This starts the daemon, arms the event stream, and creates two workers in the current workspace. Then tell Claude what you want:
+Now tell Claude what you want:
 
-> *"Have `reviewer` audit the auth module for risk. Have `fixer` pick the highest-risk issue and fix it. I'll review the PRs."*
+> *"Have `refactor` audit the auth module for risk, then rewrite the token-validation path. I'll review the diff."*
 
-Claude dispatches the work, sleeps, wakes on events, and reports back.
+Claude sends the prompt via `message send`, sleeps, wakes on `turn.completed`, and fetches detail with `message tail`. When you're done: `codex-team -b $TOKEN session detach refactor` — the thread persists in codex for future resume.
 
-When the task is finished:
+## Day-to-day operations
 
-```text
-/codex-team:shutdown
+**Session lifecycle**
+
+```bash
+codex-team -b $TOK session new NAME --cwd PATH [--auto-approve "git*,npm"] ...
+codex-team -b $TOK session health NAME            # live snapshot: busy, current_turn_id, pending, token_usage
+codex-team -b $TOK session heal NAME [--force]    # re-attach crashed / dead session
+codex-team -b $TOK session detach NAME            # release app-server; thread persists
+codex-team -b $TOK session list [--short]         # one line per session
 ```
 
----
+**Messaging**
 
-## Learn more
+```bash
+codex-team -b $TOK message send NAME "prompt"      # non-blocking; starts a turn
+codex-team -b $TOK message peer NAME "..."         # inject into the active turn (soft redirect)
+codex-team -b $TOK message wait NAME [--timeout S] # block until turn.completed / turn.error / timeout
+codex-team -b $TOK message tail NAME -n 1 --format markdown   # fetch the last turn
+codex-team -b $TOK message approval NAME REQ_ID accept         # respond to approval.request
+codex-team -b $TOK message answer NAME REQ_ID "..."            # respond to user_input.request
+```
 
-The plugin ships a full set of skills Claude loads on demand — you don't normally need to read them yourself. If you want to:
+**Event stream**
+
+```bash
+codex-team -b $TOK monitor events --stream --summary --cursor NAME   # compact NDJSON, auto-advance cursor
+codex-team -b $TOK cursor list                                       # named cursors
+codex-team -b $TOK cursor get NAME                                   # print the event id
+```
+
+**Output & status**
+
+All status-returning commands accept `--short` for compact single-line output (friendly for grep and dashboards). `message history` and `message tail` accept `--truncate <bytes>` to clip long bodies. Tagged-markdown output (`--format markdown`) follows [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md) with per-type renderers for user messages, agent messages, shell, file patches, MCP tool calls, hooks, reasoning, and auto-approval reviews.
+
+## Playbooks
+
+Nine multi-session topologies ship as skills Claude loads on demand. You rarely need to read them yourself — Claude picks based on task shape.
+
+| Playbook | Best for |
+| --- | --- |
+| `solo-worker` | One session, one goal, no review loop |
+| `worker-reviewer` | Generator + critic, iterate until approval |
+| `map-reduce` | N independent similar subtasks + aggregator |
+| `pipeline` | Stage 1 → Stage 2 → Stage 3, each a specialist |
+| `plan-execute-verify` | Planner + executor + verifier sessions |
+| `reflexion` | Failure → self-critique → retry with lesson |
+| `debate` | Advocate vs. opposing, judge synthesises |
+| `hierarchical` | Manager delegates to sub-sessions it spawns |
+| `swarm` | Loosely-related workers, handoff by mutual agreement |
+
+See [`skills/codex-team-playbooks/`](plugins/codex-team/skills/codex-team-playbooks/) and [`anti-patterns.md`](plugins/codex-team/skills/codex-team-playbooks/anti-patterns.md).
+
+## Documentation
+
+The CLI is self-documenting (`codex-team --help`, `<cmd> --help`). For deeper material:
 
 | To… | Go to |
 | --- | --- |
-| Browse the mental model | [`skills/using-codex-team/SKILL.md`](plugins/codex-team/skills/using-codex-team/SKILL.md) |
-| Read the collaboration philosophy | [`skills/using-codex-team/philosophy.md`](plugins/codex-team/skills/using-codex-team/philosophy.md) |
-| Pick a multi-agent collaboration pattern (worker+reviewer, map-reduce, debate, …) | [`skills/codex-team-playbooks/SKILL.md`](plugins/codex-team/skills/codex-team-playbooks/SKILL.md) |
-| Tune a session (model, reasoning_effort, personality, cost control) | [`skills/configure-codex-team/codex-tricks.md`](plugins/codex-team/skills/configure-codex-team/codex-tricks.md) |
-| Walk through the plugin interactively | `/codex-team:tutorial` |
-| Configure profiles or watchdog alarms | [`skills/configure-codex-team/SKILL.md`](plugins/codex-team/skills/configure-codex-team/SKILL.md) |
-
-The CLI is self-documenting via `codex-team --help` and each slash command's frontmatter.
-
-See the [release notes](plugins/codex-team/docs/releases/0.4.0.md) for what's new in 0.4.0.
-
----
+| Grok the mental model | [`skills/using-codex-team/`](plugins/codex-team/skills/using-codex-team/) |
+| Drive sessions day-to-day | [`skills/manage-codex-team/`](plugins/codex-team/skills/manage-codex-team/) |
+| Pick a collaboration pattern | [`skills/codex-team-playbooks/`](plugins/codex-team/skills/codex-team-playbooks/) |
+| Tune models, profiles, tricks | [`skills/configure-codex-team/`](plugins/codex-team/skills/configure-codex-team/) |
+| Handle errors, crashes, recovery | [`skills/recover-codex-team/`](plugins/codex-team/skills/recover-codex-team/) |
+| Interactive walkthrough | `/codex-team:tutorial` |
+| Latest changes | [`docs/releases/0.5.3.md`](plugins/codex-team/docs/releases/0.5.3.md) |
+| Output format spec | [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md) |
 
 ## Requirements
 
 - Claude Code with plugin support
 - Node.js 18+
-- Codex CLI installed and authenticated
+- Codex CLI installed and authenticated (`codex login`)
 - Windows 10+, macOS 12+, or Linux
-
----
 
 ## Local development
 
@@ -156,8 +190,8 @@ See the [release notes](plugins/codex-team/docs/releases/0.4.0.md) for what's ne
 cd plugins/codex-team
 npm install
 npm run typecheck
-npm run build
 npm test
+npm run build
 ```
 
 Install from the local marketplace manifest:
@@ -173,11 +207,15 @@ Or point Claude Code at the plugin directory directly:
 claude --plugin-dir /abs/path/to/cc-codex-team/plugins/codex-team
 ```
 
+Bump version (updates `package.json` + `.claude-plugin/plugin.json` + rebuilds dist):
+
+```bash
+npm run bump-version 0.5.3
+```
+
 Rebuild and `/reload-plugins` after editing TypeScript.
 
 </details>
-
----
 
 ## Repository
 

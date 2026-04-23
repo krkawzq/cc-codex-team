@@ -32,9 +32,17 @@ codex-team [global-flags] <command> [args] [flags]
 | `--full` | bool | No | false | Restore pre-0.5.3 full response body (opt-out of concise default) |
 | `-h, --help` | bool | No | false | Print help |
 
-Top-level convenience: `codex-team version` (no `-b`).
+Top-level convenience: `codex-team version` (no `-b`), `codex-team doctor` (no `-b`).
 Per-command help works too: `codex-team session --help`, `codex-team session new --help`, `codex-team daemon config set --help`, etc.
 `--help` is a parse terminator: `codex-team daemon --help user create` prints help for `daemon` and ignores the trailing `user create`.
+
+## doctor (no `-b` required)
+
+```
+codex-team doctor [--short]
+```
+
+Runs eight ordered environment checks and exits `0` (HEALTHY) / `1` (DEGRADED) / `2` (BROKEN). Checks: Node version, `codex` binary on PATH, `codex-team` launcher on PATH, `data_dir` writable, local socket bind permitted, daemon pid/sock consistency, daemon socket reachable, dist freshness. First thing to run if any `codex-team` command hangs or returns `daemon_unreachable` / `socket_bind_denied`.
 
 ## daemon group (no `-b` required)
 
