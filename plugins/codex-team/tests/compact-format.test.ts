@@ -261,6 +261,36 @@ describe("formatCompact", () => {
       },
     ],
     [
+      "session:list",
+      {
+        sessions: [
+          {
+            name: "audit",
+            thread_id: "th-1",
+            state: "live",
+            model: "gpt-5.4",
+            busy: true,
+            preview: "drop me",
+          },
+        ],
+        all: true,
+        next_cursor: "cursor-2",
+      },
+      {
+        sessions: [
+          {
+            name: "audit",
+            thread_id: "th-1",
+            state: "live",
+            model: "gpt-5.4",
+            busy: true,
+          },
+        ],
+        all: true,
+        next_cursor: "cursor-2",
+      },
+    ],
+    [
       "session:health",
       {
         session: "audit",

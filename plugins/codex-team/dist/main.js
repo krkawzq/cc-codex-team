@@ -1082,6 +1082,48 @@ var sessionGroup = {
           description: "List every known session, not only live ones."
         },
         {
+          long: "--cursor",
+          type: "string",
+          default: "",
+          required: false,
+          description: "Pagination cursor from a previous session list page."
+        },
+        {
+          long: "--limit",
+          type: "int",
+          default: "50",
+          required: false,
+          description: "Maximum number of sessions to return."
+        },
+        {
+          long: "--archived",
+          type: "enum",
+          default: "exclude",
+          required: false,
+          description: "Include archived sessions, exclude them, or return only archived sessions."
+        },
+        {
+          long: "--state",
+          type: "string",
+          default: "",
+          required: false,
+          description: "Comma-separated session states to keep: live, crashed, closed, archived."
+        },
+        {
+          long: "--owner",
+          type: "string",
+          default: "self",
+          required: false,
+          description: "Best-effort owner filter: self, any, or an explicit bearer token."
+        },
+        {
+          long: "--loaded-only",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "List threads currently loaded in app-server memory instead of persisted thread/list results."
+        },
+        {
           long: "--sort",
           type: "enum",
           default: "last_active",
@@ -1104,7 +1146,9 @@ var sessionGroup = {
         }
       ],
       examples: [
-        "codex-team -b $TOKEN session list --all --format table"
+        "codex-team -b $TOKEN session list --all --format table",
+        "codex-team -b $TOKEN session list --all --limit 25 --cursor abc123",
+        "codex-team -b $TOKEN session list --loaded-only --owner any"
       ],
       needs_bearer: true
     }),
@@ -1953,6 +1997,7 @@ var CONFIG_KEYS = {
   "daemon.connect_retry_delay_seconds": { type: "float", default: 0.25, needsRestart: false, description: "delay between transient daemon connect retries" },
   "monitor.default_interval_seconds": { type: "int", default: 30, needsRestart: false, description: "default --interval for `monitor events`" },
   "monitor.event_log_retention": { type: "int", default: 1e4, needsRestart: false, description: "per-user ring-buffer event retention" },
+  "session.persist_debounce_ms": { type: "int", default: 50, needsRestart: false, description: "debounce for persisting coarse session metadata" },
   "session.auto_approve_command_patterns": {
     type: "string",
     default: "",
@@ -2665,16 +2710,20 @@ function compactSessionContext(data) {
 }
 function compactSessionList(data) {
   const value = asObject2(data);
-  const all = value.all === true;
+  const remote = value.all === true || value.loaded_only === true;
   const out = {
-    sessions: asArray(value.sessions).map((entry) => all ? projectThread(entry) : projectSession(entry, {
+    sessions: asArray(value.sessions).map((entry) => remote ? projectSession(entry, {
+      includeModel: true,
+      includeBusy: true
+    }) : projectSession(entry, {
       includeModel: true,
       includeTurnCount: true,
       includeCurrentTurnId: true
     }))
   };
   copyIfPresent(out, value, "all");
-  if (all) copyIfPresent(out, value, "next_cursor");
+  if (value.loaded_only === true) copyIfPresent(out, value, "loaded_only");
+  if (remote) copyIfPresent(out, value, "next_cursor");
   return out;
 }
 function compactSessionHeal(data) {
@@ -2756,6 +2805,7 @@ function projectSession(value, options) {
   if (options.includeItemsInTurn) copyIfPresent(out, session, "items_in_turn");
   if (options.includePendingApprovals) copyIfPresent(out, session, "pending_approvals");
   if (options.includePendingUserInputs) copyIfPresent(out, session, "pending_user_inputs");
+  if (options.includeBusy) copyIfPresent(out, session, "busy");
   return out;
 }
 function projectThread(value) {
@@ -3512,14 +3562,35 @@ var import_node_path8 = __toESM(require("path"));
 var NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var SCHEMA_VERSION2 = 1;
+var DEFAULT_PERSIST_DEBOUNCE_MS = 50;
+var VOLATILE_SESSION_FIELDS = /* @__PURE__ */ new Set([
+  "last_turn_id",
+  "current_turn_id",
+  "current_turn_started_at",
+  "current_item_type",
+  "items_in_turn",
+  "pending_approvals",
+  "pending_user_inputs",
+  "token_usage_last_turn"
+]);
 var SessionRegistry = class {
   dataDir;
+  resolvePersistDebounceMs;
   users = /* @__PURE__ */ new Map();
   globalByThreadId = /* @__PURE__ */ new Map();
   touchTimers = /* @__PURE__ */ new Map();
   writeChains = /* @__PURE__ */ new Map();
-  constructor(dataDir) {
+  constructor(dataDir, opts = {}) {
     this.dataDir = dataDir;
+    const configured = opts.persistDebounceMs;
+    if (typeof configured === "function") {
+      this.resolvePersistDebounceMs = () => clampPersistDebounceMs(configured());
+    } else if (typeof configured === "number") {
+      const value = clampPersistDebounceMs(configured);
+      this.resolvePersistDebounceMs = () => value;
+    } else {
+      this.resolvePersistDebounceMs = () => DEFAULT_PERSIST_DEBOUNCE_MS;
+    }
   }
   loadForUser(user) {
     if (this.users.has(user)) return;
@@ -3598,13 +3669,14 @@ var SessionRegistry = class {
     b.byName.set(record.name, record);
     b.byThreadId.set(record.thread_id, record);
     this.globalByThreadId.set(record.thread_id, user);
-    this.schedulePersist(user, 0);
+    this.schedulePersist(user, this.persistDebounceMs());
   }
   update(user, name, patch) {
     this.loadForUser(user);
     const b = this.users.get(user);
     const rec = b.byName.get(name);
     if (!rec) throw new CodexTeamError("session_not_found", `session '${name}' not found`);
+    let persistNeeded = false;
     if (patch.name && patch.name !== rec.name) {
       if (!NAME_RE.test(patch.name)) throw invalidParams(`invalid session name: ${patch.name}`);
       if (patch.name.startsWith("th-")) throw invalidParams("session name cannot start with 'th-'");
@@ -3612,31 +3684,40 @@ var SessionRegistry = class {
       b.byName.delete(rec.name);
       rec.name = patch.name;
       b.byName.set(rec.name, rec);
+      persistNeeded = true;
     }
-    if (patch.last_active_at !== void 0) rec.last_active_at = patch.last_active_at;
-    if (patch.turn_count !== void 0) rec.turn_count = patch.turn_count;
-    if (patch.state !== void 0) rec.state = patch.state;
-    if (patch.recovery_state !== void 0) rec.recovery_state = patch.recovery_state ?? void 0;
-    if (patch.model !== void 0) rec.model = patch.model;
-    if (patch.cwd !== void 0) rec.cwd = patch.cwd;
-    if (patch.sandbox !== void 0) rec.sandbox = patch.sandbox;
-    if (patch.approval !== void 0) rec.approval = patch.approval;
-    if (patch.effort !== void 0) rec.effort = patch.effort;
-    if (patch.profile !== void 0) rec.profile = patch.profile;
+    persistNeeded = applySessionFieldUpdate(rec, "last_active_at", patch.last_active_at) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "turn_count", patch.turn_count) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "state", patch.state) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "recovery_state", patch.recovery_state ?? void 0, patch.recovery_state !== void 0) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "model", patch.model) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "cwd", patch.cwd) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "sandbox", patch.sandbox) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "approval", patch.approval) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "effort", patch.effort) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "profile", patch.profile) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "base_instructions", patch.base_instructions) || persistNeeded;
+    persistNeeded = applySessionFieldUpdate(rec, "developer_instructions", patch.developer_instructions) || persistNeeded;
     if (patch.experimental_tools !== void 0) {
-      rec.experimental_tools = patch.experimental_tools.length > 0 ? [...patch.experimental_tools] : void 0;
+      const normalized = patch.experimental_tools.length > 0 ? [...patch.experimental_tools] : void 0;
+      persistNeeded = applySessionFieldUpdate(rec, "experimental_tools", normalized, true) || persistNeeded;
     }
-    if (patch.last_turn_id !== void 0) rec.last_turn_id = patch.last_turn_id;
-    if (patch.current_turn_id !== void 0) rec.current_turn_id = patch.current_turn_id;
-    if (patch.current_turn_started_at !== void 0) rec.current_turn_started_at = patch.current_turn_started_at;
-    if (patch.current_item_type !== void 0) rec.current_item_type = patch.current_item_type;
-    if (patch.items_in_turn !== void 0) rec.items_in_turn = patch.items_in_turn;
-    if (patch.pending_approvals !== void 0) rec.pending_approvals = patch.pending_approvals;
-    if (patch.pending_user_inputs !== void 0) rec.pending_user_inputs = patch.pending_user_inputs;
-    if (patch.token_usage_last_turn !== void 0) rec.token_usage_last_turn = patch.token_usage_last_turn;
-    if (patch.crash_reason !== void 0) rec.crash_reason = patch.crash_reason;
-    if (patch.autoApprovePatterns !== void 0) rec.autoApprovePatterns = normalizeAutoApprovePatterns(patch.autoApprovePatterns);
-    this.schedulePersist(user, 0);
+    applySessionFieldUpdate(rec, "last_turn_id", patch.last_turn_id);
+    applySessionFieldUpdate(rec, "current_turn_id", patch.current_turn_id);
+    applySessionFieldUpdate(rec, "current_turn_started_at", patch.current_turn_started_at);
+    applySessionFieldUpdate(rec, "current_item_type", patch.current_item_type);
+    applySessionFieldUpdate(rec, "items_in_turn", patch.items_in_turn);
+    applySessionFieldUpdate(rec, "pending_approvals", patch.pending_approvals);
+    applySessionFieldUpdate(rec, "pending_user_inputs", patch.pending_user_inputs);
+    applySessionFieldUpdate(rec, "token_usage_last_turn", patch.token_usage_last_turn);
+    persistNeeded = applySessionFieldUpdate(rec, "crash_reason", patch.crash_reason) || persistNeeded;
+    if (patch.autoApprovePatterns !== void 0) {
+      const normalized = normalizeAutoApprovePatterns(patch.autoApprovePatterns);
+      persistNeeded = applySessionFieldUpdate(rec, "autoApprovePatterns", normalized) || persistNeeded;
+    }
+    if (persistNeeded) {
+      this.schedulePersist(user, this.persistDebounceMs());
+    }
     return rec;
   }
   remove(user, name) {
@@ -3647,7 +3728,7 @@ var SessionRegistry = class {
     b.byName.delete(rec.name);
     b.byThreadId.delete(rec.thread_id);
     this.globalByThreadId.delete(rec.thread_id);
-    this.schedulePersist(user, 0);
+    this.schedulePersist(user, this.persistDebounceMs());
     return rec;
   }
   removeAllForUser(user) {
@@ -3677,7 +3758,7 @@ var SessionRegistry = class {
     const rec = b.byName.get(name);
     if (!rec) return;
     rec.last_active_at = (/* @__PURE__ */ new Date()).toISOString();
-    this.schedulePersist(user, 250);
+    this.schedulePersist(user, this.persistDebounceMs());
   }
   async flush() {
     for (const [user, timer] of this.touchTimers) {
@@ -3694,7 +3775,7 @@ var SessionRegistry = class {
     const bucket = this.users.get(user);
     const payload = {
       schema_version: SCHEMA_VERSION2,
-      sessions: bucket ? Array.from(bucket.byName.values()) : []
+      sessions: bucket ? Array.from(bucket.byName.values()).map((record) => toPersistedRecord(record)) : []
     };
     const tmp = p + ".tmp";
     await import_node_fs7.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
@@ -3719,6 +3800,9 @@ var SessionRegistry = class {
   }
   emptyBucket() {
     return { byName: /* @__PURE__ */ new Map(), byThreadId: /* @__PURE__ */ new Map() };
+  }
+  persistDebounceMs() {
+    return this.resolvePersistDebounceMs();
   }
 };
 function validateSessionName(name) {
@@ -3811,14 +3895,14 @@ function normalizeLoadedRecord(value) {
     created_at: createdAt,
     last_active_at: lastActiveAt,
     turn_count: normalizeOptionalNumber(rec.turn_count) ?? 0,
-    last_turn_id: normalizeOptionalString(rec.last_turn_id) ?? runtimeDefaults.last_turn_id,
-    current_turn_id: normalizeOptionalString(rec.current_turn_id) ?? runtimeDefaults.current_turn_id,
-    current_turn_started_at: normalizeOptionalString(rec.current_turn_started_at) ?? runtimeDefaults.current_turn_started_at,
-    current_item_type: normalizeOptionalString(rec.current_item_type) ?? runtimeDefaults.current_item_type,
-    items_in_turn: normalizeOptionalNumber(rec.items_in_turn) ?? runtimeDefaults.items_in_turn,
-    pending_approvals: normalizeOptionalNumber(rec.pending_approvals) ?? runtimeDefaults.pending_approvals,
-    pending_user_inputs: normalizeOptionalNumber(rec.pending_user_inputs) ?? runtimeDefaults.pending_user_inputs,
-    token_usage_last_turn: normalizeTokenUsage(rec.token_usage_last_turn) ?? runtimeDefaults.token_usage_last_turn,
+    last_turn_id: runtimeDefaults.last_turn_id,
+    current_turn_id: runtimeDefaults.current_turn_id,
+    current_turn_started_at: runtimeDefaults.current_turn_started_at,
+    current_item_type: runtimeDefaults.current_item_type,
+    items_in_turn: runtimeDefaults.items_in_turn,
+    pending_approvals: runtimeDefaults.pending_approvals,
+    pending_user_inputs: runtimeDefaults.pending_user_inputs,
+    token_usage_last_turn: runtimeDefaults.token_usage_last_turn,
     crash_reason: normalizeOptionalString(rec.crash_reason) ?? runtimeDefaults.crash_reason
   };
 }
@@ -3847,6 +3931,68 @@ function normalizeStringArray(value) {
 }
 function normalizeOptionalNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function applySessionFieldUpdate(record, key, nextValue, present = nextValue !== void 0) {
+  if (!present) return false;
+  if (sessionFieldEquals(record[key], nextValue)) return false;
+  record[key] = cloneSessionField(nextValue);
+  return !VOLATILE_SESSION_FIELDS.has(key);
+}
+function cloneSessionField(value) {
+  if (Array.isArray(value)) {
+    return [...value];
+  }
+  if (value && typeof value === "object") {
+    return { ...value };
+  }
+  return value;
+}
+function sessionFieldEquals(left, right) {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return arrayEquals(
+      Array.isArray(left) ? left : [],
+      Array.isArray(right) ? right : []
+    );
+  }
+  if (isPlainObject(left) || isPlainObject(right)) {
+    if (!isPlainObject(left) || !isPlainObject(right)) return false;
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    if (leftKeys.length !== rightKeys.length) return false;
+    for (const key of leftKeys) {
+      if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+      if (!sessionFieldEquals(left[key], right[key])) return false;
+    }
+    return true;
+  }
+  return left === right;
+}
+function arrayEquals(left, right) {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (!sessionFieldEquals(left[i], right[i])) return false;
+  }
+  return true;
+}
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+function toPersistedRecord(record) {
+  const persisted = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (VOLATILE_SESSION_FIELDS.has(key)) continue;
+    persisted[key] = clonePersistedValue(value);
+  }
+  return persisted;
+}
+function clonePersistedValue(value) {
+  if (Array.isArray(value)) return [...value];
+  if (isPlainObject(value)) return { ...value };
+  return value;
+}
+function clampPersistDebounceMs(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_PERSIST_DEBOUNCE_MS;
+  return Math.max(0, Math.floor(value));
 }
 
 // src/daemon/events.ts
@@ -4698,6 +4844,15 @@ var PendingRegistry = class {
   removeForSession(user, sessionName) {
     return this.removeMatching((rec) => rec.user === user && rec.session_name === sessionName);
   }
+  renameSession(user, oldSessionName, newSessionName) {
+    let renamed = 0;
+    for (const rec of this.allRequests()) {
+      if (rec.user !== user || rec.session_name !== oldSessionName) continue;
+      rec.session_name = newSessionName;
+      renamed += 1;
+    }
+    return renamed;
+  }
   removeForUser(user) {
     return this.removeMatching((rec) => rec.user === user);
   }
@@ -4939,13 +5094,25 @@ async function threadSetName(client, threadId, name, retry = DEFAULT_RETRY) {
   await retryOnOverload(() => client.request("thread/name/set", { threadId, name }), retry);
 }
 async function threadList(client, params = {}, retry = DEFAULT_RETRY) {
-  const result = await retryOnOverload(() => client.request("thread/list", params), retry);
+  const requestParams = {};
+  if (params.cursor !== void 0) requestParams.cursor = params.cursor;
+  if (params.pageSize !== void 0) requestParams.limit = params.pageSize;
+  if (params.includeArchived !== void 0) requestParams.includeArchived = params.includeArchived;
+  if (params.sortKey !== void 0) requestParams.sortKey = params.sortKey;
+  const result = await retryOnOverload(() => client.request("thread/list", requestParams), retry);
   const obj = asObject4(result);
   const data = Array.isArray(obj.data) ? obj.data : [];
   return {
     data,
     nextCursor: obj.nextCursor ?? null,
     backwardsCursor: obj.backwardsCursor ?? null
+  };
+}
+async function threadLoadedList(client, retry = DEFAULT_RETRY) {
+  const result = await retryOnOverload(() => client.request("thread/loadedList", {}), retry);
+  const obj = asObject4(result);
+  return {
+    threads: Array.isArray(obj.threads) ? obj.threads : []
   };
 }
 async function threadRead(client, threadId, retry = DEFAULT_RETRY) {
@@ -6016,7 +6183,9 @@ function buildContext(opts = {}) {
     logPath
   });
   const users = new UserRegistry(dataDir);
-  const sessions = new SessionRegistry(dataDir);
+  const sessions = new SessionRegistry(dataDir, {
+    persistDebounceMs: () => toInt2(config.getEffective("session.persist_debounce_ms"), 50)
+  });
   sessions.loadAllUsers(users.list().map((u) => u.token));
   const pidTracker = new PidTracker(dataDir);
   const maxPerProcess = config.getEffective("app_server.max_sessions_per_process");
@@ -7151,6 +7320,8 @@ function stringify(v) {
 
 // src/daemon/handlers/session.ts
 var attachLocks = /* @__PURE__ */ new Map();
+var DEFAULT_SESSION_LIST_LIMIT = 50;
+var LOCAL_SESSION_LIST_CURSOR_PREFIX = "local:";
 var sessionNew = async (ctx, req) => {
   requireUser(ctx, req);
   const user = req.bearer;
@@ -7328,7 +7499,13 @@ var sessionRename = async (ctx, req) => {
     }
   }
   const updated = ctx.sessions.update(user, oldName, { name: newName });
+  if (typeof ctx.queues.rekey === "function") {
+    ctx.queues.rekey(keyFor(user, oldName), keyFor(user, newName));
+  }
   ctx.pool.rekeySession(keyFor(user, oldName), keyFor(user, newName));
+  if (typeof ctx.pending.renameSession === "function") {
+    ctx.pending.renameSession(user, oldName, newName);
+  }
   return { session: updated };
 };
 var sessionFork = async (ctx, req) => {
@@ -7442,36 +7619,73 @@ var sessionList = async (ctx, req) => {
   const user = req.bearer;
   const flags = asFlags(req);
   const all = isTrue2(flags["all"]);
+  const loadedOnly = isTrue2(flags["loaded-only"]);
   const sortField = asString5(flags["sort"]) ?? "last_active";
   const format = asString5(flags["format"]) ?? "json";
+  const cursor = parseSessionListCursor(flags);
+  const limit = parseSessionListLimit(flags);
+  const archivedMode = parseArchivedMode(flags);
+  const stateFilter = parseSessionStateFilter(flags);
+  const ownerFilter = parseOwnerFilter(flags);
   if (format !== "json" && format !== "table") {
     throw invalidParams(`--format must be 'json' or 'table'`);
   }
-  if (!all) {
-    const live = ctx.sessions.listLive(user);
-    const sorted2 = sortSessions(live, sortField);
-    const response2 = { sessions: sorted2, all: false, sort: sortField, format };
+  const response = { all, sort: sortField, format };
+  if (loadedOnly) response.loaded_only = true;
+  if (!all && !loadedOnly) {
+    const live = listRegistrySessions(ctx, user, ownerFilter).filter((session) => matchesArchivedMode(session, archivedMode)).filter((session) => matchesStateFilter(session, stateFilter));
+    const sorted2 = sortSessionRows(live, sortField);
+    const page = paginateLocalSessionRows(sorted2, limit, cursor);
+    response.sessions = page.sessions;
+    response.next_cursor = page.nextCursor;
     if (format === "table") {
-      response2.table = renderTable2(
-        sorted2,
-        ["name", "thread_id", "state", "model", "turn_count", "last_active_at"]
-      );
+      response.table = renderTable2(page.sessions, [
+        "name",
+        "thread_id",
+        "state",
+        "model",
+        "busy",
+        "turn_count",
+        "last_active_at"
+      ]);
     }
-    return response2;
+    return response;
   }
   const client = await ctx.pool.acquireForAdhoc(user);
-  const result = await threadList(client, {}, ctx.retryOptions());
-  const response = {
-    sessions: result.data,
-    next_cursor: result.nextCursor,
-    all: true,
-    sort: sortField,
-    format
-  };
+  if (loadedOnly) {
+    const result2 = await threadLoadedList(client, ctx.retryOptions());
+    const decorated = result2.threads.map((thread) => decorateThreadSession(ctx, user, thread)).filter((session) => matchesOwnerFilter(session, ownerFilter, user)).filter((session) => matchesArchivedMode(session, archivedMode)).filter((session) => matchesStateFilter(session, stateFilter));
+    const page = paginateLocalSessionRows(sortSessionRows(decorated, sortField), limit, cursor);
+    const sessions2 = page.sessions.map(stripInternalSessionMetadata);
+    response.sessions = page.sessions;
+    response.next_cursor = page.nextCursor;
+    response.sessions = sessions2;
+    if (format === "table") {
+      response.table = renderTable2(page.sessions, [
+        "name",
+        "thread_id",
+        "state",
+        "model",
+        "busy",
+        "updated_at"
+      ]);
+    }
+    return response;
+  }
+  const result = await threadList(client, {
+    cursor: cursor ?? void 0,
+    pageSize: limit,
+    includeArchived: archivedMode !== "exclude"
+  }, ctx.retryOptions());
+  const sessions = result.data.map((thread) => decorateThreadSession(ctx, user, thread)).filter((session) => matchesOwnerFilter(session, ownerFilter, user)).filter((session) => matchesArchivedMode(session, archivedMode)).filter((session) => matchesStateFilter(session, stateFilter)).map(stripInternalSessionMetadata);
+  Object.assign(response, {
+    sessions,
+    next_cursor: result.nextCursor
+  });
   if (format === "table") {
     response.table = renderTable2(
-      result.data,
-      ["id", "status", "preview", "cwd", "updated_at"]
+      sessions,
+      ["name", "thread_id", "state", "model", "busy", "updated_at"]
     );
   }
   return response;
@@ -7487,7 +7701,7 @@ var sessionHealth = async (ctx, req) => {
   const client = ctx.pool.clientForSession(sessionKey);
   const appServerAlive = isClientAlive(client);
   const currentTurnStartedAt = rec.current_turn_started_at ?? null;
-  const pending = typeof ctx.pending.listForUser === "function" ? ctx.pending.listForUser(user).filter((entry) => entry.session_name === rec.name) : null;
+  const pending = typeof ctx.pending.listForUser === "function" ? ctx.pending.listForUser(user).filter((entry) => entry.thread_id === rec.thread_id || entry.session_name === rec.name) : null;
   const pendingApprovals = pending ? pending.filter((entry) => entry.kind.startsWith("approval.")).length : rec.pending_approvals ?? 0;
   const pendingUserInputs = pending ? pending.filter((entry) => entry.kind === "user_input.request").length : rec.pending_user_inputs ?? 0;
   return {
@@ -7581,6 +7795,52 @@ function asPositionalOptional(req, idx) {
 function asString5(v) {
   if (Array.isArray(v)) return v[v.length - 1] ?? null;
   return typeof v === "string" ? v : null;
+}
+function parseSessionListLimit(flags) {
+  if (!hasFlag(flags, "limit")) return DEFAULT_SESSION_LIST_LIMIT;
+  const raw = asString5(flags["limit"]);
+  if (!raw) throw invalidParams("--limit requires a positive integer");
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
+    throw invalidParams("--limit must be a positive integer");
+  }
+  return value;
+}
+function parseSessionListCursor(flags) {
+  if (!hasFlag(flags, "cursor")) return null;
+  const cursor = asString5(flags["cursor"]);
+  if (!cursor) throw invalidParams("--cursor requires a value");
+  return cursor;
+}
+function parseArchivedMode(flags) {
+  if (!hasFlag(flags, "archived")) return "exclude";
+  const mode = asString5(flags["archived"]);
+  if (mode === "only" || mode === "exclude" || mode === "include") return mode;
+  throw invalidParams(`--archived must be one of: only / exclude / include`);
+}
+function parseSessionStateFilter(flags) {
+  if (!hasFlag(flags, "state")) return null;
+  const raw = asString5(flags["state"]);
+  if (!raw) throw invalidParams("--state requires a comma-separated value");
+  const entries = raw.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  if (entries.length === 0) throw invalidParams("--state requires at least one value");
+  const out = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (entry === "live" || entry === "crashed" || entry === "closed" || entry === "archived") {
+      out.add(entry);
+      continue;
+    }
+    throw invalidParams(`--state values must be drawn from: live, crashed, closed, archived`);
+  }
+  return out;
+}
+function parseOwnerFilter(flags) {
+  if (!hasFlag(flags, "owner")) return { kind: "self" };
+  const raw = asString5(flags["owner"]);
+  if (!raw) throw invalidParams("--owner requires a value");
+  if (raw === "self") return { kind: "self" };
+  if (raw === "any") return { kind: "any" };
+  return { kind: "token", token: raw };
 }
 function isTrue2(v) {
   return v === true || v === "true" || v === "1";
@@ -7740,17 +8000,149 @@ async function appendSessionClosed(ctx, user, rec, reason) {
     }
   });
 }
-function sortSessions(rows, field) {
-  const f = (/* @__PURE__ */ new Set(["name", "last_active", "turn_count", "created_at"])).has(field) ? field : "last_active";
+function sortSessionRows(rows, field) {
+  const canonical = (/* @__PURE__ */ new Set(["name", "last_active", "turn_count", "created_at"])).has(field) ? field : "last_active";
+  const key = canonical === "last_active" ? "last_active_at" : canonical === "created_at" ? "created_at" : canonical;
   const copy = [...rows];
-  copy.sort((a, b) => {
-    const av = a[f === "last_active" ? "last_active_at" : f === "created_at" ? "created_at" : f];
-    const bv = b[f === "last_active" ? "last_active_at" : f === "created_at" ? "created_at" : f];
-    if (typeof av === "string" && typeof bv === "string") return bv.localeCompare(av);
-    if (typeof av === "number" && typeof bv === "number") return bv - av;
-    return 0;
-  });
+  copy.sort((a, b) => compareSessionListValues(b[key], a[key]));
   return copy;
+}
+function compareSessionListValues(left, right) {
+  if (typeof left === "string" && typeof right === "string") return left.localeCompare(right);
+  if (typeof left === "number" && typeof right === "number") return left - right;
+  if (left === void 0 && right !== void 0) return -1;
+  if (left !== void 0 && right === void 0) return 1;
+  return 0;
+}
+function listRegistrySessions(ctx, currentUser, ownerFilter) {
+  const users = resolveRegistryUsers(ctx, currentUser, ownerFilter);
+  const rows = [];
+  for (const user of users) {
+    for (const rec of ctx.sessions.listLive(user)) {
+      rows.push(decorateLiveSession(ctx, user, rec));
+    }
+  }
+  return rows;
+}
+function resolveRegistryUsers(ctx, currentUser, ownerFilter) {
+  if (ownerFilter.kind === "self") return [currentUser];
+  if (ownerFilter.kind === "token") return [ownerFilter.token];
+  if (typeof ctx.users.list === "function") {
+    return ctx.users.list().map((entry) => entry.token);
+  }
+  return [currentUser];
+}
+function decorateLiveSession(ctx, owner, rec) {
+  const busyInfo = deriveBusyInfo(ctx, owner, rec);
+  return {
+    ...rec,
+    busy: busyInfo.busy,
+    current_turn_id: busyInfo.currentTurnId,
+    model: rec.model ?? null
+  };
+}
+function decorateThreadSession(ctx, currentUser, thread) {
+  const threadId = typeof thread.id === "string" ? thread.id : null;
+  const live = threadId ? ctx.sessions.findLiveAnywhere(threadId) : null;
+  const rec = live?.record ?? null;
+  const owner = live?.user ?? null;
+  const busyInfo = rec && owner ? deriveBusyInfo(ctx, owner, rec) : { busy: false, currentTurnId: null };
+  const state = deriveThreadState(rec, thread);
+  const name = rec?.name ?? (typeof thread.name === "string" && thread.name.length > 0 ? thread.name : threadId ?? "unknown");
+  const model = rec?.model ?? (typeof thread.model === "string" ? thread.model : null) ?? (typeof thread.model_provider === "string" ? thread.model_provider : null);
+  const out = {
+    ...thread,
+    name,
+    thread_id: threadId,
+    state,
+    model,
+    busy: busyInfo.busy
+  };
+  if (rec) {
+    out.turn_count = rec.turn_count;
+    out.current_turn_id = busyInfo.currentTurnId;
+    out.last_active_at = rec.last_active_at;
+    out.created_at = out.created_at ?? rec.created_at;
+    out.sandbox = out.sandbox ?? rec.sandbox;
+    out.approval = out.approval ?? rec.approval;
+    out.effort = out.effort ?? rec.effort;
+    out.profile = out.profile ?? rec.profile;
+    out.crash_reason = out.crash_reason ?? rec.crash_reason;
+  } else {
+    out.current_turn_id = null;
+  }
+  if (owner) out.owner = owner;
+  return out;
+}
+function deriveBusyInfo(ctx, owner, rec) {
+  const sessionKey = keyFor(owner, rec.name);
+  const currentTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+  const busy = rec.state === "live" && isClientAlive(ctx.pool.clientForSession(sessionKey)) && currentTurnId !== null;
+  return { busy, currentTurnId };
+}
+function deriveThreadState(rec, thread) {
+  if (isArchivedThread(thread)) return "archived";
+  if (rec?.state === "crashed") return "crashed";
+  if (rec?.state === "live") return "live";
+  return "closed";
+}
+function isArchivedThread(thread) {
+  const record = thread;
+  if (record.archived === true || record.isArchived === true) return true;
+  const status2 = record.status;
+  if (typeof status2 === "string") return status2 === "archived";
+  if (status2 && typeof status2 === "object" && !Array.isArray(status2)) {
+    const type = status2.type;
+    return typeof type === "string" && type === "archived";
+  }
+  return false;
+}
+function matchesStateFilter(session, filter) {
+  if (!filter) return true;
+  const state = session.state;
+  return typeof state === "string" && filter.has(state);
+}
+function matchesArchivedMode(session, archivedMode) {
+  const archived = session.state === "archived";
+  if (archivedMode === "include") return true;
+  if (archivedMode === "only") return archived;
+  return !archived;
+}
+function matchesOwnerFilter(session, ownerFilter, currentUser) {
+  const owner = typeof session.owner === "string" ? session.owner : null;
+  if (ownerFilter.kind === "any") return true;
+  if (ownerFilter.kind === "self") {
+    return owner === null || owner === currentUser;
+  }
+  return ownerFilter.token === currentUser ? owner === null || owner === currentUser : owner === ownerFilter.token;
+}
+function paginateLocalSessionRows(rows, limit, cursor) {
+  const start = decodeLocalSessionListCursor(cursor);
+  const sessions = rows.slice(start, start + limit);
+  const nextOffset = start + sessions.length;
+  return {
+    sessions,
+    nextCursor: nextOffset < rows.length ? encodeLocalSessionListCursor(nextOffset) : null
+  };
+}
+function decodeLocalSessionListCursor(cursor) {
+  if (!cursor) return 0;
+  if (!cursor.startsWith(LOCAL_SESSION_LIST_CURSOR_PREFIX)) {
+    throw invalidParams("invalid --cursor for local session list");
+  }
+  const raw = cursor.slice(LOCAL_SESSION_LIST_CURSOR_PREFIX.length);
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    throw invalidParams("invalid --cursor for local session list");
+  }
+  return value;
+}
+function encodeLocalSessionListCursor(offset) {
+  return `${LOCAL_SESSION_LIST_CURSOR_PREFIX}${offset}`;
+}
+function stripInternalSessionMetadata(session) {
+  const { owner: _owner, ...rest } = session;
+  return rest;
 }
 
 // src/daemon/handlers/message.ts

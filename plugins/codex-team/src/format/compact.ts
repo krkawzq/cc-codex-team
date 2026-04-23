@@ -143,6 +143,7 @@ interface SessionProjectionOptions {
   includeItemsInTurn?: boolean;
   includePendingApprovals?: boolean;
   includePendingUserInputs?: boolean;
+  includeBusy?: boolean;
   nameOnly?: boolean;
 }
 
@@ -222,11 +223,14 @@ function compactSessionContext(data: unknown): Record<string, unknown> {
 
 function compactSessionList(data: unknown): Record<string, unknown> {
   const value = asObject(data);
-  const all = value.all === true;
+  const remote = value.all === true || value.loaded_only === true;
   const out: Record<string, unknown> = {
     sessions: asArray(value.sessions).map((entry) =>
-      all
-        ? projectThread(entry)
+      remote
+        ? projectSession(entry, {
+            includeModel: true,
+            includeBusy: true,
+          })
         : projectSession(entry, {
             includeModel: true,
             includeTurnCount: true,
@@ -234,7 +238,8 @@ function compactSessionList(data: unknown): Record<string, unknown> {
           })),
   };
   copyIfPresent(out, value, "all");
-  if (all) copyIfPresent(out, value, "next_cursor");
+  if (value.loaded_only === true) copyIfPresent(out, value, "loaded_only");
+  if (remote) copyIfPresent(out, value, "next_cursor");
   return out;
 }
 
@@ -325,6 +330,7 @@ function projectSession(value: unknown, options: SessionProjectionOptions): Reco
   if (options.includeItemsInTurn) copyIfPresent(out, session, "items_in_turn");
   if (options.includePendingApprovals) copyIfPresent(out, session, "pending_approvals");
   if (options.includePendingUserInputs) copyIfPresent(out, session, "pending_user_inputs");
+  if (options.includeBusy) copyIfPresent(out, session, "busy");
   return out;
 }
 

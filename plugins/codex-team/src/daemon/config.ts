@@ -33,6 +33,7 @@ export const CONFIG_KEYS: Record<string, ConfigSpec> = {
 
   "monitor.default_interval_seconds": { type: "int", default: 30, needsRestart: false, description: "default --interval for `monitor events`" },
   "monitor.event_log_retention": { type: "int", default: 10000, needsRestart: false, description: "per-user ring-buffer event retention" },
+  "session.persist_debounce_ms": { type: "int", default: 50, needsRestart: false, description: "debounce for persisting coarse session metadata" },
   "session.auto_approve_command_patterns": {
     type: "string",
     default: "",

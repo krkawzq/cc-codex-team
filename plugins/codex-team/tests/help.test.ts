@@ -46,7 +46,14 @@ describe("renderHelp", () => {
     expect(renderHelp(["daemon", "status"])).toContain("--short");
     expect(renderHelp(["daemon", "user", "list"])).toContain("--short");
     expect(renderHelp(["session", "info"])).toContain("--short");
-    expect(renderHelp(["session", "list"])).toContain("cannot be used with --format table");
+    const sessionList = renderHelp(["session", "list"]);
+    expect(sessionList).toContain("cannot be used with --format table");
+    expect(sessionList).toContain("--cursor");
+    expect(sessionList).toContain("--limit");
+    expect(sessionList).toContain("--archived");
+    expect(sessionList).toContain("--state");
+    expect(sessionList).toContain("--owner");
+    expect(sessionList).toContain("--loaded-only");
     expect(renderHelp(["message", "history"])).toContain("cannot be used with --format markdown");
   });
 
