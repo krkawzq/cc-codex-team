@@ -229,6 +229,11 @@ function defaultDataDir() {
   if (configured) return expandUserPath(configured);
   return import_node_path2.default.join(homeDir(), `.${APP}`);
 }
+function clientOnlyDaemonSock(env = process.env, platform = process.platform) {
+  const configured = env.CODEX_TEAM_DAEMON_SOCK?.trim();
+  if (!configured) return null;
+  return normalizeSockPath(expandUserPath(configured, platform), platform);
+}
 function defaultSockPath(dataDir = defaultDataDir(), platform = process.platform) {
   const configured = process.env.CODEX_TEAM_SOCK;
   if (configured) return normalizeSockPath(expandUserPath(configured, platform), platform);
@@ -266,6 +271,13 @@ function normalizeSockPath(sockPath, platform = process.platform) {
   if (platform !== "win32") return sockPath;
   if (isNamedPipePath(sockPath)) return sockPath.replace(/\//g, "\\");
   return namedPipePath(sockPath);
+}
+function formatPathForEnvHint(targetPath, platform = process.platform, home = homeDir()) {
+  if (platform !== "win32" && home && targetPath === home) return "$HOME";
+  if (platform !== "win32" && home && targetPath.startsWith(`${home}/`)) {
+    return `$HOME/${targetPath.slice(home.length + 1)}`;
+  }
+  return targetPath;
 }
 function isNamedPipePath(sockPath) {
   return /^\\\\\.\\pipe[\\/]/i.test(sockPath);
@@ -571,7 +583,13 @@ function parseArgs(argv) {
       continue;
     }
     if (spec.takesValue) {
-      const v = inlineValue ?? argv[++i];
+      const taken = takeOptionValue(inlineValue, argv, i, globalToken);
+      if (!taken.ok) {
+        result.unknown = taken.message;
+        return result;
+      }
+      i = taken.nextIndex;
+      const v = taken.value;
       if (v === void 0) {
         result.unknown = `flag ${globalToken} requires a value`;
         return result;
@@ -659,6 +677,27 @@ function splitLongFlagAssignment(token) {
   const eqIdx = token.indexOf("=");
   if (eqIdx < 0) return [token, null];
   return [token.slice(0, eqIdx), token.slice(eqIdx + 1)];
+}
+function takeOptionValue(inlineValue, argv, index, token) {
+  if (inlineValue !== null) {
+    return {
+      ok: true,
+      value: inlineValue,
+      nextIndex: index
+    };
+  }
+  const value = argv[index + 1];
+  if (value === void 0 || isFlagLike(value)) {
+    return {
+      ok: false,
+      message: `flag ${token} requires a value`
+    };
+  }
+  return {
+    ok: true,
+    value,
+    nextIndex: index + 1
+  };
 }
 function setFlag(flags, key, value) {
   if (value === null) {
@@ -2368,6 +2407,13 @@ var HELP_TREE = {
       positionals: [],
       flags: [
         {
+          long: "--json",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print the structured doctor result body as JSON."
+        },
+        {
           long: "--short",
           type: "bool",
           default: "false",
@@ -2377,10 +2423,12 @@ var HELP_TREE = {
       ],
       examples: [
         "codex-team doctor",
-        "codex-team doctor --short"
+        "codex-team doctor --short",
+        "codex-team doctor --json"
       ],
       notes: [
         "Human-readable by default. Use --short for a one-line verdict summary.",
+        "Use --json for the same verdict/check payload in machine-readable form.",
         "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
         "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness."
       ],
@@ -4129,10 +4177,12 @@ async function checkSocketBind(ctx, deps = DEFAULT_DEPS) {
   if (!result.ok) {
     const code = result.error?.code ?? "UNKNOWN";
     if (code === "EPERM" || code === "EACCES") {
+      const existingDaemonSock = findExistingDaemonSockHintPath(ctx, deps.fs);
+      const hint = existingDaemonSock ? `Hint: a daemon is already running on this host. Set CODEX_TEAM_DAEMON_SOCK=${formatPathForEnvHint(existingDaemonSock)} and retry.` : "Hint: no workaround here; this environment cannot host the daemon. Sanity check: run `codex-team version`.";
       return fail("socket_bind", `socket_bind ${code} - sandbox forbids listen()`, {
         name: "socket_bind",
         detail: `socket_bind ${code} - sandbox forbids listen()`,
-        hint: "Hint: no workaround here; this environment cannot host the daemon. Sanity check: run `codex-team version`.",
+        hint,
         showHintInText: true
       });
     }
@@ -4248,17 +4298,14 @@ async function runDoctor(options = {}, deps = DEFAULT_DEPS) {
   }
   if (options.json) {
     write(`${JSON.stringify({
-      ok: true,
-      data: {
-        verdict,
-        checks: results.map((result) => ({
-          name: result.name,
-          status: renderStatus(result.status),
-          detail: result.detail,
-          ...result.hint ? { hint: result.hint } : {}
-        })),
-        exit_code: exitCodeForVerdict(verdict)
-      }
+      verdict,
+      checks: results.map((result) => ({
+        name: result.name,
+        status: renderStatus(result.status),
+        detail: result.detail,
+        ...result.hint ? { hint: result.hint } : {}
+      })),
+      exit_code: exitCodeForVerdict(verdict)
     })}
 `);
     return exitCodeForVerdict(verdict);
@@ -4347,12 +4394,22 @@ function skip(id, message, options = {}) {
   };
 }
 function resolveBundledPluginLauncher(ctx) {
-  if (!ctx.pluginRoot || !ctx.invokedAs) return null;
-  const pluginRoot = import_node_path7.default.resolve(ctx.pluginRoot, "plugins", "codex-team");
+  if (!ctx.invokedAs) return null;
   const invokedAs = import_node_path7.default.resolve(ctx.invokedAs);
-  const relative = import_node_path7.default.relative(pluginRoot, invokedAs);
-  if (relative === "" || !relative.startsWith("..") && !import_node_path7.default.isAbsolute(relative)) {
-    return invokedAs;
+  const candidates = /* @__PURE__ */ new Set();
+  candidates.add(import_node_path7.default.join(import_node_path7.default.resolve(ctx.packageRoot), "bin", "codex-team"));
+  if (ctx.pluginRoot) {
+    const pluginRoot = import_node_path7.default.resolve(ctx.pluginRoot);
+    candidates.add(import_node_path7.default.join(pluginRoot, "bin", "codex-team"));
+    candidates.add(import_node_path7.default.join(pluginRoot, "plugins", "codex-team", "bin", "codex-team"));
+  }
+  return candidates.has(invokedAs) ? invokedAs : null;
+}
+function findExistingDaemonSockHintPath(ctx, doctorFs) {
+  const candidate = import_node_path7.default.join(ctx.dataDir, "daemon.sock");
+  try {
+    if (doctorFs.existsSync(candidate)) return candidate;
+  } catch {
   }
   return null;
 }
@@ -4520,7 +4577,7 @@ var BUILTIN_PROFILES = [
       sandbox: "workspace-write",
       approval: "never",
       effort: "medium",
-      auto_approve: "npm test,vitest*,pytest*,cargo test*,go test*,make test*"
+      auto_approve: "npm test,npm run test*,vitest*,pytest*,cargo test*,go test*,make test*"
     }
   },
   {
@@ -4537,7 +4594,7 @@ var BUILTIN_PROFILES = [
 function findProfile(name) {
   return BUILTIN_PROFILES.find((profile) => profile.name === name);
 }
-function renderSessionNewCommand(profile, sessionName = "<name>", cwd = "<repo>") {
+function renderSessionNewCommand(profile, sessionName = "SESSION_NAME", cwd = "/abs/path/to/repo") {
   const args = [
     "codex-team",
     "-b",
@@ -4576,6 +4633,7 @@ var DAEMON_STDERR_FLAG = "--stderr-to";
 var DOCTOR_SUGGESTED_ACTION = "run `codex-team doctor` to diagnose";
 var SOCKET_BIND_DENIED_SUGGESTED_ACTION = "codex-team cannot bind a local IPC socket here \u2014 run `codex-team doctor` for details";
 var DATA_DIR_NOT_WRITABLE_SUGGESTED_ACTION = "set CODEX_TEAM_DATA_DIR to a writable path and retry, e.g. CODEX_TEAM_DATA_DIR=/tmp/codex-team-$USER. Run `codex-team doctor` to verify.";
+var cachedBootstrapFailure = null;
 async function readStdinAll() {
   return await new Promise((resolve, reject) => {
     let buf = "";
@@ -4627,12 +4685,13 @@ async function runCli(argv) {
     process.stdout.write(JSON.stringify(err("invalid_params", "--short cannot be used with --format markdown or --format table")) + "\n");
     return 1;
   }
-  const sockPath = parsed.daemonSock || defaultSockPath();
+  const clientOnlySockPath = parsed.daemonSock || clientOnlyDaemonSock();
+  const sockPath = clientOnlySockPath || defaultSockPath();
   if (method === "doctor") {
     return await runDoctor({ short, json, sockPath });
   }
   if (method === "version") {
-    return await runVersion(sockPath);
+    return await runVersion(sockPath, truthy(parsed.flags.full));
   }
   if (isBuiltinProfilesMethod(method)) {
     return runBuiltinProfiles(method, parsed);
@@ -4651,16 +4710,27 @@ async function runCli(argv) {
   }
   const approvalValidationError = validateApprovalHint(method, parsed);
   if (approvalValidationError) {
-    process.stdout.write(JSON.stringify(err("invalid_params", approvalValidationError)) + "\n");
-    return 2;
+    process.stdout.write(JSON.stringify(err("invalid_decision", approvalValidationError)) + "\n");
+    return 1;
   }
   const cwdPreflightError = validateCliCwdPreflight(method, parsed);
   if (cwdPreflightError) {
     process.stdout.write(JSON.stringify(err("invalid_params", cwdPreflightError)) + "\n");
     return 1;
   }
-  const ready = await ensureDaemon(sockPath);
+  canonicalizeCliCwdFlag(parsed);
+  if (needsBearer && !clientOnlySockPath) {
+    const cachedFailure = getCachedBootstrapFailure(sockPath);
+    if (cachedFailure) {
+      process.stdout.write(JSON.stringify(err(cachedFailure.code, cachedFailure.message, cachedFailure.data)) + "\n");
+      return 1;
+    }
+  }
+  const ready = await ensureDaemon(sockPath, { clientOnly: Boolean(clientOnlySockPath) });
   if (!ready.ok) {
+    if (needsBearer && !clientOnlySockPath) {
+      cacheBootstrapFailure(sockPath, ready);
+    }
     process.stdout.write(JSON.stringify(err(ready.code, ready.message, ready.data)) + "\n");
     return 1;
   }
@@ -4677,7 +4747,7 @@ function validateApprovalHint(method, parsed) {
   const validation = validateApprovalAction(kindHint, action);
   return validation.ok ? null : validation.message;
 }
-async function runVersion(sockPath) {
+async function runVersion(sockPath, full) {
   const cliVersion = getCliVersion();
   const alive = await probeSock(sockPath, 200);
   const cliConfig = readCliConfig();
@@ -4693,7 +4763,7 @@ async function runVersion(sockPath) {
     }
   }
   process.stdout.write(
-    renderJsonResult({ cli_version: cliVersion, daemon_version: daemonVersion }, false)
+    renderJsonResult({ cli_version: cliVersion, daemon_version: daemonVersion }, full)
   );
   return 0;
 }
@@ -4972,8 +5042,11 @@ async function requestOnceWithRetry(sockPath, opts, cliConfig, allowRetry) {
   }
   throw lastError ?? new Error("request failed");
 }
-async function ensureDaemon(sockPath) {
+async function ensureDaemon(sockPath, options = {}) {
   const cliConfig = readCliConfig();
+  if (options.clientOnly) {
+    return await ensureClientOnlyDaemon(sockPath, cliConfig);
+  }
   const config = new ConfigStore();
   const dataDir = config.resolvedDataDir();
   const pidPath = pidFilePath(dataDir);
@@ -5005,7 +5078,7 @@ async function ensureDaemon(sockPath) {
       return { ok: true, code: "", message: "" };
     }
   } catch (e) {
-    return buildSpawnFailure(dataDir, e, false);
+    return buildSpawnFailure(dataDir, sockPath, e, false);
   }
   try {
     const child = spawnDaemon(stderrPath);
@@ -5014,22 +5087,36 @@ async function ensureDaemon(sockPath) {
       return { ok: true, code: "", message: "" };
     }
     if (secondAttempt.exited) {
-      return buildEarlyExitFailure(stderrPath, secondAttempt);
+      return buildEarlyExitFailure(sockPath, stderrPath, secondAttempt);
     }
   } catch (e) {
-    return buildSpawnFailure(dataDir, e, true);
+    return buildSpawnFailure(dataDir, sockPath, e, true);
   }
   const stderrTail = readTail(stderrPath, 4096);
   const parsedBootstrap = parseBootstrapStderr(stderrTail);
   if (parsedBootstrap?.code === "socket_bind_denied") {
-    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
+    return buildSocketBindDeniedFailure(sockPath, parsedBootstrap, stderrTail);
   }
   return {
     ok: false,
     code: "daemon_unreachable",
     message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`,
-    data: buildDaemonUnreachableData(stderrPath, stderrTail)
+    data: withDaemonSockHint(buildDaemonUnreachableData(stderrPath, stderrTail), sockPath)
   };
+}
+async function ensureClientOnlyDaemon(sockPath, cliConfig) {
+  try {
+    const sock = await connectSockWithRetry(
+      sockPath,
+      cliConfig.connectTimeoutMs,
+      cliConfig.connectRetryAttempts,
+      cliConfig.connectRetryDelayMs
+    );
+    sock.end();
+    return { ok: true, code: "", message: "" };
+  } catch (error) {
+    return buildClientOnlyConnectFailure(sockPath, error);
+  }
 }
 async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDelayMs) {
   let attempt = 0;
@@ -5130,15 +5217,15 @@ function isPidAlive(pid) {
     return false;
   }
 }
-function buildSocketBindDeniedFailure(parsedBootstrap, stderrTail) {
+function buildSocketBindDeniedFailure(sockPath, parsedBootstrap, stderrTail) {
   return {
     ok: false,
     code: parsedBootstrap.code,
     message: parsedBootstrap.message,
-    data: {
+    data: withDaemonSockHint({
       ...parsedBootstrap.data ?? {},
       ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-    }
+    }, sockPath)
   };
 }
 function buildDaemonUnreachableData(stderrPath, stderrTail, result) {
@@ -5150,17 +5237,17 @@ function buildDaemonUnreachableData(stderrPath, stderrTail, result) {
     suggested_action: DOCTOR_SUGGESTED_ACTION
   };
 }
-function buildEarlyExitFailure(stderrPath, result) {
+function buildEarlyExitFailure(sockPath, stderrPath, result) {
   const stderrTail = readTail(stderrPath, 4096);
   const parsedBootstrap = parseBootstrapStderr(stderrTail);
   if (parsedBootstrap?.code === "socket_bind_denied") {
-    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
+    return buildSocketBindDeniedFailure(sockPath, parsedBootstrap, stderrTail);
   }
   return {
     ok: false,
     code: "daemon_unreachable",
     message: parsedBootstrap?.message ?? "daemon exited before becoming ready",
-    data: buildDaemonUnreachableData(stderrPath, stderrTail, result)
+    data: withDaemonSockHint(buildDaemonUnreachableData(stderrPath, stderrTail, result), sockPath)
   };
 }
 function readTail(filePath, maxBytes) {
@@ -5232,6 +5319,11 @@ function validateRequestedCwd(rawCwd) {
   }
   return null;
 }
+function canonicalizeCliCwdFlag(parsed) {
+  const cwd = asStringFlag(parsed.flags.cwd);
+  if (!cwd) return;
+  parsed.flags.cwd = import_node_path8.default.normalize(import_node_path8.default.resolve(cwd));
+}
 function validateDaemonDataDirWritable(dataDir) {
   try {
     import_node_fs8.default.mkdirSync(dataDir, { recursive: true });
@@ -5241,7 +5333,7 @@ function validateDaemonDataDirWritable(dataDir) {
     return buildDataDirNotWritableFailure(dataDir, error);
   }
 }
-function buildSpawnFailure(dataDir, error, withStderrCapture) {
+function buildSpawnFailure(dataDir, sockPath, error, withStderrCapture) {
   const errorWithCode = error;
   const errno = normalizeErrno(errorWithCode.code);
   if (errno && isDataDirWriteErrno(errno)) {
@@ -5252,9 +5344,9 @@ function buildSpawnFailure(dataDir, error, withStderrCapture) {
     ok: false,
     code: "daemon_unreachable",
     message: `failed to spawn daemon${withStderrCapture ? " with stderr capture" : ""}: ${errorWithCode.message}`,
-    data: {
+    data: withDaemonSockHint({
       suggested_action: DOCTOR_SUGGESTED_ACTION
-    }
+    }, sockPath)
   };
 }
 function buildDataDirNotWritableFailure(dataDir, error) {
@@ -5271,6 +5363,19 @@ function buildDataDirNotWritableFailure(dataDir, error) {
     }
   };
 }
+function buildClientOnlyConnectFailure(sockPath, error) {
+  const errorWithCode = error;
+  const errno = normalizeErrno(errorWithCode.code);
+  return {
+    ok: false,
+    code: "daemon_unreachable",
+    message: `failed to connect to daemon at ${sockPath}: ${errorWithCode.message || "connect failed"}`,
+    data: withDaemonSockHint({
+      sock_path: sockPath,
+      ...errno ? { errno } : {}
+    }, sockPath)
+  };
+}
 function extractErrno(error) {
   if (!error || typeof error !== "object") return null;
   return normalizeErrno(error.code);
@@ -5280,6 +5385,34 @@ function normalizeErrno(value) {
 }
 function isDataDirWriteErrno(errno) {
   return errno === "EACCES" || errno === "ENOENT" || errno === "EROFS";
+}
+function cacheBootstrapFailure(sockPath, result) {
+  if (result.code !== "daemon_unreachable" && result.code !== "socket_bind_denied") return;
+  cachedBootstrapFailure = {
+    sockPath,
+    code: result.code,
+    message: result.message,
+    data: asRecord(withDaemonSockHint(result.data, sockPath)) ?? void 0
+  };
+}
+function getCachedBootstrapFailure(sockPath) {
+  if (!cachedBootstrapFailure) return null;
+  if (cachedBootstrapFailure.sockPath !== sockPath) return null;
+  return cachedBootstrapFailure;
+}
+function withDaemonSockHint(data, sockPath = defaultSockPath()) {
+  const hint = buildDaemonSockHint(sockPath);
+  return {
+    ...asRecord(data) ?? {},
+    hint
+  };
+}
+function buildDaemonSockHint(sockPath) {
+  return `If a daemon is already running on this host, set CODEX_TEAM_DAEMON_SOCK=${formatPathForEnvHint(sockPath)} and retry.`;
+}
+function asRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value;
 }
 function truthy(v) {
   return v === true || v === "true" || v === "1";
@@ -5678,9 +5811,12 @@ var SessionRegistry = class {
   loadAllUsers(userTokens) {
     for (const u of userTokens) this.loadForUser(u);
   }
-  listLive(user) {
+  listAll(user) {
     this.loadForUser(user);
     return Array.from(this.users.get(user).byName.values());
+  }
+  listLive(user) {
+    return this.listAll(user).filter((record) => record.state === "live");
   }
   get(user, identifier) {
     this.loadForUser(user);
@@ -5695,7 +5831,7 @@ var SessionRegistry = class {
     const ownerByThread = this.globalByThreadId.get(identifier);
     if (ownerByThread) {
       const rec = this.users.get(ownerByThread)?.byThreadId.get(identifier);
-      if (rec) return { user: ownerByThread, record: rec };
+      if (rec?.state === "live") return { user: ownerByThread, record: rec };
     }
     return null;
   }
@@ -5703,7 +5839,7 @@ var SessionRegistry = class {
     let match = null;
     for (const [user, bucket] of this.users) {
       const rec = bucket.byName.get(name);
-      if (!rec) continue;
+      if (!rec || rec.state !== "live") continue;
       if (match) return "ambiguous";
       match = { user, record: rec };
     }
@@ -6066,6 +6202,7 @@ var MAX_PENDING_LINE_MULTIPLIER = 10;
 var EVENT_ID_SOFT_LIMIT = 2 ** 52;
 var AUTO_APPROVED_EVENT_TYPE = "auto_approved";
 var APPROVAL_REQUEST_CANCELLED_EVENT_TYPE = "approval.request_cancelled";
+var INTERNAL_TURN_FAILED_EVENT_TYPE = "turn.failed";
 var SESSION_CLOSED_EVENT_TYPE = "session.closed";
 var SESSION_CRASHED_EVENT_TYPE = "session.crashed";
 var SESSION_PENDING_DROPPED_EVENT_TYPE = "session.pending_dropped";
@@ -6196,8 +6333,12 @@ var EventLog = class {
     }
     const raw = import_node_fs11.default.readFileSync(filePath, "utf8");
     const lines = raw.split("\n").filter(Boolean);
-    const { events, totalLines } = parsePersistedEvents(lines);
-    this.hydrateLoadedUser(user, events, totalLines);
+    const parsed = parsePersistedEvents(lines);
+    this.hydrateLoadedUser(user, parsed.events, parsed.totalLines);
+    logPersistedEventWarnings(user, parsed.warnings);
+    if (parsed.warnings.length > 0) {
+      rewritePersistedEventFileSync(filePath, parsed.events);
+    }
     this.loaded.add(user);
     this.loadPromises.delete(user);
   }
@@ -6333,8 +6474,12 @@ var EventLog = class {
       const filePath = userEventLogPath(user, this.dataDir);
       const raw = await import_node_fs11.default.promises.readFile(filePath, "utf8");
       const lines = raw.split("\n").filter(Boolean);
-      const { events, totalLines } = parsePersistedEvents(lines);
-      this.hydrateLoadedUser(user, events, totalLines);
+      const parsed = parsePersistedEvents(lines);
+      this.hydrateLoadedUser(user, parsed.events, parsed.totalLines);
+      logPersistedEventWarnings(user, parsed.warnings);
+      if (parsed.warnings.length > 0) {
+        await rewritePersistedEventFile(filePath, parsed.events);
+      }
       shouldMarkLoaded = true;
     } catch (e) {
       if (e.code === "ENOENT") {
@@ -6674,31 +6819,49 @@ function isDeltaType(type) {
   return type.endsWith(DELTA_SUFFIX);
 }
 function parsePersistedEvents(lines) {
-  if (lines.length === 0) return { events: [], totalLines: 0 };
+  if (lines.length === 0) return { events: [], totalLines: 0, warnings: [] };
   let eventLines = lines;
+  let lineOffset = 0;
   let totalLines = lines.length;
-  const first = parseLine(lines[0]);
-  if (isHeader(first)) {
-    if (first.schema_version > SCHEMA_VERSION3) {
-      throw new Error(`event log schema_version ${first.schema_version} is newer than supported ${SCHEMA_VERSION3}`);
+  const first = tryParseLine(lines[0]);
+  if (first.ok && isHeader(first.value)) {
+    if (first.value.schema_version > SCHEMA_VERSION3) {
+      throw new Error(`event log schema_version ${first.value.schema_version} is newer than supported ${SCHEMA_VERSION3}`);
     }
     eventLines = lines.slice(1);
+    lineOffset = 1;
     totalLines = eventLines.length;
   }
   const events = [];
-  for (const line of eventLines) {
-    const parsed = parseLine(line);
-    if (isPersistedEvent(parsed)) {
-      events.push(parsed);
+  const warnings = [];
+  for (const [index, line] of eventLines.entries()) {
+    const parsed = tryParseLine(line);
+    const tornFinalLine = index === eventLines.length - 1;
+    if (!parsed.ok) {
+      warnings.push({
+        line: lineOffset + index + 1,
+        err: parsed.err,
+        tornFinalLine
+      });
+      continue;
     }
+    if (isPersistedEvent(parsed.value)) {
+      events.push(parsed.value);
+      continue;
+    }
+    warnings.push({
+      line: lineOffset + index + 1,
+      err: "invalid event log record",
+      tornFinalLine
+    });
   }
-  return { events, totalLines };
+  return { events, totalLines, warnings };
 }
-function parseLine(line) {
+function tryParseLine(line) {
   try {
-    return JSON.parse(line);
+    return { ok: true, value: JSON.parse(line) };
   } catch (e) {
-    throw new Error(`failed to parse event log line: ${e.message}`);
+    return { ok: false, err: `failed to parse event log line: ${e.message}` };
   }
 }
 function isHeader(value) {
@@ -6716,6 +6879,35 @@ function serializeHeaderLine() {
 }
 function serializeEventFile(buf) {
   return serializeHeaderLine() + buf.map((e) => JSON.stringify(e)).join("\n") + (buf.length ? "\n" : "");
+}
+function logPersistedEventWarnings(user, warnings) {
+  for (const warning of warnings) {
+    logger.warn(warning.tornFinalLine ? "trimmed torn final event log line" : "skipping invalid event log line", {
+      user,
+      line: warning.line,
+      err: warning.err
+    });
+  }
+}
+function rewritePersistedEventFileSync(filePath, events) {
+  try {
+    import_node_fs11.default.writeFileSync(filePath, serializeEventFile(events));
+  } catch (e) {
+    logger.warn("failed to rewrite repaired event log", {
+      path: filePath,
+      err: e.message
+    });
+  }
+}
+async function rewritePersistedEventFile(filePath, events) {
+  try {
+    await import_node_fs11.default.promises.writeFile(filePath, serializeEventFile(events));
+  } catch (e) {
+    logger.warn("failed to rewrite repaired event log", {
+      path: filePath,
+      err: e.message
+    });
+  }
 }
 
 // src/daemon/cursors.ts
@@ -6824,7 +7016,16 @@ var CursorStore = class {
     return true;
   }
   async clearUser(user) {
-    await this.flushUser(user);
+    const state = this.pendingPersists.get(user);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    state?.ops.clear();
+    if (state && !state.flushing) {
+      this.pendingPersists.delete(user);
+    }
+    await (state?.flushing?.catch(() => void 0) ?? Promise.resolve());
     await (this.writeChains.get(user)?.catch(() => void 0) ?? Promise.resolve());
     this.writeChains.delete(user);
     this.clearPendingPersistState(user);
@@ -8835,7 +9036,7 @@ var daemonStatus = async (ctx) => {
 var daemonFleetStatus = async (ctx, req) => {
   const tokens = resolveFleetUsers(ctx, asString3(getFlag(req.params, "users")));
   const perUser = tokens.map((token) => {
-    const sessions = ctx.sessions.listLive(token);
+    const sessions = typeof ctx.sessions.listAll === "function" ? ctx.sessions.listAll(token) : ctx.sessions.listLive(token);
     const live = sessions.filter((session) => session.state === "live").length;
     const crashed = sessions.filter((session) => session.state === "crashed").length;
     const busy = sessions.filter((session) => {
@@ -8936,6 +9137,7 @@ var daemonUserDestroy = async (ctx, req) => {
     ctx.queues.dispose(`${token}::${rec.name}`);
   }
   await ctx.events.clearUser(token);
+  await ctx.cursors.clearUser(token);
   ctx.users.destroy(token);
   return { destroyed: token, sessions_closed: sessions.length, pending_canceled: pending.length };
 };
@@ -9299,6 +9501,584 @@ function normalizeAlias(value) {
   return value.trim().replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/[\s_]+/g, "-").toLowerCase();
 }
 
+// src/format/markdown.ts
+var INLINE_MAX_BYTES = 2048;
+function renderTag(name, attrs, body) {
+  const line = `<${name}> ${compactJson(attrs)}`;
+  const normalizedBody = stripOuterNewlines(body);
+  if (!normalizedBody) {
+    return `${line}
+<\\${name}>`;
+  }
+  return `${line}
+${normalizedBody}
+<\\${name}>`;
+}
+function renderInline(name, attrs) {
+  return `<${name}>${compactJson(attrs)}<\\${name}>`;
+}
+function renderHistory(input, options = {}) {
+  const ctx = createRenderContext(options);
+  const attrs = {
+    session: input.session,
+    thread_id: input.thread_id,
+    count: input.turns.length
+  };
+  if (input.nextCursor) attrs.next_cursor = input.nextCursor;
+  const body = input.turns.map((turn) => renderHistoryTurn(turn, ctx)).join("\n\n");
+  return renderTag("history", attrs, body);
+}
+function renderTail(input, options = {}) {
+  const ctx = createRenderContext(options);
+  const attrs = {
+    session: input.session,
+    count: input.turns.length
+  };
+  if (input.follow) attrs.follow = true;
+  const body = input.turns.map((turn) => renderTailTurn(turn, ctx)).join("\n\n");
+  return renderTag("tail", attrs, body);
+}
+function renderContext(input) {
+  const ctx = createRenderContext();
+  const t = input.thread;
+  const attrs = {
+    session: input.session,
+    thread_id: input.thread_id,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (t) {
+    if (typeof t.model_provider === "string") attrs.model_provider = t.model_provider;
+    if (typeof t.preview === "string") attrs.preview = t.preview;
+    if (typeof t.cwd === "string") attrs.cwd = t.cwd;
+    const status2 = t.status?.type;
+    if (typeof status2 === "string") attrs.status = status2;
+    if (typeof t.created_at === "number") attrs.created_at = t.created_at;
+    if (typeof t.updated_at === "number") attrs.updated_at = t.updated_at;
+  }
+  const turns = Array.isArray(t?.turns) ? t.turns.filter((turn) => !!turn && typeof turn === "object").map((turn) => renderTurn(turn, ctx)).filter(Boolean) : [];
+  return renderTag(
+    "context",
+    attrs,
+    turns.length > 0 ? turns.join("\n\n") : "<!-- thread/read only returns thread metadata; for turn-level content use 'message history' -->"
+  );
+}
+function renderTurn(turn, ctx) {
+  const attrs = {
+    id: turn.id,
+    status: turn.status ?? null
+  };
+  if (turn.durationMs !== void 0 && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
+  if (turn.startedAt !== void 0 && turn.startedAt !== null) attrs.started_at = turn.startedAt;
+  if (turn.completedAt !== void 0 && turn.completedAt !== null) attrs.completed_at = turn.completedAt;
+  const err2 = turn["error"] ?? null;
+  if (err2) attrs.error = err2;
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  if (items.length === 0) {
+    return renderInline("turn", attrs);
+  }
+  const body = items.filter((item) => !!item && typeof item === "object").map((item) => renderItemWithContext(item, ctx)).filter(Boolean).join("\n\n");
+  return renderTag("turn", attrs, body);
+}
+function renderHistoryTurn(turn, ctx) {
+  const attrs = historyTurnAttrs(turn);
+  const items = turnItems(turn);
+  const bodyParts = items.map((item) => renderHistoryTranscriptItem(item, ctx)).filter((entry) => Boolean(entry));
+  if (bodyParts.length === 0) {
+    const fallback = renderTurnFallback(turn, ctx);
+    return fallback ? renderTag("turn", attrs, fallback) : renderInline("turn", attrs);
+  }
+  return renderTag("turn", attrs, bodyParts.join("\n\n"));
+}
+function renderTailTurn(turn, ctx) {
+  const attrs = tailTurnAttrs(turn);
+  const items = turnItems(turn);
+  const bodyParts = items.map((item) => renderTailTranscriptItem(item, ctx)).filter((entry) => Boolean(entry));
+  if (bodyParts.length === 0) {
+    const fallback = renderTurnFallback(turn, ctx);
+    return fallback ? renderTag("turn", attrs, fallback) : renderInline("turn", attrs);
+  }
+  return renderTag("turn", attrs, bodyParts.join("\n\n"));
+}
+function historyTurnAttrs(turn) {
+  const attrs = {
+    id: turn.id,
+    status: turn.status ?? null
+  };
+  if (turn.durationMs !== void 0 && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
+  return attrs;
+}
+function tailTurnAttrs(turn) {
+  const attrs = {
+    id: turn.id,
+    status: turn.status ?? null
+  };
+  if (turn.durationMs !== void 0 && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
+  return attrs;
+}
+function turnItems(turn) {
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  return items.filter((item) => Boolean(item) && typeof item === "object");
+}
+function renderHistoryTranscriptItem(item, ctx) {
+  const type = normalizeItemType(item.type);
+  switch (type) {
+    case "userMessage":
+      return renderTranscriptMessage(item, "user", ctx, { singleLine: false });
+    case "agentMessage":
+      return renderTranscriptMessage(item, "assistant", ctx, { singleLine: false });
+    case "commandExecution":
+      return renderTranscriptCommand(item, ctx);
+    case "fileChange":
+    case "file-patch":
+      return renderTranscriptFileChange(item, ctx);
+    case "mcpToolCall":
+      return renderTranscriptMcpToolCall(item, ctx);
+    case "autoApprovalReview":
+      return renderAutoApprovalReview(item, ctx);
+    default:
+      if (type.startsWith("hook.")) return renderTranscriptHook(item, type, ctx);
+      return null;
+  }
+}
+function renderTailTranscriptItem(item, ctx) {
+  const type = normalizeItemType(item.type);
+  switch (type) {
+    case "userMessage":
+      return renderTranscriptMessage(item, "user", ctx, { singleLine: true });
+    case "agentMessage":
+      return renderTranscriptMessage(item, "assistant", ctx, { singleLine: false });
+    default:
+      return null;
+  }
+}
+function renderTranscriptMessage(item, role, ctx, options) {
+  const attrs = { role };
+  if (role === "assistant" && item.phase !== void 0) attrs.phase = item.phase;
+  const text = extractMessageText(item);
+  if (!text) return renderInline("message", attrs);
+  const body = options.singleLine ? summarizeSingleLineText(text, 160) : text;
+  return renderBodyTag("message", attrs, body, ctx);
+}
+function renderTranscriptCommand(item, ctx) {
+  const attrs = {};
+  const cmd = extractCommand(item);
+  if (cmd) attrs.cmd = fitInlineText(cmd, ctx);
+  const exit = item.exit ?? item.exitCode;
+  if (exit !== void 0) attrs.exit = exit;
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
+  const summary = summarizeBlockText(extractCommandOutput(item), 400);
+  return summary ? renderBodyTag("shell", attrs, summary, ctx) : renderInline("shell", attrs);
+}
+function renderTranscriptFileChange(item, ctx) {
+  const attrs = {};
+  const filePath = asString4(item.path);
+  if (filePath) attrs.path = filePath;
+  if (item.status !== void 0) attrs.status = item.status;
+  const summary = summarizeBlockText(extractDiff(item), 400);
+  return summary ? renderBodyTag("file-patch", attrs, summary, ctx) : renderInline("file-patch", attrs);
+}
+function renderTranscriptMcpToolCall(item, ctx) {
+  const attrs = {};
+  const server = asString4(item.server) ?? asString4(item.serverName);
+  if (server) attrs.server = server;
+  attrs.tool = extractToolName(item);
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
+  const summary = summarizeBlockText(extractMcpResult(item), 400);
+  return summary ? renderBodyTag(`tool.${toTagSegment(String(attrs.tool))}`, attrs, summary, ctx) : renderInline(`tool.${toTagSegment(String(attrs.tool))}`, attrs);
+}
+function renderTranscriptHook(item, type, ctx) {
+  const run = asObject5(item.run);
+  const attrs = {};
+  const hookId = asString4(item.hook_id) ?? asString4(item.hookId) ?? asString4(run.id);
+  if (hookId) attrs.hook_id = hookId;
+  const status2 = asString4(item.status) ?? asString4(run.status);
+  if (status2) attrs.status = status2;
+  const command = extractCommand(item) ?? extractCommand(run);
+  if (command) attrs.command = fitInlineText(command, ctx);
+  const durationMs = item.duration_ms ?? item.durationMs ?? run.duration_ms ?? run.durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
+  const summary = summarizeBlockText(extractHookOutput(item, run), 300);
+  const tagName = typeToTagName(type);
+  return summary ? renderBodyTag(tagName, attrs, summary, ctx) : renderInline(tagName, attrs);
+}
+function renderTurnFallback(turn, ctx) {
+  const error = asObject5(turn["error"]);
+  if (Object.keys(error).length === 0) return null;
+  const message = summarizeBlockText(
+    asString4(error.message) ?? asString4(error.additionalDetails) ?? prettyJson(error),
+    300
+  );
+  return message ? renderBodyTag("error", {}, message, ctx) : null;
+}
+function renderItemWithContext(item, ctx) {
+  const type = normalizeItemType(item.type);
+  switch (type) {
+    case "userMessage":
+      return renderUserMessage(item, ctx);
+    case "agentMessage":
+      return renderAgentMessage(item, ctx);
+    case "commandExecution":
+      return renderCommandExecution(item, ctx);
+    case "fileChange":
+    case "file-patch":
+      return renderFileChange(item, ctx);
+    case "mcpToolCall":
+      return renderMcpToolCall(item, ctx);
+    case "autoApprovalReview":
+      return renderAutoApprovalReview(item, ctx);
+    case "reasoning":
+      return renderReasoning(item, ctx);
+    default:
+      if (type.startsWith("hook.")) return renderHook(item, type, ctx);
+      return renderInline("item", sanitizeInlineAttrs(item, ctx));
+  }
+}
+function createRenderContext(options = {}) {
+  const normalized = normalizeTruncateOption(options.truncate);
+  return {
+    inlineMaxBytes: INLINE_MAX_BYTES,
+    truncateBytes: normalized === 0 ? null : normalized ?? INLINE_MAX_BYTES
+  };
+}
+function normalizeTruncateOption(value) {
+  if (value === void 0 || value === null) return null;
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Math.floor(value));
+}
+function compactJson(value) {
+  return JSON.stringify(value ?? {});
+}
+function renderInlineValue(name, value) {
+  return `<${name}>${compactJson(value)}<\\${name}>`;
+}
+function renderBodyTag(name, attrs, body, ctx) {
+  return renderTag(name, attrs, applyBodyTruncation(body, ctx));
+}
+function renderJsonValueTag(name, value, ctx) {
+  const compact = compactJson(value);
+  if (byteLength(compact) <= ctx.inlineMaxBytes) {
+    return renderInlineValue(name, value);
+  }
+  return renderBodyTag(name, {}, prettyJson(value), ctx);
+}
+function renderUserMessage(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const text = extractMessageText(item);
+  if (!text) return renderInline("user-input", attrs);
+  if (byteLength(text) > ctx.inlineMaxBytes) {
+    return renderBodyTag("user-input", attrs, text, ctx);
+  }
+  attrs.text = fitInlineText(text, ctx);
+  return renderInline("user-input", attrs);
+}
+function renderAgentMessage(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const body = extractMessageText(item);
+  if (!body) return renderInline("agent-message", attrs);
+  return renderBodyTag("agent-message", attrs, body, ctx);
+}
+function renderCommandExecution(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const cmd = extractCommand(item);
+  if (cmd) attrs.cmd = fitInlineText(cmd, ctx);
+  const cwd = asString4(item.cwd);
+  if (cwd) attrs.cwd = cwd;
+  const exit = item.exit ?? item.exitCode;
+  if (exit !== void 0) attrs.exit = exit;
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
+  const shellBody = extractCommandOutput(item) ?? "";
+  return renderBodyTag("shell", attrs, shellBody, ctx);
+}
+function renderFileChange(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const path19 = asString4(item.path);
+  if (path19) attrs.path = path19;
+  if (item.status !== void 0) attrs.status = item.status;
+  const diffBody = extractDiff(item) ?? "";
+  return renderBodyTag("file-patch", attrs, diffBody, ctx);
+}
+function renderMcpToolCall(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const server = asString4(item.server) ?? asString4(item.serverName);
+  if (server) attrs.server = server;
+  const tool = extractToolName(item);
+  attrs.tool = tool;
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
+  const bodyParts = [];
+  const args = extractMcpArgs(item);
+  if (args !== void 0) bodyParts.push(renderJsonValueTag("mcp-args", args, ctx));
+  const result = extractMcpResult(item);
+  if (result) bodyParts.push(renderBodyTag("mcp-result", {}, result, ctx));
+  return renderTag(`tool.${toTagSegment(tool)}`, attrs, bodyParts.join("\n\n"));
+}
+function renderHook(item, type, ctx) {
+  const run = asObject5(item.run);
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const hookId = asString4(item.hook_id) ?? asString4(item.hookId) ?? asString4(run.id);
+  if (hookId) attrs.hook_id = hookId;
+  const status2 = asString4(item.status) ?? asString4(run.status);
+  if (status2) attrs.status = status2;
+  const command = extractCommand(item) ?? extractCommand(run);
+  if (command) attrs.command = fitInlineText(command, ctx);
+  const cwd = asString4(item.cwd) ?? asString4(run.cwd);
+  if (cwd) attrs.cwd = cwd;
+  const exit = item.exit ?? item.exitCode ?? run.exit ?? run.exitCode;
+  if (exit !== void 0) attrs.exit = exit;
+  const durationMs = item.duration_ms ?? item.durationMs ?? run.duration_ms ?? run.durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
+  const output = extractHookOutput(item, run);
+  const tagName = typeToTagName(type);
+  if (!output) return renderInline(tagName, attrs);
+  return renderTag(tagName, attrs, renderBodyTag("hook-output", {}, output, ctx));
+}
+function renderAutoApprovalReview(item, ctx) {
+  const review = asObject5(item.review);
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const kind = asString4(item.kind) ?? asString4(review.kind) ?? asString4(review.request_kind) ?? asString4(review.requestKind) ?? asString4(review.approval_kind) ?? asString4(review.approvalKind);
+  if (kind) attrs.kind = kind;
+  const matchedPattern = asString4(item.matched_pattern) ?? asString4(item.matchedPattern) ?? asString4(review.matched_pattern) ?? asString4(review.matchedPattern) ?? asString4(review.pattern);
+  if (matchedPattern) attrs.matched_pattern = fitInlineText(matchedPattern, ctx);
+  const commandPreview = extractCommandPreview(item, review);
+  if (commandPreview) attrs.command_preview = fitInlineText(commandPreview, ctx);
+  const decision = asString4(item.decision) ?? asString4(item.action) ?? asString4(item.decision_source) ?? asString4(item.decisionSource) ?? asString4(review.decision) ?? asString4(review.action);
+  if (decision) attrs.decision = fitInlineText(decision, ctx);
+  return renderInline("auto-approval-review", attrs);
+}
+function renderReasoning(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const text = extractReasoningText(item);
+  if (!text) return renderInline("reasoning", attrs);
+  if (byteLength(text) <= ctx.inlineMaxBytes) {
+    attrs.text = fitInlineText(text, ctx);
+    return renderInline("reasoning", attrs);
+  }
+  return renderBodyTag("reasoning", attrs, text, ctx);
+}
+function baseItemAttrs(item, options = {}) {
+  const attrs = {};
+  if (typeof item.id === "string") attrs.id = item.id;
+  if (options.includeType !== false) attrs.type = normalizeItemType(item.type);
+  if (item.phase !== void 0) attrs.phase = item.phase;
+  if (item.status !== void 0) attrs.status = item.status;
+  if (item.kind !== void 0) attrs.kind = item.kind;
+  if (item.role !== void 0) attrs.role = item.role;
+  if (item.source !== void 0) attrs.source = item.source;
+  return attrs;
+}
+function sanitizeInlineAttrs(item, ctx) {
+  const attrs = {};
+  for (const [key, value] of Object.entries(item)) {
+    if (value === void 0 || OMIT_INLINE_KEYS.has(key)) continue;
+    attrs[key] = typeof value === "string" ? fitInlineText(value, ctx) : value;
+  }
+  if (!("id" in attrs) && typeof item.id === "string") attrs.id = item.id;
+  if (!("type" in attrs)) attrs.type = normalizeItemType(item.type);
+  return attrs;
+}
+function normalizeItemType(raw) {
+  const type = typeof raw === "string" && raw ? raw : "unknown";
+  return ITEM_TYPE_ALIASES[type] ?? type;
+}
+function typeToTagName(type) {
+  return type.split(".").map(toTagSegment).join(".");
+}
+function toTagSegment(value) {
+  return value.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/_/g, "-").replace(/[^a-zA-Z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+}
+function extractMessageText(item) {
+  return firstText(item.text, item.content);
+}
+function extractReasoningText(item) {
+  return firstText(item.text, item.summaryText, item.summary, item.content);
+}
+function extractCommand(item) {
+  const direct = asString4(item.command) ?? asString4(item.cmd);
+  if (direct) return direct;
+  const command = item.command;
+  if (Array.isArray(command)) {
+    const parts = command.map((part) => {
+      if (typeof part === "string") return part;
+      if (typeof part === "number" || typeof part === "boolean") return String(part);
+      return null;
+    }).filter((part) => !!part);
+    if (parts.length > 0) return parts.join(" ");
+  }
+  return null;
+}
+function extractCommandOutput(item) {
+  const direct = asString4(item.output);
+  if (direct) return direct;
+  const output = item.output;
+  if (output && typeof output === "object" && !Array.isArray(output)) {
+    const stdout = asString4(output.stdout);
+    const stderr = asString4(output.stderr);
+    const merged = joinText([stdout, stderr], "\n");
+    if (merged) return merged;
+  }
+  return joinText([asString4(item.stdout), asString4(item.stderr)], "\n");
+}
+function extractDiff(item) {
+  return asString4(item.diff) ?? asString4(item.patch) ?? asString4(item.changes);
+}
+function extractToolName(item) {
+  return asString4(item.tool) ?? asString4(item.toolName) ?? asString4(item.name) ?? "unknown";
+}
+function extractMcpArgs(item) {
+  const args = item.args ?? item.arguments ?? item.input ?? item.parameters;
+  return args === void 0 ? void 0 : args;
+}
+function extractMcpResult(item) {
+  return extractRichBody(item.result, item.output, item.content, item.text);
+}
+function extractHookOutput(item, run) {
+  return extractCommandOutput(item) ?? extractCommandOutput(run) ?? extractRichBody(item.result, run.result);
+}
+function extractCommandPreview(...values) {
+  for (const value of values) {
+    const preview = asString4(value.command_preview) ?? asString4(value.commandPreview) ?? extractCommand(value);
+    if (preview) return preview;
+  }
+  return null;
+}
+function extractRichBody(...values) {
+  for (const value of values) {
+    const text = extractText(value);
+    if (text) return text;
+    if (Array.isArray(value)) {
+      const serialized = compactJson(value);
+      if (serialized !== "[]") return serialized;
+      continue;
+    }
+    if (value && typeof value === "object") {
+      const serialized = JSON.stringify(value, null, 2);
+      if (serialized && serialized !== "{}") return serialized;
+      continue;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      return String(value);
+    }
+  }
+  return null;
+}
+function firstText(...values) {
+  for (const value of values) {
+    const text = extractText(value);
+    if (text) return text;
+  }
+  return null;
+}
+function extractText(value) {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (!Array.isArray(value)) return null;
+  const parts = value.map((entry) => extractTextEntry(entry)).filter((entry) => !!entry);
+  return parts.length > 0 ? parts.join("\n\n") : null;
+}
+function extractTextEntry(entry) {
+  if (typeof entry === "string" && entry.length > 0) return entry;
+  if (!entry || typeof entry !== "object") return null;
+  const obj = entry;
+  if (typeof obj.text === "string" && obj.text.length > 0) return obj.text;
+  if (Array.isArray(obj.content)) return extractText(obj.content);
+  return null;
+}
+function applyBodyTruncation(text, ctx) {
+  if (ctx.truncateBytes === null) return text;
+  const truncated = truncateText(text, ctx.truncateBytes);
+  return truncated.truncatedBytes > 0 ? `${truncated.text}
+${buildTruncationMarker(truncated.truncatedBytes)}` : text;
+}
+function fitInlineText(text, ctx) {
+  if (ctx.truncateBytes === null) return text;
+  const truncated = truncateText(text, ctx.truncateBytes);
+  return truncated.truncatedBytes > 0 ? `${truncated.text}${buildTruncationMarker(truncated.truncatedBytes)}` : text;
+}
+function summarizeSingleLineText(text, maxBytes) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  return truncateText(normalized, maxBytes).text;
+}
+function summarizeBlockText(text, maxBytes) {
+  if (!text) return null;
+  const normalized = stripOuterNewlines(text);
+  if (!normalized) return null;
+  return truncateText(normalized, maxBytes).text;
+}
+function truncateText(text, maxBytes) {
+  const totalBytes = byteLength(text);
+  if (totalBytes <= maxBytes) {
+    return { text, truncatedBytes: 0 };
+  }
+  const chars = Array.from(text);
+  let low = 0;
+  let high = chars.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidate = chars.slice(0, mid).join("");
+    if (byteLength(candidate) <= maxBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  const truncatedText = chars.slice(0, low).join("");
+  return {
+    text: stripOuterNewlines(truncatedText),
+    truncatedBytes: totalBytes - byteLength(truncatedText)
+  };
+}
+function buildTruncationMarker(truncatedBytes) {
+  return `\u2026[${truncatedBytes} bytes truncated; use --truncate 0 to disable]`;
+}
+function prettyJson(value) {
+  if (value === void 0) return "{}";
+  if (typeof value === "string") return value;
+  const serialized = JSON.stringify(value, null, 2);
+  return serialized ?? String(value);
+}
+function byteLength(value) {
+  return Buffer.byteLength(value, "utf8");
+}
+function joinText(values, separator) {
+  const present = values.filter((value) => !!value);
+  return present.length > 0 ? present.join(separator) : null;
+}
+function stripOuterNewlines(value) {
+  return value.replace(/^\n+/, "").replace(/\n+$/, "");
+}
+function asString4(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+function asObject5(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  return {};
+}
+var ITEM_TYPE_ALIASES = {
+  agent_message: "agentMessage",
+  auto_approval_review: "autoApprovalReview",
+  command_execution: "commandExecution",
+  file_change: "fileChange",
+  mcp_tool_call: "mcpToolCall",
+  user_message: "userMessage"
+};
+var OMIT_INLINE_KEYS = /* @__PURE__ */ new Set([
+  "content",
+  "stdout",
+  "stderr",
+  "output",
+  "diff",
+  "patch",
+  "changes",
+  "result",
+  "review",
+  "run"
+]);
+
 // src/format/table.ts
 function renderTable2(rows, columns) {
   if (rows.length === 0) return `(no rows)`;
@@ -9365,7 +10145,7 @@ var sessionNew = async (ctx, req) => {
   }
   const experimentalTools = resolveExperimentalToolsForCreate(ctx, flags);
   const autoApprovePatterns = resolveAutoApprovePatternsForCreate(ctx, flags);
-  const cwd = resolveAndValidateRequestedCwd(asString4(flags["cwd"]));
+  const cwd = resolveAndValidateRequestedCwd(asString5(flags["cwd"]));
   const startParams = await buildThreadStartParams(ctx, flags, experimentalTools, cwd);
   const client = await ctx.pool.acquire(user, keyFor(user, name), buildExperimentalToolAppServerOptions(experimentalTools));
   let result;
@@ -9385,14 +10165,14 @@ var sessionNew = async (ctx, req) => {
     name,
     thread_id: threadId,
     state: "live",
-    model: asString4(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
+    model: asString5(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
     cwd,
-    sandbox: asString4(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
-    approval: asString4(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
-    effort: asString4(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
-    profile: asString4(flags["profile"]) ?? void 0,
-    base_instructions: asString4(flags["base-instructions"]) ?? void 0,
-    developer_instructions: asString4(flags["developer-instructions"]) ?? void 0,
+    sandbox: asString5(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
+    approval: asString5(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
+    effort: asString5(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
+    profile: asString5(flags["profile"]) ?? void 0,
+    base_instructions: asString5(flags["base-instructions"]) ?? void 0,
+    developer_instructions: asString5(flags["developer-instructions"]) ?? void 0,
     experimental_tools: experimentalTools.length > 0 ? experimentalTools : void 0,
     autoApprovePatterns,
     created_at: now,
@@ -9410,7 +10190,7 @@ var sessionAttach = async (ctx, req) => {
   const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
   const takeover = isTrue2(flags["takeover"]);
-  const lockThreadId = resolveAttachLockThreadId(ctx, identifier);
+  const lockThreadId = await resolveAttachLockThreadId(ctx, user, identifier);
   const attach = async () => {
     const existing = ctx.sessions.get(user, identifier);
     if (existing) {
@@ -9422,6 +10202,14 @@ var sessionAttach = async (ctx, req) => {
     if (anywhere === "ambiguous") {
       throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
     }
+    let detached = null;
+    if (!anywhere && !looksLikeThreadId(identifier)) {
+      const detachedMatch = await findDetachedThreadByName(ctx, user, identifier);
+      if (detachedMatch === "ambiguous") {
+        throw invalidParams(`session name '${identifier}' is ambiguous across detached threads; use a thread_id`);
+      }
+      detached = detachedMatch;
+    }
     const autoApprovePatterns = validateSessionAutoApprovePatterns(anywhere?.record.autoApprovePatterns ?? []);
     if (anywhere && anywhere.user !== user) {
       if (!takeover) {
@@ -9429,12 +10217,12 @@ var sessionAttach = async (ctx, req) => {
       }
       await seizeFromOtherUser(ctx, anywhere.user, user, anywhere.record);
     }
-    const threadId = looksLikeThreadId(identifier) ? identifier : anywhere?.record.thread_id ?? null;
+    const threadId = looksLikeThreadId(identifier) ? identifier : anywhere?.record.thread_id ?? detached?.id ?? null;
     if (!threadId) {
       throw new CodexTeamError("session_not_found", `no session matches '${identifier}' in this user`);
     }
     ensureAttachOwnership(ctx, user, threadId);
-    const name = anywhere?.record.name ?? deriveNameFromThreadId(threadId, ctx, user);
+    const name = anywhere?.record.name ?? asString5(detached?.name) ?? deriveNameFromThreadId(threadId, ctx, user);
     const experimentalTools = resolveExperimentalToolsForAttach(ctx, flags, anywhere?.record.experimental_tools);
     const sessionKey = keyFor(user, name);
     const client = await ctx.pool.acquire(user, sessionKey, buildExperimentalToolAppServerOptions(experimentalTools));
@@ -9480,7 +10268,7 @@ var sessionDetach = async (ctx, req) => {
   const user = req.bearer;
   const flags = asFlags(req);
   const detachAll = isTrue2(flags["all"]);
-  const match = asString4(flags["match"]);
+  const match = asString5(flags["match"]);
   const graceful = isTrue2(flags["graceful"]);
   if (!detachAll && match !== null) {
     throw invalidParams("--match requires --all");
@@ -9548,7 +10336,7 @@ var sessionFork = async (ctx, req) => {
   const identifier = asPositional(req, 0, "session");
   const newNameRaw = asPositionalOptional(req, 1);
   const flags = asFlags(req);
-  const atTurn = asString4(flags["at-turn"]);
+  const atTurn = asString5(flags["at-turn"]);
   const source = ctx.sessions.get(user, identifier);
   if (!source) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
   let newName = newNameRaw ?? generateSessionName();
@@ -9620,9 +10408,9 @@ var sessionContext = async (ctx, req) => {
   const user = req.bearer;
   const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
-  const format = asString4(flags["format"]) ?? "json";
-  if (format !== "json") {
-    throw invalidParams(`session context supports json only`);
+  const format = asString5(flags["format"]) ?? "json";
+  if (format !== "json" && format !== "markdown") {
+    throw invalidParams(`--format must be json or markdown`);
   }
   const rec = ctx.sessions.get(user, identifier);
   let threadId;
@@ -9639,11 +10427,20 @@ var sessionContext = async (ctx, req) => {
     client = await ctx.pool.acquireForAdhoc(user);
   }
   const result = await threadRead(client, threadId, ctx.retryOptions());
-  return {
+  const response = {
     session: rec?.name ?? null,
     thread_id: threadId,
     thread: result.thread
   };
+  if (format === "markdown") {
+    response.format = "markdown";
+    response.markdown = renderContext({
+      session: rec?.name ?? null,
+      thread_id: threadId,
+      thread: result.thread
+    });
+  }
+  return response;
 };
 var sessionList = async (ctx, req) => {
   requireUser(ctx, req);
@@ -9651,8 +10448,8 @@ var sessionList = async (ctx, req) => {
   const flags = asFlags(req);
   const all = isTrue2(flags["all"]);
   const loadedOnly = isTrue2(flags["loaded-only"]);
-  const sortField = asString4(flags["sort"]) ?? "last_active";
-  const format = asString4(flags["format"]) ?? "json";
+  const sortField = asString5(flags["sort"]) ?? "last_active";
+  const format = asString5(flags["format"]) ?? "json";
   const cursor = parseSessionListCursor(flags);
   const limit = parseSessionListLimit(flags);
   const archivedMode = parseArchivedMode(flags);
@@ -9832,13 +10629,13 @@ function asPositionalOptional(req, idx) {
   const v = positionals[idx];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
-function asString4(v) {
+function asString5(v) {
   if (Array.isArray(v)) return v[v.length - 1] ?? null;
   return typeof v === "string" ? v : null;
 }
 function parseSessionListLimit(flags) {
   if (!hasFlag(flags, "limit")) return DEFAULT_SESSION_LIST_LIMIT;
-  const raw = asString4(flags["limit"]);
+  const raw = asString5(flags["limit"]);
   if (!raw) throw invalidParams("--limit requires a positive integer");
   const value = Number(raw);
   if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
@@ -9848,19 +10645,19 @@ function parseSessionListLimit(flags) {
 }
 function parseSessionListCursor(flags) {
   if (!hasFlag(flags, "cursor")) return null;
-  const cursor = asString4(flags["cursor"]);
+  const cursor = asString5(flags["cursor"]);
   if (!cursor) throw invalidParams("--cursor requires a value");
   return cursor;
 }
 function parseArchivedMode(flags) {
   if (!hasFlag(flags, "archived")) return "exclude";
-  const mode = asString4(flags["archived"]);
+  const mode = asString5(flags["archived"]);
   if (mode === "only" || mode === "exclude" || mode === "include") return mode;
   throw invalidParams(`--archived must be one of: only / exclude / include`);
 }
 function parseSessionStateFilter(flags) {
   if (!hasFlag(flags, "state")) return null;
-  const raw = asString4(flags["state"]);
+  const raw = asString5(flags["state"]);
   if (!raw) throw invalidParams("--state requires a comma-separated value");
   const entries = raw.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
   if (entries.length === 0) throw invalidParams("--state requires at least one value");
@@ -9876,7 +10673,7 @@ function parseSessionStateFilter(flags) {
 }
 function parseOwnerFilter(flags) {
   if (!hasFlag(flags, "owner")) return { kind: "self" };
-  const raw = asString4(flags["owner"]);
+  const raw = asString5(flags["owner"]);
   if (!raw) throw invalidParams("--owner requires a value");
   if (raw === "self") return { kind: "self" };
   if (raw === "any") return { kind: "any" };
@@ -9944,22 +10741,22 @@ function describeFilesystemEntry(cwd, stat) {
 async function buildThreadStartParams(ctx, flags, experimentalTools, cwd) {
   const p = {};
   const config = {};
-  const model = asString4(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
+  const model = asString5(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
   if (model) p.model = model;
   if (cwd) p.cwd = cwd;
-  const sandbox = asString4(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
+  const sandbox = asString5(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
   if (sandbox) p.sandbox = sandbox;
-  const approval = asString4(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
+  const approval = asString5(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
   if (approval) p.approvalPolicy = approval;
-  const effort = asString4(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
+  const effort = asString5(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
   if (effort) config.model_reasoning_effort = effort;
-  const profile = asString4(flags["profile"]);
+  const profile = asString5(flags["profile"]);
   if (profile) config.profile = profile;
   const baseInstr = await readInstructionFile(flags["base-instructions"], "--base-instructions");
   if (baseInstr) p.baseInstructions = baseInstr;
   const devInstr = await readInstructionFile(flags["developer-instructions"], "--developer-instructions");
   if (devInstr) p.developerInstructions = devInstr;
-  const personality = asString4(flags["personality"]);
+  const personality = asString5(flags["personality"]);
   if (personality) p.personality = personality;
   const experimentalConfig = buildExperimentalToolThreadConfig(experimentalTools);
   if (experimentalConfig) Object.assign(config, experimentalConfig);
@@ -9979,7 +10776,7 @@ function resolveAutoApprovePatternsForCreate(ctx, flags) {
   if (!hasFlag(flags, "auto-approve")) {
     return parseConfiguredAutoApprovePatterns(ctx.config.getEffective("session.auto_approve_command_patterns"));
   }
-  const raw = asString4(flags["auto-approve"]);
+  const raw = asString5(flags["auto-approve"]);
   if (raw === null) throw invalidParams("--auto-approve requires a comma-separated value");
   const validationError = validateAutoApprovePatterns(raw);
   if (validationError) throw invalidParams(validationError);
@@ -10054,13 +10851,18 @@ function deriveNameFromThreadId(threadId, ctx, user) {
   while (ctx.sessions.get(user, candidate)) candidate = generateSessionName();
   return candidate;
 }
-function resolveAttachLockThreadId(ctx, identifier) {
+async function resolveAttachLockThreadId(ctx, user, identifier) {
   if (looksLikeThreadId(identifier)) return identifier;
   const anywhere = ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
   if (anywhere === "ambiguous") {
     throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
   }
-  return anywhere?.record.thread_id ?? null;
+  if (anywhere) return anywhere.record.thread_id;
+  const detached = await findDetachedThreadByName(ctx, user, identifier);
+  if (detached === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across detached threads; use a thread_id`);
+  }
+  return detached?.id ?? null;
 }
 function ensureAttachOwnership(ctx, user, threadId) {
   const owner = ctx.sessions.findLiveAnywhere(threadId);
@@ -10085,7 +10887,7 @@ async function withAttachLock(threadId, fn) {
   }
 }
 async function readInstructionFile(value, flag) {
-  const filePath = asString4(value);
+  const filePath = asString5(value);
   if (!filePath) return null;
   try {
     return await import_node_fs16.default.promises.readFile(filePath, "utf8");
@@ -10379,7 +11181,7 @@ var sessionRollback = async (ctx, req) => {
   const user = req.bearer;
   const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
-  const toTurnId = asString4(flags["to-turn"]);
+  const toTurnId = asString5(flags["to-turn"]);
   const detachAfter = isTrue2(flags["detach-after"]);
   if (!toTurnId) {
     throw invalidParams("--to-turn requires a value");
@@ -10431,7 +11233,7 @@ function resolveRollbackDefaults(ctx, sourceRecord, sourceThread) {
   );
   return {
     model: sourceRecord?.model ?? void 0,
-    cwd: sourceRecord?.cwd ?? asString4(sourceThread.cwd) ?? process.cwd(),
+    cwd: sourceRecord?.cwd ?? asString5(sourceThread.cwd) ?? process.cwd(),
     sandbox: sourceRecord?.sandbox ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
     approval: sourceRecord?.approval ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
     effort: sourceRecord?.effort ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
@@ -10461,10 +11263,10 @@ async function attachRollbackThread(ctx, user, name, threadId, defaults) {
     name,
     thread_id: threadId,
     state: "live",
-    model: defaults.model ?? asString4(result.model) ?? void 0,
-    cwd: defaults.cwd ?? asString4(result.cwd) ?? asString4(result.thread.cwd) ?? process.cwd(),
+    model: defaults.model ?? asString5(result.model) ?? void 0,
+    cwd: defaults.cwd ?? asString5(result.cwd) ?? asString5(result.thread.cwd) ?? process.cwd(),
     sandbox: defaults.sandbox,
-    approval: defaults.approval ?? asString4(result.approvalPolicy) ?? void 0,
+    approval: defaults.approval ?? asString5(result.approvalPolicy) ?? void 0,
     effort: defaults.effort,
     profile: defaults.profile,
     base_instructions: defaults.baseInstructions,
@@ -10545,7 +11347,7 @@ async function resolveSessionTarget(ctx, user, identifier) {
       kind: "detached",
       thread,
       threadId: thread.id,
-      name: asString4(thread.name)
+      name: asString5(thread.name)
     };
   }
   const liveByName = ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
@@ -10574,7 +11376,7 @@ async function resolveSessionTarget(ctx, user, identifier) {
     kind: "detached",
     thread: detached,
     threadId: detached.id,
-    name: asString4(detached.name)
+    name: asString5(detached.name)
   };
 }
 async function readDetachedThreadById(ctx, user, threadId) {
@@ -10597,7 +11399,7 @@ async function findDetachedThreadByName(ctx, user, name) {
       ...cursor ? { cursor } : {}
     }, ctx.retryOptions());
     for (const thread of page.data) {
-      if (asString4(thread.name) !== name) continue;
+      if (asString5(thread.name) !== name) continue;
       if (match) return "ambiguous";
       match = thread;
     }
@@ -10614,7 +11416,7 @@ var sessionHealthAll = async (ctx, req) => {
     throw invalidParams("session health --all does not take a session positional");
   }
   const onlyUnhealthy = isTrue2(flags["only-unhealthy"]);
-  const stateFilter = parseSessionHealthStates(asString4(flags["state"]));
+  const stateFilter = parseSessionHealthStates(asString5(flags["state"]));
   const sessions = ctx.sessions.listLive(user).map((record) => buildSessionHealthSnapshot(ctx, user, record)).filter((snapshot) => matchesSessionHealthState(snapshot, stateFilter)).filter((snapshot) => !onlyUnhealthy || !isQuietHealthySession(snapshot));
   return {
     summary: summarizeSessionHealthSnapshots(sessions),
@@ -10635,8 +11437,8 @@ var sessionEvents = async (ctx, req, stream) => {
   if (follow && (byTool || byItemKind)) throw invalidParams("--follow cannot be used with --by-tool or --by-item-kind");
   if (summaryMode && (byTool || byItemKind)) throw invalidParams("--summary cannot be used with --by-tool or --by-item-kind");
   const typeFilter = parseCsvFlag(flags["type"]);
-  const turnFilter = asString4(flags["turn"]);
-  const sinceId = asString4(flags["since"]);
+  const turnFilter = asString5(flags["turn"]);
+  const sinceId = asString5(flags["since"]);
   const limit = parseSessionEventsLimit(flags["limit"], 50);
   const matchesTarget = buildSessionEventMatcher(ctx, user, target);
   const listed = await ctx.events.listSince(user, sinceId, { includeDelta: true });
@@ -10771,7 +11573,7 @@ function parseSessionHealthStates(value) {
 }
 function matchesSessionHealthState(snapshot, states) {
   if (!states) return true;
-  const state = asString4(snapshot.state);
+  const state = asString5(snapshot.state);
   return state !== null && states.has(state);
 }
 function isQuietHealthySession(snapshot) {
@@ -10797,7 +11599,7 @@ function parseSessionEventsLimit(value, fallback) {
   return Math.floor(raw);
 }
 function parseCsvFlag(value) {
-  const raw = asString4(value);
+  const raw = asString5(value);
   if (!raw) return null;
   const parts = raw.split(",").map((part) => part.trim()).filter(Boolean);
   return parts.length > 0 ? parts : null;
@@ -10964,7 +11766,7 @@ function buildSessionLogsIncrement(ctx, user, rec, truncateBytes, entry) {
 }
 function parseSessionLogsIntFlag(value, fallback, label, options) {
   if (value === void 0) return fallback;
-  const raw = asString4(value);
+  const raw = asString5(value);
   if (!raw) throw invalidParams(`${label} requires a value`);
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < options.minimum) {
@@ -10975,7 +11777,7 @@ function parseSessionLogsIntFlag(value, fallback, label, options) {
 }
 function parseSessionLogsStream(value) {
   if (value === void 0) return "stderr";
-  const raw = asString4(value);
+  const raw = asString5(value);
   if (!raw) throw invalidParams("--stream requires a value");
   if (raw === "stderr" || raw === "stdout" || raw === "all") return raw;
   throw invalidParams("--stream must be one of stderr, stdout, or all");
@@ -11024,401 +11826,6 @@ function truncateTextByBytes(value, truncateBytes) {
 
 // src/daemon/handlers/message.ts
 var import_node_fs17 = __toESM(require("fs"));
-
-// src/format/markdown.ts
-var INLINE_MAX_BYTES = 2048;
-function renderTag(name, attrs, body) {
-  const line = `<${name}> ${compactJson(attrs)}`;
-  const normalizedBody = stripOuterNewlines(body);
-  if (!normalizedBody) {
-    return `${line}
-<\\${name}>`;
-  }
-  return `${line}
-${normalizedBody}
-<\\${name}>`;
-}
-function renderInline(name, attrs) {
-  return `<${name}>${compactJson(attrs)}<\\${name}>`;
-}
-function renderHistory(input, options = {}) {
-  const ctx = createRenderContext(options);
-  const attrs = {
-    session: input.session,
-    thread_id: input.thread_id,
-    count: input.turns.length
-  };
-  if (input.nextCursor) attrs.next_cursor = input.nextCursor;
-  const body = input.turns.map((turn) => renderHistoryTurn(turn, ctx)).join("\n\n");
-  return renderTag("history", attrs, body);
-}
-function renderTail(input, options = {}) {
-  const ctx = createRenderContext(options);
-  const attrs = {
-    session: input.session,
-    count: input.turns.length
-  };
-  if (input.follow) attrs.follow = true;
-  const body = input.turns.map((turn) => renderTailTurn(turn, ctx)).join("\n\n");
-  return renderTag("tail", attrs, body);
-}
-function renderHistoryTurn(turn, ctx) {
-  const attrs = historyTurnAttrs(turn);
-  const items = turnItems(turn);
-  const bodyParts = items.map((item) => renderHistoryTranscriptItem(item, ctx)).filter((entry) => Boolean(entry));
-  if (bodyParts.length === 0) {
-    const fallback = renderTurnFallback(turn, ctx);
-    return fallback ? renderTag("turn", attrs, fallback) : renderInline("turn", attrs);
-  }
-  return renderTag("turn", attrs, bodyParts.join("\n\n"));
-}
-function renderTailTurn(turn, ctx) {
-  const attrs = tailTurnAttrs(turn);
-  const items = turnItems(turn);
-  const bodyParts = items.map((item) => renderTailTranscriptItem(item, ctx)).filter((entry) => Boolean(entry));
-  if (bodyParts.length === 0) {
-    const fallback = renderTurnFallback(turn, ctx);
-    return fallback ? renderTag("turn", attrs, fallback) : renderInline("turn", attrs);
-  }
-  return renderTag("turn", attrs, bodyParts.join("\n\n"));
-}
-function historyTurnAttrs(turn) {
-  const attrs = {
-    id: turn.id,
-    status: turn.status ?? null
-  };
-  if (turn.durationMs !== void 0 && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
-  return attrs;
-}
-function tailTurnAttrs(turn) {
-  const attrs = {
-    id: turn.id,
-    status: turn.status ?? null
-  };
-  if (turn.durationMs !== void 0 && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
-  return attrs;
-}
-function turnItems(turn) {
-  const items = Array.isArray(turn.items) ? turn.items : [];
-  return items.filter((item) => Boolean(item) && typeof item === "object");
-}
-function renderHistoryTranscriptItem(item, ctx) {
-  const type = normalizeItemType(item.type);
-  switch (type) {
-    case "userMessage":
-      return renderTranscriptMessage(item, "user", ctx, { singleLine: false });
-    case "agentMessage":
-      return renderTranscriptMessage(item, "assistant", ctx, { singleLine: false });
-    case "commandExecution":
-      return renderTranscriptCommand(item, ctx);
-    case "fileChange":
-    case "file-patch":
-      return renderTranscriptFileChange(item, ctx);
-    case "mcpToolCall":
-      return renderTranscriptMcpToolCall(item, ctx);
-    case "autoApprovalReview":
-      return renderAutoApprovalReview(item, ctx);
-    default:
-      if (type.startsWith("hook.")) return renderTranscriptHook(item, type, ctx);
-      return null;
-  }
-}
-function renderTailTranscriptItem(item, ctx) {
-  const type = normalizeItemType(item.type);
-  switch (type) {
-    case "userMessage":
-      return renderTranscriptMessage(item, "user", ctx, { singleLine: true });
-    case "agentMessage":
-      return renderTranscriptMessage(item, "assistant", ctx, { singleLine: false });
-    default:
-      return null;
-  }
-}
-function renderTranscriptMessage(item, role, ctx, options) {
-  const attrs = { role };
-  if (role === "assistant" && item.phase !== void 0) attrs.phase = item.phase;
-  const text = extractMessageText(item);
-  if (!text) return renderInline("message", attrs);
-  const body = options.singleLine ? summarizeSingleLineText(text, 160) : text;
-  return renderBodyTag("message", attrs, body, ctx);
-}
-function renderTranscriptCommand(item, ctx) {
-  const attrs = {};
-  const cmd = extractCommand(item);
-  if (cmd) attrs.cmd = fitInlineText(cmd, ctx);
-  const exit = item.exit ?? item.exitCode;
-  if (exit !== void 0) attrs.exit = exit;
-  const durationMs = item.duration_ms ?? item.durationMs;
-  if (durationMs !== void 0) attrs.duration_ms = durationMs;
-  const summary = summarizeBlockText(extractCommandOutput(item), 400);
-  return summary ? renderBodyTag("shell", attrs, summary, ctx) : renderInline("shell", attrs);
-}
-function renderTranscriptFileChange(item, ctx) {
-  const attrs = {};
-  const filePath = asString5(item.path);
-  if (filePath) attrs.path = filePath;
-  if (item.status !== void 0) attrs.status = item.status;
-  const summary = summarizeBlockText(extractDiff(item), 400);
-  return summary ? renderBodyTag("file-patch", attrs, summary, ctx) : renderInline("file-patch", attrs);
-}
-function renderTranscriptMcpToolCall(item, ctx) {
-  const attrs = {};
-  const server = asString5(item.server) ?? asString5(item.serverName);
-  if (server) attrs.server = server;
-  attrs.tool = extractToolName(item);
-  const durationMs = item.duration_ms ?? item.durationMs;
-  if (durationMs !== void 0) attrs.duration_ms = durationMs;
-  const summary = summarizeBlockText(extractMcpResult(item), 400);
-  return summary ? renderBodyTag(`tool.${toTagSegment(String(attrs.tool))}`, attrs, summary, ctx) : renderInline(`tool.${toTagSegment(String(attrs.tool))}`, attrs);
-}
-function renderTranscriptHook(item, type, ctx) {
-  const run = asObject5(item.run);
-  const attrs = {};
-  const hookId = asString5(item.hook_id) ?? asString5(item.hookId) ?? asString5(run.id);
-  if (hookId) attrs.hook_id = hookId;
-  const status2 = asString5(item.status) ?? asString5(run.status);
-  if (status2) attrs.status = status2;
-  const command = extractCommand(item) ?? extractCommand(run);
-  if (command) attrs.command = fitInlineText(command, ctx);
-  const durationMs = item.duration_ms ?? item.durationMs ?? run.duration_ms ?? run.durationMs;
-  if (durationMs !== void 0) attrs.duration_ms = durationMs;
-  const summary = summarizeBlockText(extractHookOutput(item, run), 300);
-  const tagName = typeToTagName(type);
-  return summary ? renderBodyTag(tagName, attrs, summary, ctx) : renderInline(tagName, attrs);
-}
-function renderTurnFallback(turn, ctx) {
-  const error = asObject5(turn.error);
-  if (Object.keys(error).length === 0) return null;
-  const message = summarizeBlockText(
-    asString5(error.message) ?? asString5(error.additionalDetails) ?? prettyJson(error),
-    300
-  );
-  return message ? renderBodyTag("error", {}, message, ctx) : null;
-}
-function createRenderContext(options = {}) {
-  const normalized = normalizeTruncateOption(options.truncate);
-  return {
-    inlineMaxBytes: normalized === 0 ? INLINE_MAX_BYTES : Math.min(normalized ?? INLINE_MAX_BYTES, INLINE_MAX_BYTES),
-    truncateBytes: normalized === 0 ? null : normalized ?? INLINE_MAX_BYTES
-  };
-}
-function normalizeTruncateOption(value) {
-  if (value === void 0 || value === null) return null;
-  if (!Number.isFinite(value)) return null;
-  return Math.max(0, Math.floor(value));
-}
-function compactJson(value) {
-  return JSON.stringify(value ?? {});
-}
-function renderBodyTag(name, attrs, body, ctx) {
-  return renderTag(name, attrs, applyBodyTruncation(body, ctx));
-}
-function renderAutoApprovalReview(item, ctx) {
-  const review = asObject5(item.review);
-  const attrs = baseItemAttrs(item, { includeType: false });
-  const kind = asString5(item.kind) ?? asString5(review.kind) ?? asString5(review.request_kind) ?? asString5(review.requestKind) ?? asString5(review.approval_kind) ?? asString5(review.approvalKind);
-  if (kind) attrs.kind = kind;
-  const matchedPattern = asString5(item.matched_pattern) ?? asString5(item.matchedPattern) ?? asString5(review.matched_pattern) ?? asString5(review.matchedPattern) ?? asString5(review.pattern);
-  if (matchedPattern) attrs.matched_pattern = fitInlineText(matchedPattern, ctx);
-  const commandPreview = extractCommandPreview(item, review);
-  if (commandPreview) attrs.command_preview = fitInlineText(commandPreview, ctx);
-  const decision = asString5(item.decision) ?? asString5(item.action) ?? asString5(item.decision_source) ?? asString5(item.decisionSource) ?? asString5(review.decision) ?? asString5(review.action);
-  if (decision) attrs.decision = fitInlineText(decision, ctx);
-  return renderInline("auto-approval-review", attrs);
-}
-function baseItemAttrs(item, options = {}) {
-  const attrs = {};
-  if (typeof item.id === "string") attrs.id = item.id;
-  if (options.includeType !== false) attrs.type = normalizeItemType(item.type);
-  if (item.phase !== void 0) attrs.phase = item.phase;
-  if (item.status !== void 0) attrs.status = item.status;
-  if (item.kind !== void 0) attrs.kind = item.kind;
-  if (item.role !== void 0) attrs.role = item.role;
-  if (item.source !== void 0) attrs.source = item.source;
-  return attrs;
-}
-function normalizeItemType(raw) {
-  const type = typeof raw === "string" && raw ? raw : "unknown";
-  return ITEM_TYPE_ALIASES[type] ?? type;
-}
-function typeToTagName(type) {
-  return type.split(".").map(toTagSegment).join(".");
-}
-function toTagSegment(value) {
-  return value.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/_/g, "-").replace(/[^a-zA-Z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
-}
-function extractMessageText(item) {
-  return firstText(item.text, item.content);
-}
-function extractCommand(item) {
-  const direct = asString5(item.command) ?? asString5(item.cmd);
-  if (direct) return direct;
-  const command = item.command;
-  if (Array.isArray(command)) {
-    const parts = command.map((part) => {
-      if (typeof part === "string") return part;
-      if (typeof part === "number" || typeof part === "boolean") return String(part);
-      return null;
-    }).filter((part) => !!part);
-    if (parts.length > 0) return parts.join(" ");
-  }
-  return null;
-}
-function extractCommandOutput(item) {
-  const direct = asString5(item.output);
-  if (direct) return direct;
-  const output = item.output;
-  if (output && typeof output === "object" && !Array.isArray(output)) {
-    const stdout = asString5(output.stdout);
-    const stderr = asString5(output.stderr);
-    const merged = joinText([stdout, stderr], "\n");
-    if (merged) return merged;
-  }
-  return joinText([asString5(item.stdout), asString5(item.stderr)], "\n");
-}
-function extractDiff(item) {
-  return asString5(item.diff) ?? asString5(item.patch) ?? asString5(item.changes);
-}
-function extractToolName(item) {
-  return asString5(item.tool) ?? asString5(item.toolName) ?? asString5(item.name) ?? "unknown";
-}
-function extractMcpResult(item) {
-  return extractRichBody(item.result, item.output, item.content, item.text);
-}
-function extractHookOutput(item, run) {
-  return extractCommandOutput(item) ?? extractCommandOutput(run) ?? extractRichBody(item.result, run.result);
-}
-function extractCommandPreview(...values) {
-  for (const value of values) {
-    const preview = asString5(value.command_preview) ?? asString5(value.commandPreview) ?? extractCommand(value);
-    if (preview) return preview;
-  }
-  return null;
-}
-function extractRichBody(...values) {
-  for (const value of values) {
-    const text = extractText(value);
-    if (text) return text;
-    if (Array.isArray(value)) {
-      const serialized = compactJson(value);
-      if (serialized !== "[]") return serialized;
-      continue;
-    }
-    if (value && typeof value === "object") {
-      const serialized = JSON.stringify(value, null, 2);
-      if (serialized && serialized !== "{}") return serialized;
-      continue;
-    }
-    if (typeof value === "number" || typeof value === "boolean") {
-      return String(value);
-    }
-  }
-  return null;
-}
-function firstText(...values) {
-  for (const value of values) {
-    const text = extractText(value);
-    if (text) return text;
-  }
-  return null;
-}
-function extractText(value) {
-  if (typeof value === "string" && value.length > 0) return value;
-  if (!Array.isArray(value)) return null;
-  const parts = value.map((entry) => extractTextEntry(entry)).filter((entry) => !!entry);
-  return parts.length > 0 ? parts.join("\n\n") : null;
-}
-function extractTextEntry(entry) {
-  if (typeof entry === "string" && entry.length > 0) return entry;
-  if (!entry || typeof entry !== "object") return null;
-  const obj = entry;
-  if (typeof obj.text === "string" && obj.text.length > 0) return obj.text;
-  if (Array.isArray(obj.content)) return extractText(obj.content);
-  return null;
-}
-function applyBodyTruncation(text, ctx) {
-  if (ctx.truncateBytes === null) return text;
-  const truncated = truncateText(text, ctx.truncateBytes);
-  return truncated.truncatedBytes > 0 ? `${truncated.text}
-${buildTruncationMarker(truncated.truncatedBytes)}` : text;
-}
-function fitInlineText(text, ctx) {
-  if (ctx.truncateBytes === null) return text;
-  const truncated = truncateText(text, ctx.truncateBytes);
-  return truncated.truncatedBytes > 0 ? `${truncated.text}${buildTruncationMarker(truncated.truncatedBytes)}` : text;
-}
-function summarizeSingleLineText(text, maxBytes) {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return "";
-  return truncateText(normalized, maxBytes).text;
-}
-function summarizeBlockText(text, maxBytes) {
-  if (!text) return null;
-  const normalized = stripOuterNewlines(text);
-  if (!normalized) return null;
-  return truncateText(normalized, maxBytes).text;
-}
-function truncateText(text, maxBytes) {
-  const totalBytes = byteLength(text);
-  if (totalBytes <= maxBytes) {
-    return { text, truncatedBytes: 0 };
-  }
-  const chars = Array.from(text);
-  let low = 0;
-  let high = chars.length;
-  while (low < high) {
-    const mid = Math.ceil((low + high) / 2);
-    const candidate = chars.slice(0, mid).join("");
-    if (byteLength(candidate) <= maxBytes) {
-      low = mid;
-    } else {
-      high = mid - 1;
-    }
-  }
-  const truncatedText = chars.slice(0, low).join("");
-  return {
-    text: stripOuterNewlines(truncatedText),
-    truncatedBytes: totalBytes - byteLength(truncatedText)
-  };
-}
-function buildTruncationMarker(truncatedBytes) {
-  return `\u2026[${truncatedBytes} bytes truncated; use --truncate 0 to disable]`;
-}
-function prettyJson(value) {
-  if (value === void 0) return "{}";
-  if (typeof value === "string") return value;
-  const serialized = JSON.stringify(value, null, 2);
-  return serialized ?? String(value);
-}
-function byteLength(value) {
-  return Buffer.byteLength(value, "utf8");
-}
-function joinText(values, separator) {
-  const present = values.filter((value) => !!value);
-  return present.length > 0 ? present.join(separator) : null;
-}
-function stripOuterNewlines(value) {
-  return value.replace(/^\n+/, "").replace(/\n+$/, "");
-}
-function asString5(value) {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-function asObject5(value) {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value;
-  }
-  return {};
-}
-var ITEM_TYPE_ALIASES = {
-  agent_message: "agentMessage",
-  auto_approval_review: "autoApprovalReview",
-  command_execution: "commandExecution",
-  file_change: "fileChange",
-  mcp_tool_call: "mcpToolCall",
-  user_message: "userMessage"
-};
-
-// src/daemon/handlers/message.ts
 var RECENT_TERMINAL_WAIT_EVENT_WINDOW_MS = 3e4;
 var messageSend = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
@@ -11592,20 +11999,23 @@ var messageHistory = async (ctx, req) => {
     cursor: sinceRaw ?? void 0,
     sortDirection: "desc"
   }, ctx.retryOptions());
+  const turns = format === "markdown" ? await hydrateTurnsFromThreadRead(client, rec.thread_id, result.data, ctx.retryOptions()) : result.data;
   const response = {
     session: rec.name,
     thread_id: rec.thread_id,
-    turns: result.data,
+    turns,
     next_cursor: result.nextCursor,
-    format,
-    note: "Turn items are not included in turnsList responses (protocol limitation). Use 'session context' for per-thread metadata."
+    format
   };
+  if (format === "json") {
+    response.note = "Turn items are not included in turnsList responses (protocol limitation). Use 'session context' for per-thread metadata.";
+  }
   if (relativeSince) response.relative_since = relativeSince;
   if (format === "markdown") {
     response.markdown = renderHistory({
       session: rec.name,
       thread_id: rec.thread_id,
-      turns: result.data,
+      turns,
       nextCursor: result.nextCursor
     }, { truncate });
   }
@@ -11625,9 +12035,10 @@ var messageTail = async (ctx, req, stream) => {
       sortDirection: "desc"
     }, ctx.retryOptions());
     const thread = await threadRead(client, rec.thread_id, ctx.retryOptions()).catch(() => null);
+    const turns = format === "markdown" ? hydrateTurnsFromThreadSnapshot(result.data, thread?.thread ?? null) : result.data;
     const response = {
       session: rec.name,
-      turns: result.data,
+      turns,
       format,
       follow,
       thread: thread?.thread ?? null
@@ -11636,7 +12047,7 @@ var messageTail = async (ctx, req, stream) => {
       response.markdown = renderTail({
         session: rec.name,
         thread_id: rec.thread_id,
-        turns: result.data,
+        turns,
         thread: thread?.thread ?? null,
         follow
       }, { truncate });
@@ -11922,7 +12333,7 @@ function terminalWaitResult(session, threadId, turnId, event) {
     event_type: event.type,
     event_id: event.id,
     ...completedFields,
-    ...event.type === "turn.error" ? { error: event.payload.error ?? event.payload } : {}
+    ...event.type === "turn.completed" && completedStatus !== "completed" ? { error: event.payload.error ?? null } : {}
   };
 }
 async function findTerminalEvent(ctx, user, session, turnId) {
@@ -11931,7 +12342,7 @@ async function findTerminalEvent(ctx, user, session, turnId) {
   for (let i = listed.events.length - 1; i >= 0; i--) {
     const event = listed.events[i];
     if (event.session !== session) continue;
-    if (event.type !== "turn.completed" && event.type !== "turn.error" && event.type !== "turn.interrupted") continue;
+    if (event.type !== "turn.completed" && event.type !== "turn.interrupted") continue;
     if (eventTurnId(event) !== turnId) continue;
     return event;
   }
@@ -12193,13 +12604,13 @@ function timeoutWaitResult(rec, turnId, timeoutSeconds) {
   };
 }
 function isTurnTerminalEvent(event) {
-  return event.type === "turn.completed" || event.type === "turn.error" || event.type === "turn.interrupted";
+  return event.type === "turn.completed" || event.type === "turn.interrupted";
 }
 function latestRecentTerminalEvent(ctx, user, session, threadId) {
   const event = ctx.events.latestEvent(user, {
     session,
     thread_id: threadId,
-    types: ["turn.completed", "turn.error", "turn.interrupted", SESSION_CRASHED_EVENT_TYPE, SESSION_CLOSED_EVENT_TYPE]
+    types: ["turn.completed", "turn.interrupted", SESSION_CRASHED_EVENT_TYPE, SESSION_CLOSED_EVENT_TYPE]
   });
   if (!event) return null;
   const ageMs = Date.now() - Date.parse(event.ts);
@@ -12308,6 +12719,25 @@ async function listTurnsFromRelativeOffset(client, threadId, relativeSince, limi
     if (!cursor) break;
   }
   return { data, nextCursor };
+}
+async function hydrateTurnsFromThreadRead(client, threadId, turns, retry) {
+  if (turns.length === 0) return turns;
+  const thread = await threadRead(client, threadId, retry).catch(() => null);
+  return hydrateTurnsFromThreadSnapshot(turns, thread?.thread ?? null);
+}
+function hydrateTurnsFromThreadSnapshot(turns, thread) {
+  const snapshotTurns = Array.isArray(thread?.turns) ? thread.turns.filter((turn) => Boolean(turn) && typeof turn === "object" && typeof turn.id === "string") : [];
+  if (snapshotTurns.length === 0) return turns;
+  const byId = new Map(snapshotTurns.map((turn) => [turn.id, turn]));
+  return turns.map((turn) => {
+    const hydrated = byId.get(turn.id);
+    if (!hydrated) return turn;
+    const merged = { ...hydrated, ...turn };
+    if ("items" in hydrated) {
+      merged.items = hydrated.items;
+    }
+    return merged;
+  });
 }
 
 // src/daemon/handlers/cursor.ts
@@ -13131,7 +13561,7 @@ var import_node_crypto7 = __toESM(require("crypto"));
 var NOTIF_MAP = {
   "turn/started": "turn.started",
   "turn/completed": "turn.completed",
-  "error": "turn.error",
+  "error": INTERNAL_TURN_FAILED_EVENT_TYPE,
   "item/started": "item.started",
   "item/completed": "item.completed",
   "item/mcpToolCall/progress": "item.mcp_tool_call_progress",
@@ -13247,7 +13677,7 @@ function buildNotificationPayload(type, params) {
         turn
       };
     }
-    case "turn.error": {
+    case INTERNAL_TURN_FAILED_EVENT_TYPE: {
       const err2 = asObject6(params.error);
       return {
         turn_id: params.turnId ?? null,
@@ -13285,7 +13715,7 @@ function buildNotificationPayload(type, params) {
     case "thread.token_usage_updated":
       return {
         turn_id: params.turnId ?? null,
-        token_usage: params.tokenUsage ?? null
+        token_usage: normalizeCanonicalTokenUsage(params.tokenUsage)
       };
     case "thread.name_updated":
       return { name: params.threadName ?? null };
@@ -13373,17 +13803,29 @@ function deriveTurnEndedAt(turn) {
 function normalizeTurnCompletedStatus(value) {
   if (typeof value !== "string") return null;
   if (value === "completed") return "completed";
+  if (value === "interrupted") return "interrupted";
   if (value === "cancelled" || value === "canceled") return "cancelled";
-  if (value === "errored" || value === "error" || value === "failed") return "errored";
+  if (value === "errored" || value === "error" || value === "failed") return "failed";
   return null;
 }
 function deriveTurnTokenUsage(turn) {
   const usageSource = turn.tokenUsage ?? turn.token_usage ?? turn.usage;
-  const usage = asObject6(usageSource);
-  const prompt = asNumber2(usage.prompt) ?? asNumber2(usage.promptTokens) ?? asNumber2(usage.prompt_tokens) ?? asNumber2(usage.input) ?? asNumber2(usage.inputTokens) ?? asNumber2(usage.input_tokens);
-  const completion = asNumber2(usage.completion) ?? asNumber2(usage.completionTokens) ?? asNumber2(usage.completion_tokens) ?? asNumber2(usage.output) ?? asNumber2(usage.outputTokens) ?? asNumber2(usage.output_tokens);
+  return normalizeCanonicalTokenUsage(usageSource);
+}
+function normalizeCanonicalTokenUsage(value) {
+  const usage = asObject6(value);
+  const input = asNumber2(usage.input) ?? asNumber2(usage.inputTokens) ?? asNumber2(usage.input_tokens) ?? asNumber2(usage.prompt) ?? asNumber2(usage.promptTokens) ?? asNumber2(usage.prompt_tokens);
+  const cachedInput = asNumber2(usage.cached_input) ?? asNumber2(usage.cachedInput) ?? asNumber2(usage.cachedInputTokens) ?? asNumber2(usage.cached_input_tokens);
+  const output = asNumber2(usage.output) ?? asNumber2(usage.outputTokens) ?? asNumber2(usage.output_tokens) ?? asNumber2(usage.completion) ?? asNumber2(usage.completionTokens) ?? asNumber2(usage.completion_tokens);
+  const reasoningOutput = asNumber2(usage.reasoning_output) ?? asNumber2(usage.reasoningOutput) ?? asNumber2(usage.reasoningOutputTokens) ?? asNumber2(usage.reasoning_output_tokens);
   const total = asNumber2(usage.total) ?? asNumber2(usage.totalTokens) ?? asNumber2(usage.total_tokens);
-  return { prompt, completion, total };
+  return {
+    input,
+    cached_input: cachedInput,
+    output,
+    reasoning_output: reasoningOutput,
+    total
+  };
 }
 function fallbackType(method) {
   return method.replace(/\//g, ".").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
@@ -13440,7 +13882,7 @@ async function handleNotification2(ctx, e) {
   const norm = normalizeNotification(e.notification);
   const sessionName = resolveSession(ctx, e.user, norm.threadId);
   const rec = sessionName ? ctx.sessions.get(e.user, sessionName) : null;
-  const logged = await ctx.events.append(e.user, {
+  const logged = norm.type === INTERNAL_TURN_FAILED_EVENT_TYPE ? null : await ctx.events.append(e.user, {
     type: norm.type,
     session: sessionName,
     thread_id: norm.threadId,
@@ -13448,13 +13890,14 @@ async function handleNotification2(ctx, e) {
   });
   if (norm.type === "turn.started" && sessionName && rec) {
     const turnId = norm.payload.turn_id ?? null;
+    const loggedTs = logged?.ts ?? (/* @__PURE__ */ new Date()).toISOString();
     ctx.queues.setCurrentTurn(keyFor3(e.user, sessionName), turnId);
     ctx.sessions.update(e.user, sessionName, {
       state: "live",
       crash_reason: null,
       last_turn_id: turnId,
       current_turn_id: turnId,
-      current_turn_started_at: isoFromUnixSeconds(norm.payload.started_at, logged.ts),
+      current_turn_started_at: isoFromUnixSeconds(norm.payload.started_at, loggedTs),
       current_item_type: null,
       items_in_turn: 0
     });
@@ -13481,9 +13924,12 @@ async function handleNotification2(ctx, e) {
       });
     }
   }
-  if (norm.type === "turn.error" && sessionName && rec) {
+  if (norm.type === INTERNAL_TURN_FAILED_EVENT_TYPE && sessionName && rec) {
     const turnId = norm.payload.turn_id ?? rec.last_turn_id ?? null;
     const willRetry = Boolean(norm.payload.will_retry);
+    if (!willRetry && turnId) {
+      await appendFailedTurnCompleted(ctx, e.user, sessionName, norm.threadId ?? rec.thread_id, turnId, rec, norm.payload.error);
+    }
     ctx.sessions.update(e.user, sessionName, {
       last_turn_id: turnId,
       current_turn_id: willRetry ? rec.current_turn_id ?? turnId : null,
@@ -13629,19 +14075,10 @@ async function handleClientClose(ctx, e) {
     });
     await appendSessionCrashed(ctx, user, rec.name, rec.thread_id, reason, currentTurnId ?? rec.last_turn_id ?? null);
     if (currentTurnId) {
-      await ctx.events.append(user, {
-        type: "turn.error",
-        session: sessionName,
-        thread_id: rec.thread_id,
-        payload: {
-          turn_id: currentTurnId,
-          will_retry: false,
-          error: {
-            message: "app-server process exited unexpectedly",
-            codex_error_info: "internal_server_error",
-            additional_details: `exit_code=${e.exitCode ?? "null"}`
-          }
-        }
+      await appendFailedTurnCompleted(ctx, user, sessionName, rec.thread_id, currentTurnId, rec, {
+        message: "app-server process exited unexpectedly",
+        codex_error_info: "internal_server_error",
+        additional_details: `exit_code=${e.exitCode ?? "null"}`
       });
     }
     await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, "session_crashed");
@@ -13816,6 +14253,35 @@ async function appendSessionClosed2(ctx, user, session, threadId, reason) {
       ts: (/* @__PURE__ */ new Date()).toISOString()
     }
   });
+}
+async function appendFailedTurnCompleted(ctx, user, session, threadId, turnId, rec, error) {
+  const errorPayload = asErrorPayload(error);
+  const endedAt = Date.now();
+  const durationMs = rec.current_turn_started_at ? Math.max(0, endedAt - Date.parse(rec.current_turn_started_at)) : null;
+  return await ctx.events.append(user, {
+    type: "turn.completed",
+    session,
+    thread_id: threadId,
+    payload: {
+      turn_id: turnId,
+      status: "failed",
+      duration_ms: Number.isFinite(durationMs) ? durationMs : null,
+      items_count: rec.items_in_turn ?? 0,
+      token_usage: null,
+      ended_at: endedAt,
+      turn_items_included: false,
+      error: errorPayload,
+      codex_error_info: errorPayload.codex_error_info
+    }
+  });
+}
+function asErrorPayload(value) {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    message: typeof record.message === "string" ? record.message : null,
+    codex_error_info: typeof record.codex_error_info === "string" ? record.codex_error_info : null,
+    additional_details: typeof record.additional_details === "string" ? record.additional_details : null
+  };
 }
 async function appendSessionCrashed(ctx, user, session, threadId, reason, lastTurnId) {
   await ctx.events.append(user, {
@@ -14171,7 +14637,7 @@ var DAEMON_STDERR_PATH_ENV2 = "CODEX_TEAM_DAEMON_STDERR_PATH";
 async function main() {
   const argv = process.argv.slice(2);
   const hasDaemonInternal = argv.includes("--daemon-internal");
-  const stderrPath = hasDaemonInternal ? takeOptionValue(argv, "--stderr-to") : null;
+  const stderrPath = hasDaemonInternal ? takeOptionValue2(argv, "--stderr-to") : null;
   const daemonIdx = argv.indexOf("--daemon-internal");
   if (daemonIdx >= 0) {
     argv.splice(daemonIdx, 1);
@@ -14208,7 +14674,7 @@ function writeDaemonBootstrapError(error) {
   process.stderr.write(`[codex-team-daemon-bootstrap] ${JSON.stringify(payload)}
 `);
 }
-function takeOptionValue(argv, flag) {
+function takeOptionValue2(argv, flag) {
   const idx = argv.indexOf(flag);
   if (idx < 0) return null;
   const value = argv[idx + 1];
