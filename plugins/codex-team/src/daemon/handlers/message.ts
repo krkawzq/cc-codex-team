@@ -5,6 +5,7 @@ import type { DaemonContext } from "../context";
 import type { IpcRequest } from "../../ipc/protocol";
 import type { JsonValue } from "../../codex/errors";
 import { CodexTeamError, invalidParams } from "../../errors";
+import { SESSION_CLOSED_EVENT_TYPE, SESSION_CRASHED_EVENT_TYPE } from "../events";
 import {
   threadRead,
   threadTurnsList,
@@ -156,6 +157,7 @@ export const messageHistory: HandlerFn = async (ctx, req) => {
   const limit = typeof limitRaw === "string" ? parseInt(limitRaw, 10) : typeof limitRaw === "number" ? limitRaw : 50;
   const sinceRaw = asString(getFlag(req, "since"));
   const format = asString(getFlag(req, "format")) ?? "json";
+  const truncate = parseTruncateFlag(getFlag(req, "truncate"));
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
 
   const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit as number)) : 50;
@@ -183,7 +185,7 @@ export const messageHistory: HandlerFn = async (ctx, req) => {
       thread_id: rec.thread_id,
       turns: result.data,
       nextCursor: result.nextCursor,
-    });
+    }, { truncate });
   }
   return response;
 };
@@ -193,6 +195,7 @@ export const messageTail: HandlerFn = async (ctx, req, stream) => {
   const nRaw = getFlag(req, "n");
   const n = typeof nRaw === "string" ? parseInt(nRaw, 10) : typeof nRaw === "number" ? nRaw : 3;
   const format = asString(getFlag(req, "format")) ?? "json";
+  const truncate = parseTruncateFlag(getFlag(req, "truncate"));
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
   const follow = isTrue(getFlag(req, "follow")) || isTrue(getFlag(req, "f"));
 
@@ -216,7 +219,7 @@ export const messageTail: HandlerFn = async (ctx, req, stream) => {
         turns: result.data,
         thread: thread?.thread ?? null,
         follow,
-      });
+      }, { truncate });
     }
     return response;
   };
@@ -237,6 +240,125 @@ export const messageTail: HandlerFn = async (ctx, req, stream) => {
   return { streaming: true };
 };
 
+export const messageWait: HandlerFn = async (ctx, req) => {
+  const { user, rec } = await resolveSessionRecord(ctx, req);
+  if (rec.state !== "live") {
+    return {
+      session: rec.name,
+      thread_id: rec.thread_id,
+      turn_id: rec.current_turn_id ?? rec.last_turn_id ?? null,
+      outcome: "error",
+      event_type: SESSION_CRASHED_EVENT_TYPE,
+      error: {
+        reason: rec.crash_reason ?? "session_crashed",
+      },
+    };
+  }
+  const requestedTurnId = asString(getFlag(req, "for"));
+  const timeoutSeconds = parseTimeoutSeconds(getFlag(req, "timeout"));
+  const sessionKey = keyFor(user, rec.name);
+  const initialTurnId = requestedTurnId ?? rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+
+  if (requestedTurnId) {
+    const historical = await findTerminalEvent(ctx, user, rec.name, requestedTurnId);
+    if (historical) return terminalWaitResult(rec.name, rec.thread_id, requestedTurnId, historical);
+  } else if (initialTurnId) {
+    const historical = await findTerminalEvent(ctx, user, rec.name, initialTurnId);
+    if (historical) return terminalWaitResult(rec.name, rec.thread_id, initialTurnId, historical);
+  }
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    let targetTurnId = requestedTurnId;
+    let timer: NodeJS.Timeout | null = null;
+
+    const settle = (result: Record<string, unknown>) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      sub.dispose();
+      resolve(result);
+    };
+
+    const sub = ctx.events.subscribe(user, (event) => {
+      if (event.session !== rec.name) return;
+      if (event.thread_id !== rec.thread_id) return;
+
+      if (!targetTurnId) {
+        targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+      }
+
+      if (!targetTurnId) {
+        if (event.type === "turn.started") {
+          const turnId = eventTurnId(event);
+          if (!turnId) return;
+          targetTurnId = turnId;
+        } else if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
+          settle({
+            session: rec.name,
+            thread_id: rec.thread_id,
+            turn_id: null,
+            outcome: "error",
+            event_type: event.type,
+            event_id: event.id,
+            error: event.payload,
+          });
+        }
+        return;
+      }
+
+      if (event.type === "turn.completed" && eventTurnId(event) === targetTurnId) {
+        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
+        return;
+      }
+      if (event.type === "turn.error" && eventTurnId(event) === targetTurnId) {
+        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
+        return;
+      }
+      if (event.type === SESSION_CRASHED_EVENT_TYPE && eventCrashTurnId(event) === targetTurnId) {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId,
+          outcome: "error",
+          event_type: event.type,
+          event_id: event.id,
+          error: event.payload,
+        });
+        return;
+      }
+      if (event.type === SESSION_CLOSED_EVENT_TYPE) {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId,
+          outcome: "error",
+          event_type: event.type,
+          event_id: event.id,
+          error: event.payload,
+        });
+      }
+    });
+
+    if (!targetTurnId && !requestedTurnId) {
+      targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+    }
+
+    if (timeoutSeconds > 0) {
+      timer = setTimeout(() => {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId ?? null,
+          outcome: "timeout",
+          timeout_s: timeoutSeconds,
+        });
+      }, timeoutSeconds * 1000);
+      timer.unref();
+    }
+  });
+};
+
 // ----- helpers -----
 
 async function resolveLive(
@@ -253,17 +375,31 @@ async function resolveLive(
   if (!rec) {
     throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
   }
+  if (rec.state === "crashed") {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is crashed; run 'codex-team -b ${user} session heal ${rec.name}'`);
+  }
   const client = ctx.pool.clientForSession(keyFor(user, rec.name));
-  if (!client) {
-    // lazy re-spawn: acquire again
-    const fresh = await ctx.pool.acquire(
-      user,
-      keyFor(user, rec.name),
-      buildExperimentalToolAppServerOptions(rec.experimental_tools ?? []),
-    );
-    return { user, rec, client: fresh };
+  if (!isClientAlive(client)) {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
   }
   return { user, rec, client };
+}
+
+async function resolveSessionRecord(
+  ctx: DaemonContext,
+  req: IpcRequest,
+): Promise<{ user: string; rec: import("../sessions").SessionRecord }> {
+  const user = req.bearer;
+  if (!user) throw invalidParams("bearer token required");
+  if (!ctx.users.has(user)) {
+    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
+  }
+  const identifier = asPositional(req, 0, "session");
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
+  }
+  return { user, rec };
 }
 
 function requirePending(ctx: DaemonContext, user: string, requestId: string): PendingRequest {
@@ -286,12 +422,14 @@ function emitPendingWarning(
   threadId: string | null,
   payload: Record<string, unknown>,
 ): void {
-  void ctx.events.append(user, {
-    type: "warning",
-    session,
-    thread_id: threadId,
-    payload,
-  }).catch(() => undefined);
+  setImmediate(() => {
+    void ctx.events.append(user, {
+      type: "warning",
+      session,
+      thread_id: threadId,
+      payload,
+    }).catch(() => undefined);
+  });
 }
 
 async function readPromptInput(req: IpcRequest): Promise<string> {
@@ -354,17 +492,33 @@ async function buildResponse(req: IpcRequest, pending: PendingRequest, shortcut:
     return explicit;
   }
   if (!shortcut) throw invalidParams("supply a shortcut (accept|accept-session|decline|cancel) or --json/--file/--stdin");
+  return buildApprovalShortcutResponse(pending.kind, pending.raw, shortcut);
+}
 
-  switch (pending.kind) {
+export function buildApprovalShortcutResponse(kind: string, raw: Record<string, unknown>, shortcut: string): unknown {
+  switch (kind) {
     case "approval.command_execution":
     case "approval.file_change":
-      return { decision: commandOrFileShortcut(shortcut, pending.kind) };
+      return { decision: commandOrFileShortcut(shortcut, kind) };
     case "approval.permissions":
-      return permissionsShortcut(shortcut, pending.raw);
+      return permissionsShortcut(shortcut, raw);
     case "approval.mcp_elicitation":
-      return mcpElicitationShortcut(shortcut, pending.raw);
+      return mcpElicitationShortcut(shortcut, raw);
     default:
-      throw new CodexTeamError("invalid_decision", `unknown approval kind '${pending.kind}'`);
+      throw new CodexTeamError("invalid_decision", `unknown approval kind '${kind}'`);
+  }
+}
+
+export function preferredAutoApprovalShortcut(kind: string): "accept" | "accept-session" | null {
+  switch (kind) {
+    case "approval.command_execution":
+    case "approval.file_change":
+    case "approval.permissions":
+      return "accept-session";
+    case "approval.mcp_elicitation":
+      return "accept";
+    default:
+      return null;
   }
 }
 
@@ -455,8 +609,100 @@ function asStringArray(v: unknown): string[] {
   return [];
 }
 
+function isClientAlive(client: unknown): client is import("../../codex/appServerClient").AppServerClient {
+  if (!client) return false;
+  const maybe = client as { isAlive?: () => boolean };
+  if (typeof maybe.isAlive === "function") return maybe.isAlive();
+  return true;
+}
+
+function parseTimeoutSeconds(value: unknown): number {
+  if (value === undefined) return 600;
+  const raw = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(raw) || raw < 0) throw invalidParams("--timeout must be a non-negative number of seconds");
+  return Math.floor(raw);
+}
+
 function isTrue(v: unknown): boolean {
   return v === true || v === "true" || v === "1";
+}
+
+function eventTurnId(event: { payload: Record<string, unknown> }): string | null {
+  const turnId = event.payload.turn_id;
+  return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
+}
+
+function eventCrashTurnId(event: { payload: Record<string, unknown> }): string | null {
+  const turnId = event.payload.last_turn_id;
+  return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
+}
+
+function terminalWaitResult(
+  session: string,
+  threadId: string,
+  turnId: string,
+  event: { id: string; type: string; payload: Record<string, unknown> },
+): Record<string, unknown> {
+  const completedStatus = event.type === "turn.completed" ? event.payload.status : null;
+  const completedFields = event.type === "turn.completed"
+    ? pickDefined(event.payload, [
+        "status",
+        "duration_ms",
+        "items_count",
+        "token_usage",
+        "ended_at",
+        "turn_items_included",
+      ])
+    : {};
+  return {
+    session,
+    thread_id: threadId,
+    turn_id: turnId,
+    outcome: event.type === "turn.completed" && completedStatus === "completed" ? "completed" : "error",
+    event_type: event.type,
+    event_id: event.id,
+    ...completedFields,
+    ...(event.type === "turn.error" ? { error: event.payload.error ?? event.payload } : {}),
+  };
+}
+
+async function findTerminalEvent(
+  ctx: DaemonContext,
+  user: string,
+  session: string,
+  turnId: string,
+): Promise<import("../../types").TeamEvent | null> {
+  const listed = await ctx.events.listSince(user, null, { includeDelta: true });
+  if (!listed.ok) return null;
+  for (let i = listed.events.length - 1; i >= 0; i--) {
+    const event = listed.events[i]!;
+    if (event.session !== session) continue;
+    if (event.type !== "turn.completed" && event.type !== "turn.error") continue;
+    if (eventTurnId(event) !== turnId) continue;
+    return event;
+  }
+  return null;
+}
+
+function parseTruncateFlag(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const normalized = Math.floor(value);
+    if (normalized >= 0) return normalized;
+    throw invalidParams("--truncate must be a non-negative integer");
+  }
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    return parseInt(value, 10);
+  }
+  throw invalidParams("--truncate must be a non-negative integer");
+}
+
+function pickDefined(source: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  const picked: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (source[key] !== undefined) picked[key] = source[key];
+  }
+  return picked;
 }
 
 async function assertAttachable(filePath: string): Promise<void> {

@@ -5,7 +5,7 @@ export interface HelpPositional {
 }
 
 export interface HelpFlag {
-  long: string;
+  long?: string;
   short?: string;
   type: string;
   default?: string;
@@ -146,9 +146,17 @@ const daemonUserGroup: HelpNode = {
     leaf({
       name: "list",
       summary: "List all daemon users and their activity.",
-      usage: "codex-team daemon user list",
+      usage: "codex-team daemon user list [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per user to stdout.",
+        },
+      ],
       examples: [
         "codex-team daemon user list",
       ],
@@ -204,6 +212,7 @@ const daemonConfigGroup: HelpNode = {
       flags: [],
       examples: [
         "codex-team daemon config set monitor.default_interval_seconds 10",
+        "codex-team daemon config set session.auto_approve_command_patterns 'git*,node *'",
       ],
       needs_bearer: false,
     }),
@@ -280,9 +289,17 @@ const daemonGroup: HelpNode = {
     leaf({
       name: "status",
       summary: "Show daemon process, socket, and resource status.",
-      usage: "codex-team daemon status",
+      usage: "codex-team daemon status [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout.",
+        },
+      ],
       examples: [
         "codex-team daemon status",
       ],
@@ -344,7 +361,7 @@ const daemonGroup: HelpNode = {
           description: "Stream new log lines as they arrive.",
         },
         {
-          long: "-n",
+          short: "-n",
           type: "int",
           default: "100",
           required: false,
@@ -456,11 +473,18 @@ const sessionGroup: HelpNode = {
           required: false,
           description: "Enable experimental Codex tools such as ask-user-question.",
         },
+        {
+          long: "--auto-approve",
+          type: "csv|regex",
+          required: false,
+          description: "Comma-separated approval target patterns to auto-accept for this session.",
+        },
       ],
       examples: [
         "codex-team -b $TOKEN session new audit --model gpt-5.4 --cwd /repo",
         "codex-team -b $TOKEN session new --profile fast-review",
         "codex-team -b $TOKEN session new askq --experimental-tools ask-user-question",
+        "codex-team -b $TOKEN session new audit --auto-approve 'git*,node *'",
       ],
       needs_bearer: true,
     }),
@@ -561,11 +585,19 @@ const sessionGroup: HelpNode = {
     leaf({
       name: "info",
       summary: "Show metadata for one session.",
-      usage: "codex-team -b <token> session info <name|thread_id>",
+      usage: "codex-team -b <token> session info <name|thread_id> [flags]",
       positionals: [
         { ...SESSION_TARGET },
       ],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout.",
+        },
+      ],
       examples: [
         "codex-team -b $TOKEN session info audit",
       ],
@@ -619,9 +651,58 @@ const sessionGroup: HelpNode = {
           required: false,
           description: "Render output as json or table.",
         },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per session to stdout; cannot be used with --format table.",
+        },
       ],
       examples: [
         "codex-team -b $TOKEN session list --all --format table",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "health",
+      summary: "Show a compact live health snapshot for one session.",
+      usage: "codex-team -b <token> session health <name|thread_id>",
+      positionals: [
+        { ...SESSION_TARGET },
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN session health audit",
+      ],
+      notes: [
+        "If the session is crashed or the app-server is dead, run 'codex-team -b <token> session heal <name|thread_id>'.",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "heal",
+      summary: "Re-attach a crashed or dead live session to a fresh app-server.",
+      usage: "codex-team -b <token> session heal <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET },
+      ],
+      flags: [
+        {
+          long: "--force",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Drop half-baked in-memory queue state before retrying the resume.",
+        },
+      ],
+      examples: [
+        "codex-team -b $TOKEN session heal audit",
+        "codex-team -b $TOKEN session heal audit --force",
+      ],
+      notes: [
+        "Use 'codex-team -b <token> session health <name|thread_id>' first to inspect crash state and pending work.",
+        "Healthy live sessions return { ok: true, note: \"already healthy\" }.",
       ],
       needs_bearer: true,
     }),
@@ -702,14 +783,24 @@ const messageGroup: HelpNode = {
           description: "Use a shortcut that matches the approval kind.",
         },
       ],
-      flags: JSON_RESPONSE_FLAGS,
+      flags: [
+        ...JSON_RESPONSE_FLAGS,
+        {
+          long: "--kind",
+          type: "string",
+          required: false,
+          description: "Optional approval kind hint for local shortcut validation.",
+        },
+      ],
       notes: [
         "command_execution and file_change: all shortcuts are valid.",
         "permissions: cancel is invalid.",
         "mcp_elicitation: accept-session is invalid; form mode needs --json.",
+        "--kind validates the shortcut before contacting the daemon.",
       ],
       examples: [
         "codex-team -b $TOKEN message approval audit req-17 accept-session",
+        "codex-team -b $TOKEN message approval audit req-17 accept --kind approval.permissions",
         "codex-team -b $TOKEN message approval audit req-17 --file approval.json",
       ],
       needs_bearer: true,
@@ -763,6 +854,20 @@ const messageGroup: HelpNode = {
           required: false,
           description: "Render output as json or markdown.",
         },
+        {
+          long: "--truncate",
+          type: "int",
+          default: "2048",
+          required: false,
+          description: "Clip long markdown bodies to this many bytes; use 0 to disable clipping.",
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per turn to stdout; cannot be used with --format markdown.",
+        },
       ],
       examples: [
         "codex-team -b $TOKEN message history audit --since -3 --format markdown",
@@ -786,7 +891,7 @@ const messageGroup: HelpNode = {
           description: "Keep printing turns until the CLI exits.",
         },
         {
-          long: "-n",
+          short: "-n",
           type: "int",
           default: "3",
           required: false,
@@ -799,9 +904,47 @@ const messageGroup: HelpNode = {
           required: false,
           description: "Render output as json or markdown.",
         },
+        {
+          long: "--truncate",
+          type: "int",
+          default: "2048",
+          required: false,
+          description: "Clip long markdown bodies to this many bytes; use 0 to disable clipping.",
+        },
       ],
       examples: [
         "codex-team -b $TOKEN message tail audit -n 5 --follow",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "wait",
+      summary: "Block until a turn completes, errors, or times out.",
+      usage: "codex-team -b <token> message wait <name|thread_id> [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGET, description: "Session to watch." },
+      ],
+      flags: [
+        {
+          long: "--for",
+          type: "string",
+          required: false,
+          description: "Wait for a specific turn ID instead of inferring the current or next turn.",
+        },
+        {
+          long: "--timeout",
+          type: "int",
+          default: "600",
+          required: false,
+          description: "Seconds to wait before returning timeout; use 0 to disable the timeout.",
+        },
+      ],
+      notes: [
+        "Without --for, waits for the current in-flight turn. If the session is idle, waits for the next turn that starts after this call.",
+      ],
+      examples: [
+        "codex-team -b $TOKEN message wait audit",
+        "codex-team -b $TOKEN message wait audit --for turn-42 --timeout 30",
       ],
       needs_bearer: true,
     }),
@@ -859,10 +1002,23 @@ const monitorGroup: HelpNode = {
           description: "Include high-frequency *.delta events.",
         },
         {
+          long: "--summary",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Emit compact NDJSON lines with only id, ts, type, session, and a type-specific key.",
+        },
+        {
           long: "--since",
           type: "string",
           required: false,
-          description: "Resume from the given event ID.",
+          description: "Resume from the given event ID; cannot be used with --cursor.",
+        },
+        {
+          long: "--cursor",
+          type: "string",
+          required: false,
+          description: "Resume from a saved named cursor and auto-update it; cannot be used with --since.",
         },
         {
           long: "--session",
@@ -910,6 +1066,90 @@ const monitorGroup: HelpNode = {
       ],
       examples: [
         "codex-team -b $TOKEN monitor alarm 30 \"codex-team -b $TOKEN status\"",
+      ],
+      needs_bearer: true,
+    }),
+  ],
+  needs_bearer: true,
+};
+
+const cursorGroup: HelpNode = {
+  name: "cursor",
+  summary: "Manage persisted named event cursors.",
+  usage: "codex-team -b <token> cursor <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team -b $TOKEN cursor save audit-tail",
+  ],
+  subcommands: [
+    leaf({
+      name: "save",
+      summary: "Save the current event tail or an explicit event ID under a cursor name.",
+      usage: "codex-team -b <token> cursor save <name> [flags]",
+      positionals: [
+        {
+          name: "name",
+          required: true,
+          description: "Cursor name to create or update.",
+        },
+      ],
+      flags: [
+        {
+          long: "--event-id",
+          type: "string",
+          required: false,
+          description: "Override the saved event ID instead of using the current tail.",
+        },
+      ],
+      examples: [
+        "codex-team -b $TOKEN cursor save audit-tail",
+        "codex-team -b $TOKEN cursor save audit-tail --event-id evt-42",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "list",
+      summary: "List saved named cursors for the current user.",
+      usage: "codex-team -b <token> cursor list",
+      positionals: [],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN cursor list",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "get",
+      summary: "Print only the saved event ID for a cursor name.",
+      usage: "codex-team -b <token> cursor get <name>",
+      positionals: [
+        {
+          name: "name",
+          required: true,
+          description: "Cursor name to resolve.",
+        },
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN cursor get audit-tail",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
+      name: "delete",
+      summary: "Delete a saved cursor.",
+      usage: "codex-team -b <token> cursor delete <name>",
+      positionals: [
+        {
+          name: "name",
+          required: true,
+          description: "Cursor name to delete.",
+        },
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN cursor delete audit-tail",
       ],
       needs_bearer: true,
     }),
@@ -973,9 +1213,17 @@ const HELP_TREE: HelpNode = {
     leaf({
       name: "status",
       summary: "Show live sessions, pending events, and recent activity.",
-      usage: "codex-team -b <token> status",
+      usage: "codex-team -b <token> status [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout.",
+        },
+      ],
       examples: [
         "codex-team -b $TOKEN status",
       ],
@@ -985,6 +1233,7 @@ const HELP_TREE: HelpNode = {
     sessionGroup,
     messageGroup,
     monitorGroup,
+    cursorGroup,
   ],
   needs_bearer: false,
 };
@@ -1006,7 +1255,8 @@ function formatPositional(positional: HelpPositional): string {
 }
 
 function formatFlag(flag: HelpFlag): string {
-  return flag.short ? `${flag.short}, ${flag.long}` : flag.long;
+  if (flag.short && flag.long) return `${flag.short}, ${flag.long}`;
+  return flag.short ?? flag.long ?? "-";
 }
 
 function renderTable(headers: string[], rows: string[][]): string[] {

@@ -3,11 +3,24 @@ import { spawn } from "node:child_process";
 import type { HandlerFn } from "../dispatch";
 import { CodexTeamError, invalidParams } from "../../errors";
 import type { TeamEvent } from "../../types";
-import { isDeltaType } from "../events";
+import {
+  AUTO_APPROVED_EVENT_TYPE,
+  SESSION_CLOSED_EVENT_TYPE,
+  SESSION_CRASHED_EVENT_TYPE,
+  isDeltaType,
+} from "../events";
 
 const MAX_INTERVAL_QUEUE_EVENTS = 512;
 const MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
 const MAX_FLUSH_EVENTS_PER_TICK = 64;
+
+interface MonitorEventSummary {
+  id: string;
+  ts: string;
+  type: string;
+  session: string | null;
+  key: string | null;
+}
 
 export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor events requires streaming");
@@ -27,10 +40,55 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   if (intervalS <= 0 && !streamMode) throw invalidParams("--interval must be > 0");
 
   const includeDelta = isTrue(flags["include-delta"]);
+  const summaryMode = isTrue(flags["summary"]);
   const filterTypes = parseTypeList(flags["filter"]);
   const excludeTypes = parseTypeList(flags["exclude"]);
   const sinceId = asString(flags["since"]);
+  const cursorName = asString(flags["cursor"]);
+  if (sinceId && cursorName) throw invalidParams("--since and --cursor are mutually exclusive");
   const sessionFilter = asString(flags["session"]);
+  let effectiveSinceId = sinceId;
+  let persistedCursorEventId: string | null = null;
+  let lastObservedEventId: string | null = null;
+  let lastAckedEventId: string | null = null;
+  let cursorWriteChain = Promise.resolve();
+
+  if (cursorName) {
+    const cursor = await ctx.cursors.ensure(user, {
+      name: cursorName,
+      event_id: null,
+      auto_update: true,
+    });
+    effectiveSinceId = cursor.event_id;
+    persistedCursorEventId = cursor.event_id;
+    lastObservedEventId = cursor.event_id;
+    lastAckedEventId = cursor.event_id;
+  }
+
+  const emit = (event: TeamEvent): void => {
+    stream.chunk(summaryMode ? summarizeEvent(event) : event);
+  };
+  const scheduleCursorPersist = (): void => {
+    if (!cursorName) return;
+    const nextEventId = lastAckedEventId;
+    if (!nextEventId || nextEventId === persistedCursorEventId) return;
+    cursorWriteChain = cursorWriteChain
+      .catch(() => undefined)
+      .then(async () => {
+        if (!nextEventId || nextEventId === persistedCursorEventId) return;
+        await ctx.cursors.saveBestEffort(user, {
+          name: cursorName,
+          event_id: nextEventId,
+          auto_update: true,
+        });
+        persistedCursorEventId = nextEventId;
+      });
+  };
+  stream.onAck((ack) => {
+    if (!ack.event_id) return;
+    lastAckedEventId = ack.event_id;
+    scheduleCursorPersist();
+  });
 
   const accept = (e: TeamEvent): boolean => {
     if (!includeDelta && isDeltaType(e.type)) return false;
@@ -43,18 +101,21 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     return true;
   };
 
-  const backlog = await ctx.events.listSince(user, sinceId, { includeDelta: true });
+  const backlog = await ctx.events.listSince(user, effectiveSinceId, { includeDelta: true });
   if (!backlog.ok) {
     if (backlog.reason === "id_rotated") {
-      stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
+      stream.end(new CodexTeamError("id_rotated", `event '${effectiveSinceId}' has been rotated out`, {
         oldest_available_id: backlog.oldest_available_id,
       }));
     } else {
-      stream.end(invalidParams(`event '${sinceId}' not found`));
+      stream.end(invalidParams(`event '${effectiveSinceId}' not found`));
     }
     return { streaming: true };
   }
 
+  if (backlog.events.length > 0) {
+    lastObservedEventId = backlog.events[backlog.events.length - 1]?.id ?? lastObservedEventId;
+  }
   const initialEvents = backlog.events.filter(accept);
   const queue: TeamEvent[] = streamMode ? [...initialEvents] : [];
   let queueBytes = 0;
@@ -100,16 +161,20 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   }
 
   if (streamMode) {
-    for (const e of queue) stream.chunk(e);
+    for (const e of queue) emit(e);
     queue.length = 0;
     const sub = ctx.events.subscribe(user, (e) => {
-      if (accept(e)) stream.chunk(e);
+      lastObservedEventId = e.id;
+      if (accept(e)) emit(e);
     });
-    stream.onClose(() => sub.dispose());
+    stream.onClose(() => {
+      sub.dispose();
+    });
     return { streaming: true };
   }
 
   const sub = ctx.events.subscribe(user, (e) => {
+    lastObservedEventId = e.id;
     if (accept(e)) enqueueIntervalEvent(e);
   });
   let closed = false;
@@ -127,11 +192,11 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     if (closed || draining) return;
     draining = true;
     const overflowEvent = takeOverflowEvent();
-    if (overflowEvent) stream.chunk(overflowEvent);
+    if (overflowEvent) emit(overflowEvent);
     const batch = queue.splice(0, MAX_FLUSH_EVENTS_PER_TICK);
     for (const event of batch) {
       queueBytes = Math.max(0, queueBytes - eventSize(event));
-      stream.chunk(event);
+      emit(event);
     }
     draining = false;
     if (overflowDropped > 0 || queue.length > 0) scheduleDrain(1);
@@ -347,4 +412,58 @@ function numConfig(ctx: { config: { getEffective(k: string): unknown } }, key: s
 
 function eventSize(event: TeamEvent): number {
   return Buffer.byteLength(JSON.stringify(event));
+}
+
+function summarizeEvent(event: TeamEvent): MonitorEventSummary {
+  return {
+    id: event.id,
+    ts: event.ts,
+    type: event.type,
+    session: event.session,
+    key: summarizeEventKey(event),
+  };
+}
+
+function summarizeEventKey(event: TeamEvent): string | null {
+  const payload = event.payload;
+
+  if (event.type.startsWith("turn.")) return asPayloadString(payload.turn_id);
+  if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
+    return labeledSummaryValue("reason", payload.reason ?? payload.crash_reason ?? payload.why);
+  }
+  if (event.type === AUTO_APPROVED_EVENT_TYPE) {
+    return labeledSummaryValue("matched_pattern", payload.matched_pattern ?? payload.matchedPattern)
+      ?? asPayloadString(payload.request_id);
+  }
+  if (event.type.startsWith("approval.") || event.type === "user_input.request" || event.type === "server_request_resolved") {
+    return asPayloadString(payload.request_id);
+  }
+  if (event.type.startsWith("item.")) {
+    return asPayloadString(payload.type) ?? asPayloadString(payload.item_type) ?? asPayloadString(payload.item_id);
+  }
+  if (event.type.startsWith("thread.")) return asPayloadString(payload.thread_id) ?? event.thread_id;
+  if (event.type.startsWith("hook.")) return asPayloadString(payload.hook_id);
+  if (event.type.startsWith("mcp_server.")) return asPayloadString(payload.name);
+  if (event.type.startsWith("fuzzy_file_search.")) return asPayloadString(payload.search_session_id);
+  if (event.type === "monitor.overflow") return asPayloadString(payload.dropped_count);
+  return (
+    asPayloadString(payload.turn_id) ??
+    asPayloadString(payload.request_id) ??
+    asPayloadString(payload.type) ??
+    asPayloadString(payload.item_id) ??
+    asPayloadString(payload.thread_id) ??
+    asPayloadString(payload.name) ??
+    event.thread_id
+  );
+}
+
+function asPayloadString(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function labeledSummaryValue(label: string, value: unknown): string | null {
+  const rendered = asPayloadString(value);
+  return rendered ? `${label}=${rendered}` : null;
 }

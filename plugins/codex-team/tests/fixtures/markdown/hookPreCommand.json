@@ -1,0 +1,11 @@
+{
+  "renderer": "item",
+  "item": {
+    "id": "hook-pre-1",
+    "type": "hook.pre_command",
+    "hook_id": "hook-17",
+    "status": "started",
+    "command": "npm run lint",
+    "cwd": "/repo"
+  }
+}

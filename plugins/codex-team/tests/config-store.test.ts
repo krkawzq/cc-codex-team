@@ -70,6 +70,22 @@ describe("ConfigStore", () => {
     expect(store.snapshot().explicit).toEqual({});
   });
 
+  it("validates daemon default auto-approve patterns", () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const store = new ConfigStore(dir);
+
+    expect(store.set("session.auto_approve_command_patterns", "git,npm,/sh -c cat.*/i")).toEqual({
+      ok: true,
+      value: "git,npm,/sh -c cat.*/i",
+      needs_restart: false,
+    });
+    expect(store.set("session.auto_approve_command_patterns", "/unterminated")).toEqual({
+      ok: false,
+      error: expect.stringContaining("invalid auto-approve regex"),
+    });
+  });
+
   it("expands leading ~ in resolved configured paths", () => {
     const dir = mkTmpDir();
     const home = mkTmpDir();

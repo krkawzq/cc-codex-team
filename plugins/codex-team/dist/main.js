@@ -5,9 +5,6 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __commonJS = (cb, mod) => function __require() {
-  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
-};
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
     for (let key of __getOwnPropNames(from))
@@ -25,47 +22,24 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// package.json
-var require_package = __commonJS({
-  "package.json"(exports2, module2) {
-    module2.exports = {
-      name: "codex-team",
-      version: "0.5.1",
-      private: true,
-      description: "CLI + daemon orchestrating long-lived Codex app-server sessions for agents",
-      license: "MIT",
-      engines: {
-        node: ">=18"
-      },
-      scripts: {
-        build: "tsup src/main.ts --format cjs --platform node --target node18 --out-dir dist --clean",
-        dev: "tsup src/main.ts --format cjs --platform node --target node18 --out-dir dist --watch",
-        test: "vitest run",
-        "test:watch": "vitest",
-        typecheck: "tsc --noEmit",
-        clean: "rm -rf dist"
-      },
-      devDependencies: {
-        "@types/node": "^24.0.0",
-        tsup: "^8.5.0",
-        typescript: "^5.9.2",
-        vitest: "^4.1.5"
-      }
-    };
-  }
-});
+// src/main.ts
+var import_node_fs17 = __toESM(require("fs"));
+var import_node_path15 = __toESM(require("path"));
 
 // src/cli/run.ts
+var import_node_fs5 = __toESM(require("fs"));
+var import_node_path6 = __toESM(require("path"));
 var import_node_child_process = require("child_process");
 var import_promises = require("timers/promises");
 
 // src/ipc/sock.ts
-var import_node_fs = __toESM(require("fs"));
+var import_node_fs2 = __toESM(require("fs"));
 var import_node_net = __toESM(require("net"));
 var import_node_path2 = __toESM(require("path"));
 
 // src/paths.ts
 var import_node_crypto = __toESM(require("crypto"));
+var import_node_fs = __toESM(require("fs"));
 var import_node_os = __toESM(require("os"));
 var import_node_path = __toESM(require("path"));
 var APP = "codex-team";
@@ -148,11 +122,38 @@ function decodeToken(encoded) {
   const b64 = encoded.replace(/-/g, "+").replace(/_/g, "/") + pad;
   return Buffer.from(b64, "base64").toString("utf8");
 }
+var legacyWindowsDataDirWarned = false;
+function warnLegacyWindowsDataDir(emit, opts = {}) {
+  if (legacyWindowsDataDirWarned) return null;
+  const warning = getLegacyWindowsDataDirWarning(opts);
+  if (!warning) return null;
+  legacyWindowsDataDirWarned = true;
+  emit(warning);
+  return warning;
+}
 function namedPipePath(seed) {
   return `${WINDOWS_PIPE_PREFIX}${APP}-${pathHash(seed)}`;
 }
 function pathHash(input) {
   return import_node_crypto.default.createHash("sha256").update(input).digest("hex").slice(0, 16);
+}
+function getLegacyWindowsDataDirWarning(opts) {
+  const platform = opts.platform ?? process.platform;
+  if (platform !== "win32") return null;
+  if ((opts.dataDirOverride ?? process.env.CODEX_TEAM_DATA_DIR)?.trim()) return null;
+  const legacyHome = (opts.legacyHome ?? process.env.HOME ?? "").trim();
+  if (!legacyHome) return null;
+  const nativeHome = opts.nativeHome ?? homeDir();
+  if (!nativeHome || nativeHome === legacyHome) return null;
+  const exists = opts.exists ?? import_node_fs.default.existsSync;
+  const legacyPath = import_node_path.default.join(legacyHome, `.${APP}`);
+  const newPath = import_node_path.default.join(nativeHome, `.${APP}`);
+  if (!exists(legacyPath) || exists(newPath)) return null;
+  return {
+    legacyPath,
+    newPath,
+    message: `warning: Windows legacy HOME data dir '${legacyPath}' exists but new default '${newPath}' does not; move it manually to keep codex-team state.`
+  };
 }
 
 // src/ipc/sock.ts
@@ -189,7 +190,7 @@ function onMessages(socket, handler, onClose) {
 async function listenSock(sockPath) {
   const endpoint = normalizeSockPath(sockPath);
   if (isFilesystemSockPath(sockPath)) {
-    import_node_fs.default.mkdirSync(import_node_path2.default.dirname(endpoint), { recursive: true });
+    import_node_fs2.default.mkdirSync(import_node_path2.default.dirname(endpoint), { recursive: true });
   }
   const server = import_node_net.default.createServer();
   await new Promise((resolve, reject) => {
@@ -228,7 +229,7 @@ function connectSock(sockPath, timeoutMs = 2e3) {
 function probeSock(sockPath, timeoutMs = 200) {
   return new Promise((resolve) => {
     const endpoint = normalizeSockPath(sockPath);
-    if (isFilesystemSockPath(sockPath) && !import_node_fs.default.existsSync(endpoint)) {
+    if (isFilesystemSockPath(sockPath) && !import_node_fs2.default.existsSync(endpoint)) {
       resolve(false);
       return;
     }
@@ -257,7 +258,7 @@ function unlinkSockIfStale(sockPath) {
   if (!isFilesystemSockPath(sockPath)) return;
   const endpoint = normalizeSockPath(sockPath);
   try {
-    import_node_fs.default.unlinkSync(endpoint);
+    import_node_fs2.default.unlinkSync(endpoint);
   } catch {
   }
 }
@@ -295,7 +296,14 @@ var COMMANDS = /* @__PURE__ */ new Set([
   "message:history",
   "message:tail",
   "monitor:events",
-  "monitor:alarm"
+  "monitor:alarm",
+  "session:health",
+  "session:heal",
+  "message:wait",
+  "cursor:save",
+  "cursor:list",
+  "cursor:get",
+  "cursor:delete"
 ]);
 var HELP_PATHS = /* @__PURE__ */ new Set([
   ...COMMANDS,
@@ -304,7 +312,8 @@ var HELP_PATHS = /* @__PURE__ */ new Set([
   "daemon:config",
   "session",
   "message",
-  "monitor"
+  "monitor",
+  "cursor"
 ]);
 var GLOBAL_FLAGS = {
   "-b": { name: "bearer", takesValue: true },
@@ -329,15 +338,16 @@ function parseArgs(argv) {
   const nonGlobal = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    const spec = GLOBAL_FLAGS[a];
+    const [globalToken, inlineValue] = splitLongFlagAssignment(a);
+    const spec = GLOBAL_FLAGS[globalToken];
     if (!spec) {
       nonGlobal.push(a);
       continue;
     }
     if (spec.takesValue) {
-      const v = argv[++i];
+      const v = inlineValue ?? argv[++i];
       if (v === void 0) {
-        result.unknown = `flag ${a} requires a value`;
+        result.unknown = `flag ${globalToken} requires a value`;
         return result;
       }
       if (spec.name === "bearer") result.bearer = v;
@@ -405,6 +415,12 @@ function isFlagLike(s) {
 function isNegativeNumber(s) {
   return /^-\d+(\.\d+)?$/.test(s);
 }
+function splitLongFlagAssignment(token) {
+  if (!token.startsWith("--")) return [token, null];
+  const eqIdx = token.indexOf("=");
+  if (eqIdx < 0) return [token, null];
+  return [token.slice(0, eqIdx), token.slice(eqIdx + 1)];
+}
 function setFlag(flags, key, value) {
   if (value === null) {
     flags[key] = true;
@@ -431,8 +447,19 @@ function matchCommand(tokens, available) {
   }
   return null;
 }
-function commandKey(path12) {
-  return path12.join(":");
+function commandKey(path16) {
+  return path16.join(":");
+}
+var SHORT_COMMANDS = /* @__PURE__ */ new Set([
+  "status",
+  "daemon:status",
+  "daemon:user:list",
+  "session:info",
+  "session:list",
+  "message:history"
+]);
+function supportsShort(method) {
+  return SHORT_COMMANDS.has(method);
 }
 
 // src/cli/help.ts
@@ -551,9 +578,17 @@ var daemonUserGroup = {
     leaf({
       name: "list",
       summary: "List all daemon users and their activity.",
-      usage: "codex-team daemon user list",
+      usage: "codex-team daemon user list [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per user to stdout."
+        }
+      ],
       examples: [
         "codex-team daemon user list"
       ],
@@ -607,7 +642,8 @@ var daemonConfigGroup = {
       ],
       flags: [],
       examples: [
-        "codex-team daemon config set monitor.default_interval_seconds 10"
+        "codex-team daemon config set monitor.default_interval_seconds 10",
+        "codex-team daemon config set session.auto_approve_command_patterns 'git*,node *'"
       ],
       needs_bearer: false
     }),
@@ -683,9 +719,17 @@ var daemonGroup = {
     leaf({
       name: "status",
       summary: "Show daemon process, socket, and resource status.",
-      usage: "codex-team daemon status",
+      usage: "codex-team daemon status [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout."
+        }
+      ],
       examples: [
         "codex-team daemon status"
       ],
@@ -747,7 +791,7 @@ var daemonGroup = {
           description: "Stream new log lines as they arrive."
         },
         {
-          long: "-n",
+          short: "-n",
           type: "int",
           default: "100",
           required: false,
@@ -857,12 +901,19 @@ var sessionGroup = {
           default: "experimental.default_tools",
           required: false,
           description: "Enable experimental Codex tools such as ask-user-question."
+        },
+        {
+          long: "--auto-approve",
+          type: "csv|regex",
+          required: false,
+          description: "Comma-separated approval target patterns to auto-accept for this session."
         }
       ],
       examples: [
         "codex-team -b $TOKEN session new audit --model gpt-5.4 --cwd /repo",
         "codex-team -b $TOKEN session new --profile fast-review",
-        "codex-team -b $TOKEN session new askq --experimental-tools ask-user-question"
+        "codex-team -b $TOKEN session new askq --experimental-tools ask-user-question",
+        "codex-team -b $TOKEN session new audit --auto-approve 'git*,node *'"
       ],
       needs_bearer: true
     }),
@@ -963,11 +1014,19 @@ var sessionGroup = {
     leaf({
       name: "info",
       summary: "Show metadata for one session.",
-      usage: "codex-team -b <token> session info <name|thread_id>",
+      usage: "codex-team -b <token> session info <name|thread_id> [flags]",
       positionals: [
         { ...SESSION_TARGET }
       ],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout."
+        }
+      ],
       examples: [
         "codex-team -b $TOKEN session info audit"
       ],
@@ -1020,10 +1079,59 @@ var sessionGroup = {
           default: "json",
           required: false,
           description: "Render output as json or table."
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per session to stdout; cannot be used with --format table."
         }
       ],
       examples: [
         "codex-team -b $TOKEN session list --all --format table"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "health",
+      summary: "Show a compact live health snapshot for one session.",
+      usage: "codex-team -b <token> session health <name|thread_id>",
+      positionals: [
+        { ...SESSION_TARGET }
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN session health audit"
+      ],
+      notes: [
+        "If the session is crashed or the app-server is dead, run 'codex-team -b <token> session heal <name|thread_id>'."
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "heal",
+      summary: "Re-attach a crashed or dead live session to a fresh app-server.",
+      usage: "codex-team -b <token> session heal <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET }
+      ],
+      flags: [
+        {
+          long: "--force",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Drop half-baked in-memory queue state before retrying the resume."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN session heal audit",
+        "codex-team -b $TOKEN session heal audit --force"
+      ],
+      notes: [
+        "Use 'codex-team -b <token> session health <name|thread_id>' first to inspect crash state and pending work.",
+        'Healthy live sessions return { ok: true, note: "already healthy" }.'
       ],
       needs_bearer: true
     })
@@ -1103,14 +1211,24 @@ var messageGroup = {
           description: "Use a shortcut that matches the approval kind."
         }
       ],
-      flags: JSON_RESPONSE_FLAGS,
+      flags: [
+        ...JSON_RESPONSE_FLAGS,
+        {
+          long: "--kind",
+          type: "string",
+          required: false,
+          description: "Optional approval kind hint for local shortcut validation."
+        }
+      ],
       notes: [
         "command_execution and file_change: all shortcuts are valid.",
         "permissions: cancel is invalid.",
-        "mcp_elicitation: accept-session is invalid; form mode needs --json."
+        "mcp_elicitation: accept-session is invalid; form mode needs --json.",
+        "--kind validates the shortcut before contacting the daemon."
       ],
       examples: [
         "codex-team -b $TOKEN message approval audit req-17 accept-session",
+        "codex-team -b $TOKEN message approval audit req-17 accept --kind approval.permissions",
         "codex-team -b $TOKEN message approval audit req-17 --file approval.json"
       ],
       needs_bearer: true
@@ -1163,6 +1281,20 @@ var messageGroup = {
           default: "json",
           required: false,
           description: "Render output as json or markdown."
+        },
+        {
+          long: "--truncate",
+          type: "int",
+          default: "2048",
+          required: false,
+          description: "Clip long markdown bodies to this many bytes; use 0 to disable clipping."
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact line per turn to stdout; cannot be used with --format markdown."
         }
       ],
       examples: [
@@ -1187,7 +1319,7 @@ var messageGroup = {
           description: "Keep printing turns until the CLI exits."
         },
         {
-          long: "-n",
+          short: "-n",
           type: "int",
           default: "3",
           required: false,
@@ -1199,10 +1331,48 @@ var messageGroup = {
           default: "json",
           required: false,
           description: "Render output as json or markdown."
+        },
+        {
+          long: "--truncate",
+          type: "int",
+          default: "2048",
+          required: false,
+          description: "Clip long markdown bodies to this many bytes; use 0 to disable clipping."
         }
       ],
       examples: [
         "codex-team -b $TOKEN message tail audit -n 5 --follow"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "wait",
+      summary: "Block until a turn completes, errors, or times out.",
+      usage: "codex-team -b <token> message wait <name|thread_id> [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGET, description: "Session to watch." }
+      ],
+      flags: [
+        {
+          long: "--for",
+          type: "string",
+          required: false,
+          description: "Wait for a specific turn ID instead of inferring the current or next turn."
+        },
+        {
+          long: "--timeout",
+          type: "int",
+          default: "600",
+          required: false,
+          description: "Seconds to wait before returning timeout; use 0 to disable the timeout."
+        }
+      ],
+      notes: [
+        "Without --for, waits for the current in-flight turn. If the session is idle, waits for the next turn that starts after this call."
+      ],
+      examples: [
+        "codex-team -b $TOKEN message wait audit",
+        "codex-team -b $TOKEN message wait audit --for turn-42 --timeout 30"
       ],
       needs_bearer: true
     })
@@ -1259,10 +1429,23 @@ var monitorGroup = {
           description: "Include high-frequency *.delta events."
         },
         {
+          long: "--summary",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Emit compact NDJSON lines with only id, ts, type, session, and a type-specific key."
+        },
+        {
           long: "--since",
           type: "string",
           required: false,
-          description: "Resume from the given event ID."
+          description: "Resume from the given event ID; cannot be used with --cursor."
+        },
+        {
+          long: "--cursor",
+          type: "string",
+          required: false,
+          description: "Resume from a saved named cursor and auto-update it; cannot be used with --since."
         },
         {
           long: "--session",
@@ -1310,6 +1493,89 @@ var monitorGroup = {
       ],
       examples: [
         'codex-team -b $TOKEN monitor alarm 30 "codex-team -b $TOKEN status"'
+      ],
+      needs_bearer: true
+    })
+  ],
+  needs_bearer: true
+};
+var cursorGroup = {
+  name: "cursor",
+  summary: "Manage persisted named event cursors.",
+  usage: "codex-team -b <token> cursor <subcommand>",
+  positionals: [],
+  flags: [],
+  examples: [
+    "codex-team -b $TOKEN cursor save audit-tail"
+  ],
+  subcommands: [
+    leaf({
+      name: "save",
+      summary: "Save the current event tail or an explicit event ID under a cursor name.",
+      usage: "codex-team -b <token> cursor save <name> [flags]",
+      positionals: [
+        {
+          name: "name",
+          required: true,
+          description: "Cursor name to create or update."
+        }
+      ],
+      flags: [
+        {
+          long: "--event-id",
+          type: "string",
+          required: false,
+          description: "Override the saved event ID instead of using the current tail."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN cursor save audit-tail",
+        "codex-team -b $TOKEN cursor save audit-tail --event-id evt-42"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "list",
+      summary: "List saved named cursors for the current user.",
+      usage: "codex-team -b <token> cursor list",
+      positionals: [],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN cursor list"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "get",
+      summary: "Print only the saved event ID for a cursor name.",
+      usage: "codex-team -b <token> cursor get <name>",
+      positionals: [
+        {
+          name: "name",
+          required: true,
+          description: "Cursor name to resolve."
+        }
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN cursor get audit-tail"
+      ],
+      needs_bearer: true
+    }),
+    leaf({
+      name: "delete",
+      summary: "Delete a saved cursor.",
+      usage: "codex-team -b <token> cursor delete <name>",
+      positionals: [
+        {
+          name: "name",
+          required: true,
+          description: "Cursor name to delete."
+        }
+      ],
+      flags: [],
+      examples: [
+        "codex-team -b $TOKEN cursor delete audit-tail"
       ],
       needs_bearer: true
     })
@@ -1372,9 +1638,17 @@ var HELP_TREE = {
     leaf({
       name: "status",
       summary: "Show live sessions, pending events, and recent activity.",
-      usage: "codex-team -b <token> status",
+      usage: "codex-team -b <token> status [flags]",
       positionals: [],
-      flags: [],
+      flags: [
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print one compact status line to stdout."
+        }
+      ],
       examples: [
         "codex-team -b $TOKEN status"
       ],
@@ -1383,25 +1657,27 @@ var HELP_TREE = {
     daemonGroup,
     sessionGroup,
     messageGroup,
-    monitorGroup
+    monitorGroup,
+    cursorGroup
   ],
   needs_bearer: false
 };
-function findNode(path12, node = HELP_TREE) {
-  if (path12.length === 0) return node;
-  const [head, ...rest] = path12;
+function findNode(path16, node = HELP_TREE) {
+  if (path16.length === 0) return node;
+  const [head, ...rest] = path16;
   const child = node.subcommands.find((entry) => entry.name === head);
   if (!child) return null;
   return findNode(rest, child);
 }
-function formatCommandPath(path12) {
-  return path12.length === 0 ? "codex-team" : `codex-team ${path12.join(" ")}`;
+function formatCommandPath(path16) {
+  return path16.length === 0 ? "codex-team" : `codex-team ${path16.join(" ")}`;
 }
 function formatPositional(positional) {
   return positional.required ? `<${positional.name}>` : `[${positional.name}]`;
 }
 function formatFlag(flag) {
-  return flag.short ? `${flag.short}, ${flag.long}` : flag.long;
+  if (flag.short && flag.long) return `${flag.short}, ${flag.long}`;
+  return flag.short ?? flag.long ?? "-";
 }
 function renderTable(headers, rows) {
   const widths = headers.map(
@@ -1474,9 +1750,9 @@ function renderExamples(node) {
     ...node.examples.map((example) => `  ${example}`)
   ];
 }
-function renderHelp(path12) {
-  const node = findNode(path12) ?? HELP_TREE;
-  const resolvedPath = findNode(path12) ? path12 : [];
+function renderHelp(path16) {
+  const node = findNode(path16) ?? HELP_TREE;
+  const resolvedPath = findNode(path16) ? path16 : [];
   const sections = [
     [formatCommandPath(resolvedPath), node.summary],
     ["USAGE", `  ${node.usage}`]
@@ -1509,8 +1785,141 @@ function err(code, message, data) {
 }
 
 // src/daemon/config.ts
-var import_node_fs2 = __toESM(require("fs"));
+var import_node_fs4 = __toESM(require("fs"));
+var import_node_path4 = __toESM(require("path"));
+
+// src/logger.ts
+var import_node_fs3 = __toESM(require("fs"));
 var import_node_path3 = __toESM(require("path"));
+var LEVELS = {
+  error: 0,
+  warn: 1,
+  info: 2,
+  debug: 3,
+  trace: 4
+};
+var Logger = class {
+  level = "info";
+  stream = null;
+  logPath = null;
+  configure(opts) {
+    if (opts.level) this.level = opts.level;
+    if (opts.logPath && opts.logPath !== this.logPath) {
+      if (this.stream) this.stream.end();
+      import_node_fs3.default.mkdirSync(import_node_path3.default.dirname(opts.logPath), { recursive: true });
+      this.stream = import_node_fs3.default.createWriteStream(opts.logPath, { flags: "a" });
+      this.logPath = opts.logPath;
+    }
+  }
+  setLevel(level) {
+    this.level = level;
+  }
+  emit(level, msg, meta) {
+    if (LEVELS[level] > LEVELS[this.level]) return;
+    const line = JSON.stringify({
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      level,
+      msg,
+      ...meta ?? {}
+    });
+    if (this.stream) {
+      this.stream.write(line + "\n");
+    } else {
+      process.stderr.write(line + "\n");
+    }
+  }
+  error(msg, meta) {
+    this.emit("error", msg, meta);
+  }
+  warn(msg, meta) {
+    this.emit("warn", msg, meta);
+  }
+  info(msg, meta) {
+    this.emit("info", msg, meta);
+  }
+  debug(msg, meta) {
+    this.emit("debug", msg, meta);
+  }
+  trace(msg, meta) {
+    this.emit("trace", msg, meta);
+  }
+};
+var logger = new Logger();
+
+// src/daemon/auto-approve.ts
+function parseAutoApprovePatterns(raw) {
+  if (raw.length === 0) return [];
+  return raw.split(",").map((pattern) => pattern.trim()).filter((pattern) => pattern.length > 0);
+}
+function parseConfiguredAutoApprovePatterns(value) {
+  return typeof value === "string" ? parseAutoApprovePatterns(value) : [];
+}
+function validateAutoApprovePatterns(raw) {
+  return validateParsedAutoApprovePatterns(parseAutoApprovePatterns(raw));
+}
+function validateParsedAutoApprovePatterns(patterns) {
+  try {
+    for (const pattern of patterns) {
+      validateAutoApprovePattern(pattern);
+    }
+    return null;
+  } catch (error) {
+    return error.message;
+  }
+}
+function matchAutoApprovePattern(patterns, target) {
+  if (typeof target !== "string" || target.length === 0) return null;
+  for (const pattern of patterns) {
+    let matched = false;
+    try {
+      matched = matchesPattern(pattern, target);
+    } catch (error) {
+      logger.warn("auto-approve pattern match failed; ignoring pattern", {
+        pattern,
+        err: error.message,
+        target: previewAutoApproveTarget(target)
+      });
+      continue;
+    }
+    if (matched) {
+      return {
+        matchedPattern: pattern,
+        commandPreview: previewAutoApproveTarget(target)
+      };
+    }
+  }
+  return null;
+}
+function validateAutoApprovePattern(pattern) {
+  if (!pattern.startsWith("/")) return;
+  parseRegexPattern(pattern);
+}
+function matchesPattern(pattern, target) {
+  if (pattern.startsWith("/")) return parseRegexPattern(pattern).test(target);
+  if (!pattern.includes("*")) return pattern === target;
+  return new RegExp(`^${escapeGlobPattern(pattern)}$`).test(target);
+}
+function parseRegexPattern(pattern) {
+  const trailingSlash = pattern.lastIndexOf("/");
+  if (trailingSlash <= 0) {
+    throw new Error(`invalid auto-approve regex '${pattern}': expected /pattern/flags`);
+  }
+  const source = pattern.slice(1, trailingSlash);
+  const flags = pattern.slice(trailingSlash + 1);
+  try {
+    return new RegExp(source, flags);
+  } catch (error) {
+    throw new Error(`invalid auto-approve regex '${pattern}': ${error.message}`);
+  }
+}
+function escapeGlobPattern(pattern) {
+  return pattern.replace(/[|\\{}()[\]^$+?.]/g, "\\$&").replace(/\*/g, ".*");
+}
+function previewAutoApproveTarget(target) {
+  return target.length > 160 ? `${target.slice(0, 157)}...` : target;
+}
+
+// src/daemon/config.ts
 function enumSpec(values, def, needsRestart, desc) {
   return { type: "enum", enumValues: values, default: def, needsRestart, description: desc };
 }
@@ -1526,6 +1935,13 @@ var CONFIG_KEYS = {
   "daemon.connect_retry_delay_seconds": { type: "float", default: 0.25, needsRestart: false, description: "delay between transient daemon connect retries" },
   "monitor.default_interval_seconds": { type: "int", default: 30, needsRestart: false, description: "default --interval for `monitor events`" },
   "monitor.event_log_retention": { type: "int", default: 1e4, needsRestart: false, description: "per-user ring-buffer event retention" },
+  "session.auto_approve_command_patterns": {
+    type: "string",
+    default: "",
+    needsRestart: false,
+    description: "default session auto-approve command patterns CSV",
+    validate: (value) => typeof value === "string" ? validateAutoApprovePatterns(value) : "expected string"
+  },
   "app_server.max_sessions_per_process": { type: "int", default: 16, needsRestart: false, description: "max session bindings per reusable app-server process (primarily adhoc clients)" },
   "app_server.idle_unload_minutes": { type: "int", default: 60, needsRestart: false, description: "idle duration before unloading live session from app-server" },
   "app_server.request_timeout_seconds": { type: "int", default: 120, needsRestart: false, description: "per-request timeout for app-server JSON-RPC calls" },
@@ -1547,7 +1963,7 @@ var ConfigStore = class {
   }
   load() {
     try {
-      const raw = import_node_fs2.default.readFileSync(this.filePath, "utf8");
+      const raw = import_node_fs4.default.readFileSync(this.filePath, "utf8");
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object") {
         for (const [k, v] of Object.entries(parsed)) {
@@ -1561,10 +1977,10 @@ var ConfigStore = class {
     }
   }
   persist() {
-    import_node_fs2.default.mkdirSync(import_node_path3.default.dirname(this.filePath), { recursive: true });
+    import_node_fs4.default.mkdirSync(import_node_path4.default.dirname(this.filePath), { recursive: true });
     const tmp = this.filePath + ".tmp";
-    import_node_fs2.default.writeFileSync(tmp, JSON.stringify(this.explicit, null, 2));
-    import_node_fs2.default.renameSync(tmp, this.filePath);
+    import_node_fs4.default.writeFileSync(tmp, JSON.stringify(this.explicit, null, 2));
+    import_node_fs4.default.renameSync(tmp, this.filePath);
   }
   listKeys() {
     return Object.keys(CONFIG_KEYS);
@@ -1632,49 +2048,403 @@ var ConfigStore = class {
   }
 };
 function parseValue(raw, spec) {
+  let parsed;
   switch (spec.type) {
     case "int": {
       const n = Number(raw);
-      if (!Number.isFinite(n) || !Number.isInteger(n)) return { ok: false, error: `expected integer, got: ${raw}` };
-      return { ok: true, value: n };
+      parsed = !Number.isFinite(n) || !Number.isInteger(n) ? { ok: false, error: `expected integer, got: ${raw}` } : { ok: true, value: n };
+      break;
     }
     case "float": {
       const n = Number(raw);
-      if (!Number.isFinite(n)) return { ok: false, error: `expected number, got: ${raw}` };
-      return { ok: true, value: n };
+      parsed = !Number.isFinite(n) ? { ok: false, error: `expected number, got: ${raw}` } : { ok: true, value: n };
+      break;
     }
     case "bool": {
-      if (raw === "true" || raw === "1") return { ok: true, value: true };
-      if (raw === "false" || raw === "0") return { ok: true, value: false };
-      return { ok: false, error: `expected true/false, got: ${raw}` };
+      if (raw === "true" || raw === "1") parsed = { ok: true, value: true };
+      else if (raw === "false" || raw === "0") parsed = { ok: true, value: false };
+      else parsed = { ok: false, error: `expected true/false, got: ${raw}` };
+      break;
     }
     case "enum": {
-      if (!spec.enumValues || !spec.enumValues.includes(raw)) {
-        return { ok: false, error: `expected one of: ${spec.enumValues?.join(" / ") ?? ""}` };
-      }
-      return { ok: true, value: raw };
+      parsed = !spec.enumValues || !spec.enumValues.includes(raw) ? { ok: false, error: `expected one of: ${spec.enumValues?.join(" / ") ?? ""}` } : { ok: true, value: raw };
+      break;
     }
     case "path":
     case "string":
     default:
-      return { ok: true, value: raw };
+      parsed = { ok: true, value: raw };
+      break;
   }
+  if (!parsed.ok) return parsed;
+  if (!spec.validate) return parsed;
+  const error = spec.validate(parsed.value);
+  return error ? { ok: false, error } : parsed;
 }
 function isValidPersistedValue(value, spec) {
-  switch (spec.type) {
-    case "int":
-      return typeof value === "number" && Number.isInteger(value) && Number.isFinite(value);
-    case "float":
-      return typeof value === "number" && Number.isFinite(value);
-    case "bool":
-      return typeof value === "boolean";
-    case "enum":
-      return typeof value === "string" && !!spec.enumValues?.includes(value);
-    case "path":
-    case "string":
-    default:
-      return typeof value === "string";
+  const typeValid = (() => {
+    switch (spec.type) {
+      case "int":
+        return typeof value === "number" && Number.isInteger(value) && Number.isFinite(value);
+      case "float":
+        return typeof value === "number" && Number.isFinite(value);
+      case "bool":
+        return typeof value === "boolean";
+      case "enum":
+        return typeof value === "string" && !!spec.enumValues?.includes(value);
+      case "path":
+      case "string":
+      default:
+        return typeof value === "string";
+    }
+  })();
+  if (!typeValid) return false;
+  return !spec.validate || spec.validate(value) === null;
+}
+
+// src/cli/approval-validation.ts
+var APPROVAL_ACTIONS = {
+  "approval.command_execution": ["accept", "accept-session", "decline", "cancel"],
+  "approval.file_change": ["accept", "accept-session", "decline", "cancel"],
+  "approval.permissions": ["accept", "accept-session", "decline"],
+  "approval.mcp_elicitation": ["accept", "decline", "cancel"]
+};
+function validateApprovalAction(kind, action) {
+  const validActions = APPROVAL_ACTIONS[kind];
+  if (!validActions) {
+    return {
+      ok: false,
+      message: `unknown approval kind '${kind}'. Valid kinds: ${Object.keys(APPROVAL_ACTIONS).join(", ")}`
+    };
   }
+  if (validActions.includes(action)) {
+    return { ok: true, validActions };
+  }
+  return {
+    ok: false,
+    validActions,
+    message: `shortcut '${action}' is not valid for ${kind}; valid actions: ${validActions.join(", ")}`
+  };
+}
+
+// src/version.ts
+var import_node_path5 = __toESM(require("path"));
+var PACKAGE_JSON_PATH = require.resolve("../package.json");
+var pkg = require(PACKAGE_JSON_PATH);
+var PACKAGE_ROOT = import_node_path5.default.dirname(PACKAGE_JSON_PATH);
+var VERSION = pkg.version ?? "unknown";
+
+// src/format/short.ts
+function formatShort(method, data) {
+  const value = asObject(data);
+  let body;
+  switch (method) {
+    case "status":
+      body = formatStatus(data);
+      break;
+    case "daemon:status":
+      body = formatDaemonStatus(data);
+      break;
+    case "daemon:user:list":
+      body = formatDaemonUserList(data);
+      break;
+    case "session:info":
+      body = formatSessionInfo(data);
+      break;
+    case "session:list":
+      body = formatSessionList(data);
+      break;
+    case "message:history":
+      body = formatMessageHistory(data);
+      break;
+    default:
+      throw new Error(`--short is not supported for '${method}'`);
+  }
+  const footerLines = extractFooterLines(method, value);
+  return footerLines.length > 0 ? `${body}
+${footerLines.join("\n")}` : body;
+}
+function formatStatus(data) {
+  const value = asObject(data);
+  const daemon = asObject(value.daemon);
+  const retainedCount = formatScalar(value.retained_events);
+  const retainedLimit = formatScalar(
+    value.retained_limit ?? value.retention ?? value.event_log_retention ?? daemon.retained_limit
+  );
+  const appServers = formatScalar(value.app_server_count ?? daemon.app_server_count);
+  return [
+    `user=${formatScalar(value.token ?? value.user ?? value.name)}`,
+    `live=${formatScalar(value.live_sessions)}`,
+    `pending=${formatScalar(value.pending_requests)}`,
+    `retained=${retainedCount}/${retainedLimit}`,
+    `app_servers=${appServers}`,
+    `daemon_age=${formatAgeFromDateish(daemon.started_at ?? value.started_at)}`
+  ].join(" ");
+}
+function formatDaemonStatus(data) {
+  const value = asObject(data);
+  const distAge = value.dist_age_seconds;
+  return [
+    `pid=${formatScalar(value.pid)}`,
+    `sock=${shortPath(asString(value.sock) ?? "unknown")}`,
+    `age=${formatDaemonAge(value)}`,
+    `sessions=${formatScalar(value.session_count ?? value.sessions)}`,
+    `users=${formatScalar(value.user_count ?? value.users)}`,
+    `dist_age=${typeof distAge === "number" && Number.isFinite(distAge) ? humanizeMs(distAge * 1e3) : "unknown"}`
+  ].join(" ");
+}
+function formatDaemonAge(data) {
+  if (typeof data.uptime_s === "number" && Number.isFinite(data.uptime_s)) {
+    return humanizeMs(data.uptime_s * 1e3);
+  }
+  return formatAgeFromDateish(data.started_at);
+}
+function formatSessionInfo(data) {
+  const value = asObject(data);
+  const session = asObject(value.session);
+  const thread = asObject(value.thread);
+  const turn = resolveCurrentTurn(value, session, thread);
+  const turnId = resolveCurrentTurnId(value, session, thread, turn);
+  const turnIdKnown = hasCurrentTurnIdField(value, session, thread);
+  const itemsInTurn = resolveItemsInTurn(value, session, thread, turn);
+  const threadId = asString(session.thread_id) ?? asString(thread.id) ?? "unknown";
+  return [
+    sessionLabel(session, thread),
+    `state=${sessionState(value, session, thread)}`,
+    `thread=${shortId(threadId)}`,
+    `model=${formatScalar(session.model ?? value.model ?? thread.model ?? thread.model_provider)}`,
+    `busy=${busyFlag(value.busy ?? session.busy ?? thread.busy, turnId, turn, turnIdKnown)}`,
+    `turn=${formatNullableScalar(turnId)}`,
+    `items=${formatNullableCount(itemsInTurn)}`
+  ].join(" ");
+}
+function formatSessionList(data) {
+  const value = asObject(data);
+  const sessions = Array.isArray(value.sessions) ? value.sessions : [];
+  if (sessions.length === 0) return "(no sessions)";
+  return sessions.map((entry) => {
+    const session = asObject(entry);
+    const turn = resolveCurrentTurn(session, session, session);
+    const turnId = resolveCurrentTurnId(session, session, session, turn);
+    const turnIdKnown = hasCurrentTurnIdField(session, session, session);
+    return [
+      sessionLabel(session, session),
+      sessionState(session, session, session),
+      formatScalar(session.model ?? session.model_provider),
+      `busy=${busyFlag(session.busy, turnId, turn, turnIdKnown)}`
+    ].join("  ");
+  }).join("\n");
+}
+function formatDaemonUserList(data) {
+  const value = asObject(data);
+  const users = Array.isArray(value.users) ? value.users : [];
+  if (users.length === 0) return "(no users)";
+  return users.map((entry) => {
+    const user = asObject(entry);
+    const live = user.live_sessions ?? user.live_count ?? user.session_count ?? user.live;
+    return [
+      shortTokenPrefix(user.token),
+      `name=${formatScalar(user.name ?? user.token)}`,
+      `live=${formatCount(live)}`,
+      `last_seen=${formatAgeFromDateish(user.last_active_at ?? user.created_at)}`
+    ].join(" ");
+  }).join("\n");
+}
+function formatMessageHistory(data) {
+  const value = asObject(data);
+  const turns = Array.isArray(value.turns) ? value.turns : [];
+  if (turns.length === 0) return "(no turns)";
+  return turns.map((entry) => {
+    const turn = asObject(entry);
+    return [
+      formatScalar(turn.id),
+      formatScalar(turn.status),
+      formatTurnDuration(turn),
+      `items=${formatCount(turn.items && Array.isArray(turn.items) ? turn.items.length : turn.item_count ?? turn.itemCount)}`
+    ].join(" ");
+  }).join("\n");
+}
+function formatAgeFromDateish(value) {
+  const date = parseDate(value);
+  if (!date) return "unknown";
+  return humanizeMs(Math.max(0, Date.now() - date.getTime()));
+}
+function humanizeMs(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "unknown";
+  if (ms < 1e3) return `${Math.floor(ms)}ms`;
+  const seconds = Math.floor(ms / 1e3);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
+function shortPath(value) {
+  if (value.length <= 28) return value;
+  return `...${value.slice(-25)}`;
+}
+function shortId(value) {
+  if (value.length <= 16) return value;
+  return `${value.slice(0, 8)}...${value.slice(-4)}`;
+}
+function sessionLabel(session, thread) {
+  return formatScalar(session.name ?? thread.name ?? thread.id);
+}
+function sessionState(root, session, thread) {
+  const status2 = session.state ?? extractStatus(thread.status) ?? (root.live === false ? "retained" : void 0);
+  return formatScalar(status2);
+}
+function extractStatus(value) {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const type = value.type;
+    return typeof type === "string" && type.length > 0 ? type : null;
+  }
+  return null;
+}
+function resolveCurrentTurn(root, session, thread) {
+  const candidate = root.current_turn ?? root.turn ?? session.current_turn ?? session.turn ?? thread.current_turn ?? thread.turn;
+  if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+    return candidate;
+  }
+  return null;
+}
+function busyFlag(value, turnId, turn, turnIdKnown) {
+  if (value === true) return "y";
+  if (value === false) return "n";
+  if (turnId) return "y";
+  if (turnIdKnown) return "n";
+  if (turn) return "y";
+  return "unknown";
+}
+function resolveCurrentTurnId(root, session, thread, turn) {
+  const direct = asString(
+    root.current_turn_id ?? root.currentTurnId ?? session.current_turn_id ?? session.currentTurnId ?? thread.current_turn_id ?? thread.currentTurnId
+  );
+  if (direct) return direct;
+  if (!turn) return null;
+  return asString(turn.id ?? turn.turn_id ?? turn.turnId);
+}
+function resolveItemsInTurn(root, session, thread, turn) {
+  const direct = asFiniteNumber(
+    root.items_in_turn ?? root.itemsInTurn ?? session.items_in_turn ?? session.itemsInTurn ?? thread.items_in_turn ?? thread.itemsInTurn
+  );
+  if (direct !== null) return direct;
+  if (!turn) return null;
+  if (Array.isArray(turn.items)) return turn.items.length;
+  const count = asFiniteNumber(turn.item_count ?? turn.itemCount ?? turn.items_count);
+  return count ?? null;
+}
+function formatTurnDuration(turn) {
+  const direct = turn.durationMs ?? turn.duration_ms;
+  if (typeof direct === "number" && Number.isFinite(direct)) return humanizeMs(direct);
+  const started = asFiniteNumber(turn.startedAt ?? turn.started_at);
+  const completed = asFiniteNumber(turn.completedAt ?? turn.completed_at);
+  if (started !== null && completed !== null && completed >= started) {
+    return humanizeMs(completed - started);
+  }
+  return "unknown";
+}
+function formatCount(value) {
+  if (Array.isArray(value)) return String(value.length);
+  return formatScalar(value);
+}
+function formatNullableCount(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value.length > 0) return value;
+  return "unknown";
+}
+function formatNullableScalar(value) {
+  return value ?? "unknown";
+}
+function parseDate(value) {
+  if (typeof value !== "string" || value.length === 0) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+function asObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  return {};
+}
+function asString(value) {
+  if (Array.isArray(value)) return asString(value[value.length - 1]);
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+function asFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function hasCurrentTurnIdField(...records) {
+  return records.some(
+    (record) => hasOwn(record, "current_turn_id") || hasOwn(record, "currentTurnId")
+  );
+}
+function hasOwn(record, key) {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+function formatScalar(value) {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return "unknown";
+}
+function shortTokenPrefix(token) {
+  const encoded = typeof token === "string" && token.length > 0 ? encodeToken(token) : "unknown";
+  return `${encoded.slice(0, 10)}...`;
+}
+function extractFooterLines(method, value) {
+  switch (method) {
+    case "session:list":
+      return extractSessionListFooters(value);
+    case "message:history":
+      return extractMessageHistoryFooters(value);
+    default:
+      return [];
+  }
+}
+function extractSessionListFooters(value) {
+  const nextCursor = asString(value.next_cursor);
+  const includeContract = value.all === true || nextCursor !== null;
+  if (!includeContract) return [];
+  const fields = [
+    ["next_cursor", nextCursor],
+    ["all", value.all],
+    ["sort", asString(value.sort)],
+    ["format", asString(value.format)]
+  ];
+  const footer = formatFooterLine(fields);
+  return footer ? [footer] : [];
+}
+function extractMessageHistoryFooters(value) {
+  const lines = [];
+  const meta = formatFooterLine([
+    ["next_cursor", asString(value.next_cursor)],
+    ["relative_since", asFiniteNumber(value.relative_since)],
+    ["format", asString(value.format)]
+  ]);
+  if (meta) lines.push(meta);
+  const note = asString(value.note);
+  if (note) {
+    const noteLine = formatFooterLine([["note", note]]);
+    if (noteLine) lines.push(noteLine);
+  }
+  return lines;
+}
+function formatFooterLine(entries) {
+  const parts = entries.flatMap(([key, value]) => {
+    const encoded = encodeFooterValue(value);
+    return encoded === null ? [] : [`${key}=${encoded}`];
+  });
+  return parts.length > 0 ? `# ${parts.join(" ")}` : null;
+}
+function encodeFooterValue(value) {
+  if (value === null || value === void 0) return null;
+  if (typeof value === "string" && value.length === 0) return null;
+  const encoded = JSON.stringify(value);
+  return typeof encoded === "string" ? encoded : null;
 }
 
 // src/cli/run.ts
@@ -1683,6 +2453,7 @@ var DEFAULT_DAEMON_READY_TIMEOUT_MS = 15e3;
 var DEFAULT_DAEMON_CONNECT_TIMEOUT_MS = 5e3;
 var DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS = 3;
 var DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS = 250;
+var DAEMON_STDERR_FLAG = "--stderr-to";
 async function readStdinAll() {
   return await new Promise((resolve, reject) => {
     let buf = "";
@@ -1704,7 +2475,20 @@ async function runCli(argv) {
     process.stdout.write(renderHelp(parsed.commandPath));
     return 0;
   }
+  warnLegacyWindowsDataDir((warning) => {
+    process.stderr.write(warning.message + "\n");
+  });
   const method = commandKey(parsed.commandPath);
+  const short = truthy(parsed.flags.short);
+  const format = flagString(parsed.flags.format);
+  if (short && !supportsShort(method)) {
+    process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
+    return 1;
+  }
+  if (short && (format === "markdown" || format === "table")) {
+    process.stdout.write(JSON.stringify(err("invalid_params", "--short cannot be used with --format markdown or --format table")) + "\n");
+    return 1;
+  }
   const sockPath = parsed.daemonSock || defaultSockPath();
   if (method === "version") {
     return await runVersion(sockPath);
@@ -1716,15 +2500,33 @@ async function runCli(argv) {
     );
     return 1;
   }
+  const cliValidationError = validateCliFlags(parsed, method);
+  if (cliValidationError) {
+    process.stdout.write(JSON.stringify(err("invalid_params", cliValidationError)) + "\n");
+    return 1;
+  }
+  const approvalValidationError = validateApprovalHint(method, parsed);
+  if (approvalValidationError) {
+    process.stdout.write(JSON.stringify(err("invalid_params", approvalValidationError)) + "\n");
+    return 2;
+  }
   const ready = await ensureDaemon(sockPath);
-  if (!ready) {
-    process.stdout.write(JSON.stringify(err("daemon_unreachable", "daemon did not become ready in time")) + "\n");
+  if (!ready.ok) {
+    process.stdout.write(JSON.stringify(err("daemon_unreachable", ready.message)) + "\n");
     return 1;
   }
   return await dispatchCommand(sockPath, parsed, method);
 }
 function isDaemonLevel(method) {
   return method === "version" || method === "daemon:status" || method.startsWith("daemon:");
+}
+function validateApprovalHint(method, parsed) {
+  if (method !== "message:approval") return null;
+  const kindHint = asStringFlag(parsed.flags.kind);
+  const action = parsed.positionals[2];
+  if (!kindHint || typeof action !== "string" || action.length === 0) return null;
+  const validation = validateApprovalAction(kindHint, action);
+  return validation.ok ? null : validation.message;
 }
 async function runVersion(sockPath) {
   const cliVersion = getCliVersion();
@@ -1777,22 +2579,37 @@ async function dispatchCommand(sockPath, parsed, method) {
       params
     }, cliConfig, isReadOnlyMethod(method));
     if ("error" in resp && resp.error) {
-      process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
+      process.stdout.write(forwardDaemonError(resp.error));
       return 1;
+    }
+    if (truthy(parsed.flags.short)) {
+      process.stdout.write(formatShort(method, resp.result) + "\n");
+      return 0;
+    }
+    if (method === "cursor:get") {
+      process.stdout.write(extractCursorEventId(resp.result) + "\n");
+      return 0;
     }
     const markdown = extractMarkdownResult(resp.result, parsed.flags.format);
     if (markdown !== null) {
       process.stdout.write(markdown + "\n");
-      return 0;
+      return exitCodeForResult(method, resp.result);
     }
     process.stdout.write(JSON.stringify({ ok: true, data: resp.result }) + "\n");
-    return 0;
+    return exitCodeForResult(method, resp.result);
   } catch (e) {
     process.stdout.write(
       JSON.stringify(err("internal", e.message ?? "rpc failed")) + "\n"
     );
     return 1;
   }
+}
+function exitCodeForResult(method, result) {
+  if (method !== "message:wait" || !result || typeof result !== "object") return 0;
+  const outcome = result.outcome;
+  if (outcome === "error") return 1;
+  if (outcome === "timeout") return 124;
+  return 0;
 }
 async function runStream(sock, parsed, method) {
   return await new Promise((resolve) => {
@@ -1870,15 +2687,16 @@ async function runStream(sock, parsed, method) {
     };
     onMessages(sock, (msg) => {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
+        const ackAfterWrite = createStreamAckCallback(method, sock, reqId, msg.data);
         const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
         if (markdown !== null) {
-          writeStdout(markdown + "\n");
+          writeStdout(markdown + "\n", ackAfterWrite);
         } else {
-          writeStdout(JSON.stringify(msg.data) + "\n");
+          writeStdout(JSON.stringify(msg.data) + "\n", ackAfterWrite);
         }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
-          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+          writeStdout(forwardDaemonError(msg.error), () => {
             finish(1);
             sock.end();
           });
@@ -1890,7 +2708,7 @@ async function runStream(sock, parsed, method) {
         }
       } else if (msg.kind === "response" && msg.id === reqId) {
         if (msg.error) {
-          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+          writeStdout(forwardDaemonError(msg.error), () => {
             finish(1);
             sock.end();
           });
@@ -1964,14 +2782,36 @@ async function requestOnceWithRetry(sockPath, opts, cliConfig, allowRetry) {
 }
 async function ensureDaemon(sockPath) {
   const cliConfig = readCliConfig();
-  if (await probeSock(sockPath, 200)) return true;
-  spawnDaemon();
-  const deadline = Date.now() + cliConfig.readyTimeoutMs;
-  while (Date.now() < deadline) {
-    await (0, import_promises.setTimeout)(DAEMON_POLL_INTERVAL_MS);
-    if (await probeSock(sockPath, 200)) return true;
+  if (await probeSock(sockPath, 200)) {
+    return { ok: true, message: "" };
   }
-  return false;
+  try {
+    spawnDaemon();
+    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
+      return { ok: true, message: "" };
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      message: `failed to spawn daemon: ${e.message}`
+    };
+  }
+  const stderrPath = daemonSpawnStderrPath();
+  try {
+    spawnDaemon(stderrPath);
+    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
+      return { ok: true, message: "" };
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      message: `failed to spawn daemon with stderr capture: ${e.message}`
+    };
+  }
+  return {
+    ok: false,
+    message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`
+  };
 }
 async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDelayMs) {
   let attempt = 0;
@@ -1989,28 +2829,49 @@ async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDel
   }
   throw lastError ?? new Error("connect failed");
 }
-function spawnDaemon() {
-  const child = (0, import_node_child_process.spawn)(process.execPath, [process.argv[1], "--daemon-internal"], {
-    detached: true,
-    stdio: "ignore",
-    env: process.env,
-    windowsHide: true
-  });
-  child.unref();
+async function waitForDaemonReady(sockPath, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await (0, import_promises.setTimeout)(DAEMON_POLL_INTERVAL_MS);
+    if (await probeSock(sockPath, 200)) return true;
+  }
+  return false;
+}
+function spawnDaemon(stderrPath) {
+  const args = [process.argv[1], "--daemon-internal"];
+  let stderrFd = null;
+  try {
+    if (stderrPath) {
+      import_node_fs5.default.mkdirSync(import_node_path6.default.dirname(stderrPath), { recursive: true });
+      stderrFd = import_node_fs5.default.openSync(stderrPath, "w");
+      args.push(DAEMON_STDERR_FLAG, stderrPath);
+    }
+    const child = (0, import_node_child_process.spawn)(process.execPath, args, {
+      detached: true,
+      stdio: stderrFd === null ? "ignore" : ["ignore", "ignore", stderrFd],
+      env: process.env,
+      windowsHide: true
+    });
+    child.unref();
+  } finally {
+    if (stderrFd !== null) import_node_fs5.default.closeSync(stderrFd);
+  }
 }
 function getCliVersion() {
-  try {
-    const pkg = require_package();
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
-  }
+  return VERSION;
 }
 function randomId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
+function daemonSpawnStderrPath() {
+  return import_node_path6.default.join(defaultDataDir(), "daemon-spawn.stderr");
+}
 function truthy(v) {
   return v === true || v === "true" || v === "1";
+}
+function flagString(v) {
+  if (Array.isArray(v)) return flagString(v[v.length - 1]);
+  return typeof v === "string" ? v : null;
 }
 function extractMarkdownResult(result, format) {
   if (format !== "markdown" || !result || typeof result !== "object" || Array.isArray(result)) {
@@ -2019,6 +2880,51 @@ function extractMarkdownResult(result, format) {
   const markdown = result.markdown;
   return typeof markdown === "string" ? markdown : null;
 }
+function extractCursorEventId(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return "";
+  const eventId = result.event_id;
+  return typeof eventId === "string" ? eventId : "";
+}
+function createStreamAckCallback(method, sock, reqId, data) {
+  if (method !== "monitor:events") return void 0;
+  const eventId = extractStreamEventId(data);
+  if (!eventId) return void 0;
+  return () => sendStreamAck(sock, reqId, eventId);
+}
+function extractStreamEventId(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const id = data.id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+function sendStreamAck(sock, reqId, eventId) {
+  if (sock.destroyed) return;
+  writeMessage(sock, {
+    kind: "notification",
+    method: "stream_ack",
+    params: {
+      id: reqId,
+      event_id: eventId
+    }
+  });
+}
+function forwardDaemonError(error) {
+  return JSON.stringify(err(error.code, error.message, error.data)) + "\n";
+}
+function validateCliFlags(parsed, method) {
+  if (method !== "monitor:events") return null;
+  if (parsed.flags.cursor === true) return "--cursor requires a value";
+  if (parsed.flags.since !== void 0 && parsed.flags.cursor !== void 0) {
+    return "--since and --cursor are mutually exclusive";
+  }
+  return null;
+}
+function asStringFlag(value) {
+  if (Array.isArray(value)) {
+    const last = value[value.length - 1];
+    return typeof last === "string" ? last : null;
+  }
+  return typeof value === "string" ? value : null;
+}
 function isTransientConnectError(err2) {
   return err2.message === "connect timeout" || err2.code === "ECONNREFUSED" || err2.code === "ENOENT" || err2.code === "EPIPE" || err2.code === "ECONNRESET";
 }
@@ -2026,7 +2932,7 @@ function isTransientRequestError(err2) {
   return isTransientConnectError(err2) || err2.message === "daemon closed connection";
 }
 function isReadOnlyMethod(method) {
-  return method === "version" || method === "status" || method === "daemon:status" || method === "daemon:user:list" || method === "daemon:config:get" || method === "daemon:config:list" || method === "session:info" || method === "session:context" || method === "session:list" || method === "message:history";
+  return method === "version" || method === "status" || method === "daemon:status" || method === "daemon:user:list" || method === "daemon:config:get" || method === "daemon:config:list" || method === "cursor:list" || method === "cursor:get" || method === "session:info" || method === "session:context" || method === "session:list" || method === "message:history";
 }
 function readCliConfig() {
   const config = new ConfigStore();
@@ -2043,14 +2949,18 @@ function toInt(v, fallback) {
 function toMs(v, fallback) {
   return typeof v === "number" && Number.isFinite(v) ? Math.max(1, Math.floor(v * 1e3)) : fallback;
 }
+function formatDuration(ms) {
+  if (ms % 1e3 === 0) return `${ms / 1e3}s`;
+  return `${ms}ms`;
+}
 
 // src/daemon/run.ts
-var import_node_fs13 = __toESM(require("fs"));
-var import_node_path11 = __toESM(require("path"));
+var import_node_fs16 = __toESM(require("fs"));
+var import_node_path14 = __toESM(require("path"));
 
 // src/daemon/users.ts
-var import_node_fs3 = __toESM(require("fs"));
-var import_node_path4 = __toESM(require("path"));
+var import_node_fs6 = __toESM(require("fs"));
+var import_node_path7 = __toESM(require("path"));
 
 // src/errors.ts
 var CodexTeamError = class extends Error {
@@ -2081,12 +2991,12 @@ var UserRegistry = class {
   }
   loadFromDisk() {
     const root = usersDir(this.dataDir);
-    if (!import_node_fs3.default.existsSync(root)) return;
-    for (const dirname of import_node_fs3.default.readdirSync(root)) {
-      const metaPath = import_node_path4.default.join(root, dirname, "metadata.json");
-      if (import_node_fs3.default.existsSync(metaPath)) {
+    if (!import_node_fs6.default.existsSync(root)) return;
+    for (const dirname of import_node_fs6.default.readdirSync(root)) {
+      const metaPath = import_node_path7.default.join(root, dirname, "metadata.json");
+      if (import_node_fs6.default.existsSync(metaPath)) {
         try {
-          const raw = import_node_fs3.default.readFileSync(metaPath, "utf8");
+          const raw = import_node_fs6.default.readFileSync(metaPath, "utf8");
           const parsed = JSON.parse(raw);
           const user = normalizePersistedUser(parsed);
           if (user && typeof user.token === "string") {
@@ -2141,7 +3051,7 @@ var UserRegistry = class {
     this.users.delete(token);
     const dir = userDir(token, this.dataDir);
     try {
-      import_node_fs3.default.rmSync(dir, { recursive: true, force: true });
+      import_node_fs6.default.rmSync(dir, { recursive: true, force: true });
     } catch {
     }
   }
@@ -2153,14 +3063,14 @@ var UserRegistry = class {
   }
   persist(user) {
     const dir = userDir(user.token, this.dataDir);
-    import_node_fs3.default.mkdirSync(dir, { recursive: true });
+    import_node_fs6.default.mkdirSync(dir, { recursive: true });
     const metaPath = userMetadataPath(user.token, this.dataDir);
     const tmp = metaPath + ".tmp";
-    import_node_fs3.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs6.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION,
       user
     }, null, 2));
-    import_node_fs3.default.renameSync(tmp, metaPath);
+    import_node_fs6.default.renameSync(tmp, metaPath);
   }
 };
 function validateToken(token) {
@@ -2192,68 +3102,8 @@ function isCanonicalUserDir(dirname) {
 
 // src/daemon/sessions.ts
 var import_node_crypto2 = __toESM(require("crypto"));
-var import_node_fs5 = __toESM(require("fs"));
-var import_node_path6 = __toESM(require("path"));
-
-// src/logger.ts
-var import_node_fs4 = __toESM(require("fs"));
-var import_node_path5 = __toESM(require("path"));
-var LEVELS = {
-  error: 0,
-  warn: 1,
-  info: 2,
-  debug: 3,
-  trace: 4
-};
-var Logger = class {
-  level = "info";
-  stream = null;
-  logPath = null;
-  configure(opts) {
-    if (opts.level) this.level = opts.level;
-    if (opts.logPath && opts.logPath !== this.logPath) {
-      if (this.stream) this.stream.end();
-      import_node_fs4.default.mkdirSync(import_node_path5.default.dirname(opts.logPath), { recursive: true });
-      this.stream = import_node_fs4.default.createWriteStream(opts.logPath, { flags: "a" });
-      this.logPath = opts.logPath;
-    }
-  }
-  setLevel(level) {
-    this.level = level;
-  }
-  emit(level, msg, meta) {
-    if (LEVELS[level] > LEVELS[this.level]) return;
-    const line = JSON.stringify({
-      ts: (/* @__PURE__ */ new Date()).toISOString(),
-      level,
-      msg,
-      ...meta ?? {}
-    });
-    if (this.stream) {
-      this.stream.write(line + "\n");
-    } else {
-      process.stderr.write(line + "\n");
-    }
-  }
-  error(msg, meta) {
-    this.emit("error", msg, meta);
-  }
-  warn(msg, meta) {
-    this.emit("warn", msg, meta);
-  }
-  info(msg, meta) {
-    this.emit("info", msg, meta);
-  }
-  debug(msg, meta) {
-    this.emit("debug", msg, meta);
-  }
-  trace(msg, meta) {
-    this.emit("trace", msg, meta);
-  }
-};
-var logger = new Logger();
-
-// src/daemon/sessions.ts
+var import_node_fs7 = __toESM(require("fs"));
+var import_node_path8 = __toESM(require("path"));
 var NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var SCHEMA_VERSION2 = 1;
@@ -2270,18 +3120,19 @@ var SessionRegistry = class {
     if (this.users.has(user)) return;
     const bucket = this.emptyBucket();
     const p = userSessionsPath(user, this.dataDir);
-    if (!import_node_fs5.default.existsSync(p)) {
+    if (!import_node_fs7.default.existsSync(p)) {
       this.users.set(user, bucket);
       return;
     }
     try {
-      const raw = import_node_fs5.default.readFileSync(p, "utf8");
+      const raw = import_node_fs7.default.readFileSync(p, "utf8");
       const parsed = JSON.parse(raw);
       if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION2) {
         throw new Error(`sessions.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION2}`);
       }
-      for (const rec of parsed.sessions ?? []) {
-        if (!rec || typeof rec.name !== "string" || typeof rec.thread_id !== "string" || rec.thread_id.length === 0) continue;
+      for (const rawRec of parsed.sessions ?? []) {
+        const rec = normalizeLoadedRecord(rawRec);
+        if (!rec) continue;
         bucket.byName.set(rec.name, rec);
         bucket.byThreadId.set(rec.thread_id, rec);
         this.globalByThreadId.set(rec.thread_id, user);
@@ -2359,6 +3210,7 @@ var SessionRegistry = class {
     }
     if (patch.last_active_at !== void 0) rec.last_active_at = patch.last_active_at;
     if (patch.turn_count !== void 0) rec.turn_count = patch.turn_count;
+    if (patch.state !== void 0) rec.state = patch.state;
     if (patch.recovery_state !== void 0) rec.recovery_state = patch.recovery_state ?? void 0;
     if (patch.model !== void 0) rec.model = patch.model;
     if (patch.cwd !== void 0) rec.cwd = patch.cwd;
@@ -2369,7 +3221,16 @@ var SessionRegistry = class {
     if (patch.experimental_tools !== void 0) {
       rec.experimental_tools = patch.experimental_tools.length > 0 ? [...patch.experimental_tools] : void 0;
     }
-    if (patch.app_server_client_id !== void 0) rec.app_server_client_id = patch.app_server_client_id;
+    if (patch.last_turn_id !== void 0) rec.last_turn_id = patch.last_turn_id;
+    if (patch.current_turn_id !== void 0) rec.current_turn_id = patch.current_turn_id;
+    if (patch.current_turn_started_at !== void 0) rec.current_turn_started_at = patch.current_turn_started_at;
+    if (patch.current_item_type !== void 0) rec.current_item_type = patch.current_item_type;
+    if (patch.items_in_turn !== void 0) rec.items_in_turn = patch.items_in_turn;
+    if (patch.pending_approvals !== void 0) rec.pending_approvals = patch.pending_approvals;
+    if (patch.pending_user_inputs !== void 0) rec.pending_user_inputs = patch.pending_user_inputs;
+    if (patch.token_usage_last_turn !== void 0) rec.token_usage_last_turn = patch.token_usage_last_turn;
+    if (patch.crash_reason !== void 0) rec.crash_reason = patch.crash_reason;
+    if (patch.autoApprovePatterns !== void 0) rec.autoApprovePatterns = normalizeAutoApprovePatterns(patch.autoApprovePatterns);
     this.schedulePersist(user, 0);
     return rec;
   }
@@ -2423,7 +3284,7 @@ var SessionRegistry = class {
   }
   async persistAsync(user) {
     const dir = userDir(user, this.dataDir);
-    await import_node_fs5.default.promises.mkdir(dir, { recursive: true });
+    await import_node_fs7.default.promises.mkdir(dir, { recursive: true });
     const p = userSessionsPath(user, this.dataDir);
     const bucket = this.users.get(user);
     const payload = {
@@ -2431,8 +3292,8 @@ var SessionRegistry = class {
       sessions: bucket ? Array.from(bucket.byName.values()) : []
     };
     const tmp = p + ".tmp";
-    await import_node_fs5.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
-    await import_node_fs5.default.promises.rename(tmp, p);
+    await import_node_fs7.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
+    await import_node_fs7.default.promises.rename(tmp, p);
   }
   schedulePersist(user, delayMs) {
     const existing = this.touchTimers.get(user);
@@ -2463,6 +3324,10 @@ function validateSessionName(name) {
 function validateRecord(record) {
   validateSessionName(record.name);
   if (!record.thread_id) throw invalidParams("thread_id is required");
+  if (record.state !== "live" && record.state !== "crashed") {
+    throw invalidParams(`invalid session state: ${record.state}`);
+  }
+  record.autoApprovePatterns = normalizeAutoApprovePatterns(record.autoApprovePatterns);
 }
 function generateSessionName() {
   return "s-" + import_node_crypto2.default.randomBytes(4).toString("hex");
@@ -2470,16 +3335,131 @@ function generateSessionName() {
 function looksLikeThreadId(s) {
   return UUID_RE.test(s) || s.startsWith("th-");
 }
+function sessionRuntimeDefaults() {
+  return {
+    last_turn_id: null,
+    current_turn_id: null,
+    current_turn_started_at: null,
+    current_item_type: null,
+    items_in_turn: 0,
+    pending_approvals: 0,
+    pending_user_inputs: 0,
+    token_usage_last_turn: null,
+    crash_reason: null
+  };
+}
+function normalizeTokenUsage(value) {
+  const usage = asObject2(value);
+  const prompt = asNumber(
+    usage.prompt ?? usage.prompt_tokens ?? usage.promptTokens ?? usage.input ?? usage.input_tokens ?? usage.inputTokens
+  );
+  const completion = asNumber(
+    usage.completion ?? usage.completion_tokens ?? usage.completionTokens ?? usage.output ?? usage.output_tokens ?? usage.outputTokens
+  );
+  const total = asNumber(usage.total ?? usage.total_tokens ?? usage.totalTokens);
+  if (prompt === null && completion === null && total === null) return null;
+  return {
+    prompt: prompt ?? 0,
+    completion: completion ?? 0,
+    total: total ?? (prompt ?? 0) + (completion ?? 0)
+  };
+}
+function isoFromUnixSeconds(value, fallback = null) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return new Date(value * 1e3).toISOString();
+}
+function asObject2(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  return {};
+}
+function asNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function normalizeAutoApprovePatterns(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((pattern) => typeof pattern === "string");
+}
+function normalizeLoadedRecord(value) {
+  const rec = asObject2(value);
+  const name = typeof rec.name === "string" ? rec.name : null;
+  const threadId = typeof rec.thread_id === "string" && rec.thread_id.length > 0 ? rec.thread_id : null;
+  if (!name || !threadId) return null;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const createdAt = normalizeOptionalString(rec.created_at) ?? normalizeOptionalString(rec.last_active_at) ?? now;
+  const lastActiveAt = normalizeOptionalString(rec.last_active_at) ?? createdAt;
+  const runtimeDefaults = sessionRuntimeDefaults();
+  return {
+    name,
+    thread_id: threadId,
+    state: rec.state === "crashed" ? "crashed" : "live",
+    ...rec.recovery_state === "degraded" ? { recovery_state: "degraded" } : {},
+    ...normalizeOptionalString(rec.model) ? { model: normalizeOptionalString(rec.model) } : {},
+    ...normalizeOptionalString(rec.cwd) ? { cwd: normalizeOptionalString(rec.cwd) } : {},
+    ...normalizeOptionalString(rec.sandbox) ? { sandbox: normalizeOptionalString(rec.sandbox) } : {},
+    ...normalizeOptionalString(rec.approval) ? { approval: normalizeOptionalString(rec.approval) } : {},
+    ...normalizeOptionalString(rec.effort) ? { effort: normalizeOptionalString(rec.effort) } : {},
+    ...normalizeOptionalString(rec.profile) ? { profile: normalizeOptionalString(rec.profile) } : {},
+    ...normalizeOptionalString(rec.base_instructions) ? { base_instructions: normalizeOptionalString(rec.base_instructions) } : {},
+    ...normalizeOptionalString(rec.developer_instructions) ? { developer_instructions: normalizeOptionalString(rec.developer_instructions) } : {},
+    ...normalizeStringArray(rec.experimental_tools).length > 0 ? { experimental_tools: normalizeStringArray(rec.experimental_tools) } : {},
+    autoApprovePatterns: normalizeLoadedAutoApprovePatterns(name, rec.autoApprovePatterns),
+    created_at: createdAt,
+    last_active_at: lastActiveAt,
+    turn_count: normalizeOptionalNumber(rec.turn_count) ?? 0,
+    last_turn_id: normalizeOptionalString(rec.last_turn_id) ?? runtimeDefaults.last_turn_id,
+    current_turn_id: normalizeOptionalString(rec.current_turn_id) ?? runtimeDefaults.current_turn_id,
+    current_turn_started_at: normalizeOptionalString(rec.current_turn_started_at) ?? runtimeDefaults.current_turn_started_at,
+    current_item_type: normalizeOptionalString(rec.current_item_type) ?? runtimeDefaults.current_item_type,
+    items_in_turn: normalizeOptionalNumber(rec.items_in_turn) ?? runtimeDefaults.items_in_turn,
+    pending_approvals: normalizeOptionalNumber(rec.pending_approvals) ?? runtimeDefaults.pending_approvals,
+    pending_user_inputs: normalizeOptionalNumber(rec.pending_user_inputs) ?? runtimeDefaults.pending_user_inputs,
+    token_usage_last_turn: normalizeTokenUsage(rec.token_usage_last_turn) ?? runtimeDefaults.token_usage_last_turn,
+    crash_reason: normalizeOptionalString(rec.crash_reason) ?? runtimeDefaults.crash_reason
+  };
+}
+function normalizeLoadedAutoApprovePatterns(sessionName, value) {
+  const patterns = normalizeAutoApprovePatterns(value);
+  const validPatterns = [];
+  for (const pattern of patterns) {
+    const validationError = validateParsedAutoApprovePatterns([pattern]);
+    if (validationError) {
+      logger.warn("dropping invalid persisted auto-approve pattern", {
+        session: sessionName,
+        pattern,
+        err: validationError
+      });
+      continue;
+    }
+    validPatterns.push(pattern);
+  }
+  return validPatterns;
+}
+function normalizeOptionalString(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+function normalizeStringArray(value) {
+  return Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : [];
+}
+function normalizeOptionalNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
 
 // src/daemon/events.ts
-var import_node_fs6 = __toESM(require("fs"));
-var import_node_path7 = __toESM(require("path"));
+var import_node_fs8 = __toESM(require("fs"));
+var import_node_path9 = __toESM(require("path"));
 var DELTA_SUFFIX = "_delta";
 var SCHEMA_VERSION3 = 1;
 var DEFAULT_FLUSH_DELAY_MS = 25;
 var OVERFLOW_FLUSH_DELAY_MS = 250;
 var FLUSH_RETRY_DELAY_MS = 250;
 var MAX_PENDING_WRITE_BYTES = 1024 * 1024;
+var EVENT_ID_SOFT_LIMIT = 2 ** 52;
+var AUTO_APPROVED_EVENT_TYPE = "auto_approved";
+var APPROVAL_REQUEST_CANCELLED_EVENT_TYPE = "approval.request_cancelled";
+var SESSION_CLOSED_EVENT_TYPE = "session.closed";
+var SESSION_CRASHED_EVENT_TYPE = "session.crashed";
+var SESSION_PENDING_DROPPED_EVENT_TYPE = "session.pending_dropped";
+var USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE = "user_input.request_cancelled";
 var EventLog = class {
   retention;
   dataDir;
@@ -2495,6 +3475,7 @@ var EventLog = class {
   writeChains = /* @__PURE__ */ new Map();
   userOps = /* @__PURE__ */ new Map();
   overflowWarned = /* @__PURE__ */ new Set();
+  eventIdOverflowWarned = /* @__PURE__ */ new Set();
   constructor(retention = 1e4, dataDir = null) {
     this.retention = Math.max(100, retention);
     this.dataDir = dataDir;
@@ -2508,13 +3489,13 @@ var EventLog = class {
       return;
     }
     const filePath = userEventLogPath(user, this.dataDir);
-    if (!import_node_fs6.default.existsSync(filePath)) {
+    if (!import_node_fs8.default.existsSync(filePath)) {
       this.ensureUserState(user);
       this.loaded.add(user);
       this.loadPromises.delete(user);
       return;
     }
-    const raw = import_node_fs6.default.readFileSync(filePath, "utf8");
+    const raw = import_node_fs8.default.readFileSync(filePath, "utf8");
     const lines = raw.split("\n").filter(Boolean);
     const { events, totalLines } = parsePersistedEvents(lines);
     const buf = events.slice(Math.max(0, events.length - this.retention));
@@ -2545,7 +3526,11 @@ var EventLog = class {
   }
   async append(user, input) {
     await this.ensureLoaded(user);
-    return await this.withUserLock(user, async () => this.appendLoaded(user, input));
+    return await this.withUserLock(user, async () => {
+      const overflowError = this.guardEventIdOverflow(user, input);
+      if (overflowError) throw overflowError;
+      return this.appendLoaded(user, input);
+    });
   }
   async flush() {
     const users = /* @__PURE__ */ new Set([
@@ -2586,6 +3571,7 @@ var EventLog = class {
     this.loaded.delete(user);
     this.loadPromises.delete(user);
     this.overflowWarned.delete(user);
+    this.eventIdOverflowWarned.delete(user);
   }
   subscribe(user, cb) {
     let set = this.subscribers.get(user);
@@ -2631,6 +3617,19 @@ var EventLog = class {
     const buf = this.buffers.get(user);
     return buf && buf.length > 0 ? buf[0].id : null;
   }
+  latestEvent(user, filter = {}) {
+    this.loadUser(user);
+    const buf = this.buffers.get(user) ?? [];
+    const types = filter.types ? new Set(filter.types) : null;
+    for (let i = buf.length - 1; i >= 0; i--) {
+      const event = buf[i];
+      if (filter.session !== void 0 && event.session !== filter.session) continue;
+      if (filter.thread_id !== void 0 && event.thread_id !== filter.thread_id) continue;
+      if (types && !types.has(event.type)) continue;
+      return event;
+    }
+    return null;
+  }
   async ensureLoaded(user) {
     if (this.loaded.has(user)) return;
     let promise = this.loadPromises.get(user);
@@ -2654,7 +3653,7 @@ var EventLog = class {
         return;
       }
       const filePath = userEventLogPath(user, this.dataDir);
-      const raw = await import_node_fs6.default.promises.readFile(filePath, "utf8");
+      const raw = await import_node_fs8.default.promises.readFile(filePath, "utf8");
       const lines = raw.split("\n").filter(Boolean);
       const { events, totalLines } = parsePersistedEvents(lines);
       const buf = events.slice(Math.max(0, events.length - this.retention));
@@ -2704,6 +3703,34 @@ var EventLog = class {
     this.dispatchSubscribers(user, event);
     if (opts.persist !== false) this.appendToFile(user, event);
     return event;
+  }
+  guardEventIdOverflow(user, input) {
+    this.ensureUserState(user);
+    const nextId = (this.counters.get(user) ?? 0) + 1;
+    if (nextId <= EVENT_ID_SOFT_LIMIT) return null;
+    const message = `event id counter exceeded safe limit (${EVENT_ID_SOFT_LIMIT}); refusing to append new events`;
+    if (!this.eventIdOverflowWarned.has(user)) {
+      this.eventIdOverflowWarned.add(user);
+      logger.error("event id counter exceeded safe limit", {
+        user,
+        next_event_id: nextId,
+        limit: EVENT_ID_SOFT_LIMIT,
+        dropped_event_type: input.type
+      });
+      this.appendLoaded(user, {
+        type: "warning",
+        session: null,
+        thread_id: null,
+        payload: {
+          message,
+          kind: "event_id_overflow",
+          limit: EVENT_ID_SOFT_LIMIT,
+          next_event_id: nextId,
+          dropped_event_type: input.type
+        }
+      });
+    }
+    return new Error(message);
   }
   dispatchSubscribers(user, event) {
     const listeners = Array.from(this.subscribers.get(user) ?? []);
@@ -2757,11 +3784,11 @@ var EventLog = class {
     const filePath = userEventLogPath(user, this.dataDir);
     void this.enqueueFsOp(user, async () => {
       try {
-        await import_node_fs6.default.promises.mkdir(import_node_path7.default.dirname(filePath), { recursive: true });
-        await import_node_fs6.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+        await import_node_fs8.default.promises.mkdir(import_node_path9.default.dirname(filePath), { recursive: true });
+        await import_node_fs8.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
         const tmp = filePath + ".tmp";
-        await import_node_fs6.default.promises.writeFile(tmp, serializeEventFile(buf));
-        await import_node_fs6.default.promises.rename(tmp, filePath);
+        await import_node_fs8.default.promises.writeFile(tmp, serializeEventFile(buf));
+        await import_node_fs8.default.promises.rename(tmp, filePath);
         this.rotatedSinceCompact.set(user, 0);
       } catch (e) {
         logger.warn("event log compaction failed", { user, err: e.message });
@@ -2802,12 +3829,12 @@ var EventLog = class {
     const filePath = userEventLogPath(user, this.dataDir);
     const ok2 = await this.enqueueFsOp(user, async () => {
       try {
-        await import_node_fs6.default.promises.mkdir(import_node_path7.default.dirname(filePath), { recursive: true });
-        await import_node_fs6.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
-        if (!import_node_fs6.default.existsSync(filePath)) {
-          await import_node_fs6.default.promises.writeFile(filePath, serializeHeaderLine() + snapshot.lines.join(""));
+        await import_node_fs8.default.promises.mkdir(import_node_path9.default.dirname(filePath), { recursive: true });
+        await import_node_fs8.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+        if (!import_node_fs8.default.existsSync(filePath)) {
+          await import_node_fs8.default.promises.writeFile(filePath, serializeHeaderLine() + snapshot.lines.join(""));
         } else {
-          await import_node_fs6.default.promises.appendFile(filePath, snapshot.lines.join(""));
+          await import_node_fs8.default.promises.appendFile(filePath, snapshot.lines.join(""));
         }
         return true;
       } catch (e) {
@@ -2912,6 +3939,298 @@ function serializeEventFile(buf) {
   return serializeHeaderLine() + buf.map((e) => JSON.stringify(e)).join("\n") + (buf.length ? "\n" : "");
 }
 
+// src/daemon/cursors.ts
+var import_node_fs9 = __toESM(require("fs"));
+var import_node_os2 = __toESM(require("os"));
+var import_node_path10 = __toESM(require("path"));
+var import_promises2 = require("timers/promises");
+var CURSOR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+var SCHEMA_VERSION4 = 1;
+var LOCK_RETRY_MS = 10;
+var LOCK_TIMEOUT_MS = 2e3;
+var LOCK_STALE_MS = 5 * 60 * 1e3;
+var CursorStore = class {
+  dataDir;
+  users = /* @__PURE__ */ new Map();
+  loaded = /* @__PURE__ */ new Set();
+  writeChains = /* @__PURE__ */ new Map();
+  constructor(dataDir) {
+    this.dataDir = dataDir;
+  }
+  list(user) {
+    const bucket = this.bucket(user);
+    return sorted(bucket).map(cloneCursorRecord);
+  }
+  get(user, name) {
+    validateCursorName(name);
+    return cloneCursor(this.bucket(user).get(name) ?? null);
+  }
+  async ensure(user, input) {
+    validateCursorName(input.name);
+    const existing = this.bucket(user).get(input.name);
+    if (existing) return cloneCursor(existing);
+    return await this.save(user, input);
+  }
+  async save(user, input) {
+    validateCursorName(input.name);
+    const bucket = this.bucket(user);
+    const existing = bucket.get(input.name);
+    const cursor = {
+      name: input.name,
+      event_id: input.event_id ?? null,
+      updated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      auto_update: input.auto_update ?? existing?.auto_update ?? true
+    };
+    bucket.set(cursor.name, cursor);
+    try {
+      await this.enqueuePersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) });
+    } catch (error) {
+      if (existing) {
+        bucket.set(existing.name, existing);
+      } else {
+        bucket.delete(cursor.name);
+      }
+      throw error;
+    }
+    return cloneCursor(cursor);
+  }
+  async saveBestEffort(user, input) {
+    validateCursorName(input.name);
+    const bucket = this.bucket(user);
+    const existing = bucket.get(input.name);
+    const cursor = {
+      name: input.name,
+      event_id: input.event_id ?? null,
+      updated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      auto_update: input.auto_update ?? existing?.auto_update ?? true
+    };
+    bucket.set(cursor.name, cursor);
+    try {
+      await this.enqueuePersist(user, { type: "upsert", cursor: cloneCursorRecord(cursor) });
+    } catch (error) {
+      logger.warn("failed to persist cursors.json", { user, err: error.message });
+    }
+    return cloneCursor(cursor);
+  }
+  async delete(user, name) {
+    validateCursorName(name);
+    const bucket = this.bucket(user);
+    const existing = bucket.get(name);
+    const deleted = bucket.delete(name);
+    if (!deleted) return false;
+    try {
+      await this.enqueuePersist(user, { type: "delete", name });
+    } catch (error) {
+      if (existing) bucket.set(name, existing);
+      throw error;
+    }
+    return true;
+  }
+  async clearUser(user) {
+    await (this.writeChains.get(user)?.catch(() => void 0) ?? Promise.resolve());
+    this.writeChains.delete(user);
+    this.users.delete(user);
+    this.loaded.delete(user);
+  }
+  bucket(user) {
+    this.loadForUser(user);
+    let bucket = this.users.get(user);
+    if (!bucket) {
+      bucket = /* @__PURE__ */ new Map();
+      this.users.set(user, bucket);
+    }
+    return bucket;
+  }
+  loadForUser(user) {
+    if (this.loaded.has(user)) return;
+    const bucket = /* @__PURE__ */ new Map();
+    const filePath = cursorFilePath(user, this.dataDir);
+    if (import_node_fs9.default.existsSync(filePath)) {
+      try {
+        for (const cursor of loadEnvelopeFromText(import_node_fs9.default.readFileSync(filePath, "utf8")).cursors.values()) {
+          bucket.set(cursor.name, cloneCursor(cursor));
+        }
+      } catch (error) {
+        throw new Error(`failed to load cursors.json for '${user}': ${error.message}`);
+      }
+    }
+    this.users.set(user, bucket);
+    this.loaded.add(user);
+  }
+  enqueuePersist(user, op) {
+    const previous = this.writeChains.get(user) ?? Promise.resolve();
+    const next = previous.catch(() => void 0).then(() => this.persistAsync(user, op));
+    this.writeChains.set(user, next);
+    return next;
+  }
+  async persistAsync(user, op) {
+    const dir = userDir(user, this.dataDir);
+    await import_node_fs9.default.promises.mkdir(dir, { recursive: true });
+    const filePath = cursorFilePath(user, this.dataDir);
+    const releaseLock = await acquireCursorLock(filePath);
+    const tmpPath = makeTempPath(filePath);
+    try {
+      const persisted = await loadEnvelopeFromFile(filePath);
+      applyPersistOp(persisted, op);
+      const payload = {
+        schema_version: SCHEMA_VERSION4,
+        cursors: sorted(persisted)
+      };
+      await import_node_fs9.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
+      await import_node_fs9.default.promises.rename(tmpPath, filePath);
+    } finally {
+      await import_node_fs9.default.promises.unlink(tmpPath).catch(() => void 0);
+      await releaseLock();
+    }
+  }
+};
+function cursorFilePath(user, dataDir) {
+  return import_node_path10.default.join(userDir(user, dataDir), "cursors.json");
+}
+async function acquireCursorLock(filePath) {
+  const lockPath = `${filePath}.lock`;
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      const handle = await import_node_fs9.default.promises.open(lockPath, "wx");
+      try {
+        await handle.writeFile(JSON.stringify(makeCursorLockRecord()));
+      } finally {
+        await handle.close();
+      }
+      return async () => {
+        await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
+      };
+    } catch (error) {
+      const err2 = error;
+      if (err2.code !== "EEXIST") throw error;
+      if (await reclaimStaleCursorLock(lockPath)) {
+        return async () => {
+          await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
+        };
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for cursor lock '${lockPath}'`);
+      }
+      await (0, import_promises2.setTimeout)(LOCK_RETRY_MS);
+    }
+  }
+}
+async function reclaimStaleCursorLock(lockPath) {
+  const lock = await readCursorLock(lockPath);
+  if (!lock || !isStaleCursorLock(lock)) return false;
+  const tmpPath = `${lockPath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  await import_node_fs9.default.promises.writeFile(tmpPath, JSON.stringify(makeCursorLockRecord()));
+  try {
+    await import_node_fs9.default.promises.rename(tmpPath, lockPath);
+    return true;
+  } catch (error) {
+    const err2 = error;
+    if (err2.code === "EEXIST" || err2.code === "EPERM") {
+      await import_node_fs9.default.promises.unlink(lockPath).catch(() => void 0);
+      await import_node_fs9.default.promises.rename(tmpPath, lockPath);
+      return true;
+    }
+    return false;
+  } finally {
+    await import_node_fs9.default.promises.unlink(tmpPath).catch(() => void 0);
+  }
+}
+function makeTempPath(filePath) {
+  return `${filePath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+}
+function makeCursorLockRecord() {
+  return {
+    pid: process.pid,
+    started_at: (/* @__PURE__ */ new Date()).toISOString(),
+    host: import_node_os2.default.hostname()
+  };
+}
+async function loadEnvelopeFromFile(filePath) {
+  try {
+    const raw = await import_node_fs9.default.promises.readFile(filePath, "utf8");
+    return loadEnvelopeFromText(raw).cursors;
+  } catch (error) {
+    const err2 = error;
+    if (err2.code === "ENOENT") return /* @__PURE__ */ new Map();
+    throw error;
+  }
+}
+function loadEnvelopeFromText(raw) {
+  const parsed = JSON.parse(raw);
+  if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION4) {
+    throw new Error(`cursors.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION4}`);
+  }
+  const bucket = /* @__PURE__ */ new Map();
+  for (const cursor of parsed.cursors ?? []) {
+    if (!isPersistedCursor(cursor)) continue;
+    bucket.set(cursor.name, cloneCursor(cursor));
+  }
+  return { cursors: bucket };
+}
+async function readCursorLock(lockPath) {
+  try {
+    const raw = await import_node_fs9.default.promises.readFile(lockPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || typeof parsed.started_at !== "string" || typeof parsed.host !== "string") {
+      return null;
+    }
+    return {
+      pid: parsed.pid,
+      started_at: parsed.started_at,
+      host: parsed.host
+    };
+  } catch {
+    return null;
+  }
+}
+function isStaleCursorLock(lock) {
+  if (!isPidAlive(lock.pid)) return true;
+  if (lock.pid === process.pid) return false;
+  const startedAt = Date.parse(lock.started_at);
+  return Number.isFinite(startedAt) && Date.now() - startedAt > LOCK_STALE_MS;
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function applyPersistOp(bucket, op) {
+  if (op.type === "delete") {
+    bucket.delete(op.name);
+    return;
+  }
+  bucket.set(op.cursor.name, cloneCursorRecord(op.cursor));
+}
+function validateCursorName(name) {
+  if (!CURSOR_NAME_RE.test(name)) {
+    throw invalidParams("cursor name must match /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/");
+  }
+}
+function sorted(bucket) {
+  return Array.from(bucket.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+function cloneCursor(cursor) {
+  if (!cursor) return null;
+  return cloneCursorRecord(cursor);
+}
+function cloneCursorRecord(cursor) {
+  return {
+    name: cursor.name,
+    event_id: cursor.event_id,
+    updated_at: cursor.updated_at,
+    auto_update: cursor.auto_update
+  };
+}
+function isPersistedCursor(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const cursor = value;
+  return typeof cursor.name === "string" && (typeof cursor.event_id === "string" || cursor.event_id === null || cursor.event_id === void 0) && typeof cursor.updated_at === "string" && typeof cursor.auto_update === "boolean";
+}
+
 // src/daemon/pending.ts
 var import_node_crypto3 = __toESM(require("crypto"));
 var PendingRegistry = class {
@@ -2977,6 +4296,12 @@ var PendingRegistry = class {
   removeForUser(user) {
     return this.removeMatching((rec) => rec.user === user);
   }
+  abortForSession(user, sessionName, message, data) {
+    return this.abortMatching((rec) => rec.user === user && rec.session_name === sessionName, message, data);
+  }
+  abortForUser(user, message, data) {
+    return this.abortMatching((rec) => rec.user === user, message, data);
+  }
   removeMatching(predicate) {
     const removed = [];
     for (const rec of this.allRequests()) {
@@ -2985,6 +4310,17 @@ var PendingRegistry = class {
       if (!rec.responded_at) removed.push(rec);
     }
     return removed;
+  }
+  abortMatching(predicate, message, data) {
+    const aborted = [];
+    for (const rec of this.allRequests()) {
+      if (!predicate(rec)) continue;
+      const removed = this.remove(rec.request_id);
+      if (!removed || removed.responded_at) continue;
+      removed.client = pendingAbortClient(message, data);
+      aborted.push(removed);
+    }
+    return aborted;
   }
   allRequests() {
     return [
@@ -3003,12 +4339,22 @@ function assignTag(client) {
   client.__ct_tag = tag;
   return tag;
 }
+function pendingAbortClient(message, data) {
+  const error = new CodexTeamError("internal", message, data);
+  return {
+    respondAck: async () => await Promise.reject(error),
+    respondErrorAck: async () => await Promise.reject(error),
+    respondError: () => {
+      throw error;
+    }
+  };
+}
 
 // src/daemon/queues.ts
 var import_node_crypto4 = __toESM(require("crypto"));
 
 // src/codex/retry.ts
-var import_promises2 = require("timers/promises");
+var import_promises3 = require("timers/promises");
 
 // src/codex/errors.ts
 var AppServerError = class extends Error {
@@ -3163,7 +4509,7 @@ async function retryOnOverload(op, options = DEFAULT_RETRY) {
       const cap = Math.min(maxDelayMs, delay);
       const jitter = cap * jitterRatio;
       const sleepMs = Math.max(0, cap + (Math.random() * 2 - 1) * jitter);
-      if (sleepMs > 0) await (0, import_promises2.setTimeout)(sleepMs);
+      if (sleepMs > 0) await (0, import_promises3.setTimeout)(sleepMs);
       delay = Math.min(maxDelayMs, delay * 2);
     }
   }
@@ -3189,7 +4535,7 @@ async function threadSetName(client, threadId, name, retry = DEFAULT_RETRY) {
 }
 async function threadList(client, params = {}, retry = DEFAULT_RETRY) {
   const result = await retryOnOverload(() => client.request("thread/list", params), retry);
-  const obj = asObject(result);
+  const obj = asObject3(result);
   const data = Array.isArray(obj.data) ? obj.data : [];
   return {
     data,
@@ -3199,8 +4545,8 @@ async function threadList(client, params = {}, retry = DEFAULT_RETRY) {
 }
 async function threadRead(client, threadId, retry = DEFAULT_RETRY) {
   const result = await retryOnOverload(() => client.request("thread/read", { threadId }), retry);
-  const obj = asObject(result);
-  const thread = asObject(obj.thread);
+  const obj = asObject3(result);
+  const thread = asObject3(obj.thread);
   if (!thread.id) throw new Error(`thread/read: response missing thread.id`);
   return { thread };
 }
@@ -3216,7 +4562,7 @@ async function threadTurnsList(client, threadId, opts = {}, retry = DEFAULT_RETR
   if (opts.cursor !== void 0) params.cursor = opts.cursor;
   if (opts.sortDirection !== void 0) params.sortDirection = opts.sortDirection;
   const result = await retryOnOverload(() => client.request("thread/turns/list", params), retry);
-  const obj = asObject(result);
+  const obj = asObject3(result);
   return {
     data: Array.isArray(obj.data) ? obj.data : [],
     nextCursor: obj.nextCursor ?? null,
@@ -3225,8 +4571,8 @@ async function threadTurnsList(client, threadId, opts = {}, retry = DEFAULT_RETR
 }
 async function turnStart(client, threadId, input, retry = DEFAULT_RETRY) {
   const result = await retryOnOverload(() => client.request("turn/start", { threadId, input }), retry);
-  const obj = asObject(result);
-  const turn = asObject(obj.turn);
+  const obj = asObject3(result);
+  const turn = asObject3(obj.turn);
   const turnId = typeof turn.id === "string" ? turn.id : null;
   if (!turnId) throw new Error("turn/start: response missing turn.id");
   return { turnId };
@@ -3241,14 +4587,14 @@ function threadIdOf(resp) {
   return resp.thread.id;
 }
 function coerceLifecycle(result, rpc) {
-  const obj = asObject(result);
-  const thread = asObject(obj.thread);
+  const obj = asObject3(result);
+  const thread = asObject3(obj.thread);
   if (typeof thread.id !== "string" || !thread.id) {
     throw new Error(`${rpc}: response missing thread.id`);
   }
   return { ...obj, thread };
 }
-function asObject(value) {
+function asObject3(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value;
   }
@@ -3446,16 +4792,16 @@ function isStateUsable(state, generation) {
 
 // src/daemon/orphans.ts
 var import_node_crypto5 = __toESM(require("crypto"));
-var import_node_fs8 = __toESM(require("fs"));
-var import_node_path8 = __toESM(require("path"));
-var import_promises3 = require("timers/promises");
+var import_node_fs11 = __toESM(require("fs"));
+var import_node_path11 = __toESM(require("path"));
+var import_promises4 = require("timers/promises");
 
 // src/daemon/processes.ts
-var import_node_fs7 = __toESM(require("fs"));
+var import_node_fs10 = __toESM(require("fs"));
 var import_node_child_process2 = require("child_process");
 function readLinuxCmdline(pid) {
   try {
-    const raw = import_node_fs7.default.readFileSync(`/proc/${pid}/cmdline`);
+    const raw = import_node_fs10.default.readFileSync(`/proc/${pid}/cmdline`);
     const commandLine = raw.toString("utf8").replace(/\0/g, " ").trim() || null;
     return { commandLine, source: "proc", reliable: true };
   } catch {
@@ -3464,7 +4810,7 @@ function readLinuxCmdline(pid) {
 }
 function readLinuxStartTime(pid) {
   try {
-    const raw = import_node_fs7.default.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const raw = import_node_fs10.default.readFileSync(`/proc/${pid}/stat`, "utf8");
     const lastParen = raw.lastIndexOf(")");
     if (lastParen < 0) return null;
     const rest = raw.slice(lastParen + 2).trim().split(/\s+/);
@@ -3588,18 +4934,18 @@ function looksLikeCodexAppServerCommand(commandLine) {
 }
 
 // src/daemon/orphans.ts
-var SCHEMA_VERSION4 = 2;
+var SCHEMA_VERSION5 = 2;
 var TERM_GRACE_MS = 2e3;
 var KILL_GRACE_MS = 500;
 var POLL_MS = 100;
 function orphanPidsPath(dataDir) {
-  return import_node_path8.default.join(dataDir, "codex-pids.json");
+  return import_node_path11.default.join(dataDir, "codex-pids.json");
 }
 function readPidFile(dataDir) {
   const p = orphanPidsPath(dataDir);
-  if (!import_node_fs8.default.existsSync(p)) return [];
+  if (!import_node_fs11.default.existsSync(p)) return [];
   try {
-    const raw = import_node_fs8.default.readFileSync(p, "utf8");
+    const raw = import_node_fs11.default.readFileSync(p, "utf8");
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
       return parsed.filter((x) => typeof x === "number" && Number.isFinite(x)).map((pid) => ({
@@ -3611,7 +4957,7 @@ function readPidFile(dataDir) {
     }
     if (!parsed || typeof parsed !== "object") return [];
     const obj = parsed;
-    if (typeof obj.schema_version === "number" && obj.schema_version > SCHEMA_VERSION4) {
+    if (typeof obj.schema_version === "number" && obj.schema_version > SCHEMA_VERSION5) {
       logger.warn("unknown orphan pid schema_version", { schema_version: obj.schema_version });
       return [];
     }
@@ -3624,13 +4970,13 @@ function readPidFile(dataDir) {
 function writePidFile(dataDir, pids) {
   const p = orphanPidsPath(dataDir);
   try {
-    import_node_fs8.default.mkdirSync(import_node_path8.default.dirname(p), { recursive: true });
+    import_node_fs11.default.mkdirSync(import_node_path11.default.dirname(p), { recursive: true });
     const tmp = p + ".tmp";
-    import_node_fs8.default.writeFileSync(tmp, JSON.stringify({
-      schema_version: SCHEMA_VERSION4,
+    import_node_fs11.default.writeFileSync(tmp, JSON.stringify({
+      schema_version: SCHEMA_VERSION5,
       processes: pids
     }));
-    import_node_fs8.default.renameSync(tmp, p);
+    import_node_fs11.default.renameSync(tmp, p);
   } catch (e) {
     logger.warn("failed to persist codex pid file", { err: e.message });
   }
@@ -3755,7 +5101,7 @@ async function waitForTrackedExit(tracked, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (inspectTrackedProcessLiveness(tracked) === "dead") return true;
-    await (0, import_promises3.setTimeout)(POLL_MS, void 0, { ref: false });
+    await (0, import_promises4.setTimeout)(POLL_MS, void 0, { ref: false });
   }
   return inspectTrackedProcessLiveness(tracked) === "dead";
 }
@@ -3767,7 +5113,7 @@ var import_node_events2 = require("events");
 var import_node_child_process3 = require("child_process");
 var import_node_events = require("events");
 var import_node_crypto6 = require("crypto");
-var import_node_path9 = __toESM(require("path"));
+var import_node_path12 = __toESM(require("path"));
 var STDERR_TAIL_LINES = 400;
 var DEFAULT_REQUEST_TIMEOUT_MS = 12e4;
 var AppServerClient = class extends import_node_events.EventEmitter {
@@ -3833,7 +5179,7 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     this.proc.stderr.setEncoding("utf8");
     this.proc.stderr.on("data", (chunk) => this.onStderr(chunk));
     const init = await this.request("initialize", {
-      clientInfo: this.options.clientInfo ?? { name: "codex-team", title: "codex-team", version: "0.5.1" },
+      clientInfo: this.options.clientInfo ?? { name: "codex-team", title: "codex-team", version: VERSION },
       capabilities: { experimentalApi: this.options.experimentalApi }
     });
     this.notify("initialized", {});
@@ -4029,7 +5375,7 @@ function resolveLaunch(bin, args) {
   return { command: resolved, args };
 }
 function resolveWindowsCommand(bin) {
-  if (bin.includes("\\") || bin.includes("/") || import_node_path9.default.extname(bin).length > 0) return bin;
+  if (bin.includes("\\") || bin.includes("/") || import_node_path12.default.extname(bin).length > 0) return bin;
   try {
     const raw = (0, import_node_child_process3.execFileSync)("where", [bin], {
       stdio: ["ignore", "pipe", "ignore"],
@@ -4254,8 +5600,8 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
 };
 
 // src/daemon/context.ts
-function buildContext() {
-  const config = new ConfigStore();
+function buildContext(opts = {}) {
+  const config = opts.config ?? new ConfigStore();
   const dataDir = config.resolvedDataDir();
   const sockPath = config.resolvedSockPath();
   const logPath = config.resolvedLogPath();
@@ -4287,6 +5633,7 @@ function buildContext() {
   });
   const retentionRaw = config.getEffective("monitor.event_log_retention");
   const events = new EventLog(typeof retentionRaw === "number" ? retentionRaw : 1e4, dataDir);
+  const cursors = opts.cursors ?? new CursorStore(dataDir);
   const pending = new PendingRegistry();
   const queues = new TurnQueues();
   const activity = {
@@ -4310,6 +5657,7 @@ function buildContext() {
     sessions,
     pool,
     events,
+    cursors,
     pending,
     queues,
     activity,
@@ -4328,16 +5676,79 @@ function toMs2(v, fallback) {
   return fallback;
 }
 
+// src/daemon/pending-cancel.ts
+var JSONRPC_CANCEL_ERROR_CODE = -32e3;
+async function cancelPendingWithEvent(ctx, user, sessionName, threadId, reason, filter) {
+  if (typeof ctx.pending.listForUser !== "function" || typeof ctx.pending.remove !== "function") return;
+  const matching = pendingRequestsForSession(ctx, user, sessionName, filter);
+  for (const pending of matching) {
+    const removed = ctx.pending.remove(pending.request_id) ?? pending;
+    if (removed.responded_at) continue;
+    try {
+      removed.client.respondError(
+        removed.jsonrpc_id,
+        JSONRPC_CANCEL_ERROR_CODE,
+        cancellationClientMessage(reason)
+      );
+    } catch {
+    }
+    const eventType = cancellationEventType(removed.kind);
+    if (!eventType) continue;
+    await ctx.events.append(user, {
+      type: eventType,
+      session: removed.session_name ?? normalizeSessionName(sessionName),
+      thread_id: removed.thread_id ?? normalizeThreadId(threadId),
+      payload: {
+        request_id: removed.request_id,
+        kind: removed.kind,
+        turn_id: removed.turn_id ?? null,
+        reason
+      }
+    });
+  }
+}
+function pendingRequestsForSession(ctx, user, sessionName, filter) {
+  if (typeof ctx.pending.listForUser !== "function") return [];
+  return ctx.pending.listForUser(user).filter((pending) => matchesSession(pending, sessionName) && (!filter || filter(pending)));
+}
+function matchesSession(pending, sessionName) {
+  if (sessionName === "*") return true;
+  return pending.session_name === sessionName;
+}
+function cancellationClientMessage(reason) {
+  switch (reason) {
+    case "user_detach":
+      return "session detached";
+    case "idle_unload":
+      return "session idle_unloaded";
+    case "user_destroyed":
+      return "user destroyed";
+    case "session_seized":
+      return "session seized by another user";
+    case "session_heal_force_reset":
+    case "session_crashed":
+    case "app_server_crashed_on_restart":
+      return "session_crashed";
+    default:
+      return reason;
+  }
+}
+function cancellationEventType(kind) {
+  if (kind.startsWith("approval.")) return APPROVAL_REQUEST_CANCELLED_EVENT_TYPE;
+  if (kind === "user_input.request") return USER_INPUT_REQUEST_CANCELLED_EVENT_TYPE;
+  return null;
+}
+function normalizeSessionName(sessionName) {
+  return sessionName.length > 0 && sessionName !== "*" ? sessionName : null;
+}
+function normalizeThreadId(threadId) {
+  return threadId.length > 0 ? threadId : null;
+}
+
 // src/daemon/handlers/version.ts
 var version = async (_ctx, _req) => {
-  let pkgVersion = "unknown";
-  try {
-    const pkg = require_package();
-    pkgVersion = pkg.version ?? "unknown";
-  } catch {
-  }
   return {
-    daemon_version: pkgVersion
+    daemon_version: VERSION
   };
 };
 
@@ -4352,13 +5763,17 @@ var status = async (ctx, req) => {
     throw new CodexTeamError("user_not_found", `user '${token}' not found \u2014 run 'codex-team daemon user create ${token}'`);
   }
   ctx.users.touch(token);
+  const retainedLimit = typeof ctx.config?.getEffective === "function" ? ctx.config.getEffective("monitor.event_log_retention") : null;
+  const appServerCount = typeof ctx.pool?.processCount === "function" ? ctx.pool.processCount() : null;
   return {
     token: user.token,
     created_at: user.created_at,
     last_active_at: user.last_active_at,
     live_sessions: ctx.sessions.listLive(token).length,
     retained_events: ctx.events.retainedCount(token),
+    retained_limit: typeof retainedLimit === "number" ? retainedLimit : null,
     pending_requests: ctx.pending.listForUser(token).length,
+    app_server_count: typeof appServerCount === "number" ? appServerCount : null,
     daemon: {
       pid: process.pid,
       started_at: ctx.startedAt.toISOString(),
@@ -4368,17 +5783,36 @@ var status = async (ctx, req) => {
 };
 
 // src/daemon/handlers/daemon.ts
-var import_node_fs10 = __toESM(require("fs"));
-var import_node_path10 = __toESM(require("path"));
+var import_node_fs13 = __toESM(require("fs"));
+var import_node_path13 = __toESM(require("path"));
 var import_node_child_process4 = require("child_process");
 
 // src/daemon/shutdown.ts
-var import_node_fs9 = __toESM(require("fs"));
+var import_node_fs12 = __toESM(require("fs"));
 var shuttingDown = false;
 async function shutdownDaemon(ctx, reason, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info("shutdown initiated", { reason });
+  try {
+    for (const user of ctx.users.list()) {
+      for (const rec of ctx.sessions.listLive(user.token)) {
+        await ctx.events.append(user.token, {
+          type: SESSION_CLOSED_EVENT_TYPE,
+          session: rec.name,
+          thread_id: rec.thread_id,
+          payload: {
+            session: rec.name,
+            thread_id: rec.thread_id,
+            reason: "daemon_shutdown",
+            ts: (/* @__PURE__ */ new Date()).toISOString()
+          }
+        });
+      }
+    }
+  } catch (e) {
+    logger.error("session closed event flush error", { err: e.message });
+  }
   try {
     await ctx.pool.shutdown();
   } catch (e) {
@@ -4396,7 +5830,7 @@ async function shutdownDaemon(ctx, reason, exitCode = 0) {
   }
   unlinkSockIfStale(ctx.sockPath);
   try {
-    import_node_fs9.default.unlinkSync(pidFilePath(ctx.dataDir));
+    import_node_fs12.default.unlinkSync(pidFilePath(ctx.dataDir));
   } catch {
   }
   setTimeout(() => process.exit(exitCode), 10);
@@ -4405,6 +5839,12 @@ async function shutdownDaemon(ctx, reason, exitCode = 0) {
 // src/daemon/handlers/daemon.ts
 var daemonStatus = async (ctx) => {
   const uptimeMs = Date.now() - ctx.startedAt.getTime();
+  const distFreshness = await getDistFreshness();
+  const users = ctx.users.list();
+  const sessionCount = users.reduce(
+    (count, user) => count + ctx.sessions.listLive(user.token).length,
+    0
+  );
   return {
     pid: process.pid,
     version: getPkgVersion(),
@@ -4412,9 +5852,11 @@ var daemonStatus = async (ctx) => {
     sock: ctx.sockPath,
     data_dir: ctx.dataDir,
     log_path: ctx.logPath,
-    user_count: ctx.users.list().length,
+    session_count: sessionCount,
+    user_count: users.length,
     app_server_count: ctx.pool.processCount(),
-    started_at: ctx.startedAt.toISOString()
+    started_at: ctx.startedAt.toISOString(),
+    ...distFreshness
   };
 };
 var daemonStart = async () => {
@@ -4457,15 +5899,32 @@ var daemonUserDestroy = async (ctx, req) => {
       `cannot destroy user '${token}' while ${liveSessions.length} live session(s) remain; pass --force to destroy anyway`
     );
   }
-  const pending = ctx.pending.removeForUser(token);
+  const pending = typeof ctx.pending.listForUser === "function" ? ctx.pending.listForUser(token) : [];
   for (const p of pending) {
-    try {
-      p.client.respondError(p.jsonrpc_id, -32e3, "user destroyed");
-    } catch {
-    }
+    await cancelPendingWithEvent(
+      ctx,
+      token,
+      p.session_name ?? "*",
+      p.thread_id ?? "",
+      "user_destroyed",
+      (entry) => entry.request_id === p.request_id
+    );
   }
   await ctx.pool.closeUser(token);
   const sessions = await ctx.sessions.clearUser(token);
+  for (const rec of sessions) {
+    await ctx.events.append(token, {
+      type: SESSION_CLOSED_EVENT_TYPE,
+      session: rec.name,
+      thread_id: rec.thread_id ?? null,
+      payload: {
+        session: rec.name,
+        thread_id: rec.thread_id ?? null,
+        reason: "user_destroyed",
+        ts: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    });
+  }
   for (const rec of sessions) {
     ctx.queues.dispose(`${token}::${rec.name}`);
   }
@@ -4551,7 +6010,7 @@ var daemonLogsStream = async (ctx, req, stream) => {
   const logPath = ctx.logPath;
   const follow = isTrue(getFlag(req.params, "follow")) || isTrue(getFlag(req.params, "f"));
   const n = toInt3(getFlag(req.params, "n"), 100);
-  const level = asString(getFlag(req.params, "level"));
+  const level = asString2(getFlag(req.params, "level"));
   let offset = 0;
   let closed = false;
   let debounceTimer = null;
@@ -4576,7 +6035,7 @@ var daemonLogsStream = async (ctx, req, stream) => {
   }
   const syncAppended = async () => {
     try {
-      const stat = await import_node_fs10.default.promises.stat(logPath);
+      const stat = await import_node_fs13.default.promises.stat(logPath);
       if (stat.size < offset) offset = 0;
       if (stat.size === offset) return;
       const chunk = await readBytes(logPath, offset, stat.size - offset);
@@ -4598,8 +6057,8 @@ var daemonLogsStream = async (ctx, req, stream) => {
     }, 50);
     debounceTimer.unref();
   };
-  const watcher = import_node_fs10.default.watch(import_node_path10.default.dirname(logPath), { persistent: true }, (_event, filename) => {
-    if (!filename || filename.toString() === import_node_path10.default.basename(logPath)) scheduleSync();
+  const watcher = import_node_fs13.default.watch(import_node_path13.default.dirname(logPath), { persistent: true }, (_event, filename) => {
+    if (!filename || filename.toString() === import_node_path13.default.basename(logPath)) scheduleSync();
   });
   stream.onClose(() => {
     closed = true;
@@ -4632,7 +6091,7 @@ function toInt3(v, fallback) {
   }
   return fallback;
 }
-function asString(v) {
+function asString2(v) {
   return typeof v === "string" ? v : null;
 }
 function lineMatchesLevel(line, level) {
@@ -4652,7 +6111,7 @@ function safeParseOr(line, fallback) {
 }
 async function readTextIfExists(filePath) {
   try {
-    return await import_node_fs10.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs13.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw e;
@@ -4660,7 +6119,7 @@ async function readTextIfExists(filePath) {
 }
 async function readBytes(filePath, start, length) {
   if (length <= 0) return "";
-  const handle = await import_node_fs10.default.promises.open(filePath, "r");
+  const handle = await import_node_fs13.default.promises.open(filePath, "r");
   try {
     const buffer = Buffer.alloc(length);
     const { bytesRead } = await handle.read(buffer, 0, length, start);
@@ -4670,16 +6129,58 @@ async function readBytes(filePath, start, length) {
   }
 }
 function getPkgVersion() {
-  try {
-    const pkg = require_package();
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
+  return VERSION;
+}
+async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
+  const distPath = import_node_path13.default.join(packageRoot, "dist", "main.js");
+  const distStat = await statIfExists(distPath);
+  if (!distStat) {
+    return {
+      dist_built_at: null,
+      dist_age_seconds: null,
+      source_newer_than_dist: null
+    };
   }
+  const builtAt = new Date(distStat.mtimeMs).toISOString();
+  const sourceNewestMtime = await getNewestMtime(import_node_path13.default.join(packageRoot, "src"));
+  return {
+    dist_built_at: builtAt,
+    dist_age_seconds: Math.max(0, Math.floor((Date.now() - distStat.mtimeMs) / 1e3)),
+    source_newer_than_dist: sourceNewestMtime === null ? null : sourceNewestMtime > distStat.mtimeMs
+  };
+}
+async function statIfExists(filePath) {
+  try {
+    return await import_node_fs13.default.promises.stat(filePath);
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    return null;
+  }
+}
+async function getNewestMtime(dirPath) {
+  let entries;
+  try {
+    entries = await import_node_fs13.default.promises.readdir(dirPath, { withFileTypes: true });
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    return null;
+  }
+  let newest = null;
+  for (const entry of entries) {
+    const entryPath = import_node_path13.default.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      const childNewest = await getNewestMtime(entryPath);
+      if (childNewest !== null && (newest === null || childNewest > newest)) newest = childNewest;
+      continue;
+    }
+    const stat = await statIfExists(entryPath);
+    if (stat && (newest === null || stat.mtimeMs > newest)) newest = stat.mtimeMs;
+  }
+  return newest;
 }
 
 // src/daemon/handlers/session.ts
-var import_node_fs11 = __toESM(require("fs"));
+var import_node_fs14 = __toESM(require("fs"));
 
 // src/daemon/experimentalTools.ts
 var TOOL_SPECS = [
@@ -4775,6 +6276,7 @@ function normalizeAlias(value) {
 }
 
 // src/format/markdown.ts
+var INLINE_MAX_BYTES = 2048;
 function renderTag(name, attrs, body) {
   const line = `<${name}> ${compactJson(attrs)}`;
   const normalizedBody = stripOuterNewlines(body);
@@ -4792,7 +6294,8 @@ ${normalizedBody}
 function renderInline(name, attrs) {
   return `<${name}>${compactJson(attrs)}<\\${name}>`;
 }
-function renderHistory(input) {
+function renderHistory(input, options = {}) {
+  const ctx = createRenderContext(options);
   const attrs = {
     session: input.session,
     thread_id: input.thread_id,
@@ -4800,10 +6303,11 @@ function renderHistory(input) {
     generated_at: (/* @__PURE__ */ new Date()).toISOString()
   };
   if (input.nextCursor) attrs.next_cursor = input.nextCursor;
-  const body = input.turns.map(renderTurn).join("\n\n");
+  const body = input.turns.map((turn) => renderTurn(turn, ctx)).join("\n\n");
   return renderTag("history", attrs, body);
 }
-function renderTail(input) {
+function renderTail(input, options = {}) {
+  const ctx = createRenderContext(options);
   const attrs = {
     session: input.session,
     thread_id: input.thread_id,
@@ -4811,10 +6315,11 @@ function renderTail(input) {
     generated_at: (/* @__PURE__ */ new Date()).toISOString()
   };
   if (input.follow) attrs.follow = true;
-  const body = input.turns.map(renderTurn).join("\n\n");
+  const body = input.turns.map((turn) => renderTurn(turn, ctx)).join("\n\n");
   return renderTag("tail", attrs, body);
 }
 function renderContext(input) {
+  const ctx = createRenderContext();
   const t = input.thread;
   const attrs = {
     session: input.session,
@@ -4830,10 +6335,14 @@ function renderContext(input) {
     if (typeof t.created_at === "number") attrs.created_at = t.created_at;
     if (typeof t.updated_at === "number") attrs.updated_at = t.updated_at;
   }
-  const turns = Array.isArray(t?.turns) ? t.turns.filter((turn) => !!turn && typeof turn === "object").map(renderTurn).filter(Boolean) : [];
-  return renderTag("context", attrs, turns.length > 0 ? turns.join("\n\n") : "<!-- thread/read only returns thread metadata; for turn-level content use 'message history' -->");
+  const turns = Array.isArray(t?.turns) ? t.turns.filter((turn) => !!turn && typeof turn === "object").map((turn) => renderTurn(turn, ctx)).filter(Boolean) : [];
+  return renderTag(
+    "context",
+    attrs,
+    turns.length > 0 ? turns.join("\n\n") : "<!-- thread/read only returns thread metadata; for turn-level content use 'message history' -->"
+  );
 }
-function renderTurn(turn) {
+function renderTurn(turn, ctx) {
   const attrs = {
     id: turn.id,
     status: turn.status ?? null
@@ -4847,80 +6356,159 @@ function renderTurn(turn) {
   if (items.length === 0) {
     return renderInline("turn", attrs);
   }
-  const body = items.filter((item) => !!item && typeof item === "object").map((item) => renderItem(item)).filter(Boolean).join("\n\n");
+  const body = items.filter((item) => !!item && typeof item === "object").map((item) => renderItemWithContext(item, ctx)).filter(Boolean).join("\n\n");
   return renderTag("turn", attrs, body);
 }
-function renderItem(item, indent = "") {
+function renderItemWithContext(item, ctx) {
   const type = normalizeItemType(item.type);
-  const rendered = (() => {
-    switch (type) {
-      case "userMessage":
-        return renderUserMessage(item);
-      case "agentMessage":
-        return renderAgentMessage(item);
-      case "commandExecution":
-        return renderCommandExecution(item);
-      case "fileChange":
-      case "file-patch":
-        return renderFileChange(item);
-      case "reasoning":
-        return renderReasoning(item);
-      default:
-        return renderInline("item", sanitizeInlineAttrs(item));
-    }
-  })();
-  return indent ? indentBlock(rendered, indent) : rendered;
+  switch (type) {
+    case "userMessage":
+      return renderUserMessage(item, ctx);
+    case "agentMessage":
+      return renderAgentMessage(item, ctx);
+    case "commandExecution":
+      return renderCommandExecution(item, ctx);
+    case "fileChange":
+    case "file-patch":
+      return renderFileChange(item, ctx);
+    case "mcpToolCall":
+      return renderMcpToolCall(item, ctx);
+    case "autoApprovalReview":
+      return renderAutoApprovalReview(item, ctx);
+    case "reasoning":
+      return renderReasoning(item, ctx);
+    default:
+      if (type.startsWith("hook.")) return renderHook(item, type, ctx);
+      return renderInline("item", sanitizeInlineAttrs(item, ctx));
+  }
 }
-function compactJson(obj) {
-  return JSON.stringify(obj);
+function createRenderContext(options = {}) {
+  const normalized = normalizeTruncateOption(options.truncate);
+  return {
+    inlineMaxBytes: normalized === 0 ? INLINE_MAX_BYTES : Math.min(normalized ?? INLINE_MAX_BYTES, INLINE_MAX_BYTES),
+    truncateBytes: normalized === 0 ? null : normalized ?? INLINE_MAX_BYTES
+  };
 }
-function renderUserMessage(item) {
-  const attrs = baseItemAttrs(item);
+function normalizeTruncateOption(value) {
+  if (value === void 0 || value === null) return null;
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Math.floor(value));
+}
+function compactJson(value) {
+  return JSON.stringify(value ?? {});
+}
+function renderInlineValue(name, value) {
+  return `<${name}>${compactJson(value)}<\\${name}>`;
+}
+function renderBodyTag(name, attrs, body, ctx) {
+  return renderTag(name, attrs, applyBodyTruncation(body, ctx));
+}
+function renderJsonValueTag(name, value, ctx) {
+  const compact = compactJson(value);
+  if (byteLength(compact) <= ctx.inlineMaxBytes) {
+    return renderInlineValue(name, value);
+  }
+  return renderBodyTag(name, {}, prettyJson(value), ctx);
+}
+function renderUserMessage(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
   const text = extractMessageText(item);
-  if (text) attrs.text = text;
-  return renderInline("item", attrs);
+  if (!text) return renderInline("user-input", attrs);
+  if (byteLength(text) > ctx.inlineMaxBytes) {
+    return renderBodyTag("user-input", attrs, text, ctx);
+  }
+  attrs.text = text;
+  return renderInline("user-input", attrs);
 }
-function renderAgentMessage(item) {
-  const attrs = baseItemAttrs(item);
+function renderAgentMessage(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
   const body = extractMessageText(item);
-  if (!body) return renderInline("item", attrs);
-  return renderTag("item", attrs, body);
+  if (!body) return renderInline("agent-message", attrs);
+  return renderBodyTag("agent-message", attrs, body, ctx);
 }
-function renderCommandExecution(item) {
-  const attrs = baseItemAttrs(item);
-  delete attrs.status;
-  const shellAttrs = {};
+function renderCommandExecution(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
   const cmd = extractCommand(item);
-  if (cmd) shellAttrs.cmd = cmd;
-  const cwd = asString2(item.cwd);
-  if (cwd) shellAttrs.cwd = cwd;
+  if (cmd) attrs.cmd = fitInlineText(cmd, ctx);
+  const cwd = asString3(item.cwd);
+  if (cwd) attrs.cwd = cwd;
   const exit = item.exit ?? item.exitCode;
-  if (exit !== void 0) shellAttrs.exit = exit;
+  if (exit !== void 0) attrs.exit = exit;
   const durationMs = item.duration_ms ?? item.durationMs;
-  if (durationMs !== void 0) shellAttrs.duration_ms = durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
   const shellBody = extractCommandOutput(item) ?? "";
-  return renderTag("item", attrs, renderTag("shell", shellAttrs, shellBody));
+  return renderBodyTag("shell", attrs, shellBody, ctx);
 }
-function renderFileChange(item) {
-  const attrs = baseItemAttrs(item);
-  delete attrs.status;
-  const patchAttrs = {};
-  const path12 = asString2(item.path);
-  if (path12) patchAttrs.path = path12;
-  if (item.status !== void 0) patchAttrs.status = item.status;
+function renderFileChange(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const path16 = asString3(item.path);
+  if (path16) attrs.path = path16;
+  if (item.status !== void 0) attrs.status = item.status;
   const diffBody = extractDiff(item) ?? "";
-  return renderTag("item", attrs, renderTag("file-patch", patchAttrs, diffBody));
+  return renderBodyTag("file-patch", attrs, diffBody, ctx);
 }
-function renderReasoning(item) {
-  const attrs = baseItemAttrs(item);
+function renderMcpToolCall(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const server = asString3(item.server) ?? asString3(item.serverName);
+  if (server) attrs.server = server;
+  const tool = extractToolName(item);
+  attrs.tool = tool;
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
+  const bodyParts = [];
+  const args = extractMcpArgs(item);
+  if (args !== void 0) bodyParts.push(renderJsonValueTag("mcp-args", args, ctx));
+  const result = extractMcpResult(item);
+  if (result) bodyParts.push(renderBodyTag("mcp-result", {}, result, ctx));
+  return renderTag(`tool.${toTagSegment(tool)}`, attrs, bodyParts.join("\n\n"));
+}
+function renderHook(item, type, ctx) {
+  const run = asObject4(item.run);
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const hookId = asString3(item.hook_id) ?? asString3(item.hookId) ?? asString3(run.id);
+  if (hookId) attrs.hook_id = hookId;
+  const status2 = asString3(item.status) ?? asString3(run.status);
+  if (status2) attrs.status = status2;
+  const command = extractCommand(item) ?? extractCommand(run);
+  if (command) attrs.command = fitInlineText(command, ctx);
+  const cwd = asString3(item.cwd) ?? asString3(run.cwd);
+  if (cwd) attrs.cwd = cwd;
+  const exit = item.exit ?? item.exitCode ?? run.exit ?? run.exitCode;
+  if (exit !== void 0) attrs.exit = exit;
+  const durationMs = item.duration_ms ?? item.durationMs ?? run.duration_ms ?? run.durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
+  const output = extractHookOutput(item, run);
+  const tagName = typeToTagName(type);
+  if (!output) return renderInline(tagName, attrs);
+  return renderTag(tagName, attrs, renderBodyTag("hook-output", {}, output, ctx));
+}
+function renderAutoApprovalReview(item, ctx) {
+  const review = asObject4(item.review);
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const kind = asString3(item.kind) ?? asString3(review.kind) ?? asString3(review.request_kind) ?? asString3(review.requestKind) ?? asString3(review.approval_kind) ?? asString3(review.approvalKind);
+  if (kind) attrs.kind = kind;
+  const matchedPattern = asString3(item.matched_pattern) ?? asString3(item.matchedPattern) ?? asString3(review.matched_pattern) ?? asString3(review.matchedPattern) ?? asString3(review.pattern);
+  if (matchedPattern) attrs.matched_pattern = fitInlineText(matchedPattern, ctx);
+  const commandPreview = extractCommandPreview(item, review);
+  if (commandPreview) attrs.command_preview = fitInlineText(commandPreview, ctx);
+  const decision = asString3(item.decision) ?? asString3(item.action) ?? asString3(item.decision_source) ?? asString3(item.decisionSource) ?? asString3(review.decision) ?? asString3(review.action);
+  if (decision) attrs.decision = fitInlineText(decision, ctx);
+  return renderInline("auto-approval-review", attrs);
+}
+function renderReasoning(item, ctx) {
+  const attrs = baseItemAttrs(item, { includeType: false });
   const text = extractReasoningText(item);
-  if (text) attrs.text = text;
-  return renderInline("item", attrs);
+  if (!text) return renderInline("reasoning", attrs);
+  if (byteLength(text) <= ctx.inlineMaxBytes) {
+    attrs.text = text;
+    return renderInline("reasoning", attrs);
+  }
+  return renderBodyTag("reasoning", attrs, text, ctx);
 }
-function baseItemAttrs(item) {
+function baseItemAttrs(item, options = {}) {
   const attrs = {};
   if (typeof item.id === "string") attrs.id = item.id;
-  attrs.type = normalizeItemType(item.type);
+  if (options.includeType !== false) attrs.type = normalizeItemType(item.type);
   if (item.phase !== void 0) attrs.phase = item.phase;
   if (item.status !== void 0) attrs.status = item.status;
   if (item.kind !== void 0) attrs.kind = item.kind;
@@ -4928,11 +6516,11 @@ function baseItemAttrs(item) {
   if (item.source !== void 0) attrs.source = item.source;
   return attrs;
 }
-function sanitizeInlineAttrs(item) {
+function sanitizeInlineAttrs(item, ctx) {
   const attrs = {};
   for (const [key, value] of Object.entries(item)) {
     if (value === void 0 || OMIT_INLINE_KEYS.has(key)) continue;
-    attrs[key] = value;
+    attrs[key] = typeof value === "string" ? fitInlineText(value, ctx) : value;
   }
   if (!("id" in attrs) && typeof item.id === "string") attrs.id = item.id;
   if (!("type" in attrs)) attrs.type = normalizeItemType(item.type);
@@ -4942,6 +6530,12 @@ function normalizeItemType(raw) {
   const type = typeof raw === "string" && raw ? raw : "unknown";
   return ITEM_TYPE_ALIASES[type] ?? type;
 }
+function typeToTagName(type) {
+  return type.split(".").map(toTagSegment).join(".");
+}
+function toTagSegment(value) {
+  return value.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/_/g, "-").replace(/[^a-zA-Z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+}
 function extractMessageText(item) {
   return firstText(item.text, item.content);
 }
@@ -4949,7 +6543,7 @@ function extractReasoningText(item) {
   return firstText(item.text, item.summaryText, item.summary, item.content);
 }
 function extractCommand(item) {
-  const direct = asString2(item.command) ?? asString2(item.cmd);
+  const direct = asString3(item.command) ?? asString3(item.cmd);
   if (direct) return direct;
   const command = item.command;
   if (Array.isArray(command)) {
@@ -4963,19 +6557,59 @@ function extractCommand(item) {
   return null;
 }
 function extractCommandOutput(item) {
-  const direct = asString2(item.output);
+  const direct = asString3(item.output);
   if (direct) return direct;
   const output = item.output;
   if (output && typeof output === "object" && !Array.isArray(output)) {
-    const stdout = asString2(output.stdout);
-    const stderr = asString2(output.stderr);
+    const stdout = asString3(output.stdout);
+    const stderr = asString3(output.stderr);
     const merged = joinText([stdout, stderr], "\n");
     if (merged) return merged;
   }
-  return joinText([asString2(item.stdout), asString2(item.stderr)], "\n");
+  return joinText([asString3(item.stdout), asString3(item.stderr)], "\n");
 }
 function extractDiff(item) {
-  return asString2(item.diff) ?? asString2(item.patch) ?? asString2(item.changes);
+  return asString3(item.diff) ?? asString3(item.patch) ?? asString3(item.changes);
+}
+function extractToolName(item) {
+  return asString3(item.tool) ?? asString3(item.toolName) ?? asString3(item.name) ?? "unknown";
+}
+function extractMcpArgs(item) {
+  const args = item.args ?? item.arguments ?? item.input ?? item.parameters;
+  return args === void 0 ? void 0 : args;
+}
+function extractMcpResult(item) {
+  return extractRichBody(item.result, item.output, item.content, item.text);
+}
+function extractHookOutput(item, run) {
+  return extractCommandOutput(item) ?? extractCommandOutput(run) ?? extractRichBody(item.result, run.result);
+}
+function extractCommandPreview(...values) {
+  for (const value of values) {
+    const preview = asString3(value.command_preview) ?? asString3(value.commandPreview) ?? extractCommand(value);
+    if (preview) return preview;
+  }
+  return null;
+}
+function extractRichBody(...values) {
+  for (const value of values) {
+    const text = extractText(value);
+    if (text) return text;
+    if (Array.isArray(value)) {
+      const serialized = compactJson(value);
+      if (serialized !== "[]") return serialized;
+      continue;
+    }
+    if (value && typeof value === "object") {
+      const serialized = JSON.stringify(value, null, 2);
+      if (serialized && serialized !== "{}") return serialized;
+      continue;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      return String(value);
+    }
+  }
+  return null;
 }
 function firstText(...values) {
   for (const value of values) {
@@ -4998,6 +6632,52 @@ function extractTextEntry(entry) {
   if (Array.isArray(obj.content)) return extractText(obj.content);
   return null;
 }
+function applyBodyTruncation(text, ctx) {
+  if (ctx.truncateBytes === null) return text;
+  const truncated = truncateText(text, ctx.truncateBytes);
+  return truncated.truncatedBytes > 0 ? `${truncated.text}
+${buildTruncationMarker(truncated.truncatedBytes)}` : text;
+}
+function fitInlineText(text, ctx) {
+  if (ctx.truncateBytes === null) return text;
+  const truncated = truncateText(text, ctx.truncateBytes);
+  return truncated.truncatedBytes > 0 ? `${truncated.text}${buildTruncationMarker(truncated.truncatedBytes)}` : text;
+}
+function truncateText(text, maxBytes) {
+  const totalBytes = byteLength(text);
+  if (totalBytes <= maxBytes) {
+    return { text, truncatedBytes: 0 };
+  }
+  const chars = Array.from(text);
+  let low = 0;
+  let high = chars.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidate = chars.slice(0, mid).join("");
+    if (byteLength(candidate) <= maxBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  const truncatedText = chars.slice(0, low).join("");
+  return {
+    text: stripOuterNewlines(truncatedText),
+    truncatedBytes: totalBytes - byteLength(truncatedText)
+  };
+}
+function buildTruncationMarker(truncatedBytes) {
+  return `\u2026[${truncatedBytes} bytes truncated; use --truncate 0 to disable]`;
+}
+function prettyJson(value) {
+  if (value === void 0) return "{}";
+  if (typeof value === "string") return value;
+  const serialized = JSON.stringify(value, null, 2);
+  return serialized ?? String(value);
+}
+function byteLength(value) {
+  return Buffer.byteLength(value, "utf8");
+}
 function joinText(values, separator) {
   const present = values.filter((value) => !!value);
   return present.length > 0 ? present.join(separator) : null;
@@ -5005,16 +6685,21 @@ function joinText(values, separator) {
 function stripOuterNewlines(value) {
   return value.replace(/^\n+/, "").replace(/\n+$/, "");
 }
-function indentBlock(text, indent) {
-  return text.split("\n").map((line) => line ? `${indent}${line}` : line).join("\n");
-}
-function asString2(value) {
+function asString3(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+function asObject4(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  return {};
 }
 var ITEM_TYPE_ALIASES = {
   agent_message: "agentMessage",
+  auto_approval_review: "autoApprovalReview",
   command_execution: "commandExecution",
   file_change: "fileChange",
+  mcp_tool_call: "mcpToolCall",
   user_message: "userMessage"
 };
 var OMIT_INLINE_KEYS = /* @__PURE__ */ new Set([
@@ -5024,7 +6709,10 @@ var OMIT_INLINE_KEYS = /* @__PURE__ */ new Set([
   "output",
   "diff",
   "patch",
-  "changes"
+  "changes",
+  "result",
+  "review",
+  "run"
 ]);
 
 // src/format/table.ts
@@ -5072,6 +6760,7 @@ var sessionNew = async (ctx, req) => {
     throw invalidParams(`session '${name}' already exists`);
   }
   const experimentalTools = resolveExperimentalToolsForCreate(ctx, flags);
+  const autoApprovePatterns = resolveAutoApprovePatternsForCreate(ctx, flags);
   const startParams = await buildThreadStartParams(ctx, flags, experimentalTools);
   const client = await ctx.pool.acquire(user, keyFor(user, name), buildExperimentalToolAppServerOptions(experimentalTools));
   let result;
@@ -5091,18 +6780,20 @@ var sessionNew = async (ctx, req) => {
     name,
     thread_id: threadId,
     state: "live",
-    model: asString3(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
-    cwd: asString3(flags["cwd"]) ?? process.cwd(),
-    sandbox: asString3(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
-    approval: asString3(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
-    effort: asString3(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
-    profile: asString3(flags["profile"]) ?? void 0,
-    base_instructions: asString3(flags["base-instructions"]) ?? void 0,
-    developer_instructions: asString3(flags["developer-instructions"]) ?? void 0,
+    model: asString4(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
+    cwd: asString4(flags["cwd"]) ?? process.cwd(),
+    sandbox: asString4(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
+    approval: asString4(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
+    effort: asString4(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
+    profile: asString4(flags["profile"]) ?? void 0,
+    base_instructions: asString4(flags["base-instructions"]) ?? void 0,
+    developer_instructions: asString4(flags["developer-instructions"]) ?? void 0,
     experimental_tools: experimentalTools.length > 0 ? experimentalTools : void 0,
+    autoApprovePatterns,
     created_at: now,
     last_active_at: now,
-    turn_count: 0
+    turn_count: 0,
+    ...sessionRuntimeDefaults()
   };
   ctx.sessions.add(user, record);
   ctx.users.touch(user);
@@ -5118,6 +6809,7 @@ var sessionAttach = async (ctx, req) => {
   const attach = async () => {
     const existing = ctx.sessions.get(user, identifier);
     if (existing) {
+      validateSessionAutoApprovePatterns(existing.autoApprovePatterns ?? []);
       ctx.sessions.touch(user, existing.name);
       return { session: existing, noop: true };
     }
@@ -5125,6 +6817,7 @@ var sessionAttach = async (ctx, req) => {
     if (anywhere === "ambiguous") {
       throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
     }
+    const autoApprovePatterns = validateSessionAutoApprovePatterns(anywhere?.record.autoApprovePatterns ?? []);
     if (anywhere && anywhere.user !== user) {
       if (!takeover) {
         throw new CodexTeamError("session_busy", `session is live under user '${anywhere.user}'. Pass --takeover to seize.`);
@@ -5150,9 +6843,11 @@ var sessionAttach = async (ctx, req) => {
         name,
         thread_id: threadId,
         state: "live",
+        autoApprovePatterns,
         created_at: now,
         last_active_at: now,
         turn_count: 0,
+        ...sessionRuntimeDefaults(),
         ...anywhere?.record ? {
           model: anywhere.record.model,
           cwd: anywhere.record.cwd,
@@ -5206,13 +6901,9 @@ var sessionDetach = async (ctx, req) => {
   }
   ctx.pool.release(sessionKey);
   ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
   ctx.sessions.remove(user, rec.name);
-  for (const p of ctx.pending.removeForSession(user, rec.name)) {
-    try {
-      p.client.respondError(p.jsonrpc_id, -32e3, "session detached");
-    } catch {
-    }
-  }
+  await appendSessionClosed(ctx, user, rec, "user_detach");
   return { session: rec, noop: false, graceful };
 };
 var sessionRename = async (ctx, req) => {
@@ -5241,12 +6932,13 @@ var sessionFork = async (ctx, req) => {
   const identifier = asPositional(req, 0, "session");
   const newNameRaw = asPositionalOptional(req, 1);
   const flags = asFlags(req);
-  const atTurn = asString3(flags["at-turn"]);
+  const atTurn = asString4(flags["at-turn"]);
   const source = ctx.sessions.get(user, identifier);
   if (!source) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
   let newName = newNameRaw ?? generateSessionName();
   if (newNameRaw) validateSessionName(newNameRaw);
   while (ctx.sessions.get(user, newName)) newName = generateSessionName();
+  const autoApprovePatterns = validateSessionAutoApprovePatterns(source.autoApprovePatterns ?? []);
   const client = await ctx.pool.acquire(
     user,
     keyFor(user, newName),
@@ -5276,9 +6968,11 @@ var sessionFork = async (ctx, req) => {
     effort: source.effort,
     profile: source.profile,
     experimental_tools: source.experimental_tools,
+    autoApprovePatterns,
     created_at: now,
     last_active_at: now,
-    turn_count: 0
+    turn_count: 0,
+    ...sessionRuntimeDefaults()
   };
   ctx.sessions.add(user, record);
   return { session: record, forked_from: source.name, at_turn: atTurn };
@@ -5304,7 +6998,7 @@ var sessionContext = async (ctx, req) => {
   const user = req.bearer;
   const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
-  const format = asString3(flags["format"]) ?? "json";
+  const format = asString4(flags["format"]) ?? "json";
   if (format !== "json" && format !== "markdown") {
     throw invalidParams(`--format must be 'json' or 'markdown'`);
   }
@@ -5343,18 +7037,18 @@ var sessionList = async (ctx, req) => {
   const user = req.bearer;
   const flags = asFlags(req);
   const all = isTrue2(flags["all"]);
-  const sortField = asString3(flags["sort"]) ?? "last_active";
-  const format = asString3(flags["format"]) ?? "json";
+  const sortField = asString4(flags["sort"]) ?? "last_active";
+  const format = asString4(flags["format"]) ?? "json";
   if (format !== "json" && format !== "table") {
     throw invalidParams(`--format must be 'json' or 'table'`);
   }
   if (!all) {
     const live = ctx.sessions.listLive(user);
-    const sorted = sortSessions(live, sortField);
-    const response2 = { sessions: sorted, all: false, sort: sortField, format };
+    const sorted2 = sortSessions(live, sortField);
+    const response2 = { sessions: sorted2, all: false, sort: sortField, format };
     if (format === "table") {
       response2.table = renderTable2(
-        sorted,
+        sorted2,
         ["name", "thread_id", "state", "model", "turn_count", "last_active_at"]
       );
     }
@@ -5376,6 +7070,79 @@ var sessionList = async (ctx, req) => {
     );
   }
   return response;
+};
+var sessionHealth = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+  const sessionKey = keyFor(user, rec.name);
+  const busyTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const appServerAlive = isClientAlive(client);
+  const currentTurnStartedAt = rec.current_turn_started_at ?? null;
+  const pending = typeof ctx.pending.listForUser === "function" ? ctx.pending.listForUser(user).filter((entry) => entry.session_name === rec.name) : null;
+  const pendingApprovals = pending ? pending.filter((entry) => entry.kind.startsWith("approval.")).length : rec.pending_approvals ?? 0;
+  const pendingUserInputs = pending ? pending.filter((entry) => entry.kind === "user_input.request").length : rec.pending_user_inputs ?? 0;
+  return {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    state: rec.state,
+    busy: rec.state === "live" && appServerAlive && busyTurnId !== null,
+    current_turn_id: busyTurnId,
+    current_turn_started_at: currentTurnStartedAt,
+    current_turn_elapsed_ms: currentTurnStartedAt ? Math.max(0, Date.now() - Date.parse(currentTurnStartedAt)) : null,
+    current_item_type: rec.current_item_type ?? null,
+    items_done_in_turn: rec.items_in_turn ?? 0,
+    pending_approval_requests: pendingApprovals,
+    pending_user_input_requests: pendingUserInputs,
+    token_usage_last_turn: rec.token_usage_last_turn ?? null,
+    app_server_alive: appServerAlive,
+    last_event_id: ctx.events.latestEvent(user, { session: rec.name, thread_id: rec.thread_id })?.id ?? null
+  };
+};
+var sessionHeal = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const force = isTrue2(flags["force"]);
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+  if (rec.state !== "live" && rec.state !== "crashed") {
+    throw invalidParams(`session '${rec.name}' is in unexpected state '${String(rec.state)}'`);
+  }
+  const sessionKey = keyFor(user, rec.name);
+  const existingClient = ctx.pool.clientForSession(sessionKey);
+  const appServerAlive = isClientAlive(existingClient);
+  if (rec.state === "live" && appServerAlive) {
+    return { ok: true, note: "already healthy", session: rec };
+  }
+  if (!appServerAlive || force) {
+    ctx.pool.release(sessionKey);
+  }
+  if (force) {
+    ctx.queues.dispose(sessionKey);
+    await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "session_heal_force_reset");
+    ctx.sessions.update(user, rec.name, {
+      pending_approvals: 0,
+      pending_user_inputs: 0
+    });
+  }
+  const client = await ctx.pool.acquire(
+    user,
+    sessionKey,
+    buildExperimentalToolAppServerOptions(rec.experimental_tools ?? [])
+  );
+  await threadResume(client, rec.thread_id, ctx.retryOptions());
+  const updated = ctx.sessions.update(user, rec.name, {
+    state: "live",
+    recovery_state: null,
+    ...sessionRuntimeDefaults()
+  });
+  ctx.users.touch(user);
+  return { ok: true, healed: true, forced: force, session: updated };
 };
 function requireUser(ctx, req) {
   const bearer = req.bearer;
@@ -5406,7 +7173,7 @@ function asPositionalOptional(req, idx) {
   const v = positionals[idx];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
-function asString3(v) {
+function asString4(v) {
   if (Array.isArray(v)) return v[v.length - 1] ?? null;
   return typeof v === "string" ? v : null;
 }
@@ -5416,23 +7183,23 @@ function isTrue2(v) {
 async function buildThreadStartParams(ctx, flags, experimentalTools) {
   const p = {};
   const config = {};
-  const model = asString3(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
+  const model = asString4(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
   if (model) p.model = model;
-  const cwd = asString3(flags["cwd"]) ?? process.cwd();
+  const cwd = asString4(flags["cwd"]) ?? process.cwd();
   if (cwd) p.cwd = cwd;
-  const sandbox = asString3(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
+  const sandbox = asString4(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
   if (sandbox) p.sandbox = sandbox;
-  const approval = asString3(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
+  const approval = asString4(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
   if (approval) p.approvalPolicy = approval;
-  const effort = asString3(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
+  const effort = asString4(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
   if (effort) config.model_reasoning_effort = effort;
-  const profile = asString3(flags["profile"]);
+  const profile = asString4(flags["profile"]);
   if (profile) config.profile = profile;
   const baseInstr = await readInstructionFile(flags["base-instructions"], "--base-instructions");
   if (baseInstr) p.baseInstructions = baseInstr;
   const devInstr = await readInstructionFile(flags["developer-instructions"], "--developer-instructions");
   if (devInstr) p.developerInstructions = devInstr;
-  const personality = asString3(flags["personality"]);
+  const personality = asString4(flags["personality"]);
   if (personality) p.personality = personality;
   const experimentalConfig = buildExperimentalToolThreadConfig(experimentalTools);
   if (experimentalConfig) Object.assign(config, experimentalConfig);
@@ -5448,6 +7215,16 @@ function resolveExperimentalToolsForCreate(ctx, flags) {
   if (hasFlag(flags, "experimental-tools")) return parseExperimentalTools(flags["experimental-tools"]);
   return parseExperimentalTools(resolveDefault(ctx, "experimental.default_tools"));
 }
+function resolveAutoApprovePatternsForCreate(ctx, flags) {
+  if (!hasFlag(flags, "auto-approve")) {
+    return parseConfiguredAutoApprovePatterns(ctx.config.getEffective("session.auto_approve_command_patterns"));
+  }
+  const raw = asString4(flags["auto-approve"]);
+  if (raw === null) throw invalidParams("--auto-approve requires a comma-separated value");
+  const validationError = validateAutoApprovePatterns(raw);
+  if (validationError) throw invalidParams(validationError);
+  return parseAutoApprovePatterns(raw);
+}
 function resolveExperimentalToolsForAttach(ctx, flags, inherited) {
   if (hasFlag(flags, "experimental-tools")) return parseExperimentalTools(flags["experimental-tools"]);
   if (inherited && inherited.length > 0) return [...inherited];
@@ -5456,8 +7233,19 @@ function resolveExperimentalToolsForAttach(ctx, flags, inherited) {
 function keyFor(user, name) {
   return `${user}::${name}`;
 }
+function isClientAlive(client) {
+  if (!client) return false;
+  const maybe = client;
+  if (typeof maybe.isAlive === "function") return maybe.isAlive();
+  return true;
+}
 function hasFlag(flags, key) {
   return Object.prototype.hasOwnProperty.call(flags, key);
+}
+function validateSessionAutoApprovePatterns(patterns) {
+  const validationError = validateParsedAutoApprovePatterns(patterns);
+  if (validationError) throw invalidParams(validationError);
+  return [...patterns];
 }
 function deriveNameFromThreadId(threadId, ctx, user) {
   const existing = ctx.sessions.get(user, threadId);
@@ -5498,10 +7286,10 @@ async function withAttachLock(threadId, fn) {
   }
 }
 async function readInstructionFile(value, flag) {
-  const filePath = asString3(value);
+  const filePath = asString4(value);
   if (!filePath) return null;
   try {
-    return await import_node_fs11.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs14.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     throw invalidParams(`${flag} not readable: ${e.message}`);
   }
@@ -5525,18 +7313,26 @@ async function seizeFromOtherUser(ctx, fromUser, toUser, rec) {
   }
   ctx.pool.release(sessionKey);
   ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, fromUser, rec.name, rec.thread_id, "session_seized");
   ctx.sessions.remove(fromUser, rec.name);
-  for (const p of ctx.pending.removeForSession(fromUser, rec.name)) {
-    try {
-      p.client.respondError(p.jsonrpc_id, -32e3, "session seized by another user");
-    } catch {
-    }
-  }
   await ctx.events.append(fromUser, {
     type: "session.seized",
     session: rec.name,
     thread_id: rec.thread_id,
     payload: { seized_by: toUser }
+  });
+}
+async function appendSessionClosed(ctx, user, rec, reason) {
+  await ctx.events.append(user, {
+    type: SESSION_CLOSED_EVENT_TYPE,
+    session: rec.name,
+    thread_id: rec.thread_id,
+    payload: {
+      session: rec.name,
+      thread_id: rec.thread_id,
+      reason,
+      ts: (/* @__PURE__ */ new Date()).toISOString()
+    }
   });
 }
 function sortSessions(rows, field) {
@@ -5553,7 +7349,7 @@ function sortSessions(rows, field) {
 }
 
 // src/daemon/handlers/message.ts
-var import_node_fs12 = __toESM(require("fs"));
+var import_node_fs15 = __toESM(require("fs"));
 var messageSend = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const prompt = await readPromptInput(req);
@@ -5681,8 +7477,9 @@ var messageHistory = async (ctx, req) => {
   const { rec, client } = await resolveLive(ctx, req);
   const limitRaw = getFlag2(req, "limit");
   const limit = typeof limitRaw === "string" ? parseInt(limitRaw, 10) : typeof limitRaw === "number" ? limitRaw : 50;
-  const sinceRaw = asString4(getFlag2(req, "since"));
-  const format = asString4(getFlag2(req, "format")) ?? "json";
+  const sinceRaw = asString5(getFlag2(req, "since"));
+  const format = asString5(getFlag2(req, "format")) ?? "json";
+  const truncate = parseTruncateFlag(getFlag2(req, "truncate"));
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
   const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 50;
   const relativeSince = sinceRaw && /^-\d+$/.test(sinceRaw) ? Math.max(1, Math.floor(Math.abs(Number(sinceRaw)))) : null;
@@ -5706,7 +7503,7 @@ var messageHistory = async (ctx, req) => {
       thread_id: rec.thread_id,
       turns: result.data,
       nextCursor: result.nextCursor
-    });
+    }, { truncate });
   }
   return response;
 };
@@ -5714,7 +7511,8 @@ var messageTail = async (ctx, req, stream) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const nRaw = getFlag2(req, "n");
   const n = typeof nRaw === "string" ? parseInt(nRaw, 10) : typeof nRaw === "number" ? nRaw : 3;
-  const format = asString4(getFlag2(req, "format")) ?? "json";
+  const format = asString5(getFlag2(req, "format")) ?? "json";
+  const truncate = parseTruncateFlag(getFlag2(req, "truncate"));
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
   const follow = isTrue3(getFlag2(req, "follow")) || isTrue3(getFlag2(req, "f"));
   const snapshot = async () => {
@@ -5737,7 +7535,7 @@ var messageTail = async (ctx, req, stream) => {
         turns: result.data,
         thread: thread?.thread ?? null,
         follow
-      });
+      }, { truncate });
     }
     return response;
   };
@@ -5754,6 +7552,115 @@ var messageTail = async (ctx, req, stream) => {
   stream.onClose(() => sub.dispose());
   return { streaming: true };
 };
+var messageWait = async (ctx, req) => {
+  const { user, rec } = await resolveSessionRecord(ctx, req);
+  if (rec.state !== "live") {
+    return {
+      session: rec.name,
+      thread_id: rec.thread_id,
+      turn_id: rec.current_turn_id ?? rec.last_turn_id ?? null,
+      outcome: "error",
+      event_type: SESSION_CRASHED_EVENT_TYPE,
+      error: {
+        reason: rec.crash_reason ?? "session_crashed"
+      }
+    };
+  }
+  const requestedTurnId = asString5(getFlag2(req, "for"));
+  const timeoutSeconds = parseTimeoutSeconds(getFlag2(req, "timeout"));
+  const sessionKey = keyFor2(user, rec.name);
+  const initialTurnId = requestedTurnId ?? rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+  if (requestedTurnId) {
+    const historical = await findTerminalEvent(ctx, user, rec.name, requestedTurnId);
+    if (historical) return terminalWaitResult(rec.name, rec.thread_id, requestedTurnId, historical);
+  } else if (initialTurnId) {
+    const historical = await findTerminalEvent(ctx, user, rec.name, initialTurnId);
+    if (historical) return terminalWaitResult(rec.name, rec.thread_id, initialTurnId, historical);
+  }
+  return await new Promise((resolve) => {
+    let settled = false;
+    let targetTurnId = requestedTurnId;
+    let timer = null;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      sub.dispose();
+      resolve(result);
+    };
+    const sub = ctx.events.subscribe(user, (event) => {
+      if (event.session !== rec.name) return;
+      if (event.thread_id !== rec.thread_id) return;
+      if (!targetTurnId) {
+        targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+      }
+      if (!targetTurnId) {
+        if (event.type === "turn.started") {
+          const turnId = eventTurnId(event);
+          if (!turnId) return;
+          targetTurnId = turnId;
+        } else if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
+          settle({
+            session: rec.name,
+            thread_id: rec.thread_id,
+            turn_id: null,
+            outcome: "error",
+            event_type: event.type,
+            event_id: event.id,
+            error: event.payload
+          });
+        }
+        return;
+      }
+      if (event.type === "turn.completed" && eventTurnId(event) === targetTurnId) {
+        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
+        return;
+      }
+      if (event.type === "turn.error" && eventTurnId(event) === targetTurnId) {
+        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
+        return;
+      }
+      if (event.type === SESSION_CRASHED_EVENT_TYPE && eventCrashTurnId(event) === targetTurnId) {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId,
+          outcome: "error",
+          event_type: event.type,
+          event_id: event.id,
+          error: event.payload
+        });
+        return;
+      }
+      if (event.type === SESSION_CLOSED_EVENT_TYPE) {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId,
+          outcome: "error",
+          event_type: event.type,
+          event_id: event.id,
+          error: event.payload
+        });
+      }
+    });
+    if (!targetTurnId && !requestedTurnId) {
+      targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+    }
+    if (timeoutSeconds > 0) {
+      timer = setTimeout(() => {
+        settle({
+          session: rec.name,
+          thread_id: rec.thread_id,
+          turn_id: targetTurnId ?? null,
+          outcome: "timeout",
+          timeout_s: timeoutSeconds
+        });
+      }, timeoutSeconds * 1e3);
+      timer.unref();
+    }
+  });
+};
 async function resolveLive(ctx, req) {
   const user = req.bearer;
   if (!user) throw invalidParams("bearer token required");
@@ -5765,16 +7672,27 @@ async function resolveLive(ctx, req) {
   if (!rec) {
     throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
   }
+  if (rec.state === "crashed") {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is crashed; run 'codex-team -b ${user} session heal ${rec.name}'`);
+  }
   const client = ctx.pool.clientForSession(keyFor2(user, rec.name));
-  if (!client) {
-    const fresh = await ctx.pool.acquire(
-      user,
-      keyFor2(user, rec.name),
-      buildExperimentalToolAppServerOptions(rec.experimental_tools ?? [])
-    );
-    return { user, rec, client: fresh };
+  if (!isClientAlive2(client)) {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
   }
   return { user, rec, client };
+}
+async function resolveSessionRecord(ctx, req) {
+  const user = req.bearer;
+  if (!user) throw invalidParams("bearer token required");
+  if (!ctx.users.has(user)) {
+    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
+  }
+  const identifier = asPositional2(req, 0, "session");
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
+  }
+  return { user, rec };
 }
 function requirePending(ctx, user, requestId) {
   const p = ctx.pending.get(requestId);
@@ -5788,16 +7706,18 @@ function claimPending(ctx, user, requestId) {
   return claimed;
 }
 function emitPendingWarning(ctx, user, session, threadId, payload) {
-  void ctx.events.append(user, {
-    type: "warning",
-    session,
-    thread_id: threadId,
-    payload
-  }).catch(() => void 0);
+  setImmediate(() => {
+    void ctx.events.append(user, {
+      type: "warning",
+      session,
+      thread_id: threadId,
+      payload
+    }).catch(() => void 0);
+  });
 }
 async function readPromptInput(req) {
   const positional = asPositionalOptional2(req, 1);
-  const fromFile = asString4(getFlag2(req, "file"));
+  const fromFile = asString5(getFlag2(req, "file"));
   const fromStdin = isTrue3(getFlag2(req, "stdin"));
   const sources = [positional, fromFile, fromStdin].filter((v) => v !== null && v !== false).length;
   if (sources === 0) {
@@ -5809,18 +7729,18 @@ async function readPromptInput(req) {
   if (positional) return positional;
   if (fromFile) {
     try {
-      return await import_node_fs12.default.promises.readFile(fromFile, "utf8");
+      return await import_node_fs15.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
   }
-  const stdinContent = asString4(req.params.stdin_content);
+  const stdinContent = asString5(req.params.stdin_content);
   if (stdinContent === null) throw invalidParams("--stdin requested but no content forwarded from cli");
   return stdinContent;
 }
 async function readJsonInput(req) {
-  const jsonRaw = asString4(getFlag2(req, "json"));
-  const fromFile = asString4(getFlag2(req, "file"));
+  const jsonRaw = asString5(getFlag2(req, "json"));
+  const fromFile = asString5(getFlag2(req, "file"));
   const fromStdin = isTrue3(getFlag2(req, "stdin"));
   const sources = [jsonRaw, fromFile, fromStdin].filter((v) => v !== null && v !== false).length;
   if (sources === 0) return null;
@@ -5829,12 +7749,12 @@ async function readJsonInput(req) {
   if (jsonRaw) raw = jsonRaw;
   else if (fromFile) {
     try {
-      raw = await import_node_fs12.default.promises.readFile(fromFile, "utf8");
+      raw = await import_node_fs15.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
   } else {
-    const stdinContent = asString4(req.params.stdin_content);
+    const stdinContent = asString5(req.params.stdin_content);
     if (stdinContent === null) throw invalidParams("--stdin requested but no content forwarded from cli");
     raw = stdinContent;
   }
@@ -5846,9 +7766,9 @@ async function readJsonInput(req) {
 }
 async function buildUserInput(text, attachments) {
   const items = [{ type: "text", text }];
-  for (const path12 of attachments) {
-    await assertAttachable(path12);
-    items.push({ type: "localImage", path: path12 });
+  for (const path16 of attachments) {
+    await assertAttachable(path16);
+    items.push({ type: "localImage", path: path16 });
   }
   return items;
 }
@@ -5859,16 +7779,31 @@ async function buildResponse(req, pending, shortcut) {
     return explicit;
   }
   if (!shortcut) throw invalidParams("supply a shortcut (accept|accept-session|decline|cancel) or --json/--file/--stdin");
-  switch (pending.kind) {
+  return buildApprovalShortcutResponse(pending.kind, pending.raw, shortcut);
+}
+function buildApprovalShortcutResponse(kind, raw, shortcut) {
+  switch (kind) {
     case "approval.command_execution":
     case "approval.file_change":
-      return { decision: commandOrFileShortcut(shortcut, pending.kind) };
+      return { decision: commandOrFileShortcut(shortcut, kind) };
     case "approval.permissions":
-      return permissionsShortcut(shortcut, pending.raw);
+      return permissionsShortcut(shortcut, raw);
     case "approval.mcp_elicitation":
-      return mcpElicitationShortcut(shortcut, pending.raw);
+      return mcpElicitationShortcut(shortcut, raw);
     default:
-      throw new CodexTeamError("invalid_decision", `unknown approval kind '${pending.kind}'`);
+      throw new CodexTeamError("invalid_decision", `unknown approval kind '${kind}'`);
+  }
+}
+function preferredAutoApprovalShortcut(kind) {
+  switch (kind) {
+    case "approval.command_execution":
+    case "approval.file_change":
+    case "approval.permissions":
+      return "accept-session";
+    case "approval.mcp_elicitation":
+      return "accept";
+    default:
+      return null;
   }
 }
 function commandOrFileShortcut(shortcut, kind) {
@@ -5933,7 +7868,7 @@ function asPositionalOptional2(req, idx) {
   const v = list[idx];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
-function asString4(v) {
+function asString5(v) {
   if (Array.isArray(v)) {
     const last = v[v.length - 1];
     return typeof last === "string" ? last : null;
@@ -5945,13 +7880,85 @@ function asStringArray(v) {
   if (typeof v === "string") return [v];
   return [];
 }
+function isClientAlive2(client) {
+  if (!client) return false;
+  const maybe = client;
+  if (typeof maybe.isAlive === "function") return maybe.isAlive();
+  return true;
+}
+function parseTimeoutSeconds(value) {
+  if (value === void 0) return 600;
+  const raw = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(raw) || raw < 0) throw invalidParams("--timeout must be a non-negative number of seconds");
+  return Math.floor(raw);
+}
 function isTrue3(v) {
   return v === true || v === "true" || v === "1";
+}
+function eventTurnId(event) {
+  const turnId = event.payload.turn_id;
+  return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
+}
+function eventCrashTurnId(event) {
+  const turnId = event.payload.last_turn_id;
+  return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
+}
+function terminalWaitResult(session, threadId, turnId, event) {
+  const completedStatus = event.type === "turn.completed" ? event.payload.status : null;
+  const completedFields = event.type === "turn.completed" ? pickDefined(event.payload, [
+    "status",
+    "duration_ms",
+    "items_count",
+    "token_usage",
+    "ended_at",
+    "turn_items_included"
+  ]) : {};
+  return {
+    session,
+    thread_id: threadId,
+    turn_id: turnId,
+    outcome: event.type === "turn.completed" && completedStatus === "completed" ? "completed" : "error",
+    event_type: event.type,
+    event_id: event.id,
+    ...completedFields,
+    ...event.type === "turn.error" ? { error: event.payload.error ?? event.payload } : {}
+  };
+}
+async function findTerminalEvent(ctx, user, session, turnId) {
+  const listed = await ctx.events.listSince(user, null, { includeDelta: true });
+  if (!listed.ok) return null;
+  for (let i = listed.events.length - 1; i >= 0; i--) {
+    const event = listed.events[i];
+    if (event.session !== session) continue;
+    if (event.type !== "turn.completed" && event.type !== "turn.error") continue;
+    if (eventTurnId(event) !== turnId) continue;
+    return event;
+  }
+  return null;
+}
+function parseTruncateFlag(value) {
+  if (value === void 0) return void 0;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const normalized = Math.floor(value);
+    if (normalized >= 0) return normalized;
+    throw invalidParams("--truncate must be a non-negative integer");
+  }
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    return parseInt(value, 10);
+  }
+  throw invalidParams("--truncate must be a non-negative integer");
+}
+function pickDefined(source, keys) {
+  const picked = {};
+  for (const key of keys) {
+    if (source[key] !== void 0) picked[key] = source[key];
+  }
+  return picked;
 }
 async function assertAttachable(filePath) {
   let stat;
   try {
-    stat = await import_node_fs12.default.promises.stat(filePath);
+    stat = await import_node_fs15.default.promises.stat(filePath);
   } catch (e) {
     throw invalidParams(`--attach not readable: ${filePath}: ${e.message}`);
   }
@@ -6001,6 +8008,75 @@ async function listTurnsFromRelativeOffset(client, threadId, relativeSince, limi
   return { data, nextCursor };
 }
 
+// src/daemon/handlers/cursor.ts
+var cursorSave = async (ctx, req) => {
+  const user = requireUser2(ctx, req);
+  const name = reqPositional2(req, 0, "name");
+  const explicitEventId = asString6(getFlag3(req, "event-id"));
+  const eventId = explicitEventId ?? await currentTailEventId(ctx, user);
+  const cursor = await ctx.cursors.save(user, {
+    name,
+    event_id: eventId,
+    auto_update: true
+  });
+  return { cursor };
+};
+var cursorList = async (ctx, req) => {
+  const user = requireUser2(ctx, req);
+  return { cursors: ctx.cursors.list(user) };
+};
+var cursorGet = async (ctx, req) => {
+  const user = requireUser2(ctx, req);
+  const name = reqPositional2(req, 0, "name");
+  const cursor = ctx.cursors.get(user, name);
+  if (!cursor) throw invalidParams(`cursor '${name}' not found`);
+  return { event_id: cursor.event_id };
+};
+var cursorDelete = async (ctx, req) => {
+  const user = requireUser2(ctx, req);
+  const name = reqPositional2(req, 0, "name");
+  const deleted = await ctx.cursors.delete(user, name);
+  if (!deleted) throw invalidParams(`cursor '${name}' not found`);
+  return { deleted: true, name };
+};
+async function currentTailEventId(ctx, user) {
+  const listed = await ctx.events.listSince(user, null, { includeDelta: true });
+  if (!listed.ok) {
+    throw new CodexTeamError("internal", `failed to resolve current event tail for '${user}'`);
+  }
+  const last = listed.events[listed.events.length - 1];
+  return last?.id ?? null;
+}
+function requireUser2(ctx, req) {
+  const user = req.bearer;
+  if (!user) throw invalidParams("bearer token required");
+  if (!ctx.users.has(user)) {
+    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
+  }
+  return user;
+}
+function reqPositional2(req, index, name) {
+  const value = asPositionals2(req)[index];
+  if (!value) throw invalidParams(`missing positional '${name}'`);
+  return value;
+}
+function asPositionals2(req) {
+  const positionals = req.params.positionals;
+  return Array.isArray(positionals) ? positionals.filter((value) => typeof value === "string") : [];
+}
+function getFlag3(req, key) {
+  const flags = req.params.flags;
+  if (!flags || typeof flags !== "object") return void 0;
+  return flags[key];
+}
+function asString6(value) {
+  if (Array.isArray(value)) {
+    const last = value[value.length - 1];
+    return typeof last === "string" ? last : null;
+  }
+  return typeof value === "string" ? value : null;
+}
+
 // src/daemon/handlers/monitor.ts
 var import_node_child_process5 = require("child_process");
 var MAX_INTERVAL_QUEUE_EVENTS = 512;
@@ -6021,10 +8097,51 @@ var monitorEvents = async (ctx, req, stream) => {
   const intervalS = intervalGiven ? toInt4(flags["interval"], intervalDefault) : intervalDefault;
   if (intervalS <= 0 && !streamMode) throw invalidParams("--interval must be > 0");
   const includeDelta = isTrue4(flags["include-delta"]);
+  const summaryMode = isTrue4(flags["summary"]);
   const filterTypes = parseTypeList(flags["filter"]);
   const excludeTypes = parseTypeList(flags["exclude"]);
-  const sinceId = asString5(flags["since"]);
-  const sessionFilter = asString5(flags["session"]);
+  const sinceId = asString7(flags["since"]);
+  const cursorName = asString7(flags["cursor"]);
+  if (sinceId && cursorName) throw invalidParams("--since and --cursor are mutually exclusive");
+  const sessionFilter = asString7(flags["session"]);
+  let effectiveSinceId = sinceId;
+  let persistedCursorEventId = null;
+  let lastObservedEventId = null;
+  let lastAckedEventId = null;
+  let cursorWriteChain = Promise.resolve();
+  if (cursorName) {
+    const cursor = await ctx.cursors.ensure(user, {
+      name: cursorName,
+      event_id: null,
+      auto_update: true
+    });
+    effectiveSinceId = cursor.event_id;
+    persistedCursorEventId = cursor.event_id;
+    lastObservedEventId = cursor.event_id;
+    lastAckedEventId = cursor.event_id;
+  }
+  const emit = (event) => {
+    stream.chunk(summaryMode ? summarizeEvent(event) : event);
+  };
+  const scheduleCursorPersist = () => {
+    if (!cursorName) return;
+    const nextEventId = lastAckedEventId;
+    if (!nextEventId || nextEventId === persistedCursorEventId) return;
+    cursorWriteChain = cursorWriteChain.catch(() => void 0).then(async () => {
+      if (!nextEventId || nextEventId === persistedCursorEventId) return;
+      await ctx.cursors.saveBestEffort(user, {
+        name: cursorName,
+        event_id: nextEventId,
+        auto_update: true
+      });
+      persistedCursorEventId = nextEventId;
+    });
+  };
+  stream.onAck((ack) => {
+    if (!ack.event_id) return;
+    lastAckedEventId = ack.event_id;
+    scheduleCursorPersist();
+  });
   const accept = (e) => {
     if (!includeDelta && isDeltaType(e.type)) return false;
     if (filterTypes && filterTypes.length > 0 && !filterTypes.includes(e.type)) return false;
@@ -6035,16 +8152,19 @@ var monitorEvents = async (ctx, req, stream) => {
     }
     return true;
   };
-  const backlog = await ctx.events.listSince(user, sinceId, { includeDelta: true });
+  const backlog = await ctx.events.listSince(user, effectiveSinceId, { includeDelta: true });
   if (!backlog.ok) {
     if (backlog.reason === "id_rotated") {
-      stream.end(new CodexTeamError("id_rotated", `event '${sinceId}' has been rotated out`, {
+      stream.end(new CodexTeamError("id_rotated", `event '${effectiveSinceId}' has been rotated out`, {
         oldest_available_id: backlog.oldest_available_id
       }));
     } else {
-      stream.end(invalidParams(`event '${sinceId}' not found`));
+      stream.end(invalidParams(`event '${effectiveSinceId}' not found`));
     }
     return { streaming: true };
+  }
+  if (backlog.events.length > 0) {
+    lastObservedEventId = backlog.events[backlog.events.length - 1]?.id ?? lastObservedEventId;
   }
   const initialEvents = backlog.events.filter(accept);
   const queue = streamMode ? [...initialEvents] : [];
@@ -6087,15 +8207,19 @@ var monitorEvents = async (ctx, req, stream) => {
     for (const event of initialEvents) enqueueIntervalEvent(event);
   }
   if (streamMode) {
-    for (const e of queue) stream.chunk(e);
+    for (const e of queue) emit(e);
     queue.length = 0;
     const sub2 = ctx.events.subscribe(user, (e) => {
-      if (accept(e)) stream.chunk(e);
+      lastObservedEventId = e.id;
+      if (accept(e)) emit(e);
     });
-    stream.onClose(() => sub2.dispose());
+    stream.onClose(() => {
+      sub2.dispose();
+    });
     return { streaming: true };
   }
   const sub = ctx.events.subscribe(user, (e) => {
+    lastObservedEventId = e.id;
     if (accept(e)) enqueueIntervalEvent(e);
   });
   let closed = false;
@@ -6113,11 +8237,11 @@ var monitorEvents = async (ctx, req, stream) => {
     if (closed || draining) return;
     draining = true;
     const overflowEvent = takeOverflowEvent();
-    if (overflowEvent) stream.chunk(overflowEvent);
+    if (overflowEvent) emit(overflowEvent);
     const batch = queue.splice(0, MAX_FLUSH_EVENTS_PER_TICK);
     for (const event of batch) {
       queueBytes = Math.max(0, queueBytes - eventSize(event));
-      stream.chunk(event);
+      emit(event);
     }
     draining = false;
     if (overflowDropped > 0 || queue.length > 0) scheduleDrain(1);
@@ -6139,7 +8263,7 @@ var monitorEvents = async (ctx, req, stream) => {
 };
 var monitorAlarm = async (_ctx, req, stream) => {
   if (!stream) throw new CodexTeamError("internal", "monitor alarm requires streaming");
-  const positionals = asPositionals2(req);
+  const positionals = asPositionals3(req);
   const intervalS = toInt4(positionals[0], 0);
   if (intervalS <= 0) throw invalidParams("first positional must be interval seconds (positive integer)");
   const command = positionals[1];
@@ -6285,14 +8409,14 @@ function asFlags2(req) {
   const f = req.params.flags;
   return f && typeof f === "object" ? f : {};
 }
-function asPositionals2(req) {
+function asPositionals3(req) {
   const p = req.params.positionals;
   return Array.isArray(p) ? p.filter((x) => typeof x === "string") : [];
 }
 function isTrue4(v) {
   return v === true || v === "true" || v === "1";
 }
-function asString5(v) {
+function asString7(v) {
   if (Array.isArray(v)) {
     const last = v[v.length - 1];
     return typeof last === "string" ? last : null;
@@ -6308,7 +8432,7 @@ function toInt4(v, fallback) {
   return fallback;
 }
 function parseTypeList(v) {
-  const s = asString5(v);
+  const s = asString7(v);
   if (!s) return null;
   return s.split(",").map((x) => x.trim()).filter(Boolean);
 }
@@ -6318,6 +8442,46 @@ function numConfig(ctx, key, fallback) {
 }
 function eventSize(event) {
   return Buffer.byteLength(JSON.stringify(event));
+}
+function summarizeEvent(event) {
+  return {
+    id: event.id,
+    ts: event.ts,
+    type: event.type,
+    session: event.session,
+    key: summarizeEventKey(event)
+  };
+}
+function summarizeEventKey(event) {
+  const payload = event.payload;
+  if (event.type.startsWith("turn.")) return asPayloadString(payload.turn_id);
+  if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
+    return labeledSummaryValue("reason", payload.reason ?? payload.crash_reason ?? payload.why);
+  }
+  if (event.type === AUTO_APPROVED_EVENT_TYPE) {
+    return labeledSummaryValue("matched_pattern", payload.matched_pattern ?? payload.matchedPattern) ?? asPayloadString(payload.request_id);
+  }
+  if (event.type.startsWith("approval.") || event.type === "user_input.request" || event.type === "server_request_resolved") {
+    return asPayloadString(payload.request_id);
+  }
+  if (event.type.startsWith("item.")) {
+    return asPayloadString(payload.type) ?? asPayloadString(payload.item_type) ?? asPayloadString(payload.item_id);
+  }
+  if (event.type.startsWith("thread.")) return asPayloadString(payload.thread_id) ?? event.thread_id;
+  if (event.type.startsWith("hook.")) return asPayloadString(payload.hook_id);
+  if (event.type.startsWith("mcp_server.")) return asPayloadString(payload.name);
+  if (event.type.startsWith("fuzzy_file_search.")) return asPayloadString(payload.search_session_id);
+  if (event.type === "monitor.overflow") return asPayloadString(payload.dropped_count);
+  return asPayloadString(payload.turn_id) ?? asPayloadString(payload.request_id) ?? asPayloadString(payload.type) ?? asPayloadString(payload.item_id) ?? asPayloadString(payload.thread_id) ?? asPayloadString(payload.name) ?? event.thread_id;
+}
+function asPayloadString(value) {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+function labeledSummaryValue(label, value) {
+  const rendered = asPayloadString(value);
+  return rendered ? `${label}=${rendered}` : null;
 }
 
 // src/daemon/dispatch.ts
@@ -6353,7 +8517,14 @@ var HANDLERS = {
   "message:history": messageHistory,
   "message:tail": messageTail,
   "monitor:events": monitorEvents,
-  "monitor:alarm": monitorAlarm
+  "monitor:alarm": monitorAlarm,
+  "session:health": sessionHealth,
+  "session:heal": sessionHeal,
+  "message:wait": messageWait,
+  "cursor:save": cursorSave,
+  "cursor:list": cursorList,
+  "cursor:get": cursorGet,
+  "cursor:delete": cursorDelete
 };
 function getHandler(method) {
   const h = HANDLERS[method];
@@ -6372,12 +8543,17 @@ async function startServer(ctx) {
 }
 function handleConnection(ctx, socket) {
   const closeCallbacks = /* @__PURE__ */ new Set();
+  const activeStreams = /* @__PURE__ */ new Map();
   onMessages(
     socket,
     async (msg) => {
+      if (msg.kind === "notification") {
+        handleNotification(msg, activeStreams);
+        return;
+      }
       if (msg.kind !== "request") return;
       try {
-        await handleRequest(ctx, socket, msg, closeCallbacks);
+        await handleRequest(ctx, socket, msg, closeCallbacks, activeStreams);
       } catch (e) {
         sendError(socket, msg.id, e);
       }
@@ -6389,6 +8565,7 @@ function handleConnection(ctx, socket) {
         } catch {
         }
       }
+      activeStreams.clear();
       closeCallbacks.clear();
     }
   );
@@ -6396,16 +8573,17 @@ function handleConnection(ctx, socket) {
     logger.debug("socket error", { err: e.message });
   });
 }
-async function handleRequest(ctx, socket, req, closeCallbacks) {
+async function handleRequest(ctx, socket, req, closeCallbacks, activeStreams) {
   ctx.activity.touch();
   const handler = getHandler(req.method);
   const streaming = req.params?.streaming === true;
   if (streaming) {
-    const stream = createStreamHandle(socket, req.id, closeCallbacks);
+    const stream = createStreamHandle(socket, req.id, closeCallbacks, () => activeStreams.delete(req.id));
+    activeStreams.set(req.id, stream);
     try {
-      await handler(ctx, req, stream);
+      await handler(ctx, req, stream.handle);
     } catch (e) {
-      stream.end(toCodexTeamError(e));
+      stream.handle.end(toCodexTeamError(e));
     }
     return;
   }
@@ -6417,11 +8595,19 @@ async function handleRequest(ctx, socket, req, closeCallbacks) {
   };
   writeMessage(socket, resp);
 }
-function createStreamHandle(socket, id, closeCallbacks) {
+function createStreamHandle(socket, id, closeCallbacks, onRetire) {
   let ended = false;
+  let retired = false;
   let blocked = false;
   let queuedBytes = 0;
   const queuedFrames = [];
+  const ackCallbacks = /* @__PURE__ */ new Set();
+  const retire = () => {
+    if (retired) return;
+    retired = true;
+    ackCallbacks.clear();
+    onRetire();
+  };
   const flushQueued = () => {
     while (queuedFrames.length > 0) {
       const frame = queuedFrames[0];
@@ -6436,7 +8622,10 @@ function createStreamHandle(socket, id, closeCallbacks) {
   };
   const onDrain = () => flushQueued();
   socket.on("drain", onDrain);
-  closeCallbacks.add(() => socket.off("drain", onDrain));
+  closeCallbacks.add(() => {
+    retire();
+    socket.off("drain", onDrain);
+  });
   const enqueueFrame = (frame) => {
     if (ended) return;
     if (!blocked && queuedFrames.length === 0) {
@@ -6451,6 +8640,7 @@ function createStreamHandle(socket, id, closeCallbacks) {
       queuedFrames.length = 0;
       queuedBytes = 0;
       ended = true;
+      retire();
       const msg = {
         kind: "stream_end",
         id,
@@ -6469,31 +8659,58 @@ function createStreamHandle(socket, id, closeCallbacks) {
     flushQueued();
   };
   return {
-    chunk(data) {
-      if (ended) return;
-      const msg = { kind: "stream_chunk", id, data };
-      enqueueFrame(JSON.stringify(msg) + "\n");
-    },
-    end(error) {
-      if (ended) return;
-      ended = true;
-      const msg = { kind: "stream_end", id };
-      if (error) {
-        msg.error = { code: error.code, message: error.message, ...error.data !== void 0 ? { data: error.data } : {} };
+    handle: {
+      chunk(data) {
+        if (ended) return;
+        const msg = { kind: "stream_chunk", id, data };
+        enqueueFrame(JSON.stringify(msg) + "\n");
+      },
+      end(error) {
+        if (ended) return;
+        ended = true;
+        retire();
+        const msg = { kind: "stream_end", id };
+        if (error) {
+          msg.error = { code: error.code, message: error.message, ...error.data !== void 0 ? { data: error.data } : {} };
+        }
+        if (queuedFrames.length > 0) {
+          const frame = JSON.stringify(msg) + "\n";
+          queuedFrames.push(frame);
+          queuedBytes += Buffer.byteLength(frame);
+          flushQueued();
+          return;
+        }
+        writeMessage(socket, msg);
+      },
+      onClose(cb) {
+        closeCallbacks.add(cb);
+      },
+      onAck(cb) {
+        ackCallbacks.add(cb);
       }
-      if (queuedFrames.length > 0) {
-        const frame = JSON.stringify(msg) + "\n";
-        queuedFrames.push(frame);
-        queuedBytes += Buffer.byteLength(frame);
-        flushQueued();
-        return;
-      }
-      writeMessage(socket, msg);
     },
-    onClose(cb) {
-      closeCallbacks.add(cb);
+    ack(params) {
+      if (ended || retired) return;
+      const ack = normalizeStreamAck(params);
+      if (!ack) return;
+      for (const cb of ackCallbacks) cb(ack);
     }
   };
+}
+function handleNotification(msg, activeStreams) {
+  if (msg.method !== "stream_ack") return;
+  const streamId = asString8(msg.params?.id);
+  if (!streamId) return;
+  const params = msg.params && typeof msg.params === "object" && !Array.isArray(msg.params) ? msg.params : {};
+  activeStreams.get(streamId)?.ack(params);
+}
+function normalizeStreamAck(params) {
+  const eventId = asString8(params.event_id);
+  if (!eventId) return null;
+  return { event_id: eventId };
+}
+function asString8(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 function sendError(socket, id, e) {
   const err2 = toCodexTeamError(e);
@@ -6521,6 +8738,9 @@ function toCodexTeamError(e) {
   if (e instanceof Error) return new CodexTeamError("internal", e.message);
   return new CodexTeamError("internal", String(e));
 }
+
+// src/daemon/wire.ts
+var import_node_crypto7 = __toESM(require("crypto"));
 
 // src/daemon/normalize.ts
 var NOTIF_MAP = {
@@ -6577,14 +8797,14 @@ var REQUEST_MAP = {
 };
 function normalizeNotification(n) {
   const type = NOTIF_MAP[n.method] ?? fallbackType(n.method);
-  const params = asObject2(n.params);
+  const params = asObject5(n.params);
   const threadId = extractThreadId(params);
   const payload = buildNotificationPayload(type, params);
   return { type, threadId, payload, isDelta: type.endsWith("_delta") };
 }
 function normalizeServerRequest(r) {
   const kind = REQUEST_MAP[r.method] ?? fallbackType(r.method);
-  const params = asObject2(r.params);
+  const params = asObject5(r.params);
   const threadId = typeof params.threadId === "string" ? params.threadId : null;
   const payload = {
     kind,
@@ -6602,6 +8822,7 @@ function normalizeServerRequest(r) {
   } else if (kind === "approval.permissions") {
     if (params.reason !== void 0) payload.reason = params.reason;
     if (params.cwd !== void 0) payload.cwd = params.cwd;
+    if (params.command !== void 0) payload.command = params.command;
     if (params.permissions !== void 0) payload.permissions = params.permissions;
   } else if (kind === "approval.mcp_elicitation") {
     if (params.serverName !== void 0) payload.server_name = params.serverName;
@@ -6612,26 +8833,37 @@ function normalizeServerRequest(r) {
   } else if (kind === "user_input.request") {
     if (Array.isArray(params.questions)) payload.questions = params.questions;
   }
-  return { type: kind, threadId, payload, kind };
+  return { type: kind, threadId, payload, kind, autoApproveTarget: extractAutoApproveTarget(kind, payload) };
 }
 function buildNotificationPayload(type, params) {
   switch (type) {
     case "turn.started":
     case "turn.completed": {
-      const turn = asObject2(params.turn);
+      const turn = asObject5(params.turn);
       const items = Array.isArray(turn.items) ? turn.items : [];
+      if (type === "turn.completed") {
+        return {
+          turn_id: turn.id ?? null,
+          status: normalizeTurnCompletedStatus(turn.status),
+          duration_ms: deriveDurationMs(turn),
+          items_count: items.length,
+          token_usage: deriveTurnTokenUsage(turn),
+          ended_at: deriveTurnEndedAt(turn),
+          turn_items_included: false
+        };
+      }
       return {
         turn_id: turn.id ?? null,
         status: turn.status ?? null,
-        started_at: asNumber(turn.startedAt),
-        completed_at: asNumber(turn.completedAt),
+        started_at: asNumber2(turn.startedAt),
+        completed_at: asNumber2(turn.completedAt),
         duration_ms: deriveDurationMs(turn),
         item_count: items.length,
         turn
       };
     }
     case "turn.error": {
-      const err2 = asObject2(params.error);
+      const err2 = asObject5(params.error);
       return {
         turn_id: params.turnId ?? null,
         will_retry: Boolean(params.willRetry),
@@ -6644,7 +8876,7 @@ function buildNotificationPayload(type, params) {
     }
     case "item.started":
     case "item.completed": {
-      const item = asObject2(params.item);
+      const item = asObject5(params.item);
       return {
         item_id: params.itemId ?? item.id ?? null,
         turn_id: params.turnId ?? null,
@@ -6653,7 +8885,7 @@ function buildNotificationPayload(type, params) {
       };
     }
     case "thread.started": {
-      const thread = asObject2(params.thread);
+      const thread = asObject5(params.thread);
       return {
         thread_id: thread.id ?? null,
         source: thread.source ?? null,
@@ -6711,7 +8943,7 @@ function buildNotificationPayload(type, params) {
       };
     case "hook.started":
     case "hook.completed": {
-      const run = asObject2(params.run);
+      const run = asObject5(params.run);
       return {
         turn_id: params.turnId ?? null,
         hook_id: run.id ?? null,
@@ -6740,37 +8972,71 @@ function buildNotificationPayload(type, params) {
   }
 }
 function deriveDurationMs(turn) {
-  const durationMs = asNumber(turn.durationMs);
+  const durationMs = asNumber2(turn.durationMs);
   if (durationMs !== null) return durationMs;
-  const startedAt = asNumber(turn.startedAt);
-  const completedAt = asNumber(turn.completedAt);
+  const startedAt = asNumber2(turn.startedAt);
+  const completedAt = asNumber2(turn.completedAt);
   if (startedAt !== null && completedAt !== null) {
     const deltaMs = (completedAt - startedAt) * 1e3;
     if (Number.isFinite(deltaMs)) return Math.max(0, Math.round(deltaMs));
   }
   return null;
 }
+function deriveTurnEndedAt(turn) {
+  return asNumber2(turn.endedAt) ?? asNumber2(turn.completedAt);
+}
+function normalizeTurnCompletedStatus(value) {
+  if (typeof value !== "string") return null;
+  if (value === "completed") return "completed";
+  if (value === "cancelled" || value === "canceled") return "cancelled";
+  if (value === "errored" || value === "error" || value === "failed") return "errored";
+  return null;
+}
+function deriveTurnTokenUsage(turn) {
+  const usageSource = turn.tokenUsage ?? turn.token_usage ?? turn.usage;
+  const usage = asObject5(usageSource);
+  const prompt = asNumber2(usage.prompt) ?? asNumber2(usage.promptTokens) ?? asNumber2(usage.prompt_tokens) ?? asNumber2(usage.input) ?? asNumber2(usage.inputTokens) ?? asNumber2(usage.input_tokens);
+  const completion = asNumber2(usage.completion) ?? asNumber2(usage.completionTokens) ?? asNumber2(usage.completion_tokens) ?? asNumber2(usage.output) ?? asNumber2(usage.outputTokens) ?? asNumber2(usage.output_tokens);
+  const total = asNumber2(usage.total) ?? asNumber2(usage.totalTokens) ?? asNumber2(usage.total_tokens);
+  return { prompt, completion, total };
+}
 function fallbackType(method) {
   return method.replace(/\//g, ".").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }
-function asObject2(value) {
+function extractAutoApproveTarget(kind, payload) {
+  switch (kind) {
+    case "approval.command_execution":
+      return asString9(payload.command);
+    case "approval.permissions":
+      return asString9(payload.command) ?? asString9(payload.reason);
+    case "approval.file_change":
+      return asString9(payload.reason) ?? asString9(payload.grant_root);
+    case "approval.mcp_elicitation":
+      return asString9(payload.url) ?? asString9(payload.message) ?? asString9(payload.server_name);
+    default:
+      return null;
+  }
+}
+function asString9(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+function asObject5(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
   return {};
 }
-function asNumber(value) {
+function asNumber2(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 function extractThreadId(params) {
   if (typeof params.threadId === "string") return params.threadId;
-  const thread = asObject2(params.thread);
+  const thread = asObject5(params.thread);
   return typeof thread.id === "string" ? thread.id : null;
 }
 
 // src/daemon/wire.ts
 function wireDaemonEvents(ctx) {
-  const recoveringSessions = /* @__PURE__ */ new Set();
   ctx.pool.on("notification", (e) => {
-    void handleNotification(ctx, recoveringSessions, e).catch((err2) => {
+    void handleNotification2(ctx, e).catch((err2) => {
       logger.warn("notification handling failed", { err: err2.message });
     });
   });
@@ -6780,24 +9046,76 @@ function wireDaemonEvents(ctx) {
     });
   });
   ctx.pool.on("client_close", (e) => {
-    void handleClientClose(ctx, recoveringSessions, e).catch((err2) => {
+    void handleClientClose(ctx, e).catch((err2) => {
       logger.warn("client close handling failed", { err: err2.message });
     });
   });
 }
-async function handleNotification(ctx, recoveringSessions, e) {
+async function handleNotification2(ctx, e) {
   const norm = normalizeNotification(e.notification);
   const sessionName = resolveSession(ctx, e.user, norm.threadId);
-  await ctx.events.append(e.user, {
+  const rec = sessionName ? ctx.sessions.get(e.user, sessionName) : null;
+  const logged = await ctx.events.append(e.user, {
     type: norm.type,
     session: sessionName,
     thread_id: norm.threadId,
     payload: norm.payload
   });
-  if (norm.type === "turn.started" && sessionName) {
-    ctx.queues.setCurrentTurn(keyFor3(e.user, sessionName), norm.payload.turn_id ?? null);
+  if (norm.type === "turn.started" && sessionName && rec) {
+    const turnId = norm.payload.turn_id ?? null;
+    ctx.queues.setCurrentTurn(keyFor3(e.user, sessionName), turnId);
+    ctx.sessions.update(e.user, sessionName, {
+      state: "live",
+      crash_reason: null,
+      last_turn_id: turnId,
+      current_turn_id: turnId,
+      current_turn_started_at: isoFromUnixSeconds(norm.payload.started_at, logged.ts),
+      current_item_type: null,
+      items_in_turn: 0
+    });
+  }
+  if (norm.type === "item.started" && sessionName && rec) {
+    ctx.sessions.update(e.user, sessionName, {
+      current_item_type: norm.payload.type ?? null,
+      last_turn_id: norm.payload.turn_id ?? rec.last_turn_id ?? null
+    });
+  }
+  if (norm.type === "item.completed" && sessionName && rec) {
+    ctx.sessions.update(e.user, sessionName, {
+      current_item_type: null,
+      items_in_turn: (rec.items_in_turn ?? 0) + 1,
+      last_turn_id: norm.payload.turn_id ?? rec.last_turn_id ?? null
+    });
+  }
+  if (norm.type === "thread.token_usage_updated" && sessionName && rec) {
+    const tokenUsage = normalizeTokenUsage(norm.payload.token_usage);
+    if (tokenUsage) {
+      ctx.sessions.update(e.user, sessionName, {
+        token_usage_last_turn: tokenUsage,
+        last_turn_id: norm.payload.turn_id ?? rec.last_turn_id ?? null
+      });
+    }
+  }
+  if (norm.type === "turn.error" && sessionName && rec) {
+    ctx.sessions.update(e.user, sessionName, {
+      last_turn_id: norm.payload.turn_id ?? rec.last_turn_id ?? null,
+      current_turn_id: null,
+      current_turn_started_at: null,
+      current_item_type: null,
+      items_in_turn: 0
+    });
   }
   if (norm.type === "turn.completed" && sessionName && norm.threadId) {
+    if (rec) {
+      ctx.sessions.update(e.user, sessionName, {
+        last_turn_id: norm.payload.turn_id ?? rec.last_turn_id ?? null,
+        current_turn_id: null,
+        current_turn_started_at: null,
+        current_item_type: null,
+        items_in_turn: 0,
+        turn_count: (rec.turn_count ?? 0) + 1
+      });
+    }
     const client = ctx.pool.clientForSession(keyFor3(e.user, sessionName));
     void ctx.queues.onTurnCompleted(keyFor3(e.user, sessionName), client, norm.threadId, ctx.retryOptions()).then(async (next) => {
       if (next.turn_id) {
@@ -6840,16 +9158,7 @@ async function handleNotification(ctx, recoveringSessions, e) {
   }
   if (norm.type === "thread.closed" && sessionName) {
     try {
-      const sessionKey = keyFor3(e.user, sessionName);
-      ctx.pool.release(sessionKey);
-      ctx.queues.dispose(sessionKey);
-      ctx.sessions.remove(e.user, sessionName);
-      for (const p of ctx.pending.removeForSession(e.user, sessionName)) {
-        try {
-          p.client.respondError(p.jsonrpc_id, -32e3, "session detached");
-        } catch {
-        }
-      }
+      await closeSession(ctx, e.user, sessionName, "user_detach", false);
     } catch (err2) {
       logger.warn("thread closed cleanup failed", { session: sessionName, err: err2.message });
     }
@@ -6860,19 +9169,27 @@ async function handleNotification(ctx, recoveringSessions, e) {
       const jsonrpcId = reqId;
       const client = ctx.pool.clientById(e.clientId);
       if (client) {
-        ctx.pending.removeByJsonrpcId(client, jsonrpcId);
-      } else {
-        for (const p of ctx.pending.listForUser(e.user)) {
-          if (String(p.jsonrpc_id) === String(jsonrpcId)) {
-            ctx.pending.remove(p.request_id);
-            break;
-          }
+        const removed = ctx.pending.removeByJsonrpcId(client, jsonrpcId);
+        if (removed?.session_name) {
+          adjustPendingCounts(ctx, removed.user, removed.session_name, removed.kind, -1);
         }
+      } else {
+        logger.warn("ignoring server_request_resolved for unknown client", {
+          user: e.user,
+          client_id: e.clientId,
+          jsonrpc_id: jsonrpcId
+        });
       }
     }
   }
   if (norm.type === "client_close" && sessionName && norm.threadId) {
-    void recoverSession(ctx, recoveringSessions, e.user, sessionName, norm.threadId);
+    if (isSessionIdle(ctx, e.user, sessionName)) {
+      try {
+        await closeSession(ctx, e.user, sessionName, "idle_unload", true);
+      } catch (err2) {
+        logger.warn("idle unload cleanup failed", { session: sessionName, err: err2.message });
+      }
+    }
   }
 }
 async function handleServerRequest(ctx, e) {
@@ -6892,6 +9209,9 @@ async function handleServerRequest(ctx, e) {
     e.respondError(-32e3, "no client available");
     return;
   }
+  if (await maybeAutoApproveRequest(ctx, e.user, sessionName, norm, effectiveClient, e.request.id)) {
+    return;
+  }
   const pending = ctx.pending.add({
     client: effectiveClient,
     jsonrpc_id: e.request.id,
@@ -6903,6 +9223,7 @@ async function handleServerRequest(ctx, e) {
     raw: norm.payload.raw
   });
   const payload = { ...norm.payload, request_id: pending.request_id };
+  adjustPendingCounts(ctx, e.user, sessionName, norm.kind, 1);
   await ctx.events.append(e.user, {
     type: norm.type,
     session: sessionName,
@@ -6910,69 +9231,100 @@ async function handleServerRequest(ctx, e) {
     payload
   });
 }
-async function handleClientClose(ctx, recoveringSessions, e) {
+async function handleClientClose(ctx, e) {
   if (e.reason !== "unexpected") return;
   for (const sessionKey of e.sessions) {
     const [user, sessionName] = parseKey(sessionKey);
     if (!user || !sessionName) continue;
     const rec = ctx.sessions.get(user, sessionName);
     if (!rec) continue;
-    ctx.sessions.update(user, sessionName, { recovery_state: "degraded" });
-    await ctx.events.append(user, {
-      type: "turn.error",
-      session: sessionName,
-      thread_id: rec.thread_id,
-      payload: {
-        will_retry: false,
-        error: {
-          message: "app-server process exited unexpectedly",
-          codex_error_info: "internal_server_error",
-          additional_details: `exit_code=${e.exitCode ?? "null"}`
+    const currentTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+    const reason = `app-server process exited unexpectedly (exit_code=${e.exitCode ?? "null"})`;
+    ctx.sessions.update(user, sessionName, {
+      state: "crashed",
+      recovery_state: "degraded",
+      crash_reason: reason,
+      pending_approvals: 0,
+      pending_user_inputs: 0,
+      current_item_type: null
+    });
+    await appendSessionCrashed(ctx, user, rec.name, rec.thread_id, reason, currentTurnId ?? rec.last_turn_id ?? null);
+    if (currentTurnId) {
+      await ctx.events.append(user, {
+        type: "turn.error",
+        session: sessionName,
+        thread_id: rec.thread_id,
+        payload: {
+          turn_id: currentTurnId,
+          will_retry: false,
+          error: {
+            message: "app-server process exited unexpectedly",
+            codex_error_info: "internal_server_error",
+            additional_details: `exit_code=${e.exitCode ?? "null"}`
+          }
         }
-      }
-    });
+      });
+    }
+    await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, "session_crashed");
+    await appendSessionClosed2(ctx, user, rec.name, rec.thread_id, "app_server_crashed");
     ctx.queues.onClientClosed(sessionKey);
-    for (const p of ctx.pending.removeForSession(user, sessionName)) {
-      void p;
-    }
-    void recoverSession(ctx, recoveringSessions, user, sessionName, rec.thread_id);
-  }
-}
-async function recoverSession(ctx, recoveringSessions, user, sessionName, threadId) {
-  const recoveryKey = `${user}::${threadId}`;
-  if (recoveringSessions.has(recoveryKey)) return;
-  recoveringSessions.add(recoveryKey);
-  const sessionKey = keyFor3(user, sessionName);
-  try {
-    const rec = ctx.sessions.get(user, sessionName);
-    const client = await ctx.pool.acquire(
-      user,
-      sessionKey,
-      buildExperimentalToolAppServerOptions(rec?.experimental_tools ?? [])
-    );
-    await threadResume(client, threadId, ctx.retryOptions());
-    const live = ctx.sessions.get(user, sessionName);
-    if (live) {
-      ctx.sessions.update(user, sessionName, { recovery_state: null });
-    } else {
-      ctx.pool.release(sessionKey);
-    }
-  } catch (err2) {
-    logger.warn("failed to recover session after client exit", {
-      user,
-      session: sessionName,
-      thread_id: threadId,
-      err: err2.message
-    });
-    ctx.pool.release(sessionKey);
-  } finally {
-    recoveringSessions.delete(recoveryKey);
   }
 }
 function resolveSession(ctx, user, threadId) {
   if (!threadId) return null;
   const rec = ctx.sessions.get(user, threadId);
   return rec ? rec.name : null;
+}
+async function maybeAutoApproveRequest(ctx, user, sessionName, norm, client, jsonrpcId) {
+  if (!norm.kind.startsWith("approval.")) return false;
+  const rec = ctx.sessions.get(user, sessionName);
+  const patterns = rec?.autoApprovePatterns ?? [];
+  if (patterns.length === 0) return false;
+  const shortcut = preferredAutoApprovalShortcut(norm.kind);
+  if (!shortcut) return false;
+  const match = matchAutoApprovePattern(patterns, norm.autoApproveTarget);
+  if (!match) return false;
+  const requestId = `req-${import_node_crypto7.default.randomBytes(4).toString("hex")}`;
+  const response = buildApprovalShortcutResponse(norm.kind, norm.payload.raw, shortcut);
+  let ack;
+  try {
+    ack = await client.respondAck(jsonrpcId, response);
+  } catch (err2) {
+    await emitWarning(ctx, user, sessionName, norm.threadId, {
+      message: `auto-approval reply delivery failed: ${err2.message}`,
+      kind: "auto_approval_reply_delivery_failed",
+      request_id: requestId
+    });
+    return false;
+  }
+  await ctx.events.append(user, {
+    type: AUTO_APPROVED_EVENT_TYPE,
+    session: sessionName,
+    thread_id: norm.threadId,
+    payload: {
+      request_id: requestId,
+      kind: norm.kind,
+      matched_pattern: match.matchedPattern,
+      command_preview: match.commandPreview,
+      decision: shortcut
+    }
+  }).catch(() => void 0);
+  if (ack.backpressured) {
+    await emitWarning(ctx, user, sessionName, norm.threadId, {
+      message: "auto-approval reply is delayed by app-server stdin backpressure",
+      kind: "auto_approval_reply_backpressured",
+      request_id: requestId
+    });
+  }
+  return true;
+}
+async function emitWarning(ctx, user, session, threadId, payload) {
+  await ctx.events.append(user, {
+    type: "warning",
+    session,
+    thread_id: threadId,
+    payload
+  }).catch(() => void 0);
 }
 function keyFor3(user, name) {
   return `${user}::${name}`;
@@ -6982,10 +9334,81 @@ function parseKey(sessionKey) {
   if (idx < 0) return [null, null];
   return [sessionKey.slice(0, idx), sessionKey.slice(idx + 2)];
 }
+function adjustPendingCounts(ctx, user, sessionName, kind, delta) {
+  const rec = ctx.sessions.get(user, sessionName);
+  if (!rec) return;
+  if (kind.startsWith("approval.")) {
+    ctx.sessions.update(user, sessionName, {
+      pending_approvals: Math.max(0, (rec.pending_approvals ?? 0) + delta)
+    });
+    return;
+  }
+  if (kind === "user_input.request") {
+    ctx.sessions.update(user, sessionName, {
+      pending_user_inputs: Math.max(0, (rec.pending_user_inputs ?? 0) + delta)
+    });
+  }
+}
+function isSessionIdle(ctx, user, sessionName) {
+  const sessionKey = keyFor3(user, sessionName);
+  const rec = ctx.sessions.get(user, sessionName);
+  return Boolean(rec) && (rec?.state ?? "live") === "live" && (rec?.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey)) === null && ctx.queues.depth(sessionKey) === 0 && (rec?.pending_approvals ?? 0) === 0 && (rec?.pending_user_inputs ?? 0) === 0;
+}
+async function closeSession(ctx, user, sessionName, reason, unsubscribe) {
+  const rec = ctx.sessions.get(user, sessionName);
+  if (!rec) return;
+  const sessionKey = keyFor3(user, sessionName);
+  const client = ctx.pool.clientForSession(sessionKey);
+  if (unsubscribe && client) {
+    try {
+      await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions());
+    } catch {
+    }
+  }
+  ctx.pool.release(sessionKey);
+  ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, reason);
+  ctx.sessions.remove(user, sessionName);
+  await appendSessionClosed2(ctx, user, rec.name, rec.thread_id, reason);
+}
+async function appendSessionClosed2(ctx, user, session, threadId, reason) {
+  await ctx.events.append(user, {
+    type: SESSION_CLOSED_EVENT_TYPE,
+    session,
+    thread_id: threadId,
+    payload: {
+      session,
+      thread_id: threadId,
+      reason,
+      ts: (/* @__PURE__ */ new Date()).toISOString()
+    }
+  });
+}
+async function appendSessionCrashed(ctx, user, session, threadId, reason, lastTurnId) {
+  await ctx.events.append(user, {
+    type: SESSION_CRASHED_EVENT_TYPE,
+    session,
+    thread_id: threadId,
+    payload: {
+      session,
+      thread_id: threadId,
+      reason,
+      last_turn_id: lastTurnId
+    }
+  });
+}
 
 // src/daemon/run.ts
+var APP_SERVER_CRASHED_ON_RESTART_REASON = "app_server_crashed_on_restart";
 async function runDaemon() {
-  const ctx = buildContext();
+  const config = new ConfigStore();
+  const ctx = buildContext({
+    config,
+    cursors: new CursorStore(config.resolvedDataDir())
+  });
+  warnLegacyWindowsDataDir((warning) => {
+    logger.warn(warning.message);
+  });
   const pidPath = pidFilePath(ctx.dataDir);
   const acquired = await acquireDaemonOwnership(ctx.sockPath, pidPath);
   if (!acquired.ok) {
@@ -6993,10 +9416,11 @@ async function runDaemon() {
     return 1;
   }
   await reapOrphans(ctx.dataDir);
+  await reconcileLoadedSessionsAfterRestart(ctx);
   const cleanup = () => {
     unlinkSockIfStale(ctx.sockPath);
     try {
-      import_node_fs13.default.unlinkSync(pidPath);
+      import_node_fs16.default.unlinkSync(pidPath);
     } catch {
     }
   };
@@ -7016,7 +9440,7 @@ async function runDaemon() {
   } catch (e) {
     logger.error("failed to start server", { err: e.message });
     try {
-      import_node_fs13.default.unlinkSync(pidPath);
+      import_node_fs16.default.unlinkSync(pidPath);
     } catch {
     }
     return 1;
@@ -7025,23 +9449,94 @@ async function runDaemon() {
   return await new Promise(() => {
   });
 }
+async function reconcileLoadedSessionsAfterRestart(ctx) {
+  if (!ctx.users || typeof ctx.users.list !== "function") return;
+  if (!ctx.sessions || typeof ctx.sessions.listLive !== "function" || typeof ctx.sessions.update !== "function") return;
+  if (!ctx.pool || typeof ctx.pool.clientForSession !== "function") return;
+  if (!ctx.events || typeof ctx.events.append !== "function") return;
+  for (const user of ctx.users.list()) {
+    for (const rec of ctx.sessions.listLive(user.token)) {
+      if (rec.state !== "live") continue;
+      const sessionKey = keyFor4(user.token, rec.name);
+      if (isClientAlive3(ctx.pool.clientForSession(sessionKey))) continue;
+      const hadPersistedPending = (rec.pending_approvals ?? 0) > 0 || (rec.pending_user_inputs ?? 0) > 0;
+      const hadPendingMetadata = pendingRequestsForSession(
+        ctx,
+        user.token,
+        rec.name
+      ).length > 0;
+      const lastTurnId = rec.current_turn_id ?? rec.last_turn_id ?? null;
+      ctx.sessions.update(user.token, rec.name, {
+        state: "crashed",
+        recovery_state: "degraded",
+        crash_reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+        last_turn_id: lastTurnId,
+        current_turn_id: null,
+        current_turn_started_at: null,
+        current_item_type: null,
+        items_in_turn: 0,
+        pending_approvals: 0,
+        pending_user_inputs: 0
+      });
+      await ctx.events.append(user.token, {
+        type: SESSION_CRASHED_EVENT_TYPE,
+        session: rec.name,
+        thread_id: rec.thread_id,
+        payload: {
+          session: rec.name,
+          thread_id: rec.thread_id,
+          reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+          last_turn_id: lastTurnId
+        }
+      });
+      await cancelPendingWithEvent(
+        ctx,
+        user.token,
+        rec.name,
+        rec.thread_id,
+        APP_SERVER_CRASHED_ON_RESTART_REASON
+      );
+      if (hadPersistedPending && !hadPendingMetadata) {
+        await ctx.events.append(user.token, {
+          type: SESSION_PENDING_DROPPED_EVENT_TYPE,
+          session: rec.name,
+          thread_id: rec.thread_id,
+          payload: {
+            session: rec.name,
+            thread_id: rec.thread_id,
+            reason: "daemon_restart_pending_lost"
+          }
+        });
+      }
+    }
+  }
+}
 function acquirePid(pidPath) {
   try {
-    import_node_fs13.default.mkdirSync(import_node_path11.default.dirname(pidPath), { recursive: true });
-    const fd = import_node_fs13.default.openSync(pidPath, "wx");
+    import_node_fs16.default.mkdirSync(import_node_path14.default.dirname(pidPath), { recursive: true });
+    const fd = import_node_fs16.default.openSync(pidPath, "wx");
     try {
-      import_node_fs13.default.writeFileSync(fd, JSON.stringify({
+      import_node_fs16.default.writeFileSync(fd, JSON.stringify({
         pid: process.pid,
         created_at: (/* @__PURE__ */ new Date()).toISOString()
       }));
     } finally {
-      import_node_fs13.default.closeSync(fd);
+      import_node_fs16.default.closeSync(fd);
     }
     return true;
   } catch (e) {
     if (e?.code === "EEXIST") return false;
     return false;
   }
+}
+function isClientAlive3(client) {
+  if (!client) return false;
+  const maybe = client;
+  if (typeof maybe.isAlive === "function") return maybe.isAlive();
+  return true;
+}
+function keyFor4(user, sessionName) {
+  return `${user}::${sessionName}`;
 }
 function scheduleIdleShutdown(ctx) {
   const check = () => {
@@ -7092,7 +9587,7 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
           }
         };
       }
-      await sleep4(150);
+      await sleep5(150);
       continue;
     }
     if (pidAlive || legacyPidAlive) {
@@ -7108,18 +9603,18 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
           }
         };
       }
-      await sleep4(150);
+      await sleep5(150);
       continue;
     }
     if (pid !== null && !pidAlive) {
       try {
-        import_node_fs13.default.unlinkSync(pidPath);
+        import_node_fs16.default.unlinkSync(pidPath);
       } catch {
       }
     }
     if (legacyPidPath && legacyPid !== null && !legacyPidAlive) {
       try {
-        import_node_fs13.default.unlinkSync(legacyPidPath);
+        import_node_fs16.default.unlinkSync(legacyPidPath);
       } catch {
       }
     }
@@ -7134,12 +9629,12 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
         details: { pid_path: pidPath }
       };
     }
-    await sleep4(150);
+    await sleep5(150);
   }
 }
 function readPidFile2(pidPath) {
   try {
-    const raw = import_node_fs13.default.readFileSync(pidPath, "utf8");
+    const raw = import_node_fs16.default.readFileSync(pidPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
     return {
@@ -7162,12 +9657,12 @@ function legacyWindowsPidFilePath(currentPidPath) {
   if (process.platform !== "win32") return null;
   const legacyHome = process.env.HOME;
   if (!legacyHome) return null;
-  const legacyPath = import_node_path11.default.join(legacyHome, `.${APP}`, "daemon.pid");
+  const legacyPath = import_node_path14.default.join(legacyHome, `.${APP}`, "daemon.pid");
   if (legacyPath === currentPidPath) return null;
   if (legacyHome === homeDir()) return null;
   return legacyPath;
 }
-function sleep4(ms) {
+function sleep5(ms) {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
     timer.unref();
@@ -7177,9 +9672,12 @@ function sleep4(ms) {
 // src/main.ts
 async function main() {
   const argv = process.argv.slice(2);
+  const hasDaemonInternal = argv.includes("--daemon-internal");
+  const stderrPath = hasDaemonInternal ? takeOptionValue(argv, "--stderr-to") : null;
   const daemonIdx = argv.indexOf("--daemon-internal");
   if (daemonIdx >= 0) {
     argv.splice(daemonIdx, 1);
+    if (stderrPath) redirectProcessStderr(stderrPath);
     const code2 = await runDaemon();
     process.exit(code2);
   }
@@ -7191,3 +9689,28 @@ main().catch((e) => {
 `);
   process.exit(1);
 });
+function takeOptionValue(argv, flag) {
+  const idx = argv.indexOf(flag);
+  if (idx < 0) return null;
+  const value = argv[idx + 1];
+  if (!value || value.startsWith("--")) {
+    throw new Error(`missing value for ${flag}`);
+  }
+  argv.splice(idx, 2);
+  return value;
+}
+function redirectProcessStderr(stderrPath) {
+  import_node_fs17.default.mkdirSync(import_node_path15.default.dirname(stderrPath), { recursive: true });
+  const stream = import_node_fs17.default.createWriteStream(stderrPath, { flags: "a" });
+  stream.on("error", () => void 0);
+  const write = stream.write.bind(stream);
+  process.stderr.write = ((chunk, encoding, cb) => {
+    if (typeof encoding === "function") return write(chunk, encoding);
+    if (typeof encoding === "string") {
+      return typeof cb === "function" ? write(chunk, encoding, cb) : write(chunk, encoding);
+    }
+    if (typeof cb === "function") return write(chunk, cb);
+    return write(chunk);
+  });
+  process.on("exit", () => stream.end());
+}

@@ -1,18 +1,35 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import type { DaemonContext } from "./context";
 import { buildContext } from "./context";
+import { ConfigStore } from "./config";
+import { CursorStore } from "./cursors";
+import {
+  SESSION_CRASHED_EVENT_TYPE,
+  SESSION_PENDING_DROPPED_EVENT_TYPE,
+} from "./events";
+import { cancelPendingWithEvent, pendingRequestsForSession } from "./pending-cancel";
 import { startServer } from "./server";
 import { probeSock, unlinkSockIfStale } from "../ipc/sock";
 import { logger } from "../logger";
-import { APP, homeDir, pidFilePath } from "../paths";
+import { APP, homeDir, pidFilePath, warnLegacyWindowsDataDir } from "../paths";
 import { shutdownDaemon } from "./shutdown";
 import { wireDaemonEvents } from "./wire";
 import { reapOrphans } from "./orphans";
 import { isLikelyCodexTeamDaemonProcess } from "./processes";
 
+const APP_SERVER_CRASHED_ON_RESTART_REASON = "app_server_crashed_on_restart";
+
 export async function runDaemon(): Promise<number> {
-  const ctx = buildContext();
+  const config = new ConfigStore();
+  const ctx = buildContext({
+    config,
+    cursors: new CursorStore(config.resolvedDataDir()),
+  });
+  warnLegacyWindowsDataDir((warning) => {
+    logger.warn(warning.message);
+  });
   const pidPath = pidFilePath(ctx.dataDir);
 
   const acquired = await acquireDaemonOwnership(ctx.sockPath, pidPath);
@@ -23,6 +40,7 @@ export async function runDaemon(): Promise<number> {
 
   // Kill any leftover codex app-server processes spawned by a previous daemon.
   await reapOrphans(ctx.dataDir);
+  await reconcileLoadedSessionsAfterRestart(ctx);
 
   const cleanup = (): void => {
     unlinkSockIfStale(ctx.sockPath);
@@ -55,6 +73,76 @@ export async function runDaemon(): Promise<number> {
   return await new Promise<number>(() => { /* run forever */ });
 }
 
+export async function reconcileLoadedSessionsAfterRestart(ctx: Partial<DaemonContext>): Promise<void> {
+  if (!ctx.users || typeof ctx.users.list !== "function") return;
+  if (!ctx.sessions || typeof ctx.sessions.listLive !== "function" || typeof ctx.sessions.update !== "function") return;
+  if (!ctx.pool || typeof ctx.pool.clientForSession !== "function") return;
+  if (!ctx.events || typeof ctx.events.append !== "function") return;
+
+  for (const user of ctx.users.list()) {
+    for (const rec of ctx.sessions.listLive(user.token)) {
+      if (rec.state !== "live") continue;
+      const sessionKey = keyFor(user.token, rec.name);
+      if (isClientAlive(ctx.pool.clientForSession(sessionKey))) continue;
+
+      const hadPersistedPending = (rec.pending_approvals ?? 0) > 0 || (rec.pending_user_inputs ?? 0) > 0;
+      const hadPendingMetadata = pendingRequestsForSession(
+        ctx as DaemonContext,
+        user.token,
+        rec.name,
+      ).length > 0;
+      const lastTurnId = rec.current_turn_id ?? rec.last_turn_id ?? null;
+      ctx.sessions.update(user.token, rec.name, {
+        state: "crashed",
+        recovery_state: "degraded",
+        crash_reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+        last_turn_id: lastTurnId,
+        current_turn_id: null,
+        current_turn_started_at: null,
+        current_item_type: null,
+        items_in_turn: 0,
+        pending_approvals: 0,
+        pending_user_inputs: 0,
+      });
+
+      await ctx.events.append(user.token, {
+        type: SESSION_CRASHED_EVENT_TYPE,
+        session: rec.name,
+        thread_id: rec.thread_id,
+        payload: {
+          session: rec.name,
+          thread_id: rec.thread_id,
+          reason: APP_SERVER_CRASHED_ON_RESTART_REASON,
+          last_turn_id: lastTurnId,
+        },
+      });
+
+      await cancelPendingWithEvent(
+        ctx as DaemonContext,
+        user.token,
+        rec.name,
+        rec.thread_id,
+        APP_SERVER_CRASHED_ON_RESTART_REASON,
+      );
+
+      if (hadPersistedPending && !hadPendingMetadata) {
+        // 0.5.2 does not persist request-level pending metadata across a full daemon restart, so
+        // reconcile can only emit a session-scoped best-effort marker when those requests are lost.
+        await ctx.events.append(user.token, {
+          type: SESSION_PENDING_DROPPED_EVENT_TYPE,
+          session: rec.name,
+          thread_id: rec.thread_id,
+          payload: {
+            session: rec.name,
+            thread_id: rec.thread_id,
+            reason: "daemon_restart_pending_lost",
+          },
+        });
+      }
+    }
+  }
+}
+
 function acquirePid(pidPath: string): boolean {
   try {
     fs.mkdirSync(path.dirname(pidPath), { recursive: true });
@@ -72,6 +160,17 @@ function acquirePid(pidPath: string): boolean {
     if ((e as NodeJS.ErrnoException)?.code === "EEXIST") return false;
     return false;
   }
+}
+
+function isClientAlive(client: unknown): boolean {
+  if (!client) return false;
+  const maybe = client as { isAlive?: () => boolean };
+  if (typeof maybe.isAlive === "function") return maybe.isAlive();
+  return true;
+}
+
+function keyFor(user: string, sessionName: string): string {
+  return `${user}::${sessionName}`;
 }
 
 function scheduleIdleShutdown(ctx: import("./context").DaemonContext): void {

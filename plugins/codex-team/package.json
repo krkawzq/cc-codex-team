@@ -1,6 +1,6 @@
 {
   "name": "codex-team",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "description": "CLI + daemon orchestrating long-lived Codex app-server sessions for agents",
   "license": "MIT",
@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsup src/main.ts --format cjs --platform node --target node18 --out-dir dist --clean",
+    "bump-version": "node scripts/bump-version.mjs",
     "dev": "tsup src/main.ts --format cjs --platform node --target node18 --out-dir dist --watch",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -1,0 +1,14 @@
+{
+  "renderer": "item",
+  "item": {
+    "id": "agent-1",
+    "type": "agentMessage",
+    "phase": "final_answer",
+    "content": [
+      {
+        "type": "text",
+        "text": "Renderer update complete.\n\n- Added tool and hook renderers\n- Added truncation controls"
+      }
+    ]
+  }
+}

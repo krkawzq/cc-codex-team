@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import type { AppServerClient } from "../codex/appServerClient";
+import { CodexTeamError } from "../errors";
 
 export interface PendingRequest {
   request_id: string;
@@ -91,6 +92,19 @@ export class PendingRegistry {
     return this.removeMatching((rec) => rec.user === user);
   }
 
+  abortForSession(
+    user: string,
+    sessionName: string,
+    message: string,
+    data?: Record<string, unknown>,
+  ): PendingRequest[] {
+    return this.abortMatching((rec) => rec.user === user && rec.session_name === sessionName, message, data);
+  }
+
+  abortForUser(user: string, message: string, data?: Record<string, unknown>): PendingRequest[] {
+    return this.abortMatching((rec) => rec.user === user, message, data);
+  }
+
   private removeMatching(predicate: (rec: PendingRequest) => boolean): PendingRequest[] {
     const removed: PendingRequest[] = [];
     for (const rec of this.allRequests()) {
@@ -99,6 +113,22 @@ export class PendingRegistry {
       if (!rec.responded_at) removed.push(rec);
     }
     return removed;
+  }
+
+  private abortMatching(
+    predicate: (rec: PendingRequest) => boolean,
+    message: string,
+    data?: Record<string, unknown>,
+  ): PendingRequest[] {
+    const aborted: PendingRequest[] = [];
+    for (const rec of this.allRequests()) {
+      if (!predicate(rec)) continue;
+      const removed = this.remove(rec.request_id);
+      if (!removed || removed.responded_at) continue;
+      removed.client = pendingAbortClient(message, data);
+      aborted.push(removed);
+    }
+    return aborted;
   }
 
   private allRequests(): PendingRequest[] {
@@ -119,4 +149,13 @@ function assignTag(client: AppServerClient): string {
   const tag = crypto.randomBytes(4).toString("hex");
   (client as unknown as { __ct_tag: string }).__ct_tag = tag;
   return tag;
+}
+
+function pendingAbortClient(message: string, data?: Record<string, unknown>): AppServerClient {
+  const error = new CodexTeamError("internal", message, data);
+  return {
+    respondAck: async () => await Promise.reject(error),
+    respondErrorAck: async () => await Promise.reject(error),
+    respondError: () => { throw error; },
+  } as unknown as AppServerClient;
 }

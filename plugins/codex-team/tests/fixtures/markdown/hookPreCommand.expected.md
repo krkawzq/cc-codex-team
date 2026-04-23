@@ -1,0 +1,1 @@
+<hook.pre-command>{"id":"hook-pre-1","status":"started","hook_id":"hook-17","command":"npm run lint","cwd":"/repo"}<\hook.pre-command>

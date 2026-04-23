@@ -1,0 +1,1 @@
+<auto-approval-review>{"id":"aar-1","kind":"approval.command_execution","matched_pattern":"git status*","command_preview":"git status --short","decision":"approved"}<\auto-approval-review>

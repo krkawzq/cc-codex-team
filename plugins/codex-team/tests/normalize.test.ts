@@ -7,13 +7,15 @@ describe("daemon normalize", () => {
     expect(normalizeServerRequest({
       id: 1,
       method: "item/permissions/requestApproval",
-      params: { threadId: "th-1", turnId: "turn-1", itemId: "item-1", permissions: { fs: true } },
+      params: { threadId: "th-1", turnId: "turn-1", itemId: "item-1", command: "git status", permissions: { fs: true } },
     })).toMatchObject({
       kind: "approval.permissions",
+      autoApproveTarget: "git status",
       threadId: "th-1",
       payload: {
         turn_id: "turn-1",
         item_id: "item-1",
+        command: "git status",
         permissions: { fs: true },
       },
     });
@@ -68,7 +70,7 @@ describe("daemon normalize", () => {
     });
   });
 
-  it("uses camelCase payload fields for turn, name, hook, and server-request notifications", () => {
+  it("uses camelCase payload fields for turn-started, name, hook, and server-request notifications", () => {
     expect(normalizeNotification({
       method: "turn/started",
       params: {
@@ -123,5 +125,38 @@ describe("daemon normalize", () => {
         requestId: 99,
       },
     }).payload).toEqual({ request_id: 99 });
+  });
+
+  it("emits a lean turn.completed payload with an explicit items marker", () => {
+    expect(normalizeNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "th-1",
+        turn: {
+          id: "turn-1",
+          status: "failed",
+          startedAt: 100,
+          completedAt: 101,
+          items: [{ id: "item-1" }, { id: "item-2" }],
+          tokenUsage: {
+            inputTokens: 11,
+            outputTokens: 7,
+            totalTokens: 18,
+          },
+        },
+      },
+    }).payload).toEqual({
+      turn_id: "turn-1",
+      status: "errored",
+      duration_ms: 1000,
+      items_count: 2,
+      token_usage: {
+        prompt: 11,
+        completion: 7,
+        total: 18,
+      },
+      ended_at: 101,
+      turn_items_included: false,
+    });
   });
 });

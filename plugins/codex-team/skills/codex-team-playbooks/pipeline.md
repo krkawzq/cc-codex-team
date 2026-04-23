@@ -34,6 +34,7 @@ One session per stage. Roles and profiles are stage-specific:
 ```bash
 TOK=claude-$(date +%s)
 codex-team daemon user create $TOK >/dev/null
+codex-team -b $TOK cursor save pipeline-tail
 
 cd /repo
 mkdir -p .codex-team
@@ -45,6 +46,7 @@ profiles=(explorer planner fixer tester reviewer)
 for i in "${!stages[@]}"; do
   codex-team -b $TOK session new "${stages[$i]}" --profile "${profiles[$i]}" --cwd "$(pwd)"
 done
+codex-team -b $TOK monitor events --stream --summary --cursor pipeline-tail
 ```
 
 ### Run the stages
@@ -54,26 +56,28 @@ Claude runs each sequentially, waiting for `turn.completed` before starting the 
 ```
 stage explorer:
   message send explorer "Read brief.md. Survey the codebase. Write findings to .codex-team/explorer.md."
-  wait for turn.completed.
+  codex-team -b $TOK message wait explorer --timeout 0
 
 stage designer:
   message send designer "Read brief.md and .codex-team/explorer.md. Propose a design in .codex-team/designer.md."
-  wait.
+  codex-team -b $TOK message wait designer --timeout 0
 
 stage implementer:
   message send implementer "Read brief.md and .codex-team/designer.md. Implement the design. Log your progress in .codex-team/implementer.md."
-  wait.
+  codex-team -b $TOK message wait implementer --timeout 0
 
 stage tester:
   message send tester "Run the test suite. Log results in .codex-team/tester.md."
-  wait.
+  codex-team -b $TOK message wait tester --timeout 0
 
 stage reviewer:
   message send reviewer "Read everything in .codex-team/*.md. Write .codex-team/reviewer.md with verdict + any concerns."
-  wait.
+  codex-team -b $TOK message wait reviewer --timeout 0
 
 Claude reads reviewer.md, decides to ship or loop back.
 ```
+
+In 0.5.2, `turn.completed` only tells you `{turn_id, status, duration_ms, items_count, token_usage, ended_at}`. Read the stage file or `message tail` for actual content.
 
 ## Handling stage failures
 
@@ -92,8 +96,11 @@ When two stages are independent (e.g. `explorer` and `read-prior-art`), kick the
 ```bash
 codex-team -b $TOK message send explorer "..."
 codex-team -b $TOK message send prior-art "..."
-# wait for both turn.completed, then proceed to designer
+codex-team -b $TOK message wait explorer --timeout 0
+codex-team -b $TOK message wait prior-art --timeout 0
 ```
+
+If the implement stage is intentionally trusted, give that session `--auto-approve "<patterns>"` or use the daemon default `session.auto_approve_command_patterns`; do not emulate approval handling with shell polling.
 
 ## Termination
 

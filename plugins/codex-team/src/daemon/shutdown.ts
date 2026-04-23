@@ -2,6 +2,7 @@ import fs from "node:fs";
 
 import { logger } from "../logger";
 import type { DaemonContext } from "./context";
+import { SESSION_CLOSED_EVENT_TYPE } from "./events";
 import { pidFilePath } from "../paths";
 import { unlinkSockIfStale } from "../ipc/sock";
 
@@ -11,6 +12,26 @@ export async function shutdownDaemon(ctx: DaemonContext, reason: string, exitCod
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info("shutdown initiated", { reason });
+
+  try {
+    for (const user of ctx.users.list()) {
+      for (const rec of ctx.sessions.listLive(user.token)) {
+        await ctx.events.append(user.token, {
+          type: SESSION_CLOSED_EVENT_TYPE,
+          session: rec.name,
+          thread_id: rec.thread_id,
+          payload: {
+            session: rec.name,
+            thread_id: rec.thread_id,
+            reason: "daemon_shutdown",
+            ts: new Date().toISOString(),
+          },
+        });
+      }
+    }
+  } catch (e) {
+    logger.error("session closed event flush error", { err: (e as Error).message });
+  }
 
   try {
     await ctx.pool.shutdown();

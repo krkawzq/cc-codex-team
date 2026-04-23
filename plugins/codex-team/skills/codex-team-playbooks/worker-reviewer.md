@@ -24,15 +24,18 @@
 ```bash
 TOK=claude-$(date +%s)
 codex-team daemon user create $TOK >/dev/null
+codex-team -b $TOK cursor save wr-tail
 
 cd /repo
 mkdir -p .codex-team
 echo "$BRIEF" > .codex-team/brief.md
 
-codex-team -b $TOK session new worker   --profile fixer    --cwd "$(pwd)"
+codex-team -b $TOK session new worker   --profile fixer    --cwd "$(pwd)" \
+  --auto-approve 'git*,npm test,vitest*'
 codex-team -b $TOK session new reviewer --profile reviewer --cwd "$(pwd)"
 
 # Arm events Monitor
+codex-team -b $TOK monitor events --stream --summary --cursor wr-tail
 ```
 
 ### Main loop
@@ -40,12 +43,12 @@ codex-team -b $TOK session new reviewer --profile reviewer --cwd "$(pwd)"
 ```
 Claude:
   1. message send worker "Read .codex-team/brief.md; write your plan to .codex-team/worker.md; then execute it. Update worker.md with what you did."
-  2. Wait for worker turn.completed.
+  2. `codex-team -b $TOK message wait worker --timeout 0`
   3. message send reviewer "Read .codex-team/brief.md and .codex-team/worker.md. Produce .codex-team/review.md with:
      - Verdict: accept / reject
      - If reject: numbered list of concrete issues
      - Any suggestions"
-  4. Wait for reviewer turn.completed.
+  4. `codex-team -b $TOK message wait reviewer --timeout 0`
   5. Read .codex-team/review.md yourself.
      - accept → detach both sessions; done.
      - reject → message send worker "Address the issues in .codex-team/review.md. Update worker.md."
@@ -54,10 +57,13 @@ Claude:
 
 Bounded: stop after 3 accept-loops. If still rejecting, escalate (human intervention or fork-and-restart).
 
+`turn.completed` is compact in 0.5.2, so the worker's diff/log still comes from `worker.md` or `message tail`, not the event payload.
+
 ## Variants
 
 - **Parallel review**: spin up a second reviewer with a different angle (e.g. one checks correctness, one checks performance). Claude merges reviews before sending to worker.
 - **Quiet reviewer**: instead of a dedicated session, use `codex:codex-rescue` subagent for ad-hoc review. Cheaper; no persistent context.
+- For several worker/reviewer pairs at once, keep one `monitor events --summary --cursor wr-tail` rather than separate verbose streams.
 
 ## Anti-patterns
 

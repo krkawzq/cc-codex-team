@@ -72,6 +72,7 @@ export interface NormalizedRequest {
   threadId: string | null;
   payload: Record<string, unknown>;
   kind: string;
+  autoApproveTarget: string | null;
 }
 
 export function normalizeNotification(n: ServerNotification): NormalizedEvent {
@@ -103,6 +104,7 @@ export function normalizeServerRequest(r: ServerRequest): NormalizedRequest {
   } else if (kind === "approval.permissions") {
     if (params.reason !== undefined) payload.reason = params.reason;
     if (params.cwd !== undefined) payload.cwd = params.cwd;
+    if (params.command !== undefined) payload.command = params.command;
     if (params.permissions !== undefined) payload.permissions = params.permissions;
   } else if (kind === "approval.mcp_elicitation") {
     if (params.serverName !== undefined) payload.server_name = params.serverName;
@@ -113,7 +115,7 @@ export function normalizeServerRequest(r: ServerRequest): NormalizedRequest {
   } else if (kind === "user_input.request") {
     if (Array.isArray(params.questions)) payload.questions = params.questions;
   }
-  return { type: kind, threadId, payload, kind };
+  return { type: kind, threadId, payload, kind, autoApproveTarget: extractAutoApproveTarget(kind, payload) };
 }
 
 function buildNotificationPayload(type: string, params: Record<string, unknown>): Record<string, unknown> {
@@ -122,6 +124,19 @@ function buildNotificationPayload(type: string, params: Record<string, unknown>)
     case "turn.completed": {
       const turn = asObject(params.turn as JsonValue);
       const items = Array.isArray(turn.items) ? (turn.items as unknown[]) : [];
+      if (type === "turn.completed") {
+        // 0.5.2 event-digest change: keep turn.completed payloads lean and
+        // source detailed turn/items data via message history or message tail.
+        return {
+          turn_id: (turn.id as string) ?? null,
+          status: normalizeTurnCompletedStatus(turn.status),
+          duration_ms: deriveDurationMs(turn),
+          items_count: items.length,
+          token_usage: deriveTurnTokenUsage(turn),
+          ended_at: deriveTurnEndedAt(turn),
+          turn_items_included: false,
+        };
+      }
       return {
         turn_id: (turn.id as string) ?? null,
         status: (turn.status as string) ?? null,
@@ -254,8 +269,68 @@ function deriveDurationMs(turn: Record<string, unknown>): number | null {
   return null;
 }
 
+function deriveTurnEndedAt(turn: Record<string, unknown>): number | null {
+  return asNumber(turn.endedAt) ?? asNumber(turn.completedAt);
+}
+
+function normalizeTurnCompletedStatus(value: unknown): "completed" | "errored" | "cancelled" | null {
+  if (typeof value !== "string") return null;
+  if (value === "completed") return "completed";
+  if (value === "cancelled" || value === "canceled") return "cancelled";
+  if (value === "errored" || value === "error" || value === "failed") return "errored";
+  return null;
+}
+
+function deriveTurnTokenUsage(turn: Record<string, unknown>): {
+  prompt: number | null;
+  completion: number | null;
+  total: number | null;
+} {
+  const usageSource = turn.tokenUsage ?? turn.token_usage ?? turn.usage;
+  const usage = asObject(usageSource);
+  const prompt =
+    asNumber(usage.prompt) ??
+    asNumber(usage.promptTokens) ??
+    asNumber(usage.prompt_tokens) ??
+    asNumber(usage.input) ??
+    asNumber(usage.inputTokens) ??
+    asNumber(usage.input_tokens);
+  const completion =
+    asNumber(usage.completion) ??
+    asNumber(usage.completionTokens) ??
+    asNumber(usage.completion_tokens) ??
+    asNumber(usage.output) ??
+    asNumber(usage.outputTokens) ??
+    asNumber(usage.output_tokens);
+  const total =
+    asNumber(usage.total) ??
+    asNumber(usage.totalTokens) ??
+    asNumber(usage.total_tokens);
+
+  return { prompt, completion, total };
+}
+
 function fallbackType(method: string): string {
   return method.replace(/\//g, ".").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+}
+
+function extractAutoApproveTarget(kind: string, payload: Record<string, unknown>): string | null {
+  switch (kind) {
+    case "approval.command_execution":
+      return asString(payload.command);
+    case "approval.permissions":
+      return asString(payload.command) ?? asString(payload.reason);
+    case "approval.file_change":
+      return asString(payload.reason) ?? asString(payload.grant_root);
+    case "approval.mcp_elicitation":
+      return asString(payload.url) ?? asString(payload.message) ?? asString(payload.server_name);
+    default:
+      return null;
+  }
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function asObject(value: JsonValue | unknown): Record<string, unknown> {

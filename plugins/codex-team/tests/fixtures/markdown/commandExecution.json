@@ -1,0 +1,13 @@
+{
+  "renderer": "item",
+  "item": {
+    "id": "cmd-1",
+    "type": "commandExecution",
+    "command": "npm test",
+    "cwd": "/repo",
+    "exit": 0,
+    "durationMs": 1543,
+    "stdout": "PASS renderer.test.ts\nPASS cli.test.ts",
+    "stderr": "Warnings: 0"
+  }
+}

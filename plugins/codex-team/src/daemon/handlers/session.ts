@@ -9,6 +9,7 @@ import {
   SessionRecord,
   generateSessionName,
   looksLikeThreadId,
+  sessionRuntimeDefaults,
   validateSessionName,
 } from "../sessions";
 import {
@@ -27,6 +28,14 @@ import {
   buildExperimentalToolThreadConfig,
   parseExperimentalTools,
 } from "../experimentalTools";
+import {
+  parseAutoApprovePatterns,
+  parseConfiguredAutoApprovePatterns,
+  validateAutoApprovePatterns,
+  validateParsedAutoApprovePatterns,
+} from "../auto-approve";
+import { SESSION_CLOSED_EVENT_TYPE } from "../events";
+import { cancelPendingWithEvent } from "../pending-cancel";
 import { renderContext } from "../../format/markdown";
 import { renderTable } from "../../format/table";
 
@@ -49,6 +58,7 @@ export const sessionNew: HandlerFn = async (ctx, req) => {
   }
 
   const experimentalTools = resolveExperimentalToolsForCreate(ctx, flags);
+  const autoApprovePatterns = resolveAutoApprovePatternsForCreate(ctx, flags);
   const startParams = await buildThreadStartParams(ctx, flags, experimentalTools);
 
   const client = await ctx.pool.acquire(user, keyFor(user, name), buildExperimentalToolAppServerOptions(experimentalTools));
@@ -78,9 +88,11 @@ export const sessionNew: HandlerFn = async (ctx, req) => {
     base_instructions: asString(flags["base-instructions"]) ?? undefined,
     developer_instructions: asString(flags["developer-instructions"]) ?? undefined,
     experimental_tools: experimentalTools.length > 0 ? experimentalTools : undefined,
+    autoApprovePatterns,
     created_at: now,
     last_active_at: now,
     turn_count: 0,
+    ...sessionRuntimeDefaults(),
   };
   ctx.sessions.add(user, record);
   ctx.users.touch(user);
@@ -98,6 +110,7 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
   const attach = async () => {
     const existing = ctx.sessions.get(user, identifier);
     if (existing) {
+      validateSessionAutoApprovePatterns(existing.autoApprovePatterns ?? []);
       ctx.sessions.touch(user, existing.name);
       return { session: existing, noop: true };
     }
@@ -108,6 +121,7 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
     if (anywhere === "ambiguous") {
       throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
     }
+    const autoApprovePatterns = validateSessionAutoApprovePatterns(anywhere?.record.autoApprovePatterns ?? []);
     if (anywhere && anywhere.user !== user) {
       if (!takeover) {
         throw new CodexTeamError("session_busy", `session is live under user '${anywhere.user}'. Pass --takeover to seize.`);
@@ -136,9 +150,11 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
         name,
         thread_id: threadId,
         state: "live",
+        autoApprovePatterns,
         created_at: now,
         last_active_at: now,
         turn_count: 0,
+        ...sessionRuntimeDefaults(),
         ...(anywhere?.record ? {
           model: anywhere.record.model,
           cwd: anywhere.record.cwd,
@@ -194,10 +210,9 @@ export const sessionDetach: HandlerFn = async (ctx, req) => {
 
   ctx.pool.release(sessionKey);
   ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "user_detach");
   ctx.sessions.remove(user, rec.name);
-  for (const p of ctx.pending.removeForSession(user, rec.name)) {
-    try { p.client.respondError(p.jsonrpc_id, -32000, "session detached"); } catch { /* ignore */ }
-  }
+  await appendSessionClosed(ctx, user, rec, "user_detach");
   return { session: rec, noop: false, graceful };
 };
 
@@ -237,6 +252,7 @@ export const sessionFork: HandlerFn = async (ctx, req) => {
   let newName = newNameRaw ?? generateSessionName();
   if (newNameRaw) validateSessionName(newNameRaw);
   while (ctx.sessions.get(user, newName)) newName = generateSessionName();
+  const autoApprovePatterns = validateSessionAutoApprovePatterns(source.autoApprovePatterns ?? []);
 
   const client = await ctx.pool.acquire(
     user,
@@ -266,9 +282,11 @@ export const sessionFork: HandlerFn = async (ctx, req) => {
     effort: source.effort,
     profile: source.profile,
     experimental_tools: source.experimental_tools,
+    autoApprovePatterns,
     created_at: now,
     last_active_at: now,
     turn_count: 0,
+    ...sessionRuntimeDefaults(),
   };
   ctx.sessions.add(user, record);
   return { session: record, forked_from: source.name, at_turn: atTurn };
@@ -378,6 +396,93 @@ export const sessionList: HandlerFn = async (ctx, req) => {
   return response;
 };
 
+export const sessionHealth: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+
+  const sessionKey = keyFor(user, rec.name);
+  const busyTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+  const client = ctx.pool.clientForSession(sessionKey);
+  const appServerAlive = isClientAlive(client);
+  const currentTurnStartedAt = rec.current_turn_started_at ?? null;
+  const pending = typeof ctx.pending.listForUser === "function"
+    ? ctx.pending.listForUser(user).filter((entry) => entry.session_name === rec.name)
+    : null;
+  const pendingApprovals = pending
+    ? pending.filter((entry) => entry.kind.startsWith("approval.")).length
+    : rec.pending_approvals ?? 0;
+  const pendingUserInputs = pending
+    ? pending.filter((entry) => entry.kind === "user_input.request").length
+    : rec.pending_user_inputs ?? 0;
+
+  return {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    state: rec.state,
+    busy: rec.state === "live" && appServerAlive && busyTurnId !== null,
+    current_turn_id: busyTurnId,
+    current_turn_started_at: currentTurnStartedAt,
+    current_turn_elapsed_ms: currentTurnStartedAt ? Math.max(0, Date.now() - Date.parse(currentTurnStartedAt)) : null,
+    current_item_type: rec.current_item_type ?? null,
+    items_done_in_turn: rec.items_in_turn ?? 0,
+    pending_approval_requests: pendingApprovals,
+    pending_user_input_requests: pendingUserInputs,
+    token_usage_last_turn: rec.token_usage_last_turn ?? null,
+    app_server_alive: appServerAlive,
+    last_event_id: ctx.events.latestEvent(user, { session: rec.name, thread_id: rec.thread_id })?.id ?? null,
+  };
+};
+
+export const sessionHeal: HandlerFn = async (ctx, req) => {
+  requireUser(ctx, req);
+  const user = req.bearer!;
+  const identifier = asPositional(req, 0, "session");
+  const flags = asFlags(req);
+  const force = isTrue(flags["force"]);
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
+  if (rec.state !== "live" && rec.state !== "crashed") {
+    throw invalidParams(`session '${rec.name}' is in unexpected state '${String(rec.state)}'`);
+  }
+
+  const sessionKey = keyFor(user, rec.name);
+  const existingClient = ctx.pool.clientForSession(sessionKey);
+  const appServerAlive = isClientAlive(existingClient);
+  if (rec.state === "live" && appServerAlive) {
+    return { ok: true, note: "already healthy", session: rec };
+  }
+
+  if (!appServerAlive || force) {
+    ctx.pool.release(sessionKey);
+  }
+  if (force) {
+    ctx.queues.dispose(sessionKey);
+    await cancelPendingWithEvent(ctx, user, rec.name, rec.thread_id, "session_heal_force_reset");
+    ctx.sessions.update(user, rec.name, {
+      pending_approvals: 0,
+      pending_user_inputs: 0,
+    });
+  }
+
+  const client = await ctx.pool.acquire(
+    user,
+    sessionKey,
+    buildExperimentalToolAppServerOptions(rec.experimental_tools ?? []),
+  );
+  await threadResume(client, rec.thread_id, ctx.retryOptions());
+
+  const updated = ctx.sessions.update(user, rec.name, {
+    state: "live",
+    recovery_state: null,
+    ...sessionRuntimeDefaults(),
+  });
+  ctx.users.touch(user);
+  return { ok: true, healed: true, forced: force, session: updated };
+};
+
 // --- helpers ---
 
 function requireUser(ctx: DaemonContext, req: IpcRequest): void {
@@ -465,6 +570,17 @@ function resolveExperimentalToolsForCreate(ctx: DaemonContext, flags: Record<str
   return parseExperimentalTools(resolveDefault(ctx, "experimental.default_tools"));
 }
 
+function resolveAutoApprovePatternsForCreate(ctx: DaemonContext, flags: Record<string, unknown>): string[] {
+  if (!hasFlag(flags, "auto-approve")) {
+    return parseConfiguredAutoApprovePatterns(ctx.config.getEffective("session.auto_approve_command_patterns"));
+  }
+  const raw = asString(flags["auto-approve"]);
+  if (raw === null) throw invalidParams("--auto-approve requires a comma-separated value");
+  const validationError = validateAutoApprovePatterns(raw);
+  if (validationError) throw invalidParams(validationError);
+  return parseAutoApprovePatterns(raw);
+}
+
 function resolveExperimentalToolsForAttach(
   ctx: DaemonContext,
   flags: Record<string, unknown>,
@@ -479,9 +595,23 @@ function keyFor(user: string, name: string): string {
   return `${user}::${name}`;
 }
 
+function isClientAlive(client: unknown): boolean {
+  if (!client) return false;
+  const maybe = client as { isAlive?: () => boolean };
+  if (typeof maybe.isAlive === "function") return maybe.isAlive();
+  return true;
+}
+
 function hasFlag(flags: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(flags, key);
 }
+
+function validateSessionAutoApprovePatterns(patterns: string[]): string[] {
+  const validationError = validateParsedAutoApprovePatterns(patterns);
+  if (validationError) throw invalidParams(validationError);
+  return [...patterns];
+}
+
 
 function deriveNameFromThreadId(threadId: string, ctx: DaemonContext, user: string): string {
   const existing = ctx.sessions.get(user, threadId);
@@ -553,18 +683,33 @@ async function seizeFromOtherUser(
   }
   ctx.pool.release(sessionKey);
   ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, fromUser, rec.name, rec.thread_id, "session_seized");
   ctx.sessions.remove(fromUser, rec.name);
-
-  // Cancel any pending approval/user_input for the session (best-effort).
-  for (const p of ctx.pending.removeForSession(fromUser, rec.name)) {
-    try { p.client.respondError(p.jsonrpc_id, -32000, "session seized by another user"); } catch { /* ignore */ }
-  }
 
   await ctx.events.append(fromUser, {
     type: "session.seized",
     session: rec.name,
     thread_id: rec.thread_id,
     payload: { seized_by: toUser },
+  });
+}
+
+async function appendSessionClosed(
+  ctx: DaemonContext,
+  user: string,
+  rec: SessionRecord,
+  reason: "user_detach" | "daemon_shutdown" | "app_server_crashed" | "idle_unload" | "user_destroyed",
+): Promise<void> {
+  await ctx.events.append(user, {
+    type: SESSION_CLOSED_EVENT_TYPE,
+    session: rec.name,
+    thread_id: rec.thread_id,
+    payload: {
+      session: rec.name,
+      thread_id: rec.thread_id,
+      reason,
+      ts: new Date().toISOString(),
+    },
   });
 }
 

@@ -5,11 +5,20 @@ import { spawn } from "node:child_process";
 import { CONFIG_KEYS } from "../config";
 import { CodexTeamError, invalidParams } from "../../errors";
 import type { HandlerFn } from "../dispatch";
+import { SESSION_CLOSED_EVENT_TYPE } from "../events";
+import { cancelPendingWithEvent } from "../pending-cancel";
 import { shutdownDaemon } from "../shutdown";
 import { logger } from "../../logger";
+import { PACKAGE_ROOT, VERSION } from "../../version";
 
 export const daemonStatus: HandlerFn = async (ctx) => {
   const uptimeMs = Date.now() - ctx.startedAt.getTime();
+  const distFreshness = await getDistFreshness();
+  const users = ctx.users.list();
+  const sessionCount = users.reduce(
+    (count, user) => count + ctx.sessions.listLive(user.token).length,
+    0,
+  );
   return {
     pid: process.pid,
     version: getPkgVersion(),
@@ -17,9 +26,11 @@ export const daemonStatus: HandlerFn = async (ctx) => {
     sock: ctx.sockPath,
     data_dir: ctx.dataDir,
     log_path: ctx.logPath,
-    user_count: ctx.users.list().length,
+    session_count: sessionCount,
+    user_count: users.length,
     app_server_count: ctx.pool.processCount(),
     started_at: ctx.startedAt.toISOString(),
+    ...distFreshness,
   };
 };
 
@@ -67,12 +78,34 @@ export const daemonUserDestroy: HandlerFn = async (ctx, req) => {
       `cannot destroy user '${token}' while ${liveSessions.length} live session(s) remain; pass --force to destroy anyway`,
     );
   }
-  const pending = ctx.pending.removeForUser(token);
+  const pending = typeof ctx.pending.listForUser === "function"
+    ? ctx.pending.listForUser(token)
+    : [];
   for (const p of pending) {
-    try { p.client.respondError(p.jsonrpc_id, -32000, "user destroyed"); } catch { /* ignore */ }
+    await cancelPendingWithEvent(
+      ctx,
+      token,
+      p.session_name ?? "*",
+      p.thread_id ?? "",
+      "user_destroyed",
+      (entry) => entry.request_id === p.request_id,
+    );
   }
   await ctx.pool.closeUser(token);
   const sessions = await ctx.sessions.clearUser(token);
+  for (const rec of sessions) {
+    await ctx.events.append(token, {
+      type: SESSION_CLOSED_EVENT_TYPE,
+      session: rec.name,
+      thread_id: rec.thread_id ?? null,
+      payload: {
+        session: rec.name,
+        thread_id: rec.thread_id ?? null,
+        reason: "user_destroyed",
+        ts: new Date().toISOString(),
+      },
+    });
+  }
   for (const rec of sessions) {
     ctx.queues.dispose(`${token}::${rec.name}`);
   }
@@ -299,11 +332,65 @@ async function readBytes(filePath: string, start: number, length: number): Promi
 }
 
 function getPkgVersion(): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const pkg = require("../../../package.json");
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
+  return VERSION;
+}
+
+interface DistFreshness {
+  dist_built_at: string | null;
+  dist_age_seconds: number | null;
+  source_newer_than_dist: boolean | null;
+}
+
+async function getDistFreshness(packageRoot = PACKAGE_ROOT): Promise<DistFreshness> {
+  const distPath = path.join(packageRoot, "dist", "main.js");
+  const distStat = await statIfExists(distPath);
+  if (!distStat) {
+    return {
+      dist_built_at: null,
+      dist_age_seconds: null,
+      source_newer_than_dist: null,
+    };
   }
+
+  const builtAt = new Date(distStat.mtimeMs).toISOString();
+  const sourceNewestMtime = await getNewestMtime(path.join(packageRoot, "src"));
+
+  return {
+    dist_built_at: builtAt,
+    dist_age_seconds: Math.max(0, Math.floor((Date.now() - distStat.mtimeMs) / 1000)),
+    source_newer_than_dist: sourceNewestMtime === null ? null : sourceNewestMtime > distStat.mtimeMs,
+  };
+}
+
+async function statIfExists(filePath: string): Promise<fs.Stats | null> {
+  try {
+    return await fs.promises.stat(filePath);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return null;
+  }
+}
+
+async function getNewestMtime(dirPath: string): Promise<number | null> {
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return null;
+  }
+
+  let newest: number | null = null;
+  for (const entry of entries) {
+    const entryPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      const childNewest = await getNewestMtime(entryPath);
+      if (childNewest !== null && (newest === null || childNewest > newest)) newest = childNewest;
+      continue;
+    }
+
+    const stat = await statIfExists(entryPath);
+    if (stat && (newest === null || stat.mtimeMs > newest)) newest = stat.mtimeMs;
+  }
+  return newest;
 }

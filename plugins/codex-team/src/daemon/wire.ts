@@ -1,15 +1,25 @@
+import crypto from "node:crypto";
+
 import type { DaemonContext } from "./context";
 import { normalizeNotification, normalizeServerRequest } from "./normalize";
+import {
+  AUTO_APPROVED_EVENT_TYPE,
+  SESSION_CLOSED_EVENT_TYPE,
+  SESSION_CRASHED_EVENT_TYPE,
+} from "./events";
+import { cancelPendingWithEvent } from "./pending-cancel";
 import type { PoolClientClose, PoolNotification, PoolServerRequest } from "../codex/pool";
-import { threadResume } from "../codex/rpc";
+import type { JsonValue } from "../codex/errors";
+import { threadResume, threadUnsubscribe } from "../codex/rpc";
+import { isoFromUnixSeconds, normalizeTokenUsage } from "./sessions";
 import { logger } from "../logger";
+import { matchAutoApprovePattern } from "./auto-approve";
 import { buildExperimentalToolAppServerOptions } from "./experimentalTools";
+import { buildApprovalShortcutResponse, preferredAutoApprovalShortcut } from "./handlers/message";
 
 export function wireDaemonEvents(ctx: DaemonContext): void {
-  const recoveringSessions = new Set<string>();
-
   ctx.pool.on("notification", (e) => {
-    void handleNotification(ctx, recoveringSessions, e).catch((err) => {
+    void handleNotification(ctx, e).catch((err) => {
       logger.warn("notification handling failed", { err: (err as Error).message });
     });
   });
@@ -21,7 +31,7 @@ export function wireDaemonEvents(ctx: DaemonContext): void {
   });
 
   ctx.pool.on("client_close", (e) => {
-    void handleClientClose(ctx, recoveringSessions, e).catch((err) => {
+    void handleClientClose(ctx, e).catch((err) => {
       logger.warn("client close handling failed", { err: (err as Error).message });
     });
   });
@@ -29,24 +39,79 @@ export function wireDaemonEvents(ctx: DaemonContext): void {
 
 async function handleNotification(
   ctx: DaemonContext,
-  recoveringSessions: Set<string>,
   e: PoolNotification,
 ): Promise<void> {
   const norm = normalizeNotification(e.notification);
   const sessionName = resolveSession(ctx, e.user, norm.threadId);
+  const rec = sessionName ? ctx.sessions.get(e.user, sessionName) : null;
 
-  await ctx.events.append(e.user, {
+  const logged = await ctx.events.append(e.user, {
     type: norm.type,
     session: sessionName,
     thread_id: norm.threadId,
     payload: norm.payload,
   });
 
-  if (norm.type === "turn.started" && sessionName) {
-    ctx.queues.setCurrentTurn(keyFor(e.user, sessionName), (norm.payload.turn_id as string | null) ?? null);
+  if (norm.type === "turn.started" && sessionName && rec) {
+    const turnId = (norm.payload.turn_id as string | null) ?? null;
+    ctx.queues.setCurrentTurn(keyFor(e.user, sessionName), turnId);
+    ctx.sessions.update(e.user, sessionName, {
+      state: "live",
+      crash_reason: null,
+      last_turn_id: turnId,
+      current_turn_id: turnId,
+      current_turn_started_at: isoFromUnixSeconds(norm.payload.started_at, logged.ts),
+      current_item_type: null,
+      items_in_turn: 0,
+    });
+  }
+
+  if (norm.type === "item.started" && sessionName && rec) {
+    ctx.sessions.update(e.user, sessionName, {
+      current_item_type: (norm.payload.type as string | null) ?? null,
+      last_turn_id: (norm.payload.turn_id as string | null) ?? rec.last_turn_id ?? null,
+    });
+  }
+
+  if (norm.type === "item.completed" && sessionName && rec) {
+    ctx.sessions.update(e.user, sessionName, {
+      current_item_type: null,
+      items_in_turn: (rec.items_in_turn ?? 0) + 1,
+      last_turn_id: (norm.payload.turn_id as string | null) ?? rec.last_turn_id ?? null,
+    });
+  }
+
+  if (norm.type === "thread.token_usage_updated" && sessionName && rec) {
+    const tokenUsage = normalizeTokenUsage(norm.payload.token_usage);
+    if (tokenUsage) {
+      ctx.sessions.update(e.user, sessionName, {
+        token_usage_last_turn: tokenUsage,
+        last_turn_id: (norm.payload.turn_id as string | null) ?? rec.last_turn_id ?? null,
+      });
+    }
+  }
+
+  if (norm.type === "turn.error" && sessionName && rec) {
+    ctx.sessions.update(e.user, sessionName, {
+      last_turn_id: (norm.payload.turn_id as string | null) ?? rec.last_turn_id ?? null,
+      current_turn_id: null,
+      current_turn_started_at: null,
+      current_item_type: null,
+      items_in_turn: 0,
+    });
   }
 
   if (norm.type === "turn.completed" && sessionName && norm.threadId) {
+    if (rec) {
+      ctx.sessions.update(e.user, sessionName, {
+        last_turn_id: (norm.payload.turn_id as string | null) ?? rec.last_turn_id ?? null,
+        current_turn_id: null,
+        current_turn_started_at: null,
+        current_item_type: null,
+        items_in_turn: 0,
+        turn_count: (rec.turn_count ?? 0) + 1,
+      });
+    }
     const client = ctx.pool.clientForSession(keyFor(e.user, sessionName));
     void ctx.queues.onTurnCompleted(keyFor(e.user, sessionName), client, norm.threadId, ctx.retryOptions()).then(async (next) => {
       if (next.turn_id) {
@@ -91,13 +156,7 @@ async function handleNotification(
 
   if (norm.type === "thread.closed" && sessionName) {
     try {
-      const sessionKey = keyFor(e.user, sessionName);
-      ctx.pool.release(sessionKey);
-      ctx.queues.dispose(sessionKey);
-      ctx.sessions.remove(e.user, sessionName);
-      for (const p of ctx.pending.removeForSession(e.user, sessionName)) {
-        try { p.client.respondError(p.jsonrpc_id, -32000, "session detached"); } catch { /* ignore */ }
-      }
+      await closeSession(ctx, e.user, sessionName, "user_detach", false);
     } catch (err) {
       logger.warn("thread closed cleanup failed", { session: sessionName, err: (err as Error).message });
     }
@@ -109,20 +168,28 @@ async function handleNotification(
       const jsonrpcId = reqId as string | number;
       const client = ctx.pool.clientById(e.clientId);
       if (client) {
-        ctx.pending.removeByJsonrpcId(client, jsonrpcId);
-      } else {
-        for (const p of ctx.pending.listForUser(e.user)) {
-          if (String(p.jsonrpc_id) === String(jsonrpcId)) {
-            ctx.pending.remove(p.request_id);
-            break;
-          }
+        const removed = ctx.pending.removeByJsonrpcId(client, jsonrpcId);
+        if (removed?.session_name) {
+          adjustPendingCounts(ctx, removed.user, removed.session_name, removed.kind, -1);
         }
+      } else {
+        logger.warn("ignoring server_request_resolved for unknown client", {
+          user: e.user,
+          client_id: e.clientId,
+          jsonrpc_id: jsonrpcId,
+        });
       }
     }
   }
 
   if (norm.type === "client_close" && sessionName && norm.threadId) {
-    void recoverSession(ctx, recoveringSessions, e.user, sessionName, norm.threadId);
+    if (isSessionIdle(ctx, e.user, sessionName)) {
+      try {
+        await closeSession(ctx, e.user, sessionName, "idle_unload", true);
+      } catch (err) {
+        logger.warn("idle unload cleanup failed", { session: sessionName, err: (err as Error).message });
+      }
+    }
   }
 }
 
@@ -149,6 +216,10 @@ async function handleServerRequest(
     return;
   }
 
+  if (await maybeAutoApproveRequest(ctx, e.user, sessionName, norm, effectiveClient, e.request.id)) {
+    return;
+  }
+
   const pending = ctx.pending.add({
     client: effectiveClient,
     jsonrpc_id: e.request.id,
@@ -161,6 +232,7 @@ async function handleServerRequest(
   });
 
   const payload = { ...norm.payload, request_id: pending.request_id };
+  adjustPendingCounts(ctx, e.user, sessionName, norm.kind, 1);
   await ctx.events.append(e.user, {
     type: norm.type,
     session: sessionName,
@@ -171,7 +243,6 @@ async function handleServerRequest(
 
 async function handleClientClose(
   ctx: DaemonContext,
-  recoveringSessions: Set<string>,
   e: PoolClientClose,
 ): Promise<void> {
   if (e.reason !== "unexpected") return;
@@ -182,65 +253,36 @@ async function handleClientClose(
     const rec = ctx.sessions.get(user, sessionName);
     if (!rec) continue;
 
-    ctx.sessions.update(user, sessionName, { recovery_state: "degraded" });
-    await ctx.events.append(user, {
-      type: "turn.error",
-      session: sessionName,
-      thread_id: rec.thread_id,
-      payload: {
-        will_retry: false,
-        error: {
-          message: "app-server process exited unexpectedly",
-          codex_error_info: "internal_server_error",
-          additional_details: `exit_code=${e.exitCode ?? "null"}`,
+    const currentTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+    const reason = `app-server process exited unexpectedly (exit_code=${e.exitCode ?? "null"})`;
+    ctx.sessions.update(user, sessionName, {
+      state: "crashed",
+      recovery_state: "degraded",
+      crash_reason: reason,
+      pending_approvals: 0,
+      pending_user_inputs: 0,
+      current_item_type: null,
+    });
+    await appendSessionCrashed(ctx, user, rec.name, rec.thread_id, reason, currentTurnId ?? rec.last_turn_id ?? null);
+    if (currentTurnId) {
+      await ctx.events.append(user, {
+        type: "turn.error",
+        session: sessionName,
+        thread_id: rec.thread_id,
+        payload: {
+          turn_id: currentTurnId,
+          will_retry: false,
+          error: {
+            message: "app-server process exited unexpectedly",
+            codex_error_info: "internal_server_error",
+            additional_details: `exit_code=${e.exitCode ?? "null"}`,
+          },
         },
-      },
-    });
-
+      });
+    }
+    await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, "session_crashed");
+    await appendSessionClosed(ctx, user, rec.name, rec.thread_id, "app_server_crashed");
     ctx.queues.onClientClosed(sessionKey);
-    for (const p of ctx.pending.removeForSession(user, sessionName)) {
-      void p;
-    }
-    void recoverSession(ctx, recoveringSessions, user, sessionName, rec.thread_id);
-  }
-}
-
-async function recoverSession(
-  ctx: DaemonContext,
-  recoveringSessions: Set<string>,
-  user: string,
-  sessionName: string,
-  threadId: string,
-): Promise<void> {
-  const recoveryKey = `${user}::${threadId}`;
-  if (recoveringSessions.has(recoveryKey)) return;
-  recoveringSessions.add(recoveryKey);
-
-  const sessionKey = keyFor(user, sessionName);
-  try {
-    const rec = ctx.sessions.get(user, sessionName);
-    const client = await ctx.pool.acquire(
-      user,
-      sessionKey,
-      buildExperimentalToolAppServerOptions(rec?.experimental_tools ?? []),
-    );
-    await threadResume(client, threadId, ctx.retryOptions());
-    const live = ctx.sessions.get(user, sessionName);
-    if (live) {
-      ctx.sessions.update(user, sessionName, { recovery_state: null });
-    } else {
-      ctx.pool.release(sessionKey);
-    }
-  } catch (err) {
-    logger.warn("failed to recover session after client exit", {
-      user,
-      session: sessionName,
-      thread_id: threadId,
-      err: (err as Error).message,
-    });
-    ctx.pool.release(sessionKey);
-  } finally {
-    recoveringSessions.delete(recoveryKey);
   }
 }
 
@@ -248,6 +290,79 @@ function resolveSession(ctx: DaemonContext, user: string, threadId: string | nul
   if (!threadId) return null;
   const rec = ctx.sessions.get(user, threadId);
   return rec ? rec.name : null;
+}
+
+async function maybeAutoApproveRequest(
+  ctx: DaemonContext,
+  user: string,
+  sessionName: string,
+  norm: ReturnType<typeof normalizeServerRequest>,
+  client: NonNullable<ReturnType<DaemonContext["pool"]["clientById"]>>,
+  jsonrpcId: string | number,
+): Promise<boolean> {
+  if (!norm.kind.startsWith("approval.")) return false;
+  const rec = ctx.sessions.get(user, sessionName);
+  const patterns = rec?.autoApprovePatterns ?? [];
+  if (patterns.length === 0) return false;
+
+  const shortcut = preferredAutoApprovalShortcut(norm.kind);
+  if (!shortcut) return false;
+
+  const match = matchAutoApprovePattern(patterns, norm.autoApproveTarget);
+  if (!match) return false;
+
+  const requestId = `req-${crypto.randomBytes(4).toString("hex")}`;
+  const response = buildApprovalShortcutResponse(norm.kind, norm.payload.raw as Record<string, unknown>, shortcut);
+
+  let ack: { backpressured: boolean };
+  try {
+    ack = await client.respondAck(jsonrpcId, response as JsonValue);
+  } catch (err) {
+    await emitWarning(ctx, user, sessionName, norm.threadId, {
+      message: `auto-approval reply delivery failed: ${(err as Error).message}`,
+      kind: "auto_approval_reply_delivery_failed",
+      request_id: requestId,
+    });
+    return false;
+  }
+
+  await ctx.events.append(user, {
+    type: AUTO_APPROVED_EVENT_TYPE,
+    session: sessionName,
+    thread_id: norm.threadId,
+    payload: {
+      request_id: requestId,
+      kind: norm.kind,
+      matched_pattern: match.matchedPattern,
+      command_preview: match.commandPreview,
+      decision: shortcut,
+    },
+  }).catch(() => undefined);
+
+  if (ack.backpressured) {
+    await emitWarning(ctx, user, sessionName, norm.threadId, {
+      message: "auto-approval reply is delayed by app-server stdin backpressure",
+      kind: "auto_approval_reply_backpressured",
+      request_id: requestId,
+    });
+  }
+
+  return true;
+}
+
+async function emitWarning(
+  ctx: DaemonContext,
+  user: string,
+  session: string | null,
+  threadId: string | null,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await ctx.events.append(user, {
+    type: "warning",
+    session,
+    thread_id: threadId,
+    payload,
+  }).catch(() => undefined);
 }
 
 function keyFor(user: string, name: string): string {
@@ -258,4 +373,99 @@ function parseKey(sessionKey: string): [string | null, string | null] {
   const idx = sessionKey.indexOf("::");
   if (idx < 0) return [null, null];
   return [sessionKey.slice(0, idx), sessionKey.slice(idx + 2)];
+}
+
+function adjustPendingCounts(
+  ctx: DaemonContext,
+  user: string,
+  sessionName: string,
+  kind: string,
+  delta: number,
+): void {
+  const rec = ctx.sessions.get(user, sessionName);
+  if (!rec) return;
+  if (kind.startsWith("approval.")) {
+    ctx.sessions.update(user, sessionName, {
+      pending_approvals: Math.max(0, (rec.pending_approvals ?? 0) + delta),
+    });
+    return;
+  }
+  if (kind === "user_input.request") {
+    ctx.sessions.update(user, sessionName, {
+      pending_user_inputs: Math.max(0, (rec.pending_user_inputs ?? 0) + delta),
+    });
+  }
+}
+
+function isSessionIdle(ctx: DaemonContext, user: string, sessionName: string): boolean {
+  const sessionKey = keyFor(user, sessionName);
+  const rec = ctx.sessions.get(user, sessionName);
+  return Boolean(rec)
+    && (rec?.state ?? "live") === "live"
+    && (rec?.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey)) === null
+    && ctx.queues.depth(sessionKey) === 0
+    && (rec?.pending_approvals ?? 0) === 0
+    && (rec?.pending_user_inputs ?? 0) === 0;
+}
+
+async function closeSession(
+  ctx: DaemonContext,
+  user: string,
+  sessionName: string,
+  reason: "user_detach" | "daemon_shutdown" | "app_server_crashed" | "idle_unload" | "user_destroyed",
+  unsubscribe: boolean,
+): Promise<void> {
+  const rec = ctx.sessions.get(user, sessionName);
+  if (!rec) return;
+  const sessionKey = keyFor(user, sessionName);
+  const client = ctx.pool.clientForSession(sessionKey);
+  if (unsubscribe && client) {
+    try { await threadUnsubscribe(client, rec.thread_id, ctx.retryOptions()); } catch { /* ignore */ }
+  }
+  ctx.pool.release(sessionKey);
+  ctx.queues.dispose(sessionKey);
+  await cancelPendingWithEvent(ctx, user, sessionName, rec.thread_id, reason);
+  ctx.sessions.remove(user, sessionName);
+  await appendSessionClosed(ctx, user, rec.name, rec.thread_id, reason);
+}
+
+async function appendSessionClosed(
+  ctx: DaemonContext,
+  user: string,
+  session: string,
+  threadId: string,
+  reason: "user_detach" | "daemon_shutdown" | "app_server_crashed" | "idle_unload" | "user_destroyed",
+): Promise<void> {
+  await ctx.events.append(user, {
+    type: SESSION_CLOSED_EVENT_TYPE,
+    session,
+    thread_id: threadId,
+    payload: {
+      session,
+      thread_id: threadId,
+      reason,
+      ts: new Date().toISOString(),
+    },
+  });
+}
+
+async function appendSessionCrashed(
+  ctx: DaemonContext,
+  user: string,
+  session: string,
+  threadId: string,
+  reason: string,
+  lastTurnId: string | null,
+): Promise<void> {
+  await ctx.events.append(user, {
+    type: SESSION_CRASHED_EVENT_TYPE,
+    session,
+    thread_id: threadId,
+    payload: {
+      session,
+      thread_id: threadId,
+      reason,
+      last_turn_id: lastTurnId,
+    },
+  });
 }

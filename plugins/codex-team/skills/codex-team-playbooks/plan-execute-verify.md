@@ -28,14 +28,17 @@ Not the same as a pipeline — here the three stages have named roles with stric
 ```bash
 TOK=claude-$(date +%s)
 codex-team daemon user create $TOK >/dev/null
+codex-team -b $TOK cursor save pev-tail
 
 cd /repo
 mkdir -p .codex-team
 echo "$BRIEF" > .codex-team/brief.md
 
 codex-team -b $TOK session new planner  --profile planner  --cwd "$(pwd)"
-codex-team -b $TOK session new executor --profile fixer    --cwd "$(pwd)"
+codex-team -b $TOK session new executor --profile fixer    --cwd "$(pwd)" \
+  --auto-approve 'git*,npm test,vitest*'
 codex-team -b $TOK session new verifier --profile reviewer --cwd "$(pwd)"
+codex-team -b $TOK monitor events --stream --summary --cursor pev-tail
 ```
 
 ### Phase 1 — Plan
@@ -49,7 +52,14 @@ message send planner "Read .codex-team/brief.md. Produce .codex-team/plan.md:
 Do not execute. Do not modify any files outside .codex-team/."
 ```
 
-Wait for turn.completed. Claude reads plan.md. If obviously wrong, message send planner with targeted feedback. Otherwise proceed.
+Then:
+
+```bash
+codex-team -b $TOK message wait planner --timeout 0
+codex-team -b $TOK message tail planner -n 1 --format markdown
+```
+
+Claude reads plan.md. If obviously wrong, message send planner with targeted feedback. Otherwise proceed.
 
 ### Phase 2 — Execute
 
@@ -60,6 +70,14 @@ Stop at the first step you can't complete; explain why."
 ```
 
 Executor may fire `approval.command_execution` / `approval.file_change` events. Claude responds per `manage-codex-team/approvals.md`, using brief.md as the reference for what's in scope.
+
+When you intentionally want unattended execution, prefer `--auto-approve` on the executor or a daemon default `session.auto_approve_command_patterns`. Don't build approval polling around `status` or `message history`.
+
+Block on the executor with:
+
+```bash
+codex-team -b $TOK message wait executor --timeout 0
+```
 
 If executor stops mid-plan: Claude reads execution.md, decides whether to adjust plan (message planner again) or retry the failing step.
 
@@ -75,6 +93,14 @@ If reject, list concrete follow-ups."
 ```
 
 Claude reads verification.md. If accept: detach all; done. If reject: decide — do we message executor to address the gaps, or restart planning?
+
+Use the same blocker for the verifier:
+
+```bash
+codex-team -b $TOK message wait verifier --timeout 0
+```
+
+Remember that `turn.completed` is compact metadata only in 0.5.2; the verification detail lives in `verification.md` / `message tail`.
 
 ## When to short-circuit
 

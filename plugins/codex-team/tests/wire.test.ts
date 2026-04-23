@@ -3,11 +3,11 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/codex/rpc", () => ({
-  threadResume: vi.fn(),
+  threadUnsubscribe: vi.fn(),
 }));
 
 import { wireDaemonEvents } from "../src/daemon/wire";
-import { threadResume } from "../src/codex/rpc";
+import { threadUnsubscribe } from "../src/codex/rpc";
 
 class FakePool extends EventEmitter {
   clientById = vi.fn();
@@ -17,26 +17,43 @@ class FakePool extends EventEmitter {
 }
 
 function makeContext(pool: FakePool, overrides: Record<string, unknown> = {}) {
+  let eventSeq = 0;
   return {
     pool,
     sessions: {
-      get: vi.fn().mockReturnValue({ name: "sess-1", thread_id: "th-1", experimental_tools: ["ask-user-question"] }),
+      get: vi.fn().mockReturnValue({
+        name: "sess-1",
+        thread_id: "th-1",
+        state: "live",
+        turn_count: 0,
+        current_turn_id: null,
+        pending_approvals: 0,
+        pending_user_inputs: 0,
+        experimental_tools: ["ask-user-question"],
+      }),
       update: vi.fn(),
       remove: vi.fn(),
     },
     events: {
-      append: vi.fn().mockResolvedValue(undefined),
+      append: vi.fn(async (_user: string, input: Record<string, unknown>) => ({
+        id: `evt-${++eventSeq}`,
+        ts: "2025-01-01T00:00:00.000Z",
+        ...input,
+      })),
     },
     queues: {
       setCurrentTurn: vi.fn(),
       onTurnCompleted: vi.fn().mockResolvedValue({ turn_id: null, queue_id: null, failed: false }),
       isTeardown: vi.fn().mockReturnValue(false),
       onClientClosed: vi.fn(),
+      getCurrentTurn: vi.fn().mockReturnValue(null),
+      depth: vi.fn().mockReturnValue(0),
       dispose: vi.fn(),
     },
     pending: {
       removeForSession: vi.fn().mockReturnValue([]),
       removeByJsonrpcId: vi.fn(),
+      abortForSession: vi.fn().mockReturnValue([]),
       listForUser: vi.fn().mockReturnValue([]),
       remove: vi.fn(),
       add: vi.fn(),
@@ -69,6 +86,12 @@ describe("wireDaemonEvents", () => {
     await Promise.resolve();
 
     expect(ctx.queues.setCurrentTurn).toHaveBeenCalledWith("user-1::sess-1", "turn-1");
+    expect(ctx.sessions.update).toHaveBeenCalledWith("user-1", "sess-1", expect.objectContaining({
+      state: "live",
+      current_turn_id: "turn-1",
+      current_item_type: null,
+      items_in_turn: 0,
+    }));
   });
 
   it("emits a local event when a queued turn starts draining", async () => {
@@ -187,6 +210,50 @@ describe("wireDaemonEvents", () => {
     expect(ctx.pending.remove).not.toHaveBeenCalled();
   });
 
+  it("does not clear unrelated pending requests when serverRequest/resolved arrives after client eviction", async () => {
+    const pool = new FakePool();
+    pool.clientById.mockReturnValue(null);
+    const ctx = makeContext(pool, {
+      pending: {
+        removeForSession: vi.fn().mockReturnValue([]),
+        removeByJsonrpcId: vi.fn(),
+        abortForSession: vi.fn().mockReturnValue([]),
+        listForUser: vi.fn().mockReturnValue([
+          {
+            request_id: "req-2",
+            jsonrpc_id: 7,
+            user: "user-1",
+            session_name: "sess-2",
+            kind: "approval.permissions",
+          },
+        ]),
+        remove: vi.fn(),
+        add: vi.fn(),
+      },
+    });
+
+    wireDaemonEvents(ctx as never);
+
+    pool.emit("notification", {
+      user: "user-1",
+      clientId: "client-gone",
+      notification: {
+        method: "serverRequest/resolved",
+        params: {
+          threadId: "th-1",
+          requestId: 7,
+        },
+      },
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ctx.pending.removeByJsonrpcId).not.toHaveBeenCalled();
+    expect(ctx.pending.remove).not.toHaveBeenCalled();
+    expect(ctx.sessions.update).not.toHaveBeenCalledWith("user-1", "sess-2", expect.anything());
+  });
+
   it("tracks server requests with the emitting client and logs them as events", async () => {
     const pool = new FakePool();
     const client = {};
@@ -196,6 +263,7 @@ describe("wireDaemonEvents", () => {
       pending: {
         removeForSession: vi.fn().mockReturnValue([]),
         removeByJsonrpcId: vi.fn(),
+        abortForSession: vi.fn().mockReturnValue([]),
         listForUser: vi.fn().mockReturnValue([]),
         remove: vi.fn(),
         add: vi.fn().mockReturnValue(addedPending),
@@ -241,6 +309,9 @@ describe("wireDaemonEvents", () => {
         request_id: "req-1",
       }),
     }));
+    expect(ctx.sessions.update).toHaveBeenCalledWith("user-1", "sess-1", {
+      pending_approvals: 1,
+    });
   });
 
   it("rejects late server requests when the session is tearing down", async () => {
@@ -282,20 +353,40 @@ describe("wireDaemonEvents", () => {
     expect(ctx.pending.add).not.toHaveBeenCalled();
   });
 
-  it("recovers unexpected client_close by respawning and resuming the session", async () => {
+  it("marks unexpected app-server exits as crashed and cancels pending requests", async () => {
     const pool = new FakePool();
-    const replacement = { client: "replacement" };
-    pool.acquire.mockResolvedValue(replacement);
+    const pendingClient = { respondError: vi.fn() };
+    const pendingEntry = {
+      request_id: "req-1",
+      kind: "approval.permissions",
+      user: "user-1",
+      session_name: "sess-1",
+      thread_id: "th-1",
+      turn_id: "turn-1",
+      jsonrpc_id: 11,
+      client: pendingClient,
+      raw: {},
+      created_at: "2025-01-01T00:00:00.000Z",
+    };
     const ctx = makeContext(pool, {
+      queues: {
+        setCurrentTurn: vi.fn(),
+        onTurnCompleted: vi.fn().mockResolvedValue({ turn_id: null, queue_id: null, failed: false }),
+        isTeardown: vi.fn().mockReturnValue(false),
+        onClientClosed: vi.fn(),
+        getCurrentTurn: vi.fn().mockReturnValue("turn-1"),
+        depth: vi.fn().mockReturnValue(0),
+        dispose: vi.fn(),
+      },
       pending: {
-        removeForSession: vi.fn().mockReturnValue([{ request_id: "req-1" }]),
+        removeForSession: vi.fn().mockReturnValue([]),
         removeByJsonrpcId: vi.fn(),
-        listForUser: vi.fn().mockReturnValue([]),
-        remove: vi.fn(),
+        abortForSession: vi.fn().mockReturnValue([{ request_id: "req-1" }]),
+        listForUser: vi.fn().mockReturnValue([pendingEntry]),
+        remove: vi.fn().mockReturnValue(pendingEntry),
         add: vi.fn(),
       },
     });
-    vi.mocked(threadResume).mockResolvedValue(undefined as never);
 
     wireDaemonEvents(ctx as never);
 
@@ -308,25 +399,88 @@ describe("wireDaemonEvents", () => {
     });
 
     await vi.waitFor(() => {
-      expect(ctx.sessions.update).toHaveBeenCalledTimes(2);
+      expect(ctx.events.append).toHaveBeenCalledTimes(4);
     });
 
+    expect(ctx.sessions.update).toHaveBeenCalledWith("user-1", "sess-1", expect.objectContaining({
+      state: "crashed",
+      recovery_state: "degraded",
+      crash_reason: expect.stringContaining("exit_code=9"),
+      pending_approvals: 0,
+      pending_user_inputs: 0,
+    }));
+    expect(ctx.events.append).toHaveBeenNthCalledWith(1, "user-1", expect.objectContaining({
+      type: "session.crashed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: expect.objectContaining({
+        reason: expect.stringContaining("exit_code=9"),
+      }),
+    }));
     expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
       type: "turn.error",
       session: "sess-1",
       thread_id: "th-1",
       payload: expect.objectContaining({
+        turn_id: "turn-1",
         will_retry: false,
       }),
     }));
-    expect(ctx.sessions.update).toHaveBeenNthCalledWith(1, "user-1", "sess-1", { recovery_state: "degraded" });
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "approval.request_cancelled",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: expect.objectContaining({
+        request_id: "req-1",
+        reason: "session_crashed",
+      }),
+    }));
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "session.closed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: expect.objectContaining({
+        reason: "app_server_crashed",
+      }),
+    }));
     expect(ctx.queues.onClientClosed).toHaveBeenCalledWith("user-1::sess-1");
-    expect(ctx.pending.removeForSession).toHaveBeenCalledWith("user-1", "sess-1");
-    expect(pool.acquire).toHaveBeenCalledWith("user-1", "user-1::sess-1", {
-      configOverrides: ["features.default_mode_request_user_input=true"],
+    expect(pendingClient.respondError).toHaveBeenCalledWith(11, -32000, "session_crashed");
+    expect(pool.acquire).not.toHaveBeenCalled();
+  });
+
+  it("idle-unloads a session after the last client_close notification when the session is idle", async () => {
+    const pool = new FakePool();
+    pool.clientForSession.mockReturnValue({});
+    vi.mocked(threadUnsubscribe).mockResolvedValue(undefined as never);
+    const ctx = makeContext(pool);
+
+    wireDaemonEvents(ctx as never);
+
+    pool.emit("notification", {
+      user: "user-1",
+      clientId: "client-1",
+      notification: {
+        method: "clientClose",
+        params: {
+          threadId: "th-1",
+        },
+      },
     });
-    expect(vi.mocked(threadResume)).toHaveBeenCalledWith(replacement, "th-1", {});
-    expect(ctx.sessions.update).toHaveBeenNthCalledWith(2, "user-1", "sess-1", { recovery_state: null });
-    expect(ctx.queues.dispose).not.toHaveBeenCalled();
+
+    await vi.waitFor(() => {
+      expect(ctx.sessions.remove).toHaveBeenCalledWith("user-1", "sess-1");
+    });
+
+    expect(vi.mocked(threadUnsubscribe)).toHaveBeenCalledWith({}, "th-1", {});
+    expect(pool.release).toHaveBeenCalledWith("user-1::sess-1");
+    expect(ctx.queues.dispose).toHaveBeenCalledWith("user-1::sess-1");
+    expect(ctx.events.append).toHaveBeenCalledWith("user-1", expect.objectContaining({
+      type: "session.closed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: expect.objectContaining({
+        reason: "idle_unload",
+      }),
+    }));
   });
 });

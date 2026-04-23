@@ -1,0 +1,76 @@
+{
+  "renderer": "history",
+  "options": {
+    "truncate": 72
+  },
+  "input": {
+    "session": "audit",
+    "thread_id": "th-7",
+    "nextCursor": "cursor-2",
+    "turns": [
+      {
+        "id": "turn-7",
+        "status": "completed",
+        "durationMs": 2310,
+        "startedAt": 1712345678,
+        "completedAt": 1712345680,
+        "items": [
+          {
+            "id": "user-1",
+            "type": "userMessage",
+            "content": [
+              {
+                "type": "text",
+                "text": "Show me the latest markdown output."
+              }
+            ]
+          },
+          {
+            "id": "reasoning-1",
+            "type": "reasoning",
+            "text": "I should render the latest turn with the new tags, verify truncation markers, and keep the output small enough for reliable snapshots."
+          },
+          {
+            "id": "tool-1",
+            "type": "mcpToolCall",
+            "server": "docs",
+            "tool": "searchDocs",
+            "status": "completed",
+            "args": {
+              "query": "snapshot renderer"
+            },
+            "output": "Found markdown.ts, html-md-format.md, and markdown-snapshot.test.ts with related output."
+          },
+          {
+            "id": "cmd-1",
+            "type": "commandExecution",
+            "command": "npm test",
+            "exit": 0,
+            "durationMs": 1200,
+            "stdout": "PASS markdown-snapshot.test.ts\nPASS status-and-format.test.ts\nPASS cli-run.test.ts"
+          },
+          {
+            "id": "review-1",
+            "type": "autoApprovalReview",
+            "review": {
+              "kind": "approval.command_execution",
+              "matchedPattern": "npm test",
+              "commandPreview": "npm test"
+            },
+            "action": "approved"
+          },
+          {
+            "id": "agent-1",
+            "type": "agentMessage",
+            "content": [
+              {
+                "type": "text",
+                "text": "Snapshot output refreshed."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

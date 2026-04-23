@@ -16,11 +16,23 @@ One session. Role: worker. Profile: `fixer` (or task-specific).
 TOK=claude-$(date +%s)
 codex-team daemon user create $TOK >/dev/null
 
-codex-team -b $TOK session new worker --profile fixer --cwd /repo
-
-# Arm events in a Monitor tool (not shown; see manage-codex-team)
+codex-team -b $TOK session new worker --profile fixer --cwd /repo \
+  --auto-approve 'git*,npm test,vitest*'
+codex-team -b $TOK cursor save solo-tail
 
 codex-team -b $TOK message send worker "<brief>"
+```
+
+If you want resumable async monitoring, keep this open in a separate terminal or Monitor tool:
+
+```bash
+codex-team -b $TOK monitor events --stream --summary --cursor solo-tail
+```
+
+If you are just blocked waiting on the worker, skip the monitor and use:
+
+```bash
+codex-team -b $TOK message wait worker --timeout 0
 ```
 
 Claude:
@@ -29,6 +41,12 @@ Claude:
 2. Responds to approvals per `manage-codex-team/approvals.md`
 3. On `turn.completed`, fetches via `message tail worker -n 1 --format markdown`
 4. Decides: send follow-up, detach, or leave running
+
+Notes:
+
+- If you are actively blocked on the worker, `message wait` is simpler and more reliable than a polling loop.
+- `turn.completed` is compact metadata only in 0.5.2; always fetch the turn or read the worker's output file for substance.
+- If you do not want unattended approvals, pass `--auto-approve ""` or omit the flag and rely on the daemon default being empty.
 
 ## Termination
 

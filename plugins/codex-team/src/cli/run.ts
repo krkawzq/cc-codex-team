@@ -1,20 +1,26 @@
+import fs from "node:fs";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import type net from "node:net";
 
 import { connectSock, probeSock, writeMessage, onMessages } from "../ipc/sock";
 import type { IpcMessage, IpcRequest } from "../ipc/protocol";
-import { defaultSockPath } from "../paths";
-import { parseArgs, commandKey, type ParsedArgs } from "./args";
+import { defaultDataDir, defaultSockPath, warnLegacyWindowsDataDir } from "../paths";
+import { parseArgs, commandKey, supportsShort, type ParsedArgs } from "./args";
 import { renderHelp } from "./help";
 import { err, ok } from "../result";
 import { ConfigStore } from "../daemon/config";
+import { validateApprovalAction } from "./approval-validation";
+import { VERSION } from "../version";
+import { formatShort } from "../format/short";
 
 const DAEMON_POLL_INTERVAL_MS = 100;
 const DEFAULT_DAEMON_READY_TIMEOUT_MS = 15000;
 const DEFAULT_DAEMON_CONNECT_TIMEOUT_MS = 5000;
 const DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS = 3;
 const DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS = 250;
+const DAEMON_STDERR_FLAG = "--stderr-to";
 
 export async function readStdinAll(): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
@@ -39,7 +45,21 @@ export async function runCli(argv: string[]): Promise<number> {
     return 0;
   }
 
+  warnLegacyWindowsDataDir((warning) => {
+    process.stderr.write(warning.message + "\n");
+  });
+
   const method = commandKey(parsed.commandPath);
+  const short = truthy(parsed.flags.short);
+  const format = flagString(parsed.flags.format);
+  if (short && !supportsShort(method)) {
+    process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
+    return 1;
+  }
+  if (short && (format === "markdown" || format === "table")) {
+    process.stdout.write(JSON.stringify(err("invalid_params", "--short cannot be used with --format markdown or --format table")) + "\n");
+    return 1;
+  }
   const sockPath = parsed.daemonSock || defaultSockPath();
 
   if (method === "version") {
@@ -54,9 +74,21 @@ export async function runCli(argv: string[]): Promise<number> {
     return 1;
   }
 
+  const cliValidationError = validateCliFlags(parsed, method);
+  if (cliValidationError) {
+    process.stdout.write(JSON.stringify(err("invalid_params", cliValidationError)) + "\n");
+    return 1;
+  }
+
+  const approvalValidationError = validateApprovalHint(method, parsed);
+  if (approvalValidationError) {
+    process.stdout.write(JSON.stringify(err("invalid_params", approvalValidationError)) + "\n");
+    return 2;
+  }
+
   const ready = await ensureDaemon(sockPath);
-  if (!ready) {
-    process.stdout.write(JSON.stringify(err("daemon_unreachable", "daemon did not become ready in time")) + "\n");
+  if (!ready.ok) {
+    process.stdout.write(JSON.stringify(err("daemon_unreachable", ready.message)) + "\n");
     return 1;
   }
 
@@ -65,6 +97,15 @@ export async function runCli(argv: string[]): Promise<number> {
 
 function isDaemonLevel(method: string): boolean {
   return method === "version" || method === "daemon:status" || method.startsWith("daemon:");
+}
+
+function validateApprovalHint(method: string, parsed: ParsedArgs): string | null {
+  if (method !== "message:approval") return null;
+  const kindHint = asStringFlag(parsed.flags.kind);
+  const action = parsed.positionals[2];
+  if (!kindHint || typeof action !== "string" || action.length === 0) return null;
+  const validation = validateApprovalAction(kindHint, action);
+  return validation.ok ? null : validation.message;
 }
 
 async function runVersion(sockPath: string): Promise<number> {
@@ -128,22 +169,38 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
       params,
     }, cliConfig, isReadOnlyMethod(method));
     if ("error" in resp && resp.error) {
-      process.stdout.write(JSON.stringify({ ok: false, error: resp.error }) + "\n");
+      process.stdout.write(forwardDaemonError(resp.error));
       return 1;
+    }
+    if (truthy(parsed.flags.short)) {
+      process.stdout.write(formatShort(method, resp.result) + "\n");
+      return 0;
+    }
+    if (method === "cursor:get") {
+      process.stdout.write(extractCursorEventId(resp.result) + "\n");
+      return 0;
     }
     const markdown = extractMarkdownResult(resp.result, parsed.flags.format);
     if (markdown !== null) {
       process.stdout.write(markdown + "\n");
-      return 0;
+      return exitCodeForResult(method, resp.result);
     }
     process.stdout.write(JSON.stringify({ ok: true, data: resp.result }) + "\n");
-    return 0;
+    return exitCodeForResult(method, resp.result);
   } catch (e) {
     process.stdout.write(
       JSON.stringify(err("internal", (e as Error).message ?? "rpc failed")) + "\n",
     );
     return 1;
   }
+}
+
+function exitCodeForResult(method: string, result: unknown): number {
+  if (method !== "message:wait" || !result || typeof result !== "object") return 0;
+  const outcome = (result as Record<string, unknown>).outcome;
+  if (outcome === "error") return 1;
+  if (outcome === "timeout") return 124;
+  return 0;
 }
 
 async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): Promise<number> {
@@ -223,15 +280,16 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
 
     onMessages(sock, (msg) => {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
+        const ackAfterWrite = createStreamAckCallback(method, sock, reqId, msg.data);
         const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
         if (markdown !== null) {
-          writeStdout(markdown + "\n");
+          writeStdout(markdown + "\n", ackAfterWrite);
         } else {
-          writeStdout(JSON.stringify(msg.data) + "\n");
+          writeStdout(JSON.stringify(msg.data) + "\n", ackAfterWrite);
         }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
-          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+          writeStdout(forwardDaemonError(msg.error), () => {
             finish(1);
             sock.end();
           });
@@ -243,7 +301,7 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
         }
       } else if (msg.kind === "response" && msg.id === reqId) {
         if (msg.error) {
-          writeStdout(JSON.stringify({ ok: false, error: msg.error }) + "\n", () => {
+          writeStdout(forwardDaemonError(msg.error), () => {
             finish(1);
             sock.end();
           });
@@ -331,16 +389,46 @@ async function requestOnceWithRetry(
   throw lastError ?? new Error("request failed");
 }
 
-async function ensureDaemon(sockPath: string): Promise<boolean> {
+interface EnsureDaemonResult {
+  ok: boolean;
+  message: string;
+}
+
+async function ensureDaemon(sockPath: string): Promise<EnsureDaemonResult> {
   const cliConfig = readCliConfig();
-  if (await probeSock(sockPath, 200)) return true;
-  spawnDaemon();
-  const deadline = Date.now() + cliConfig.readyTimeoutMs;
-  while (Date.now() < deadline) {
-    await sleep(DAEMON_POLL_INTERVAL_MS);
-    if (await probeSock(sockPath, 200)) return true;
+  if (await probeSock(sockPath, 200)) {
+    return { ok: true, message: "" };
   }
-  return false;
+
+  try {
+    spawnDaemon();
+    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
+      return { ok: true, message: "" };
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      message: `failed to spawn daemon: ${(e as Error).message}`,
+    };
+  }
+
+  const stderrPath = daemonSpawnStderrPath();
+  try {
+    spawnDaemon(stderrPath);
+    if (await waitForDaemonReady(sockPath, cliConfig.readyTimeoutMs)) {
+      return { ok: true, message: "" };
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      message: `failed to spawn daemon with stderr capture: ${(e as Error).message}`,
+    };
+  }
+
+  return {
+    ok: false,
+    message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`,
+  };
 }
 
 async function connectSockWithRetry(
@@ -365,31 +453,57 @@ async function connectSockWithRetry(
   throw lastError ?? new Error("connect failed");
 }
 
-function spawnDaemon(): void {
-  const child = spawn(process.execPath, [process.argv[1], "--daemon-internal"], {
-    detached: true,
-    stdio: "ignore",
-    env: process.env,
-    windowsHide: true,
-  });
-  child.unref();
+async function waitForDaemonReady(sockPath: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(DAEMON_POLL_INTERVAL_MS);
+    if (await probeSock(sockPath, 200)) return true;
+  }
+  return false;
+}
+
+function spawnDaemon(stderrPath?: string): void {
+  const args = [process.argv[1], "--daemon-internal"];
+  let stderrFd: number | null = null;
+
+  try {
+    if (stderrPath) {
+      fs.mkdirSync(path.dirname(stderrPath), { recursive: true });
+      stderrFd = fs.openSync(stderrPath, "w");
+      args.push(DAEMON_STDERR_FLAG, stderrPath);
+    }
+
+    const child = spawn(process.execPath, args, {
+      detached: true,
+      stdio: stderrFd === null ? "ignore" : ["ignore", "ignore", stderrFd],
+      env: process.env,
+      windowsHide: true,
+    });
+    child.unref();
+  } finally {
+    if (stderrFd !== null) fs.closeSync(stderrFd);
+  }
 }
 
 function getCliVersion(): string {
-  try {
-    const pkg = require("../../package.json");
-    return pkg.version ?? "unknown";
-  } catch {
-    return "unknown";
-  }
+  return VERSION;
 }
 
 function randomId(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
+function daemonSpawnStderrPath(): string {
+  return path.join(defaultDataDir(), "daemon-spawn.stderr");
+}
+
 function truthy(v: unknown): boolean {
   return v === true || v === "true" || v === "1";
+}
+
+function flagString(v: unknown): string | null {
+  if (Array.isArray(v)) return flagString(v[v.length - 1]);
+  return typeof v === "string" ? v : null;
 }
 
 function extractMarkdownResult(result: unknown, format: unknown): string | null {
@@ -399,6 +513,63 @@ function extractMarkdownResult(result: unknown, format: unknown): string | null 
 
   const markdown = (result as { markdown?: unknown }).markdown;
   return typeof markdown === "string" ? markdown : null;
+}
+
+function extractCursorEventId(result: unknown): string {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return "";
+  const eventId = (result as { event_id?: unknown }).event_id;
+  return typeof eventId === "string" ? eventId : "";
+}
+
+function createStreamAckCallback(
+  method: string,
+  sock: net.Socket,
+  reqId: string,
+  data: unknown,
+): (() => void) | undefined {
+  if (method !== "monitor:events") return undefined;
+  const eventId = extractStreamEventId(data);
+  if (!eventId) return undefined;
+  return () => sendStreamAck(sock, reqId, eventId);
+}
+
+function extractStreamEventId(data: unknown): string | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const id = (data as { id?: unknown }).id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+function sendStreamAck(sock: net.Socket, reqId: string, eventId: string): void {
+  if (sock.destroyed) return;
+  writeMessage(sock, {
+    kind: "notification",
+    method: "stream_ack",
+    params: {
+      id: reqId,
+      event_id: eventId,
+    },
+  });
+}
+
+function forwardDaemonError(error: { code: string; message: string; data?: unknown }): string {
+  return JSON.stringify(err(error.code, error.message, error.data)) + "\n";
+}
+
+function validateCliFlags(parsed: ParsedArgs, method: string): string | null {
+  if (method !== "monitor:events") return null;
+  if (parsed.flags.cursor === true) return "--cursor requires a value";
+  if (parsed.flags.since !== undefined && parsed.flags.cursor !== undefined) {
+    return "--since and --cursor are mutually exclusive";
+  }
+  return null;
+}
+
+function asStringFlag(value: string | boolean | string[] | undefined): string | null {
+  if (Array.isArray(value)) {
+    const last = value[value.length - 1];
+    return typeof last === "string" ? last : null;
+  }
+  return typeof value === "string" ? value : null;
 }
 
 function isTransientConnectError(err: Error & { code?: string }): boolean {
@@ -420,6 +591,8 @@ function isReadOnlyMethod(method: string): boolean {
     method === "daemon:user:list" ||
     method === "daemon:config:get" ||
     method === "daemon:config:list" ||
+    method === "cursor:list" ||
+    method === "cursor:get" ||
     method === "session:info" ||
     method === "session:context" ||
     method === "session:list" ||
@@ -447,4 +620,9 @@ function toInt(v: unknown, fallback: number): number {
 
 function toMs(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) ? Math.max(1, Math.floor(v * 1000)) : fallback;
+}
+
+function formatDuration(ms: number): string {
+  if (ms % 1000 === 0) return `${ms / 1000}s`;
+  return `${ms}ms`;
 }

@@ -104,6 +104,7 @@ describe("parseArgs", () => {
       "--attach", "/tmp/b.png",
       "--since", "-3",
       "--format=markdown",
+      "--truncate", "4096",
       "--experimental-tools", "ask-user-question,request-permissions",
     ]);
 
@@ -113,12 +114,51 @@ describe("parseArgs", () => {
     expect(parsed.flags.attach).toEqual(["/tmp/a.png", "/tmp/b.png"]);
     expect(parsed.flags.since).toBe("-3");
     expect(parsed.flags.format).toBe("markdown");
+    expect(parsed.flags.truncate).toBe("4096");
     expect(parsed.flags["experimental-tools"]).toBe("ask-user-question,request-permissions");
   });
 
   it("reports unknown commands and missing global flag values", () => {
     expect(parseArgs(["bogus"]).unknown).toMatch("unknown command");
     expect(parseArgs(["-b"]).unknown).toBe("flag -b requires a value");
+  });
+
+  it("parses cursor commands and event-id flags", () => {
+    const parsed = parseArgs([
+      "-b", "token-1",
+      "cursor", "save", "audit-tail",
+      "--event-id", "evt-9",
+    ]);
+
+    expect(parsed.bearer).toBe("token-1");
+    expect(parsed.commandPath).toEqual(["cursor", "save"]);
+    expect(parsed.positionals).toEqual(["audit-tail"]);
+    expect(parsed.flags["event-id"]).toBe("evt-9");
+  });
+
+  it("parses global value flags in --flag=value form", () => {
+    const parsed = parseArgs([
+      "--bearer=token-1",
+      "--daemon-sock=/tmp/codex-team.sock",
+      "status",
+    ]);
+
+    expect(parsed.bearer).toBe("token-1");
+    expect(parsed.daemonSock).toBe("/tmp/codex-team.sock");
+    expect(parsed.commandPath).toEqual(["status"]);
+  });
+
+  it("parses monitor cursor flags alongside other monitor options", () => {
+    const parsed = parseArgs([
+      "-b", "token-1",
+      "monitor", "events",
+      "--cursor", "audit-tail",
+      "--stream",
+    ]);
+
+    expect(parsed.commandPath).toEqual(["monitor", "events"]);
+    expect(parsed.flags.cursor).toBe("audit-tail");
+    expect(parsed.flags.stream).toBe(true);
   });
 
   it("resolves subgroup help paths and skips positional validation", () => {
@@ -132,6 +172,12 @@ describe("parseArgs", () => {
     expect(leaf.commandPath).toEqual(["message", "approval"]);
     expect(leaf.positionals).toEqual([]);
     expect(leaf.unknown).toBeNull();
+
+    const cursor = parseArgs(["cursor", "--help"]);
+    expect(cursor.help).toBe(true);
+    expect(cursor.commandPath).toEqual(["cursor"]);
+    expect(cursor.positionals).toEqual([]);
+    expect(cursor.unknown).toBeNull();
   });
 
   it("treats --help as a command-path terminator", () => {
@@ -152,5 +198,21 @@ describe("parseArgs", () => {
     expect(sessionLeaf.commandPath).toEqual(["session", "new"]);
     expect(sessionLeaf.positionals).toEqual([]);
     expect(sessionLeaf.unknown).toBeNull();
+  });
+
+  it("parses the new session health/heal and message wait commands", () => {
+    const health = parseArgs(["-b", "token-1", "session", "health", "sess-1"]);
+    expect(health.commandPath).toEqual(["session", "health"]);
+    expect(health.positionals).toEqual(["sess-1"]);
+
+    const heal = parseArgs(["-b", "token-1", "session", "heal", "sess-1", "--force"]);
+    expect(heal.commandPath).toEqual(["session", "heal"]);
+    expect(heal.flags.force).toBe(true);
+
+    const wait = parseArgs(["-b", "token-1", "message", "wait", "sess-1", "--for", "turn-1", "--timeout", "30"]);
+    expect(wait.commandPath).toEqual(["message", "wait"]);
+    expect(wait.positionals).toEqual(["sess-1"]);
+    expect(wait.flags.for).toBe("turn-1");
+    expect(wait.flags.timeout).toBe("30");
   });
 });

@@ -1,0 +1,13 @@
+{
+  "renderer": "item",
+  "item": {
+    "id": "aar-1",
+    "type": "autoApprovalReview",
+    "review": {
+      "kind": "approval.command_execution",
+      "matchedPattern": "git status*",
+      "commandPreview": "git status --short"
+    },
+    "action": "approved"
+  }
+}

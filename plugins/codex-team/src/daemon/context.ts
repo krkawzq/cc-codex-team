@@ -2,6 +2,7 @@ import { ConfigStore } from "./config";
 import { UserRegistry } from "./users";
 import { SessionRegistry } from "./sessions";
 import { EventLog } from "./events";
+import { CursorStore } from "./cursors";
 import { PendingRegistry } from "./pending";
 import { TurnQueues } from "./queues";
 import { PidTracker } from "./orphans";
@@ -21,6 +22,7 @@ export interface DaemonContext {
   sessions: SessionRegistry;
   pool: AppServerPool;
   events: EventLog;
+  cursors: CursorStore;
   pending: PendingRegistry;
   queues: TurnQueues;
   activity: ActivityTracker;
@@ -30,8 +32,8 @@ export interface DaemonContext {
   logPath: string;
 }
 
-export function buildContext(): DaemonContext {
-  const config = new ConfigStore();
+export function buildContext(opts: { config?: ConfigStore; cursors?: CursorStore } = {}): DaemonContext {
+  const config = opts.config ?? new ConfigStore();
   const dataDir = config.resolvedDataDir();
   const sockPath = config.resolvedSockPath();
   const logPath = config.resolvedLogPath();
@@ -69,6 +71,7 @@ export function buildContext(): DaemonContext {
 
   const retentionRaw = config.getEffective("monitor.event_log_retention");
   const events = new EventLog(typeof retentionRaw === "number" ? retentionRaw : 10000, dataDir);
+  const cursors = opts.cursors ?? new CursorStore(dataDir);
   const pending = new PendingRegistry();
   const queues = new TurnQueues();
 
@@ -93,6 +96,7 @@ export function buildContext(): DaemonContext {
     sessions,
     pool,
     events,
+    cursors,
     pending,
     queues,
     activity,

@@ -42,6 +42,13 @@ const COMMANDS: Set<string> = new Set([
   "message:tail",
   "monitor:events",
   "monitor:alarm",
+  "session:health",
+  "session:heal",
+  "message:wait",
+  "cursor:save",
+  "cursor:list",
+  "cursor:get",
+  "cursor:delete",
 ]);
 
 const HELP_PATHS: Set<string> = new Set([
@@ -52,6 +59,7 @@ const HELP_PATHS: Set<string> = new Set([
   "session",
   "message",
   "monitor",
+  "cursor",
 ]);
 
 interface GlobalSpec {
@@ -84,15 +92,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const nonGlobal: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    const spec = GLOBAL_FLAGS[a];
+    const [globalToken, inlineValue] = splitLongFlagAssignment(a);
+    const spec = GLOBAL_FLAGS[globalToken];
     if (!spec) {
       nonGlobal.push(a);
       continue;
     }
     if (spec.takesValue) {
-      const v = argv[++i];
+      const v = inlineValue ?? argv[++i];
       if (v === undefined) {
-        result.unknown = `flag ${a} requires a value`;
+        result.unknown = `flag ${globalToken} requires a value`;
         return result;
       }
       if (spec.name === "bearer") result.bearer = v;
@@ -167,6 +176,13 @@ function isNegativeNumber(s: string): boolean {
   return /^-\d+(\.\d+)?$/.test(s);
 }
 
+function splitLongFlagAssignment(token: string): [string, string | null] {
+  if (!token.startsWith("--")) return [token, null];
+  const eqIdx = token.indexOf("=");
+  if (eqIdx < 0) return [token, null];
+  return [token.slice(0, eqIdx), token.slice(eqIdx + 1)];
+}
+
 function setFlag(flags: Record<string, string | boolean | string[]>, key: string, value: string | null): void {
   if (value === null) {
     flags[key] = true;
@@ -197,4 +213,17 @@ function matchCommand(tokens: string[], available: Set<string>): { path: string[
 
 export function commandKey(path: string[]): string {
   return path.join(":");
+}
+
+const SHORT_COMMANDS: Set<string> = new Set([
+  "status",
+  "daemon:status",
+  "daemon:user:list",
+  "session:info",
+  "session:list",
+  "message:history",
+]);
+
+export function supportsShort(method: string): boolean {
+  return SHORT_COMMANDS.has(method);
 }

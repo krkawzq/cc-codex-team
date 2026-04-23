@@ -17,9 +17,14 @@ const FIXTURE_BIN = path.join(__dirname, "fixtures", "fake-codex-app-server.js")
 
 class MemoryEvents {
   entries: Array<{ user: string; type: string; session: string | null; thread_id: string | null; payload: Record<string, unknown> }> = [];
+  private seq = 0;
 
-  async append(user: string, event: { type: string; session: string | null; thread_id: string | null; payload: Record<string, unknown> }): Promise<void> {
+  async append(user: string, event: { type: string; session: string | null; thread_id: string | null; payload: Record<string, unknown> }): Promise<{ id: string; ts: string }> {
     this.entries.push({ user, ...event });
+    return {
+      id: `evt-${++this.seq}`,
+      ts: new Date().toISOString(),
+    };
   }
 
   subscribe(): { dispose(): void } {
