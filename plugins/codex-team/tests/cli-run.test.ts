@@ -170,6 +170,42 @@ describe("runCli", () => {
     );
   });
 
+  it("emits raw markdown for session context --format markdown", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            format: "markdown",
+            markdown: "<context>{\"session\":\"sess-1\"}<\\context>",
+          },
+        });
+      }, 0);
+    });
+
+    const code = await runCli(["-b", "token-1", "session", "context", "sess-1", "--format", "markdown"]);
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith("<context>{\"session\":\"sess-1\"}<\\context>\n");
+    expect(stdoutSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining("\"markdown\""),
+    );
+  });
+
   it("renders cursor get as one-line JSONL by default", async () => {
     let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
     const socket = {

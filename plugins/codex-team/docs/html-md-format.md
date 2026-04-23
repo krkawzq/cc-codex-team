@@ -1,6 +1,6 @@
 # codex-team 标签化 Markdown 格式
 
-用于 `message history` / `message tail` / `session info` 等读取类命令的 `--format markdown` 输出。`session context` 当前主线为 JSON-only，不再默认提供 markdown 视图。
+用于 `message history` / `message tail` / `session context` / `session info` 等读取类命令的 `--format markdown` 输出。
 
 ## 设计目标
 
@@ -16,7 +16,7 @@
 
 - `message history --format markdown`：**简洁 transcript**。展示多轮 `<turn>`，保留 `<message role="user|assistant">` 正文，并展示 `<shell>` / `<file-patch>` / `tool.*` 等的**摘要**。
 - `message tail --format markdown`：**最新回复视图**。只展示 message，用户输入压成单行摘要，assistant message 保留正文；多轮时依然用 `<turn>` 分隔。
-- `session context`：**JSON-only 详情视图**。默认返回详细 thread metadata，`--full` 再展开更多冗余细节。
+- `session context --format markdown`：**thread 快照视图**。输出 `<context>` 根标签，携带 thread 元数据，并在 `thread/read` 返回 turn 内容时内嵌 `<turn>` transcript。
 
 ## 语法
 
@@ -61,6 +61,7 @@ tag 正文：任意 markdown，直接写，不包裹。
 
 | Tag | 命令 | 正文 |
 |---|---|---|
+| `<context>` | `session context --format markdown` | 嵌套 |
 | `<history>` | `message history --format markdown` | 嵌套 |
 | `<tail>` | `message tail --format markdown` | 嵌套 |
 | `<session-info>` | `session info --format markdown` | markdown 列表 |
@@ -103,9 +104,13 @@ tag 正文：任意 markdown，直接写，不包裹。
 | `<file-read>` | 文件内容 | `id` / `path` / `from_line` / `to_line` / `lang` |
 | `<file-write>` | 写入内容 | `id` / `path` |
 | `<tool.<name>>` | tool 结果（文本 / markdown） | `id` / `server` / `status` / `duration_ms` / `args`（对象） |
+| `<mcp-args>` | 无（内联 JSON） | — |
+| `<mcp-result>` | MCP/tool 文本结果 | — |
 | `<web-search>` | markdown 列表 | `id` / `query` / `engine` |
+| `<auto-approval-review>` | 无（全部 JSON，内联） | `id` / `kind` / `matched_pattern` / `command_preview` / `decision` |
 | `<approval-request>` | 无（全部 JSON，内联） | `id` / `kind` / `status` / `decided_by` / `decided_at` / `cmd` / `reason` / `decision`（对象） |
 | `<user-input-request>` | 无（全部 JSON，内联） | `id` / `status` / `answered_by` / `answered_at` / `questions`（数组） / `answers`（对象） |
+| `<hook-output>` | hook 输出正文 | — |
 | `<error>` | 错误描述 prose | `kind` / `codex_error_info` / `will_retry` |
 | `<item>` | 通用兜底 | `id` / `type` |
 
@@ -120,7 +125,7 @@ tag 正文：任意 markdown，直接写，不包裹。
 说明：
 
 - 下面部分 `<context>` / `<user-input>` / `<agent-message>` 示例是**旧格式兼容示例**，保留用于说明历史 tag 词表，不代表当前主线默认输出。
-- 当前主线默认输出遵循本页上方的语义说明：`history` 是简洁 transcript，`tail` 是 message-focused 视图，`context` 为 JSON-only。
+- 当前主线默认输出遵循本页上方的语义说明：`history` 是简洁 transcript，`tail` 是 message-focused 视图，`context` 是 thread snapshot 视图。
 
 ### 1 — `session context`
 

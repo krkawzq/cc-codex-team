@@ -44,6 +44,7 @@ import {
 } from "../auto-approve";
 import { SESSION_CLOSED_EVENT_TYPE } from "../events";
 import { cancelPendingWithEvent } from "../pending-cancel";
+import { renderContext } from "../../format/markdown";
 import { renderTable } from "../../format/table";
 import { matchesGlob } from "../../util/glob";
 
@@ -365,8 +366,8 @@ export const sessionContext: HandlerFn = async (ctx, req) => {
   const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
   const format = asString(flags["format"]) ?? "json";
-  if (format !== "json") {
-    throw invalidParams(`session context supports json only`);
+  if (format !== "json" && format !== "markdown") {
+    throw invalidParams(`--format must be json or markdown`);
   }
 
   const rec = ctx.sessions.get(user, identifier);
@@ -385,11 +386,20 @@ export const sessionContext: HandlerFn = async (ctx, req) => {
   }
 
   const result = await threadRead(client, threadId, ctx.retryOptions());
-  return {
+  const response: Record<string, unknown> = {
     session: rec?.name ?? null,
     thread_id: threadId,
     thread: result.thread,
   };
+  if (format === "markdown") {
+    response.format = "markdown";
+    response.markdown = renderContext({
+      session: rec?.name ?? null,
+      thread_id: threadId,
+      thread: result.thread,
+    });
+  }
+  return response;
 };
 
 export const sessionList: HandlerFn = async (ctx, req) => {

@@ -110,7 +110,7 @@ The turn is now running. Your cli returned immediately. Watch the events panel:
 codex-team -b $TOKEN message tail demo -n 1 --format markdown
 ```
 
-The `markdown` field in the response is tag-structured — paste it into your working notes or parse it for downstream logic.
+The CLI prints raw tag-structured markdown to stdout — paste it into your working notes or parse it for downstream logic.
 
 ## 7. Second turn — queued automatically
 
