@@ -116,6 +116,7 @@ function makeCtx(initial: TestSessionRecord[] = []) {
       beginTeardown: vi.fn().mockResolvedValue({ currentTurnId: null }),
       waitForIdle: vi.fn().mockResolvedValue(undefined),
       dispose: vi.fn(),
+      finalDispose: vi.fn(),
     },
     pending: {
       listForUser: vi.fn().mockReturnValue([]),

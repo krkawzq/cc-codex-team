@@ -53,9 +53,10 @@ export async function runCli(argv: string[]): Promise<number> {
       process.stderr.write(warning.message + "\n");
     });
   }
+  const effectiveMethod = resolveMethod(method, parsed);
   const short = truthy(parsed.flags.short);
   const format = flagString(parsed.flags.format);
-  if (short && !supportsShort(method)) {
+  if (short && !supportsShort(effectiveMethod)) {
     process.stdout.write(JSON.stringify(err("invalid_params", `--short is not supported for '${method}'`)) + "\n");
     return 1;
   }
@@ -77,7 +78,7 @@ export async function runCli(argv: string[]): Promise<number> {
     return await runVersion(sockPath);
   }
 
-  const needsBearer = !isDaemonLevel(method);
+  const needsBearer = !isDaemonLevel(effectiveMethod);
   if (needsBearer && !parsed.bearer) {
     process.stdout.write(
       JSON.stringify(err("invalid_params", `bearer token required for '${method}'; pass -b <token>`)) + "\n",
@@ -85,7 +86,7 @@ export async function runCli(argv: string[]): Promise<number> {
     return 1;
   }
 
-  const cliValidationError = validateCliFlags(parsed, method);
+  const cliValidationError = validateCliFlags(parsed, method, effectiveMethod);
   if (cliValidationError) {
     process.stdout.write(JSON.stringify(err("invalid_params", cliValidationError)) + "\n");
     return 1;
@@ -103,7 +104,7 @@ export async function runCli(argv: string[]): Promise<number> {
     return 1;
   }
 
-  return await dispatchCommand(sockPath, parsed, method);
+  return await dispatchCommand(sockPath, parsed, effectiveMethod);
 }
 
 function isDaemonLevel(method: string): boolean {
@@ -145,6 +146,7 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
   const cliConfig = readCliConfig();
   const needsStreaming =
     method === "monitor:events" ||
+    method === "session:events" ||
     method === "monitor:alarm" ||
     method === "daemon:logs" ||
     (method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]));
@@ -775,7 +777,7 @@ function forwardDaemonError(error: { code: string; message: string; data?: unkno
   return JSON.stringify(err(error.code, error.message, error.data)) + "\n";
 }
 
-function validateCliFlags(parsed: ParsedArgs, method: string): string | null {
+function validateCliFlags(parsed: ParsedArgs, method: string, effectiveMethod: string): string | null {
   if (method === "monitor:events") {
     if (parsed.flags.cursor === true) return "--cursor requires a value";
     if (parsed.flags.since !== undefined && parsed.flags.cursor !== undefined) {
@@ -795,7 +797,40 @@ function validateCliFlags(parsed: ParsedArgs, method: string): string | null {
     }
     return null;
   }
+
+  if (method === "session:health" && effectiveMethod === "session:health") {
+    if (parsed.flags["only-unhealthy"] !== undefined || parsed.flags.state !== undefined) {
+      return "--only-unhealthy and --state require --all";
+    }
+  }
+
+  if (effectiveMethod === "daemon:fleet:status" && parsed.flags.users === true) {
+    return "--users requires a value";
+  }
+
+  if (effectiveMethod === "session:events") {
+    if (parsed.flags.type === true) return "--type requires a value";
+    if (parsed.flags.turn === true) return "--turn requires a value";
+    if (parsed.flags.since === true) return "--since requires a value";
+    if (parsed.flags.limit === true) return "--limit requires a value";
+    if (truthy(parsed.flags["by-tool"]) && truthy(parsed.flags["by-item-kind"])) {
+      return "--by-tool and --by-item-kind are mutually exclusive";
+    }
+    if (truthy(parsed.flags.follow) && (truthy(parsed.flags["by-tool"]) || truthy(parsed.flags["by-item-kind"]))) {
+      return "--follow cannot be used with --by-tool or --by-item-kind";
+    }
+    if (truthy(parsed.flags.summary) && (truthy(parsed.flags["by-tool"]) || truthy(parsed.flags["by-item-kind"]))) {
+      return "--summary cannot be used with --by-tool or --by-item-kind";
+    }
+  }
   return null;
+}
+
+function resolveMethod(method: string, parsed: ParsedArgs): string {
+  if (method === "session:health" && truthy(parsed.flags.all)) {
+    return "session:health:all";
+  }
+  return method;
 }
 
 function asStringFlag(value: string | boolean | string[] | undefined): string | null {
@@ -821,12 +856,16 @@ function isTransientRequestError(err: Error & { code?: string }): boolean {
 function isReadOnlyMethod(method: string): boolean {
   return method === "version" ||
     method === "status" ||
+    method === "daemon:fleet:status" ||
     method === "daemon:status" ||
     method === "daemon:user:list" ||
     method === "daemon:config:get" ||
     method === "daemon:config:list" ||
     method === "cursor:list" ||
     method === "cursor:get" ||
+    method === "session:health" ||
+    method === "session:health:all" ||
+    method === "session:events" ||
     method === "session:info" ||
     method === "session:context" ||
     method === "session:list" ||

@@ -13,6 +13,7 @@ const COMMANDS: Set<string> = new Set([
   "version",
   "doctor",
   "status",
+  "daemon:fleet:status",
   "daemon:status",
   "daemon:start",
   "daemon:stop",
@@ -37,6 +38,7 @@ const COMMANDS: Set<string> = new Set([
   "session:info",
   "session:context",
   "session:list",
+  "session:events",
   "message:send",
   "message:send-many",
   "message:peer",
@@ -59,6 +61,7 @@ const COMMANDS: Set<string> = new Set([
 const HELP_PATHS: Set<string> = new Set([
   ...COMMANDS,
   "daemon",
+  "daemon:fleet",
   "daemon:user",
   "daemon:config",
   "session",
@@ -263,9 +266,12 @@ export function commandKey(path: string[]): string {
 const SHORT_COMMANDS: Set<string> = new Set([
   "doctor",
   "status",
+  "daemon:fleet:status",
   "daemon:status",
   "daemon:user:list",
   "session:info",
+  "session:health",
+  "session:health:all",
   "session:list",
   "message:history",
 ]);

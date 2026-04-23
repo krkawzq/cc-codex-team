@@ -29,6 +29,7 @@ const processMocks = vi.hoisted(() => ({
   spawn: vi.fn(() => ({
     unref: vi.fn(),
   })),
+  spawnSync: vi.fn(() => ({ status: 0, error: undefined })),
 }));
 
 vi.mock("../src/codex/rpc", () => rpcMocks);
@@ -43,6 +44,9 @@ vi.mock("../src/daemon/config", () => ({
       if (key === "daemon.connect_retry_delay_seconds") return 0.25;
       return null;
     }
+    resolvedDataDir() { return "/tmp/cct-cohort-test"; }
+    resolvedLogPath() { return "/tmp/cct-cohort-test/daemon.log"; }
+    resolvedSockPath() { return "/tmp/cct-cohort-test/daemon.sock"; }
   },
 }));
 
@@ -590,6 +594,7 @@ describe("cohort commands", () => {
         beginTeardown: vi.fn().mockImplementation(async (_sessionKey: string) => ({ currentTurnId: null })),
         waitForIdle: vi.fn().mockResolvedValue(undefined),
         dispose: vi.fn(),
+        finalDispose: vi.fn(),
       },
       pending: {},
       events: {

@@ -45,6 +45,7 @@ describe("renderHelp", () => {
   it("documents --short for compact status commands", () => {
     expect(renderHelp(["status"])).toContain("--short");
     expect(renderHelp(["daemon", "status"])).toContain("--short");
+    expect(renderHelp(["daemon", "fleet", "status"])).toContain("--users");
     expect(renderHelp(["daemon", "user", "list"])).toContain("--short");
     expect(renderHelp(["session", "info"])).toContain("--short");
     const sessionList = renderHelp(["session", "list"]);
@@ -55,6 +56,8 @@ describe("renderHelp", () => {
     expect(sessionList).toContain("--state");
     expect(sessionList).toContain("--owner");
     expect(sessionList).toContain("--loaded-only");
+    expect(renderHelp(["session", "health"])).toContain("--only-unhealthy");
+    expect(renderHelp(["session", "list"])).toContain("cannot be used with --format table");
     expect(renderHelp(["message", "history"])).toContain("cannot be used with --format markdown");
   });
 
@@ -107,6 +110,8 @@ describe("renderHelp", () => {
     const health = renderHelp(["session", "health"]);
     expect(health).toContain("codex-team session health");
     expect(health).toContain("session heal");
+    expect(health).toContain("--all");
+    expect(health).toContain("--state");
 
     const heal = renderHelp(["session", "heal"]);
     expect(heal).toContain("codex-team session heal");
@@ -136,6 +141,21 @@ describe("renderHelp", () => {
     expect(rollback).toContain("codex-team session rollback");
     expect(rollback).toContain("--to-turn");
     expect(rollback).toContain("--detach-after");
+  });
+
+  it("renders daemon fleet and session events help entries", () => {
+    const fleet = renderHelp(["daemon", "fleet", "status"]);
+    expect(fleet).toContain("codex-team daemon fleet status");
+    expect(fleet).toContain("--users");
+    expect(fleet).toContain("--short");
+
+    const events = renderHelp(["session", "events"]);
+    expect(events).toContain("codex-team session events");
+    expect(events).toContain("--type");
+    expect(events).toContain("--since");
+    expect(events).toContain("--follow");
+    expect(events).toContain("--by-tool");
+    expect(events).toContain("--by-item-kind");
   });
 
   it("renders cursor subcommands and the explicit event-id flag", () => {

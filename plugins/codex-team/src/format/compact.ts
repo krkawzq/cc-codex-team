@@ -11,6 +11,8 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
         "pending_requests",
         "app_server_count",
       ]);
+    case "daemon:fleet:status":
+      return compactDaemonFleetStatus(data);
     case "daemon:status":
       return pickFields(data, [
         "pid",
@@ -93,6 +95,10 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
         "app_server_alive",
         "last_event_id",
       ]);
+    case "session:health:all":
+      return compactSessionHealthAll(data);
+    case "session:events":
+      return asObject(data);
     case "session:heal":
       return compactSessionHeal(data);
     case "message:send":
@@ -158,6 +164,25 @@ function compactDaemonConfigList(data: unknown): Record<string, unknown> {
       "explicit",
       "needs_restart",
       "type",
+    ])),
+  };
+}
+
+function compactDaemonFleetStatus(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  return {
+    total_users: value.total_users,
+    total_live_sessions: value.total_live_sessions,
+    total_pending: value.total_pending,
+    total_app_servers: value.total_app_servers,
+    per_user: asArray(value.per_user).map((entry) => pickFields(entry, [
+      "token",
+      "live",
+      "busy",
+      "pending",
+      "crashed",
+      "last_event_id",
+      "last_activity_age_s",
     ])),
   };
 }
@@ -256,6 +281,27 @@ function compactSessionHeal(data: unknown): Record<string, unknown> {
   copyIfPresent(out, value, "healed");
   copyIfPresent(out, value, "note");
   return out;
+}
+
+function compactSessionHealthAll(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  return {
+    summary: pickFields(value.summary, ["total", "healthy", "crashed", "closed", "busy", "pending_total"]),
+    sessions: asArray(value.sessions).map((entry) => pickFields(entry, [
+      "session",
+      "thread_id",
+      "state",
+      "busy",
+      "current_turn_id",
+      "current_turn_elapsed_ms",
+      "current_item_type",
+      "items_done_in_turn",
+      "pending_approval_requests",
+      "pending_user_input_requests",
+      "app_server_alive",
+      "last_event_id",
+    ])),
+  };
 }
 
 function compactMessageHistory(data: unknown): Record<string, unknown> {
