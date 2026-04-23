@@ -42,6 +42,18 @@ export interface ServerRequest {
 
 export interface InitializeResponse extends Record<string, unknown> {}
 
+export type AppServerLogStream = "stdout" | "stderr";
+
+export interface AppServerLogLine {
+  stream: AppServerLogStream;
+  line: string;
+  ts: string;
+}
+
+interface StoredAppServerLogLine extends AppServerLogLine {
+  seq: number;
+}
+
 interface PendingRequest {
   resolve(value: JsonValue): void;
   reject(err: Error): void;
@@ -51,6 +63,8 @@ interface PendingRequest {
 export interface AppServerEvents {
   notification: (n: ServerNotification) => void;
   server_request: (r: ServerRequest) => void;
+  stdout_line: (line: AppServerLogLine) => void;
+  stderr_line: (line: AppServerLogLine) => void;
   close: (code: number | null) => void;
   error: (err: Error) => void;
 }
@@ -64,9 +78,13 @@ export declare interface AppServerClient {
 
 export class AppServerClient extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams | null = null;
+  private stdoutBuf = "";
+  private stderrBuf = "";
   private pending = new Map<string, PendingRequest>();
-  private stderrTail: string[] = [];
+  private stdoutLogTail: StoredAppServerLogLine[] = [];
+  private stderrLogTail: StoredAppServerLogLine[] = [];
   private lastPid: number | null = null;
+  private nextLogSeq = 1;
   private readonly options: Required<Omit<AppServerOptions, "env" | "cwd" | "clientInfo">> &
     Pick<AppServerOptions, "env" | "cwd" | "clientInfo">;
   private initialized = false;
@@ -96,7 +114,27 @@ export class AppServerClient extends EventEmitter {
   }
 
   stderrTailText(): string {
-    return this.stderrTail.join("\n");
+    return this.stderrLogTail.map((entry) => entry.line).join("\n");
+  }
+
+  stdoutTailText(): string {
+    return this.stdoutLogTail.map((entry) => entry.line).join("\n");
+  }
+
+  stderrTail(n = this.options.stderrTailLines): AppServerLogLine[] {
+    return this.sliceTail(this.stderrLogTail, n);
+  }
+
+  stdoutTail(n = this.options.stderrTailLines): AppServerLogLine[] {
+    return this.sliceTail(this.stdoutLogTail, n);
+  }
+
+  logTail(stream: AppServerLogStream | "all", n = this.options.stderrTailLines): AppServerLogLine[] {
+    if (stream === "stdout") return this.stdoutTail(n);
+    if (stream === "stderr") return this.stderrTail(n);
+    const merged = [...this.stdoutLogTail, ...this.stderrLogTail]
+      .sort((left, right) => left.seq - right.seq);
+    return this.sliceTail(merged, n);
   }
 
   async start(): Promise<InitializeResponse> {
@@ -126,6 +164,8 @@ export class AppServerClient extends EventEmitter {
     });
     this.proc.on("exit", (code, signal) => {
       logger.info("app-server exited", { code, signal });
+      this.flushLogBuffer("stdout", true);
+      this.flushLogBuffer("stderr", true);
       this.failAllPending(new TransportClosedError(`app-server exited (code=${code}, signal=${signal})`));
       this.emit("close", code);
       this.proc = null;
@@ -265,16 +305,16 @@ export class AppServerClient extends EventEmitter {
   }
 
   private onStdout(chunk: string): void {
+    // JSON-RPC framing (cursor-based parser)
     this.stdoutParser.push(chunk);
+    // Also capture raw lines for session logs ring buffer
+    this.stdoutBuf += chunk;
+    this.flushLogBuffer("stdout");
   }
 
   private onStderr(chunk: string): void {
-    const lines = chunk.split("\n");
-    for (const line of lines) {
-      if (!line) continue;
-      this.stderrTail.push(line);
-      if (this.stderrTail.length > this.options.stderrTailLines) this.stderrTail.shift();
-    }
+    this.stderrBuf += chunk;
+    this.flushLogBuffer("stderr");
   }
 
   private dispatchIncoming(msg: Record<string, unknown>): void {
@@ -349,6 +389,55 @@ export class AppServerClient extends EventEmitter {
   private peerLabel(): string {
     return this.lastPid ? `app_server:${this.lastPid}` : "app_server:unknown";
   }
+
+  private flushLogBuffer(stream: AppServerLogStream, includePartial = false): void {
+    const current = stream === "stdout" ? this.stdoutBuf : this.stderrBuf;
+    let remaining = current;
+    let idx: number;
+    while ((idx = remaining.indexOf("\n")) >= 0) {
+      const line = remaining.slice(0, idx);
+      remaining = remaining.slice(idx + 1);
+      this.recordLogLine(stream, line);
+    }
+    if (includePartial && remaining.length > 0) {
+      this.recordLogLine(stream, remaining);
+      remaining = "";
+    }
+
+    if (stream === "stdout") this.stdoutBuf = remaining;
+    else this.stderrBuf = remaining;
+  }
+
+  private recordLogLine(stream: AppServerLogStream, line: string): void {
+    if (!line) return;
+    const entry: StoredAppServerLogLine = {
+      stream,
+      line,
+      ts: new Date().toISOString(),
+      seq: this.nextLogSeq++,
+    };
+    const target = stream === "stdout" ? this.stdoutLogTail : this.stderrLogTail;
+    target.push(entry);
+    if (target.length > this.options.stderrTailLines) target.shift();
+
+    const rendered = this.stripLogLine(entry);
+    this.emit(`${stream}_line`, rendered);
+    // JSON-RPC dispatch is handled by the cursor-based stdoutParser in onStdout().
+    // recordLogLine only captures raw lines for the session-logs ring buffer.
+  }
+
+  private sliceTail(lines: StoredAppServerLogLine[], n: number): AppServerLogLine[] {
+    const limit = normalizeTailCount(n, this.options.stderrTailLines);
+    return lines.slice(Math.max(0, lines.length - limit)).map((entry) => this.stripLogLine(entry));
+  }
+
+  private stripLogLine(entry: StoredAppServerLogLine): AppServerLogLine {
+    return {
+      stream: entry.stream,
+      line: entry.line,
+      ts: entry.ts,
+    };
+  }
 }
 
 export function isJsonRpcError(e: unknown): e is JsonRpcError {
@@ -418,4 +507,9 @@ function forceKillProcess(proc: ChildProcessWithoutNullStreams): void {
   } catch {
     // ignore
   }
+}
+
+function normalizeTailCount(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) return Math.max(1, Math.floor(fallback));
+  return Math.max(1, Math.floor(value));
 }

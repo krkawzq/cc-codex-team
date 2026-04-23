@@ -39,6 +39,7 @@ const COMMANDS: Set<string> = new Set([
   "session:context",
   "session:list",
   "session:events",
+  "session:logs",
   "message:send",
   "message:send-many",
   "message:peer",
@@ -272,6 +273,7 @@ const SHORT_COMMANDS: Set<string> = new Set([
   "session:info",
   "session:health",
   "session:health:all",
+  "session:logs",
   "session:list",
   "message:history",
 ]);

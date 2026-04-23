@@ -59,6 +59,7 @@ describe("renderHelp", () => {
     expect(renderHelp(["session", "health"])).toContain("--only-unhealthy");
     expect(renderHelp(["session", "list"])).toContain("cannot be used with --format table");
     expect(renderHelp(["message", "history"])).toContain("cannot be used with --format markdown");
+    expect(renderHelp(["session", "logs"])).toContain("--short");
   });
 
   it("documents --full on leaf commands", () => {
@@ -156,6 +157,12 @@ describe("renderHelp", () => {
     expect(events).toContain("--follow");
     expect(events).toContain("--by-tool");
     expect(events).toContain("--by-item-kind");
+
+    const logs = renderHelp(["session", "logs"]);
+    expect(logs).toContain("codex-team session logs");
+    expect(logs).toContain("--stream");
+    expect(logs).toContain("--truncate");
+    expect(logs).toContain("state=crashed");
   });
 
   it("renders cursor subcommands and the explicit event-id flag", () => {

@@ -748,6 +748,47 @@ describe("runCli", () => {
     );
   });
 
+  it("renders session logs follow chunks in short mode", async () => {
+    let streamHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      streamHandler = handler;
+    });
+
+    const pending = runCli(["-b", "token-1", "session", "logs", "audit", "--follow", "--short"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const reqId = sockMocks.writeMessage.mock.calls[0]?.[1]?.id;
+
+    streamHandler?.({
+      kind: "stream_chunk",
+      id: reqId,
+      data: {
+        session: "audit",
+        lines: [{ ts: "2026-04-23T12:00:00.000Z", stream: "stderr", line: "boom" }],
+      },
+    });
+    streamHandler?.({
+      kind: "stream_end",
+      id: reqId,
+    });
+
+    const code = await pending;
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith("2026-04-23T12:00:00.000Z stderr boom\n");
+    expect(stdoutSpy).not.toHaveBeenCalledWith(expect.stringContaining("\"lines\""));
+  });
+
   it("routes session health --all to the fleet RPC shape", async () => {
     let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
     const socket = {

@@ -23,12 +23,12 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/main.ts
-var import_node_fs18 = __toESM(require("fs"));
-var import_node_path17 = __toESM(require("path"));
+var import_node_fs19 = __toESM(require("fs"));
+var import_node_path18 = __toESM(require("path"));
 
 // src/cli/run.ts
-var import_node_fs7 = __toESM(require("fs"));
-var import_node_path7 = __toESM(require("path"));
+var import_node_fs8 = __toESM(require("fs"));
+var import_node_path8 = __toESM(require("path"));
 var import_node_child_process3 = require("child_process");
 var import_promises = require("timers/promises");
 
@@ -484,6 +484,7 @@ var COMMANDS = /* @__PURE__ */ new Set([
   "session:context",
   "session:list",
   "session:events",
+  "session:logs",
   "message:send",
   "message:send-many",
   "message:peer",
@@ -682,8 +683,8 @@ function matchCommand(tokens, available) {
   }
   return null;
 }
-function commandKey(path18) {
-  return path18.join(":");
+function commandKey(path19) {
+  return path19.join(":");
 }
 var SHORT_COMMANDS = /* @__PURE__ */ new Set([
   "doctor",
@@ -694,6 +695,7 @@ var SHORT_COMMANDS = /* @__PURE__ */ new Set([
   "session:info",
   "session:health",
   "session:health:all",
+  "session:logs",
   "session:list",
   "message:history"
 ]);
@@ -1661,6 +1663,62 @@ var sessionGroup = {
       needs_bearer: true
     }),
     leaf({
+      name: "logs",
+      summary: "Show the recent app-server stdout/stderr tail for one session.",
+      usage: "codex-team -b <token> session logs <name|thread_id> [flags]",
+      positionals: [
+        { ...SESSION_TARGET }
+      ],
+      flags: [
+        {
+          long: "-n",
+          type: "int",
+          default: "100",
+          required: false,
+          description: "Return the last N captured log lines."
+        },
+        {
+          long: "--follow",
+          short: "-f",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Keep streaming new log lines until the CLI exits."
+        },
+        {
+          long: "--stream",
+          type: "enum",
+          default: "stderr",
+          required: false,
+          description: "Choose stderr, stdout, or all captured streams."
+        },
+        {
+          long: "--truncate",
+          type: "int",
+          default: "2048",
+          required: false,
+          description: "Clip each log line to this many bytes; use 0 to disable clipping."
+        },
+        {
+          long: "--short",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Print '<ts> <stream> <line>' per log line."
+        }
+      ],
+      examples: [
+        "codex-team -b $TOKEN session logs audit -n 50",
+        "codex-team -b $TOKEN session logs audit --stream all",
+        "codex-team -b $TOKEN session logs audit --follow --short"
+      ],
+      notes: [
+        "Detached sessions return session_not_live; re-attach them first.",
+        "Crashed sessions return the last captured tail with state=crashed."
+      ],
+      needs_bearer: true
+    }),
+    leaf({
       name: "heal",
       summary: "Re-attach a crashed or dead live session to a fresh app-server.",
       usage: "codex-team -b <token> session heal <name|thread_id> [flags]",
@@ -2294,15 +2352,15 @@ var HELP_TREE = {
   ],
   needs_bearer: false
 };
-function findNode(path18, node = HELP_TREE) {
-  if (path18.length === 0) return node;
-  const [head, ...rest] = path18;
+function findNode(path19, node = HELP_TREE) {
+  if (path19.length === 0) return node;
+  const [head, ...rest] = path19;
   const child = node.subcommands.find((entry) => entry.name === head);
   if (!child) return null;
   return findNode(rest, child);
 }
-function formatCommandPath(path18) {
-  return path18.length === 0 ? "codex-team" : `codex-team ${path18.join(" ")}`;
+function formatCommandPath(path19) {
+  return path19.length === 0 ? "codex-team" : `codex-team ${path19.join(" ")}`;
 }
 function formatPositional(positional) {
   return positional.required ? `<${positional.name}>` : `[${positional.name}]`;
@@ -2382,9 +2440,9 @@ function renderExamples(node) {
     ...node.examples.map((example) => `  ${example}`)
   ];
 }
-function renderHelp(path18) {
-  const node = findNode(path18) ?? HELP_TREE;
-  const resolvedPath = findNode(path18) ? path18 : [];
+function renderHelp(path19) {
+  const node = findNode(path19) ?? HELP_TREE;
+  const resolvedPath = findNode(path19) ? path19 : [];
   const sections = [
     [formatCommandPath(resolvedPath), node.summary],
     ["USAGE", `  ${node.usage}`]
@@ -2735,6 +2793,9 @@ function formatShort(method, data) {
     case "session:health:all":
       body = formatSessionHealth(data);
       break;
+    case "session:logs":
+      body = formatSessionLogs(data);
+      break;
     case "session:info":
       body = formatSessionInfo(data);
       break;
@@ -2846,6 +2907,19 @@ function formatSessionList(data) {
       formatScalar(session.model ?? session.model_provider),
       `busy=${busyFlag(session.busy, turnId, turn, turnIdKnown)}`
     ].join("  ");
+  }).join("\n");
+}
+function formatSessionLogs(data) {
+  const value = asObject(data);
+  const lines = Array.isArray(value.lines) ? value.lines : [];
+  if (lines.length === 0) return "(no logs)";
+  return lines.map((entry) => {
+    const line = asObject(entry);
+    return [
+      formatScalar(line.ts),
+      formatScalar(line.stream),
+      formatScalar(line.line)
+    ].join(" ");
   }).join("\n");
 }
 function formatDaemonUserList(data) {
@@ -3185,6 +3259,8 @@ function formatCompact(method, data) {
       return compactSessionHealthAll(data);
     case "session:events":
       return asObject2(data);
+    case "session:logs":
+      return compactSessionLogs(data);
     case "session:heal":
       return compactSessionHeal(data);
     case "message:send":
@@ -3309,6 +3385,10 @@ function compactSessionContext(data) {
   const thread = projectThread(value.thread);
   if (Object.keys(thread).length > 0) out.thread = thread;
   return out;
+}
+function compactSessionLogs(data) {
+  const value = asObject2(data);
+  return pickFields(value, ["session", "state", "lines", "truncated_from"]);
 }
 function compactSessionList(data) {
   const value = asObject2(data);
@@ -3576,10 +3656,9 @@ function hasOwn2(record, key) {
 }
 
 // src/cli/doctor.ts
-var import_node_fs6 = __toESM(require("fs"));
-var import_node_net2 = __toESM(require("net"));
-var import_node_os2 = __toESM(require("os"));
-var import_node_path6 = __toESM(require("path"));
+var import_node_fs7 = __toESM(require("fs"));
+var import_node_net3 = __toESM(require("net"));
+var import_node_path7 = __toESM(require("path"));
 var import_node_child_process2 = require("child_process");
 
 // src/daemon/processes.ts
@@ -3719,12 +3798,88 @@ function looksLikeCodexAppServerCommand(commandLine) {
   return commandLine.includes("app-server") && (commandLine.includes("codex") || commandLine.includes("codex-cli-bin"));
 }
 
+// src/ipc/socket-bind-probe.ts
+var import_node_fs6 = __toESM(require("fs"));
+var import_node_net2 = __toESM(require("net"));
+var import_node_path6 = __toESM(require("path"));
+function buildSocketBindProbePath(sockPath) {
+  const endpoint = normalizeSockPath(sockPath);
+  if (!isFilesystemSockPath(sockPath)) {
+    return `${endpoint}-probe-${process.pid}-${Date.now()}`;
+  }
+  const parentDir = import_node_path6.default.dirname(endpoint);
+  const baseName = import_node_path6.default.basename(endpoint, import_node_path6.default.extname(endpoint)) || "daemon";
+  return import_node_path6.default.join(parentDir, `${baseName}-probe-${process.pid}-${Date.now()}.sock`);
+}
+async function probeSocketBind(sockPath, deps = {
+  fs: import_node_fs6.default,
+  createServer: import_node_net2.default.createServer
+}) {
+  const probedPath = buildSocketBindProbePath(sockPath);
+  const endpoint = normalizeSockPath(probedPath);
+  const server = deps.createServer();
+  const cleanup = async () => {
+    await new Promise((resolve) => {
+      try {
+        server.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+    if (isFilesystemSockPath(probedPath)) {
+      try {
+        deps.fs.unlinkSync(endpoint);
+      } catch {
+      }
+    }
+  };
+  if (isFilesystemSockPath(probedPath)) {
+    deps.fs.mkdirSync(import_node_path6.default.dirname(endpoint), { recursive: true });
+    try {
+      deps.fs.unlinkSync(endpoint);
+    } catch {
+    }
+  }
+  const listenResult = await new Promise((resolve) => {
+    const onError = (error) => {
+      server.off("listening", onListening);
+      resolve({ ok: false, error });
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve({ ok: true });
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    try {
+      server.listen(endpoint);
+    } catch (error) {
+      server.off("error", onError);
+      server.off("listening", onListening);
+      resolve({ ok: false, error });
+    }
+  });
+  if (!listenResult.ok) {
+    await cleanup();
+    return {
+      ok: false,
+      probedPath,
+      error: listenResult.error
+    };
+  }
+  await cleanup();
+  return {
+    ok: true,
+    probedPath
+  };
+}
+
 // src/cli/doctor.ts
 var DEFAULT_DEPS = {
-  fs: import_node_fs6.default,
+  fs: import_node_fs7.default,
   spawnSync: import_node_child_process2.spawnSync,
-  createServer: import_node_net2.default.createServer,
-  createConnection: import_node_net2.default.createConnection,
+  createServer: import_node_net3.default.createServer,
+  createConnection: import_node_net3.default.createConnection,
   kill: process.kill.bind(process),
   isLikelyCodexTeamDaemonProcess
 };
@@ -3737,7 +3892,7 @@ function buildDoctorContext(options = {}) {
     dataDir,
     sockPath,
     pidPath: pidFilePath(dataDir),
-    launcherPath: import_node_path6.default.join(options.packageRoot ?? PACKAGE_ROOT, "bin", "codex-team"),
+    launcherPath: import_node_path7.default.join(options.packageRoot ?? PACKAGE_ROOT, "bin", "codex-team"),
     pathEnv: options.pathEnv ?? process.env.PATH
   };
 }
@@ -3773,7 +3928,7 @@ function checkLauncherOnPath(ctx, deps = DEFAULT_DEPS) {
   return warn("path", `codex-team not on PATH; use ${ctx.launcherPath}`);
 }
 function checkDataDirWritable(ctx, deps = DEFAULT_DEPS) {
-  const testPath = import_node_path6.default.join(ctx.dataDir, ".doctor-write-test");
+  const testPath = import_node_path7.default.join(ctx.dataDir, ".doctor-write-test");
   try {
     deps.fs.mkdirSync(ctx.dataDir, { recursive: true });
     deps.fs.writeFileSync(testPath, "ok");
@@ -3787,53 +3942,18 @@ function checkDataDirWritable(ctx, deps = DEFAULT_DEPS) {
     return fail("data_dir", `data_dir not writable: ${ctx.dataDir}`);
   }
 }
-async function checkSocketBind(_ctx, deps = DEFAULT_DEPS) {
-  const sockPath = import_node_path6.default.join(import_node_os2.default.tmpdir(), `ct-doctor-${process.pid}-${Date.now()}.sock`);
-  const endpoint = normalizeSockPath(sockPath);
-  const server = deps.createServer();
-  const cleanup = async () => {
-    await new Promise((resolve) => {
-      try {
-        server.close(() => resolve());
-      } catch {
-        resolve();
-      }
-    });
-    if (isFilesystemSockPath(sockPath)) {
-      try {
-        deps.fs.unlinkSync(endpoint);
-      } catch {
-      }
-    }
-  };
-  if (isFilesystemSockPath(sockPath)) {
-    try {
-      deps.fs.unlinkSync(endpoint);
-    } catch {
-    }
-  }
-  const listenResult = await new Promise((resolve) => {
-    const onError = (error) => {
-      server.off("listening", onListening);
-      resolve({ ok: false, error });
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      resolve({ ok: true });
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(endpoint);
+async function checkSocketBind(ctx, deps = DEFAULT_DEPS) {
+  const result = await probeSocketBind(ctx.sockPath, {
+    fs: deps.fs,
+    createServer: deps.createServer
   });
-  if (!listenResult.ok) {
-    await cleanup();
-    const code = listenResult.error.code ?? "UNKNOWN";
+  if (!result.ok) {
+    const code = result.error?.code ?? "UNKNOWN";
     if (code === "EPERM" || code === "EACCES") {
       return fail("socket_bind", `socket_bind ${code} - sandbox forbids listen(); codex-team won't work here`);
     }
-    return fail("socket_bind", `socket_bind ${code} - listen() failed: ${listenResult.error.message}`);
+    return fail("socket_bind", `socket_bind ${code} - listen() failed: ${result.error?.message ?? "unknown error"}`);
   }
-  await cleanup();
   return ok2("socket_bind", "socket_bind permitted");
 }
 function checkDaemonPid(ctx, deps = DEFAULT_DEPS) {
@@ -3873,12 +3993,12 @@ async function checkDaemonSocket(ctx, pidResult, deps = DEFAULT_DEPS) {
   return fail("daemon_socket", `daemon_socket ${code} - ${interpretSocketConnectError(code, result.message)}`);
 }
 function checkDistFreshness(ctx, deps = DEFAULT_DEPS) {
-  const distPath = import_node_path6.default.join(ctx.packageRoot, "dist", "main.js");
+  const distPath = import_node_path7.default.join(ctx.packageRoot, "dist", "main.js");
   const distStat = statIfExists(distPath, deps.fs);
   if (!distStat) {
     return warn("dist", "dist missing; run `npm run build` in plugins/codex-team");
   }
-  const sourceNewest = newestMtime(import_node_path6.default.join(ctx.packageRoot, "src"), deps.fs);
+  const sourceNewest = newestMtime(import_node_path7.default.join(ctx.packageRoot, "src"), deps.fs);
   if (sourceNewest !== null && sourceNewest > distStat.mtimeMs) {
     return warn("dist", "source newer than dist; run `npm run build` in plugins/codex-team");
   }
@@ -3953,11 +4073,11 @@ function skip(id, message) {
   return { id, status: "skip", message };
 }
 function resolveOnPath(command, pathEnv, doctorFs) {
-  const segments = (pathEnv ?? "").split(import_node_path6.default.delimiter).filter(Boolean);
+  const segments = (pathEnv ?? "").split(import_node_path7.default.delimiter).filter(Boolean);
   const candidates = process.platform === "win32" ? windowsExecutableCandidates(command) : [command];
   for (const segment of segments) {
     for (const candidate of candidates) {
-      const target = import_node_path6.default.join(segment, candidate);
+      const target = import_node_path7.default.join(segment, candidate);
       try {
         const stat = doctorFs.statSync(target);
         if (!stat.isFile()) continue;
@@ -4010,7 +4130,7 @@ function newestMtime(target, doctorFs) {
     return null;
   }
   for (const entry of entries) {
-    const childNewest = newestMtime(import_node_path6.default.join(target, entry.name), doctorFs);
+    const childNewest = newestMtime(import_node_path7.default.join(target, entry.name), doctorFs);
     if (childNewest !== null && (newest === null || childNewest > newest)) {
       newest = childNewest;
     }
@@ -4075,6 +4195,8 @@ var DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS = 3;
 var DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS = 250;
 var DEFAULT_CLI_STDOUT_MAX_BYTES = 4 * 1024 * 1024;
 var DAEMON_STDERR_FLAG = "--stderr-to";
+var DOCTOR_SUGGESTED_ACTION = "run `codex-team doctor` to diagnose";
+var SOCKET_BIND_DENIED_SUGGESTED_ACTION = "codex-team cannot bind a local IPC socket here \u2014 run `codex-team doctor` for details";
 async function readStdinAll() {
   return await new Promise((resolve, reject) => {
     let buf = "";
@@ -4181,7 +4303,7 @@ async function runVersion(sockPath) {
 }
 async function dispatchCommand(sockPath, parsed, method) {
   const cliConfig = readCliConfig();
-  const needsStreaming = method === "monitor:events" || method === "session:events" || method === "monitor:alarm" || method === "daemon:logs" || method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]);
+  const needsStreaming = method === "monitor:events" || method === "session:events" || method === "monitor:alarm" || method === "daemon:logs" || method === "session:logs" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]) || method === "message:tail" && truthy(parsed.flags["follow"] ?? parsed.flags["f"]);
   if (truthy(parsed.flags["stdin"]) && !("stdin_content" in parsed.flags)) {
     try {
       const content = await readStdinAll();
@@ -4364,7 +4486,9 @@ async function runStream(sock, parsed, method) {
       if (msg.kind === "stream_chunk" && msg.id === reqId) {
         const ackAfterWrite = createStreamAckCallback(method, sock, reqId, msg.data);
         const markdown = extractMarkdownResult(msg.data, parsed.flags.format);
-        if (markdown !== null) {
+        if (truthy(parsed.flags.short)) {
+          return writeStdout(formatShort(method, msg.data) + "\n", ackAfterWrite);
+        } else if (markdown !== null) {
           return writeStdout(markdown + "\n", ackAfterWrite);
         } else {
           const rendered = truthy(parsed.flags.full) ? msg.data : formatCompact(method, msg.data);
@@ -4510,24 +4634,13 @@ async function ensureDaemon(sockPath) {
   const stderrTail = readTail(stderrPath, 4096);
   const parsedBootstrap = parseBootstrapStderr(stderrTail);
   if (parsedBootstrap?.code === "socket_bind_denied") {
-    return {
-      ok: false,
-      code: parsedBootstrap.code,
-      message: parsedBootstrap.message,
-      data: {
-        ...parsedBootstrap.data ?? {},
-        ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-      }
-    };
+    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
   }
   return {
     ok: false,
     code: "daemon_unreachable",
     message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`,
-    data: {
-      stderr_path: stderrPath,
-      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-    }
+    data: buildDaemonUnreachableData(stderrPath, stderrTail)
   };
 }
 async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDelayMs) {
@@ -4574,8 +4687,8 @@ function spawnDaemon(stderrPath) {
   let stderrFd = null;
   try {
     if (stderrPath) {
-      import_node_fs7.default.mkdirSync(import_node_path7.default.dirname(stderrPath), { recursive: true });
-      stderrFd = import_node_fs7.default.openSync(stderrPath, "w");
+      import_node_fs8.default.mkdirSync(import_node_path8.default.dirname(stderrPath), { recursive: true });
+      stderrFd = import_node_fs8.default.openSync(stderrPath, "w");
       args.push(DAEMON_STDERR_FLAG, stderrPath);
     }
     const child = (0, import_node_child_process3.spawn)(process.execPath, args, {
@@ -4587,7 +4700,7 @@ function spawnDaemon(stderrPath) {
     child.unref();
     return child;
   } finally {
-    if (stderrFd !== null) import_node_fs7.default.closeSync(stderrFd);
+    if (stderrFd !== null) import_node_fs8.default.closeSync(stderrFd);
   }
 }
 function getCliVersion() {
@@ -4597,7 +4710,7 @@ function randomId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 function daemonSpawnStderrPath(dataDir) {
-  return import_node_path7.default.join(dataDir, "daemon-spawn.stderr");
+  return import_node_path8.default.join(dataDir, "daemon-spawn.stderr");
 }
 function detectStaleDaemonArtifacts(sockPath, pidPath) {
   const pidRecord = readPidFile(pidPath);
@@ -4605,7 +4718,7 @@ function detectStaleDaemonArtifacts(sockPath, pidPath) {
   if (isPidAlive(pidRecord.pid)) return null;
   if (!isFilesystemSockPath(sockPath)) return null;
   const normalizedSockPath = normalizeSockPath(sockPath);
-  if (!import_node_fs7.default.existsSync(normalizedSockPath)) return null;
+  if (!import_node_fs8.default.existsSync(normalizedSockPath)) return null;
   return {
     pid: pidRecord.pid,
     sockPath: normalizedSockPath
@@ -4613,7 +4726,7 @@ function detectStaleDaemonArtifacts(sockPath, pidPath) {
 }
 function readPidFile(targetPath) {
   try {
-    const raw = import_node_fs7.default.readFileSync(targetPath, "utf8");
+    const raw = import_node_fs8.default.readFileSync(targetPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
     return { pid: Math.floor(parsed.pid) };
@@ -4629,35 +4742,41 @@ function isPidAlive(pid) {
     return false;
   }
 }
+function buildSocketBindDeniedFailure(parsedBootstrap, stderrTail) {
+  return {
+    ok: false,
+    code: parsedBootstrap.code,
+    message: parsedBootstrap.message,
+    data: {
+      ...parsedBootstrap.data ?? {},
+      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
+    }
+  };
+}
+function buildDaemonUnreachableData(stderrPath, stderrTail, result) {
+  return {
+    stderr_path: stderrPath,
+    ...typeof result?.exitCode === "number" ? { exit_code: result.exitCode } : {},
+    ...result?.signal ? { signal: result.signal } : {},
+    ...stderrTail ? { bootstrap_stderr: stderrTail } : { suggested_action: DOCTOR_SUGGESTED_ACTION }
+  };
+}
 function buildEarlyExitFailure(stderrPath, result) {
   const stderrTail = readTail(stderrPath, 4096);
   const parsedBootstrap = parseBootstrapStderr(stderrTail);
   if (parsedBootstrap?.code === "socket_bind_denied") {
-    return {
-      ok: false,
-      code: parsedBootstrap.code,
-      message: parsedBootstrap.message,
-      data: {
-        ...parsedBootstrap.data ?? {},
-        ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-      }
-    };
+    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
   }
   return {
     ok: false,
     code: "daemon_unreachable",
     message: parsedBootstrap?.message ?? "daemon exited before becoming ready",
-    data: {
-      stderr_path: stderrPath,
-      ...typeof result.exitCode === "number" ? { exit_code: result.exitCode } : {},
-      ...result.signal ? { signal: result.signal } : {},
-      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-    }
+    data: buildDaemonUnreachableData(stderrPath, stderrTail, result)
   };
 }
 function readTail(filePath, maxBytes) {
   try {
-    const raw = import_node_fs7.default.readFileSync(filePath, "utf8");
+    const raw = import_node_fs8.default.readFileSync(filePath, "utf8");
     if (raw.length <= maxBytes) return raw.trim();
     return raw.slice(-maxBytes).trim();
   } catch {
@@ -4669,6 +4788,8 @@ function parseBootstrapStderr(stderrTail) {
   const prefix = "[codex-team-daemon-bootstrap] ";
   const lines = stderrTail.split(/\r?\n/).reverse();
   for (const line of lines) {
+    const socketBindDenied = parseSocketBindDeniedLine(line);
+    if (socketBindDenied) return socketBindDenied;
     if (!line.startsWith(prefix)) continue;
     try {
       const parsed = JSON.parse(line.slice(prefix.length));
@@ -4683,6 +4804,24 @@ function parseBootstrapStderr(stderrTail) {
     }
   }
   return null;
+}
+function parseSocketBindDeniedLine(line) {
+  try {
+    const parsed = JSON.parse(line);
+    if (parsed.kind !== "socket_bind_denied") return null;
+    const errno = typeof parsed.errno === "string" && parsed.errno.length > 0 ? parsed.errno : "UNKNOWN";
+    return {
+      code: "socket_bind_denied",
+      message: `local socket bind denied by environment (${errno})`,
+      data: {
+        suggested_action: SOCKET_BIND_DENIED_SUGGESTED_ACTION,
+        errno,
+        ...typeof parsed.probed_path === "string" && parsed.probed_path.length > 0 ? { probed_path: parsed.probed_path } : {}
+      }
+    };
+  } catch {
+    return null;
+  }
 }
 function truthy(v) {
   return v === true || v === "true" || v === "1";
@@ -4777,6 +4916,11 @@ function validateCliFlags(parsed, method, effectiveMethod) {
       return "--summary cannot be used with --by-tool or --by-item-kind";
     }
   }
+  if (effectiveMethod === "session:logs") {
+    if (parsed.flags.n === true) return "-n requires a value";
+    if (parsed.flags.stream === true) return "--stream requires a value";
+    if (parsed.flags.truncate === true) return "--truncate requires a value";
+  }
   return null;
 }
 function resolveMethod(method, parsed) {
@@ -4799,7 +4943,7 @@ function isTransientRequestError(err2) {
   return isTransientConnectError(err2) || err2.message === "daemon closed connection";
 }
 function isReadOnlyMethod(method) {
-  return method === "version" || method === "status" || method === "daemon:fleet:status" || method === "daemon:status" || method === "daemon:user:list" || method === "daemon:config:get" || method === "daemon:config:list" || method === "cursor:list" || method === "cursor:get" || method === "session:health" || method === "session:health:all" || method === "session:events" || method === "session:info" || method === "session:context" || method === "session:list" || method === "message:history";
+  return method === "version" || method === "status" || method === "daemon:fleet:status" || method === "daemon:status" || method === "daemon:user:list" || method === "daemon:config:get" || method === "daemon:config:list" || method === "cursor:list" || method === "cursor:get" || method === "session:health" || method === "session:health:all" || method === "session:logs" || method === "session:events" || method === "session:info" || method === "session:context" || method === "session:list" || method === "message:history";
 }
 function readCliConfig() {
   const config = new ConfigStore();
@@ -4829,8 +4973,8 @@ function formatDuration(ms) {
 }
 
 // src/daemon/run.ts
-var import_node_fs17 = __toESM(require("fs"));
-var import_node_path16 = __toESM(require("path"));
+var import_node_fs18 = __toESM(require("fs"));
+var import_node_path17 = __toESM(require("path"));
 
 // src/errors.ts
 var CodexTeamError = class extends Error {
@@ -4851,8 +4995,8 @@ function methodNotFound(method) {
 }
 
 // src/daemon/users.ts
-var import_node_fs8 = __toESM(require("fs"));
-var import_node_path8 = __toESM(require("path"));
+var import_node_fs9 = __toESM(require("fs"));
+var import_node_path9 = __toESM(require("path"));
 var SCHEMA_VERSION = 1;
 var UserRegistry = class {
   users = /* @__PURE__ */ new Map();
@@ -4863,12 +5007,12 @@ var UserRegistry = class {
   }
   loadFromDisk() {
     const root = usersDir(this.dataDir);
-    if (!import_node_fs8.default.existsSync(root)) return;
-    for (const dirname of import_node_fs8.default.readdirSync(root)) {
-      const metaPath = import_node_path8.default.join(root, dirname, "metadata.json");
-      if (import_node_fs8.default.existsSync(metaPath)) {
+    if (!import_node_fs9.default.existsSync(root)) return;
+    for (const dirname of import_node_fs9.default.readdirSync(root)) {
+      const metaPath = import_node_path9.default.join(root, dirname, "metadata.json");
+      if (import_node_fs9.default.existsSync(metaPath)) {
         try {
-          const raw = import_node_fs8.default.readFileSync(metaPath, "utf8");
+          const raw = import_node_fs9.default.readFileSync(metaPath, "utf8");
           const parsed = JSON.parse(raw);
           const user = normalizePersistedUser(parsed);
           if (user && typeof user.token === "string") {
@@ -4923,7 +5067,7 @@ var UserRegistry = class {
     this.users.delete(token);
     const dir = userDir(token, this.dataDir);
     try {
-      import_node_fs8.default.rmSync(dir, { recursive: true, force: true });
+      import_node_fs9.default.rmSync(dir, { recursive: true, force: true });
     } catch {
     }
   }
@@ -4935,14 +5079,14 @@ var UserRegistry = class {
   }
   persist(user) {
     const dir = userDir(user.token, this.dataDir);
-    import_node_fs8.default.mkdirSync(dir, { recursive: true });
+    import_node_fs9.default.mkdirSync(dir, { recursive: true });
     const metaPath = userMetadataPath(user.token, this.dataDir);
     const tmp = metaPath + ".tmp";
-    import_node_fs8.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs9.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION,
       user
     }, null, 2));
-    import_node_fs8.default.renameSync(tmp, metaPath);
+    import_node_fs9.default.renameSync(tmp, metaPath);
   }
 };
 function validateToken(token) {
@@ -4974,8 +5118,8 @@ function isCanonicalUserDir(dirname) {
 
 // src/daemon/sessions.ts
 var import_node_crypto2 = __toESM(require("crypto"));
-var import_node_fs9 = __toESM(require("fs"));
-var import_node_path9 = __toESM(require("path"));
+var import_node_fs10 = __toESM(require("fs"));
+var import_node_path10 = __toESM(require("path"));
 var NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var SCHEMA_VERSION2 = 1;
@@ -5013,12 +5157,12 @@ var SessionRegistry = class {
     if (this.users.has(user)) return;
     const bucket = this.emptyBucket();
     const p = userSessionsPath(user, this.dataDir);
-    if (!import_node_fs9.default.existsSync(p)) {
+    if (!import_node_fs10.default.existsSync(p)) {
       this.users.set(user, bucket);
       return;
     }
     try {
-      const raw = import_node_fs9.default.readFileSync(p, "utf8");
+      const raw = import_node_fs10.default.readFileSync(p, "utf8");
       const parsed = JSON.parse(raw);
       if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION2) {
         throw new Error(`sessions.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION2}`);
@@ -5187,7 +5331,7 @@ var SessionRegistry = class {
   }
   async persistAsync(user) {
     const dir = userDir(user, this.dataDir);
-    await import_node_fs9.default.promises.mkdir(dir, { recursive: true });
+    await import_node_fs10.default.promises.mkdir(dir, { recursive: true });
     const p = userSessionsPath(user, this.dataDir);
     const bucket = this.users.get(user);
     const payload = {
@@ -5195,8 +5339,8 @@ var SessionRegistry = class {
       sessions: bucket ? Array.from(bucket.byName.values()).map((record) => toPersistedRecord(record)) : []
     };
     const tmp = p + ".tmp";
-    await import_node_fs9.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
-    await import_node_fs9.default.promises.rename(tmp, p);
+    await import_node_fs10.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
+    await import_node_fs10.default.promises.rename(tmp, p);
   }
   schedulePersist(user, delayMs) {
     const existing = this.touchTimers.get(user);
@@ -5413,8 +5557,8 @@ function clampPersistDebounceMs(value) {
 }
 
 // src/daemon/events.ts
-var import_node_fs10 = __toESM(require("fs"));
-var import_node_path10 = __toESM(require("path"));
+var import_node_fs11 = __toESM(require("fs"));
+var import_node_path11 = __toESM(require("path"));
 var DELTA_SUFFIX = "_delta";
 var SCHEMA_VERSION3 = 1;
 var DEFAULT_FLUSH_DELAY_MS = 25;
@@ -5548,13 +5692,13 @@ var EventLog = class {
       return;
     }
     const filePath = userEventLogPath(user, this.dataDir);
-    if (!import_node_fs10.default.existsSync(filePath)) {
+    if (!import_node_fs11.default.existsSync(filePath)) {
       this.ensureUserState(user);
       this.loaded.add(user);
       this.loadPromises.delete(user);
       return;
     }
-    const raw = import_node_fs10.default.readFileSync(filePath, "utf8");
+    const raw = import_node_fs11.default.readFileSync(filePath, "utf8");
     const lines = raw.split("\n").filter(Boolean);
     const { events, totalLines } = parsePersistedEvents(lines);
     this.hydrateLoadedUser(user, events, totalLines);
@@ -5691,7 +5835,7 @@ var EventLog = class {
         return;
       }
       const filePath = userEventLogPath(user, this.dataDir);
-      const raw = await import_node_fs10.default.promises.readFile(filePath, "utf8");
+      const raw = await import_node_fs11.default.promises.readFile(filePath, "utf8");
       const lines = raw.split("\n").filter(Boolean);
       const { events, totalLines } = parsePersistedEvents(lines);
       this.hydrateLoadedUser(user, events, totalLines);
@@ -5830,11 +5974,11 @@ var EventLog = class {
       const contents = serializeEventFile(this.buffers.get(user)?.toArray() ?? []);
       writePromise = this.enqueueFsOp(user, async () => {
         try {
-          await import_node_fs10.default.promises.mkdir(import_node_path10.default.dirname(filePath), { recursive: true });
-          await import_node_fs10.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+          await import_node_fs11.default.promises.mkdir(import_node_path11.default.dirname(filePath), { recursive: true });
+          await import_node_fs11.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
           const tmp = filePath + ".tmp";
-          await import_node_fs10.default.promises.writeFile(tmp, contents);
-          await import_node_fs10.default.promises.rename(tmp, filePath);
+          await import_node_fs11.default.promises.writeFile(tmp, contents);
+          await import_node_fs11.default.promises.rename(tmp, filePath);
           return true;
         } catch (e) {
           logger.warn("event log compaction failed", { user, err: e.message });
@@ -5893,12 +6037,12 @@ var EventLog = class {
       this.pendingBytes.delete(user);
       writePromise = this.enqueueFsOp(user, async () => {
         try {
-          await import_node_fs10.default.promises.mkdir(import_node_path10.default.dirname(filePath), { recursive: true });
-          await import_node_fs10.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
-          if (!import_node_fs10.default.existsSync(filePath)) {
-            await import_node_fs10.default.promises.writeFile(filePath, serializeHeaderLine() + snapshotLines.join(""));
+          await import_node_fs11.default.promises.mkdir(import_node_path11.default.dirname(filePath), { recursive: true });
+          await import_node_fs11.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+          if (!import_node_fs11.default.existsSync(filePath)) {
+            await import_node_fs11.default.promises.writeFile(filePath, serializeHeaderLine() + snapshotLines.join(""));
           } else {
-            await import_node_fs10.default.promises.appendFile(filePath, snapshotLines.join(""));
+            await import_node_fs11.default.promises.appendFile(filePath, snapshotLines.join(""));
           }
           return true;
         } catch (e) {
@@ -6079,9 +6223,9 @@ function serializeEventFile(buf) {
 }
 
 // src/daemon/cursors.ts
-var import_node_fs11 = __toESM(require("fs"));
-var import_node_os3 = __toESM(require("os"));
-var import_node_path11 = __toESM(require("path"));
+var import_node_fs12 = __toESM(require("fs"));
+var import_node_os2 = __toESM(require("os"));
+var import_node_path12 = __toESM(require("path"));
 var import_promises2 = require("timers/promises");
 var CURSOR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 var SCHEMA_VERSION4 = 1;
@@ -6248,9 +6392,9 @@ var CursorStore = class {
     if (this.loaded.has(user)) return;
     const bucket = /* @__PURE__ */ new Map();
     const filePath = cursorFilePath(user, this.dataDir);
-    if (import_node_fs11.default.existsSync(filePath)) {
+    if (import_node_fs12.default.existsSync(filePath)) {
       try {
-        for (const cursor of loadEnvelopeFromText(import_node_fs11.default.readFileSync(filePath, "utf8")).cursors.values()) {
+        for (const cursor of loadEnvelopeFromText(import_node_fs12.default.readFileSync(filePath, "utf8")).cursors.values()) {
           bucket.set(cursor.name, cloneCursor(cursor));
         }
       } catch (error) {
@@ -6269,7 +6413,7 @@ var CursorStore = class {
   }
   async persistAsync(user, ops) {
     const dir = userDir(user, this.dataDir);
-    await import_node_fs11.default.promises.mkdir(dir, { recursive: true });
+    await import_node_fs12.default.promises.mkdir(dir, { recursive: true });
     const filePath = cursorFilePath(user, this.dataDir);
     const lock = await acquireCursorLock(filePath);
     const tmpPath = makeTempPath(filePath);
@@ -6280,10 +6424,10 @@ var CursorStore = class {
         schema_version: SCHEMA_VERSION4,
         cursors: sorted(persisted)
       };
-      await import_node_fs11.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
-      await import_node_fs11.default.promises.rename(tmpPath, filePath);
+      await import_node_fs12.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
+      await import_node_fs12.default.promises.rename(tmpPath, filePath);
     } finally {
-      await import_node_fs11.default.promises.unlink(tmpPath).catch(() => void 0);
+      await import_node_fs12.default.promises.unlink(tmpPath).catch(() => void 0);
       await lock.release();
     }
   }
@@ -6325,7 +6469,7 @@ var CursorStore = class {
   }
 };
 function cursorFilePath(user, dataDir) {
-  return import_node_path11.default.join(userDir(user, dataDir), "cursors.json");
+  return import_node_path12.default.join(userDir(user, dataDir), "cursors.json");
 }
 async function acquireCursorLock(filePath) {
   const lockPath = `${filePath}.lock`;
@@ -6350,7 +6494,7 @@ async function reclaimStaleCursorLock(lockPath) {
   const lock = await readCursorLock(lockPath);
   if (!lock || !isStaleCursorLock(lock)) return null;
   try {
-    await import_node_fs11.default.promises.unlink(lockPath);
+    await import_node_fs12.default.promises.unlink(lockPath);
   } catch (error) {
     const err2 = error;
     if (err2.code === "ENOENT") return null;
@@ -6371,13 +6515,13 @@ function makeCursorLockRecord() {
   return {
     pid: process.pid,
     started_at: (/* @__PURE__ */ new Date()).toISOString(),
-    host: import_node_os3.default.hostname(),
+    host: import_node_os2.default.hostname(),
     nonce: Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
   };
 }
 async function loadEnvelopeFromFile(filePath) {
   try {
-    const raw = await import_node_fs11.default.promises.readFile(filePath, "utf8");
+    const raw = await import_node_fs12.default.promises.readFile(filePath, "utf8");
     return loadEnvelopeFromText(raw).cursors;
   } catch (error) {
     const err2 = error;
@@ -6399,7 +6543,7 @@ function loadEnvelopeFromText(raw) {
 }
 async function readCursorLock(lockPath) {
   try {
-    const raw = await import_node_fs11.default.promises.readFile(lockPath, "utf8");
+    const raw = await import_node_fs12.default.promises.readFile(lockPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || typeof parsed.started_at !== "string" || typeof parsed.host !== "string") {
       return null;
@@ -6467,7 +6611,7 @@ function cloneCursorRecord(cursor) {
   };
 }
 async function tryCreateCursorLock(lockPath) {
-  const handle = await import_node_fs11.default.promises.open(lockPath, "wx");
+  const handle = await import_node_fs12.default.promises.open(lockPath, "wx");
   const record = makeCursorLockRecord();
   try {
     await handle.writeFile(JSON.stringify(record));
@@ -6483,7 +6627,7 @@ async function tryCreateCursorLock(lockPath) {
         const owned = await verifyCursorLockOwnership(lockPath, record);
         await handle.close().catch(() => void 0);
         if (owned) {
-          await import_node_fs11.default.promises.unlink(lockPath).catch(() => void 0);
+          await import_node_fs12.default.promises.unlink(lockPath).catch(() => void 0);
         }
       }
     };
@@ -7141,21 +7285,21 @@ function queueHeadRetryMax(retry) {
 
 // src/daemon/orphans.ts
 var import_node_crypto5 = __toESM(require("crypto"));
-var import_node_fs12 = __toESM(require("fs"));
-var import_node_path12 = __toESM(require("path"));
+var import_node_fs13 = __toESM(require("fs"));
+var import_node_path13 = __toESM(require("path"));
 var import_promises4 = require("timers/promises");
 var SCHEMA_VERSION5 = 2;
 var TERM_GRACE_MS = 2e3;
 var KILL_GRACE_MS = 500;
 var POLL_MS = 100;
 function orphanPidsPath(dataDir) {
-  return import_node_path12.default.join(dataDir, "codex-pids.json");
+  return import_node_path13.default.join(dataDir, "codex-pids.json");
 }
 function readPidFile2(dataDir) {
   const p = orphanPidsPath(dataDir);
-  if (!import_node_fs12.default.existsSync(p)) return [];
+  if (!import_node_fs13.default.existsSync(p)) return [];
   try {
-    const raw = import_node_fs12.default.readFileSync(p, "utf8");
+    const raw = import_node_fs13.default.readFileSync(p, "utf8");
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
       return parsed.filter((x) => typeof x === "number" && Number.isFinite(x)).map((pid) => ({
@@ -7180,13 +7324,13 @@ function readPidFile2(dataDir) {
 function writePidFile(dataDir, pids) {
   const p = orphanPidsPath(dataDir);
   try {
-    import_node_fs12.default.mkdirSync(import_node_path12.default.dirname(p), { recursive: true });
+    import_node_fs13.default.mkdirSync(import_node_path13.default.dirname(p), { recursive: true });
     const tmp = p + ".tmp";
-    import_node_fs12.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs13.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION5,
       processes: pids
     }));
-    import_node_fs12.default.renameSync(tmp, p);
+    import_node_fs13.default.renameSync(tmp, p);
   } catch (e) {
     logger.warn("failed to persist codex pid file", { err: e.message });
   }
@@ -7323,14 +7467,18 @@ var import_node_events2 = require("events");
 var import_node_child_process4 = require("child_process");
 var import_node_events = require("events");
 var import_node_crypto6 = require("crypto");
-var import_node_path13 = __toESM(require("path"));
+var import_node_path14 = __toESM(require("path"));
 var STDERR_TAIL_LINES = 400;
 var DEFAULT_REQUEST_TIMEOUT_MS = 12e4;
 var AppServerClient = class extends import_node_events.EventEmitter {
   proc = null;
+  stdoutBuf = "";
+  stderrBuf = "";
   pending = /* @__PURE__ */ new Map();
-  stderrTail = [];
+  stdoutLogTail = [];
+  stderrLogTail = [];
   lastPid = null;
+  nextLogSeq = 1;
   options;
   initialized = false;
   stdoutParser = this.createStdoutParser("app_server:unknown");
@@ -7355,7 +7503,22 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     return this.proc?.pid ?? this.lastPid;
   }
   stderrTailText() {
-    return this.stderrTail.join("\n");
+    return this.stderrLogTail.map((entry) => entry.line).join("\n");
+  }
+  stdoutTailText() {
+    return this.stdoutLogTail.map((entry) => entry.line).join("\n");
+  }
+  stderrTail(n = this.options.stderrTailLines) {
+    return this.sliceTail(this.stderrLogTail, n);
+  }
+  stdoutTail(n = this.options.stderrTailLines) {
+    return this.sliceTail(this.stdoutLogTail, n);
+  }
+  logTail(stream, n = this.options.stderrTailLines) {
+    if (stream === "stdout") return this.stdoutTail(n);
+    if (stream === "stderr") return this.stderrTail(n);
+    const merged = [...this.stdoutLogTail, ...this.stderrLogTail].sort((left, right) => left.seq - right.seq);
+    return this.sliceTail(merged, n);
   }
   async start() {
     if (this.proc) throw new Error("app-server already started");
@@ -7380,6 +7543,8 @@ var AppServerClient = class extends import_node_events.EventEmitter {
     });
     this.proc.on("exit", (code, signal) => {
       logger.info("app-server exited", { code, signal });
+      this.flushLogBuffer("stdout", true);
+      this.flushLogBuffer("stderr", true);
       this.failAllPending(new TransportClosedError(`app-server exited (code=${code}, signal=${signal})`));
       this.emit("close", code);
       this.proc = null;
@@ -7503,14 +7668,12 @@ var AppServerClient = class extends import_node_events.EventEmitter {
   }
   onStdout(chunk) {
     this.stdoutParser.push(chunk);
+    this.stdoutBuf += chunk;
+    this.flushLogBuffer("stdout");
   }
   onStderr(chunk) {
-    const lines = chunk.split("\n");
-    for (const line of lines) {
-      if (!line) continue;
-      this.stderrTail.push(line);
-      if (this.stderrTail.length > this.options.stderrTailLines) this.stderrTail.shift();
-    }
+    this.stderrBuf += chunk;
+    this.flushLogBuffer("stderr");
   }
   dispatchIncoming(msg) {
     const hasId = "id" in msg;
@@ -7578,6 +7741,47 @@ var AppServerClient = class extends import_node_events.EventEmitter {
   peerLabel() {
     return this.lastPid ? `app_server:${this.lastPid}` : "app_server:unknown";
   }
+  flushLogBuffer(stream, includePartial = false) {
+    const current = stream === "stdout" ? this.stdoutBuf : this.stderrBuf;
+    let remaining = current;
+    let idx;
+    while ((idx = remaining.indexOf("\n")) >= 0) {
+      const line = remaining.slice(0, idx);
+      remaining = remaining.slice(idx + 1);
+      this.recordLogLine(stream, line);
+    }
+    if (includePartial && remaining.length > 0) {
+      this.recordLogLine(stream, remaining);
+      remaining = "";
+    }
+    if (stream === "stdout") this.stdoutBuf = remaining;
+    else this.stderrBuf = remaining;
+  }
+  recordLogLine(stream, line) {
+    if (!line) return;
+    const entry = {
+      stream,
+      line,
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      seq: this.nextLogSeq++
+    };
+    const target = stream === "stdout" ? this.stdoutLogTail : this.stderrLogTail;
+    target.push(entry);
+    if (target.length > this.options.stderrTailLines) target.shift();
+    const rendered = this.stripLogLine(entry);
+    this.emit(`${stream}_line`, rendered);
+  }
+  sliceTail(lines, n) {
+    const limit = normalizeTailCount(n, this.options.stderrTailLines);
+    return lines.slice(Math.max(0, lines.length - limit)).map((entry) => this.stripLogLine(entry));
+  }
+  stripLogLine(entry) {
+    return {
+      stream: entry.stream,
+      line: entry.line,
+      ts: entry.ts
+    };
+  }
 };
 function resolveLaunch(bin, args) {
   if (isNodeScript(bin)) {
@@ -7596,7 +7800,7 @@ function resolveLaunch(bin, args) {
   return { command: resolved, args };
 }
 function resolveWindowsCommand(bin) {
-  if (bin.includes("\\") || bin.includes("/") || import_node_path13.default.extname(bin).length > 0) return bin;
+  if (bin.includes("\\") || bin.includes("/") || import_node_path14.default.extname(bin).length > 0) return bin;
   try {
     const raw = (0, import_node_child_process4.execFileSync)("where", [bin], {
       stdio: ["ignore", "pipe", "ignore"],
@@ -7638,6 +7842,10 @@ function forceKillProcess(proc) {
   } catch {
   }
 }
+function normalizeTailCount(value, fallback) {
+  if (!Number.isFinite(value)) return Math.max(1, Math.floor(fallback));
+  return Math.max(1, Math.floor(value));
+}
 
 // src/codex/pool.ts
 var AppServerPool = class extends import_node_events2.EventEmitter {
@@ -7645,6 +7853,7 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
   byUser = /* @__PURE__ */ new Map();
   byClient = /* @__PURE__ */ new Map();
   bySession = /* @__PURE__ */ new Map();
+  closedLogsBySession = /* @__PURE__ */ new Map();
   inFlightAcquireBySession = /* @__PURE__ */ new Map();
   nextClientId = 1;
   shuttingDown = false;
@@ -7685,11 +7894,13 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     if (managed) {
       managed.sessions.add(sessionKey);
       this.bySession.set(sessionKey, managed);
+      this.closedLogsBySession.delete(sessionKey);
       return managed.client;
     }
     const fresh = await this.spawn(user, clientOptions);
     fresh.sessions.add(sessionKey);
     this.bySession.set(sessionKey, fresh);
+    this.closedLogsBySession.delete(sessionKey);
     return fresh.client;
   }
   release(sessionKey) {
@@ -7697,6 +7908,7 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     if (!m) return;
     m.sessions.delete(sessionKey);
     this.bySession.delete(sessionKey);
+    this.closedLogsBySession.delete(sessionKey);
   }
   rekeySession(oldKey, newKey) {
     if (oldKey === newKey) return;
@@ -7706,6 +7918,11 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     m.sessions.add(newKey);
     this.bySession.delete(oldKey);
     this.bySession.set(newKey, m);
+    const closed = this.closedLogsBySession.get(oldKey);
+    if (closed) {
+      this.closedLogsBySession.delete(oldKey);
+      this.closedLogsBySession.set(newKey, cloneClosedSessionLogs(closed));
+    }
   }
   async acquireForAdhoc(user, clientOptions) {
     if (this.shuttingDown) throw new Error("pool is shutting down");
@@ -7722,8 +7939,16 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     const m = this.bySession.get(sessionKey);
     return m ? m.client : null;
   }
+  sessionBinding(sessionKey) {
+    const m = this.bySession.get(sessionKey);
+    return m ? { appServerId: m.id, pid: m.client.pid() } : null;
+  }
   clientById(clientId) {
     return this.byClient.get(clientId)?.client ?? null;
+  }
+  closedLogsForSession(sessionKey) {
+    const snapshot = this.closedLogsBySession.get(sessionKey);
+    return snapshot ? cloneClosedSessionLogs(snapshot) : null;
   }
   listClients() {
     return Array.from(this.byClient.values()).map((m) => ({
@@ -7746,6 +7971,7 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     this.byUser.clear();
     this.byClient.clear();
     this.bySession.clear();
+    this.closedLogsBySession.clear();
   }
   async closeUser(user) {
     const managed = [...this.byUser.get(user) ?? []];
@@ -7785,8 +8011,22 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
       const sessions = Array.from(managed.sessions);
       const reason = managed.closeReason ?? (this.shuttingDown ? "shutdown" : "unexpected");
       managed.closeReason = null;
+      const closedLogs = {
+        appServerId: id,
+        pid: client.pid(),
+        closedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        stderrTail: client.stderrTail(),
+        stdoutTail: client.stdoutTail()
+      };
       for (const s of sessions) this.bySession.delete(s);
       managed.sessions.clear();
+      if (reason === "unexpected") {
+        for (const sessionKey of sessions) {
+          this.closedLogsBySession.set(sessionKey, cloneClosedSessionLogs(closedLogs));
+        }
+      } else {
+        for (const sessionKey of sessions) this.closedLogsBySession.delete(sessionKey);
+      }
       const list2 = this.byUser.get(user);
       if (list2) {
         const idx = list2.indexOf(managed);
@@ -7819,6 +8059,15 @@ var AppServerPool = class extends import_node_events2.EventEmitter {
     return managed;
   }
 };
+function cloneClosedSessionLogs(value) {
+  return {
+    appServerId: value.appServerId,
+    pid: value.pid,
+    closedAt: value.closedAt,
+    stderrTail: value.stderrTail.map((entry) => ({ ...entry })),
+    stdoutTail: value.stdoutTail.map((entry) => ({ ...entry }))
+  };
+}
 
 // src/daemon/context.ts
 function buildContext(opts = {}) {
@@ -8006,12 +8255,12 @@ var status = async (ctx, req) => {
 };
 
 // src/daemon/handlers/daemon.ts
-var import_node_fs14 = __toESM(require("fs"));
-var import_node_path14 = __toESM(require("path"));
+var import_node_fs15 = __toESM(require("fs"));
+var import_node_path15 = __toESM(require("path"));
 var import_node_child_process5 = require("child_process");
 
 // src/daemon/shutdown.ts
-var import_node_fs13 = __toESM(require("fs"));
+var import_node_fs14 = __toESM(require("fs"));
 var shuttingDown = false;
 async function shutdownDaemon(ctx, reason, exitCode = 0) {
   if (shuttingDown) return;
@@ -8058,7 +8307,7 @@ async function shutdownDaemon(ctx, reason, exitCode = 0) {
   }
   unlinkSockIfStale(ctx.sockPath);
   try {
-    import_node_fs13.default.unlinkSync(pidFilePath(ctx.dataDir));
+    import_node_fs14.default.unlinkSync(pidFilePath(ctx.dataDir));
   } catch {
   }
   setTimeout(() => process.exit(exitCode), 10);
@@ -8297,7 +8546,7 @@ var daemonLogsStream = async (ctx, req, stream) => {
   }
   const syncAppended = async () => {
     try {
-      const stat = await import_node_fs14.default.promises.stat(logPath);
+      const stat = await import_node_fs15.default.promises.stat(logPath);
       if (stat.size < offset) offset = 0;
       if (stat.size === offset) return;
       const chunk = await readBytes(logPath, offset, stat.size - offset);
@@ -8319,8 +8568,8 @@ var daemonLogsStream = async (ctx, req, stream) => {
     }, 50);
     debounceTimer.unref();
   };
-  const watcher = import_node_fs14.default.watch(import_node_path14.default.dirname(logPath), { persistent: true }, (_event, filename) => {
-    if (!filename || filename.toString() === import_node_path14.default.basename(logPath)) scheduleSync();
+  const watcher = import_node_fs15.default.watch(import_node_path15.default.dirname(logPath), { persistent: true }, (_event, filename) => {
+    if (!filename || filename.toString() === import_node_path15.default.basename(logPath)) scheduleSync();
   });
   stream.onClose(() => {
     closed = true;
@@ -8389,7 +8638,7 @@ function safeParseOr(line, fallback) {
 }
 async function readTextIfExists(filePath) {
   try {
-    return await import_node_fs14.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs15.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw e;
@@ -8397,7 +8646,7 @@ async function readTextIfExists(filePath) {
 }
 async function readBytes(filePath, start, length) {
   if (length <= 0) return "";
-  const handle = await import_node_fs14.default.promises.open(filePath, "r");
+  const handle = await import_node_fs15.default.promises.open(filePath, "r");
   try {
     const buffer = Buffer.alloc(length);
     const { bytesRead } = await handle.read(buffer, 0, length, start);
@@ -8410,7 +8659,7 @@ function getPkgVersion() {
   return VERSION;
 }
 async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
-  const distPath = import_node_path14.default.join(packageRoot, "dist", "main.js");
+  const distPath = import_node_path15.default.join(packageRoot, "dist", "main.js");
   const distStat = await statIfExists2(distPath);
   if (!distStat) {
     return {
@@ -8420,7 +8669,7 @@ async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
     };
   }
   const builtAt = new Date(distStat.mtimeMs).toISOString();
-  const sourceNewestMtime = await getNewestMtime(import_node_path14.default.join(packageRoot, "src"));
+  const sourceNewestMtime = await getNewestMtime(import_node_path15.default.join(packageRoot, "src"));
   return {
     dist_built_at: builtAt,
     dist_age_seconds: Math.max(0, Math.floor((Date.now() - distStat.mtimeMs) / 1e3)),
@@ -8429,7 +8678,7 @@ async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
 }
 async function statIfExists2(filePath) {
   try {
-    return await import_node_fs14.default.promises.stat(filePath);
+    return await import_node_fs15.default.promises.stat(filePath);
   } catch (e) {
     if (e.code === "ENOENT") return null;
     return null;
@@ -8438,14 +8687,14 @@ async function statIfExists2(filePath) {
 async function getNewestMtime(dirPath) {
   let entries;
   try {
-    entries = await import_node_fs14.default.promises.readdir(dirPath, { withFileTypes: true });
+    entries = await import_node_fs15.default.promises.readdir(dirPath, { withFileTypes: true });
   } catch (e) {
     if (e.code === "ENOENT") return null;
     return null;
   }
   let newest = null;
   for (const entry of entries) {
-    const entryPath = import_node_path14.default.join(dirPath, entry.name);
+    const entryPath = import_node_path15.default.join(dirPath, entry.name);
     if (entry.isDirectory()) {
       const childNewest = await getNewestMtime(entryPath);
       if (childNewest !== null && (newest === null || childNewest > newest)) newest = childNewest;
@@ -8458,8 +8707,8 @@ async function getNewestMtime(dirPath) {
 }
 
 // src/daemon/handlers/session.ts
-var import_node_fs15 = __toESM(require("fs"));
-var import_node_path15 = __toESM(require("path"));
+var import_node_fs16 = __toESM(require("fs"));
+var import_node_path16 = __toESM(require("path"));
 
 // src/daemon/experimentalTools.ts
 var TOOL_SPECS = [
@@ -8720,8 +8969,8 @@ function renderCommandExecution(item, ctx) {
 }
 function renderFileChange(item, ctx) {
   const attrs = baseItemAttrs(item, { includeType: false });
-  const path18 = asString4(item.path);
-  if (path18) attrs.path = path18;
+  const path19 = asString4(item.path);
+  if (path19) attrs.path = path19;
   if (item.status !== void 0) attrs.status = item.status;
   const diffBody = extractDiff(item) ?? "";
   return renderBodyTag("file-patch", attrs, diffBody, ctx);
@@ -9043,6 +9292,8 @@ function matchesGlob(pattern, value) {
 var attachLocks = /* @__PURE__ */ new Map();
 var DEFAULT_SESSION_LIST_LIMIT = 50;
 var LOCAL_SESSION_LIST_CURSOR_PREFIX = "local:";
+var DEFAULT_SESSION_LOG_LINE_LIMIT = 100;
+var DEFAULT_SESSION_LOG_TRUNCATE_BYTES = 2048;
 var sessionNew = async (ctx, req) => {
   requireUser(ctx, req);
   const user = req.bearer;
@@ -9589,7 +9840,7 @@ function isTrue2(v) {
 }
 function resolveAndValidateRequestedCwd(rawCwd) {
   const daemonCwd = resolveDaemonProcessCwd();
-  const resolved = rawCwd === null ? import_node_path15.default.normalize(daemonCwd) : resolveAbsoluteCwd(rawCwd, daemonCwd, "cwd");
+  const resolved = rawCwd === null ? import_node_path16.default.normalize(daemonCwd) : resolveAbsoluteCwd(rawCwd, daemonCwd, "cwd");
   return validateResolvedCwd(resolved, {
     missing: (cwd) => `cwd '${cwd}' does not exist`,
     notDirectory: (cwd, kind) => `cwd '${cwd}' is not a directory (it is a ${kind})`,
@@ -9598,7 +9849,7 @@ function resolveAndValidateRequestedCwd(rawCwd) {
 }
 function resolveAndValidatePersistedCwd(rawCwd, messages) {
   const daemonCwd = resolveDaemonProcessCwd();
-  const resolved = import_node_path15.default.isAbsolute(rawCwd) ? import_node_path15.default.normalize(rawCwd) : resolveAbsoluteCwd(rawCwd, daemonCwd, messages.label);
+  const resolved = import_node_path16.default.isAbsolute(rawCwd) ? import_node_path16.default.normalize(rawCwd) : resolveAbsoluteCwd(rawCwd, daemonCwd, messages.label);
   return validateResolvedCwd(resolved, messages);
 }
 function resolveDaemonProcessCwd() {
@@ -9610,21 +9861,21 @@ function resolveDaemonProcessCwd() {
 }
 function resolveAbsoluteCwd(rawCwd, daemonCwd, label) {
   try {
-    return import_node_path15.default.normalize(import_node_path15.default.resolve(daemonCwd, rawCwd));
+    return import_node_path16.default.normalize(import_node_path16.default.resolve(daemonCwd, rawCwd));
   } catch (error) {
     throw invalidParams(`${label} '${rawCwd}' could not be resolved: ${error.message}`);
   }
 }
 function validateResolvedCwd(cwd, messages) {
-  if (!import_node_fs15.default.existsSync(cwd)) {
+  if (!import_node_fs16.default.existsSync(cwd)) {
     throw invalidParams(messages.missing(cwd));
   }
-  const stat = import_node_fs15.default.statSync(cwd);
+  const stat = import_node_fs16.default.statSync(cwd);
   if (!stat.isDirectory()) {
     throw invalidParams(messages.notDirectory(cwd, describeFilesystemEntry(cwd, stat)));
   }
   try {
-    import_node_fs15.default.accessSync(cwd, import_node_fs15.default.constants.R_OK | import_node_fs15.default.constants.X_OK);
+    import_node_fs16.default.accessSync(cwd, import_node_fs16.default.constants.R_OK | import_node_fs16.default.constants.X_OK);
   } catch {
     throw invalidParams(messages.inaccessible(cwd));
   }
@@ -9632,7 +9883,7 @@ function validateResolvedCwd(cwd, messages) {
 }
 function describeFilesystemEntry(cwd, stat) {
   try {
-    const entry = import_node_fs15.default.lstatSync(cwd);
+    const entry = import_node_fs16.default.lstatSync(cwd);
     if (entry.isSymbolicLink()) return "symlink";
   } catch {
   }
@@ -9790,7 +10041,7 @@ async function readInstructionFile(value, flag) {
   const filePath = asString5(value);
   if (!filePath) return null;
   try {
-    return await import_node_fs15.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs16.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     throw invalidParams(`${flag} not readable: ${e.message}`);
   }
@@ -10388,6 +10639,50 @@ var sessionEvents = async (ctx, req, stream) => {
   stream.onClose(() => sub.dispose());
   return { streaming: true };
 };
+var sessionLogs = async (ctx, req, stream) => {
+  requireUser(ctx, req);
+  const user = req.bearer;
+  const identifier = asPositional(req, 0, "name|thread_id");
+  const flags = asFlags(req);
+  const follow = isTrue2(flags["follow"]) || isTrue2(flags["f"]);
+  const lineLimit = parseSessionLogsIntFlag(flags["n"], DEFAULT_SESSION_LOG_LINE_LIMIT, "-n", { minimum: 1 });
+  const truncateBytes = parseSessionLogsIntFlag(
+    flags["truncate"],
+    DEFAULT_SESSION_LOG_TRUNCATE_BYTES,
+    "--truncate",
+    { minimum: 0 }
+  );
+  const selectedStream = parseSessionLogsStream(flags["stream"]);
+  const target = await resolveSessionLogsTarget(ctx, user, identifier);
+  const initial = buildSessionLogsResponse(ctx, user, target.rec, selectedStream, lineLimit, truncateBytes);
+  if (!follow || !stream || target.rec.state === "crashed") {
+    if (follow && stream) {
+      stream.chunk(initial);
+      stream.end();
+      return { streaming: true };
+    }
+    return initial;
+  }
+  const client = target.client;
+  if (!client) {
+    throw new CodexTeamError("session_not_live", `session '${target.rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${target.rec.name}'`);
+  }
+  const emitLiveLine = (entry) => {
+    if (!matchesSessionLogStream(selectedStream, entry.stream)) return;
+    stream.chunk(buildSessionLogsIncrement(ctx, user, target.rec, truncateBytes, entry));
+  };
+  const onClose = () => stream.end();
+  if (selectedStream === "stderr" || selectedStream === "all") client.on("stderr_line", emitLiveLine);
+  if (selectedStream === "stdout" || selectedStream === "all") client.on("stdout_line", emitLiveLine);
+  client.on("close", onClose);
+  stream.chunk(initial);
+  stream.onClose(() => {
+    client.off("stderr_line", emitLiveLine);
+    client.off("stdout_line", emitLiveLine);
+    client.off("close", onClose);
+  });
+  return { streaming: true };
+};
 function buildSessionHealthSnapshot(ctx, user, rec) {
   const sessionKey = keyFor(user, rec.name);
   const busyTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
@@ -10568,9 +10863,120 @@ function numericValue2(value) {
 function isSessionEventDeltaType(type) {
   return type.endsWith("_delta");
 }
+async function resolveSessionLogsTarget(ctx, user, identifier) {
+  const rec = ctx.sessions.get(user, identifier);
+  if (rec) {
+    const client2 = rec.state === "live" ? ctx.pool.clientForSession(keyFor(user, rec.name)) : null;
+    if (rec.state === "live" && !isClientAlive(client2)) {
+      throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
+    }
+    return { rec, client: client2 };
+  }
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "detached") {
+    const attachTarget = target.name ?? target.threadId;
+    throw new CodexTeamError(
+      "session_not_live",
+      `session '${attachTarget}' is detached; re-attach the session with 'codex-team -b ${user} session attach ${attachTarget}' first`
+    );
+  }
+  const client = ctx.pool.clientForSession(keyFor(user, target.session.name));
+  if (!isClientAlive(client)) {
+    throw new CodexTeamError("session_not_live", `session '${target.session.name}' is unhealthy; run 'codex-team -b ${user} session heal ${target.session.name}'`);
+  }
+  return { rec: target.session, client };
+}
+function buildSessionLogsResponse(ctx, user, rec, selectedStream, lineLimit, truncateBytes) {
+  const sessionKey = keyFor(user, rec.name);
+  const binding = rec.state === "live" ? ctx.pool.sessionBinding(sessionKey) : null;
+  const client = rec.state === "live" ? ctx.pool.clientForSession(sessionKey) : null;
+  const closed = rec.state === "crashed" ? ctx.pool.closedLogsForSession(sessionKey) : null;
+  const sourceLines = rec.state === "crashed" ? selectStoredSessionLogLines(closed, selectedStream) : selectLiveSessionLogLines(client, selectedStream);
+  const rendered = projectSessionLogLines(sourceLines, lineLimit, truncateBytes);
+  const response = {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    app_server_id: binding?.appServerId ?? closed?.appServerId ?? null,
+    pid: binding?.pid ?? closed?.pid ?? null,
+    lines: rendered.lines,
+    truncated_from: rendered.truncatedFrom
+  };
+  if (rec.state === "crashed") response.state = "crashed";
+  return response;
+}
+function buildSessionLogsIncrement(ctx, user, rec, truncateBytes, entry) {
+  const binding = ctx.pool.sessionBinding(keyFor(user, rec.name));
+  return {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    app_server_id: binding?.appServerId ?? null,
+    pid: binding?.pid ?? null,
+    lines: [truncateSessionLogLine(entry, truncateBytes)],
+    truncated_from: null
+  };
+}
+function parseSessionLogsIntFlag(value, fallback, label, options) {
+  if (value === void 0) return fallback;
+  const raw = asString5(value);
+  if (!raw) throw invalidParams(`${label} requires a value`);
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < options.minimum) {
+    const expectation = options.minimum === 0 ? "a non-negative integer" : "a positive integer";
+    throw invalidParams(`${label} must be ${expectation}`);
+  }
+  return parsed;
+}
+function parseSessionLogsStream(value) {
+  if (value === void 0) return "stderr";
+  const raw = asString5(value);
+  if (!raw) throw invalidParams("--stream requires a value");
+  if (raw === "stderr" || raw === "stdout" || raw === "all") return raw;
+  throw invalidParams("--stream must be one of stderr, stdout, or all");
+}
+function selectLiveSessionLogLines(client, selectedStream) {
+  if (!client) return [];
+  if (selectedStream === "stderr") return client.stderrTail(Number.MAX_SAFE_INTEGER);
+  if (selectedStream === "stdout") return client.stdoutTail(Number.MAX_SAFE_INTEGER);
+  return client.logTail("all", Number.MAX_SAFE_INTEGER);
+}
+function selectStoredSessionLogLines(snapshot, selectedStream) {
+  if (!snapshot) return [];
+  if (selectedStream === "stderr") return snapshot.stderrTail;
+  if (selectedStream === "stdout") return snapshot.stdoutTail;
+  return [...snapshot.stderrTail, ...snapshot.stdoutTail].sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts));
+}
+function projectSessionLogLines(lines, lineLimit, truncateBytes) {
+  const truncatedFrom = lines.length > lineLimit ? lines.length : null;
+  return {
+    lines: lines.slice(Math.max(0, lines.length - lineLimit)).map((entry) => truncateSessionLogLine(entry, truncateBytes)),
+    truncatedFrom
+  };
+}
+function matchesSessionLogStream(selectedStream, stream) {
+  return selectedStream === "all" || selectedStream === stream;
+}
+function truncateSessionLogLine(entry, truncateBytes) {
+  return {
+    ...entry,
+    line: truncateTextByBytes(entry.line, truncateBytes)
+  };
+}
+function truncateTextByBytes(value, truncateBytes) {
+  if (truncateBytes <= 0 || Buffer.byteLength(value, "utf8") <= truncateBytes) return value;
+  const suffix = truncateBytes >= 3 ? "..." : "";
+  const budget = Math.max(0, truncateBytes - Buffer.byteLength(suffix, "utf8"));
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, mid), "utf8") <= budget) low = mid;
+    else high = mid - 1;
+  }
+  return `${value.slice(0, low)}${suffix}`;
+}
 
 // src/daemon/handlers/message.ts
-var import_node_fs16 = __toESM(require("fs"));
+var import_node_fs17 = __toESM(require("fs"));
 var messageSend = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const prompt = await readPromptInput(req);
@@ -10876,7 +11282,7 @@ async function readPromptInput(req, positional = asPositionalOptional2(req, 1)) 
   if (positional) return positional;
   if (fromFile) {
     try {
-      return await import_node_fs16.default.promises.readFile(fromFile, "utf8");
+      return await import_node_fs17.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -10896,7 +11302,7 @@ async function readJsonInput(req) {
   if (jsonRaw) raw = jsonRaw;
   else if (fromFile) {
     try {
-      raw = await import_node_fs16.default.promises.readFile(fromFile, "utf8");
+      raw = await import_node_fs17.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -10913,9 +11319,9 @@ async function readJsonInput(req) {
 }
 async function buildUserInput(text, attachments) {
   const items = [{ type: "text", text }];
-  for (const path18 of attachments) {
-    await assertAttachable(path18);
-    items.push({ type: "localImage", path: path18 });
+  for (const path19 of attachments) {
+    await assertAttachable(path19);
+    items.push({ type: "localImage", path: path19 });
   }
   return items;
 }
@@ -11389,7 +11795,7 @@ function pickDefined(source, keys) {
 async function assertAttachable(filePath) {
   let stat;
   try {
-    stat = await import_node_fs16.default.promises.stat(filePath);
+    stat = await import_node_fs17.default.promises.stat(filePath);
   } catch (e) {
     throw invalidParams(`--attach not readable: ${filePath}: ${e.message}`);
   }
@@ -12021,6 +12427,7 @@ var HANDLERS = {
   "session:list": sessionList,
   "session:health:all": sessionHealthAll,
   "session:events": sessionEvents,
+  "session:logs": sessionLogs,
   "message:send": messageSend,
   "message:send-many": messageSendMany,
   "message:peer": messagePeer,
@@ -12961,12 +13368,18 @@ async function appendSessionCrashed(ctx, user, session, threadId, reason, lastTu
 
 // src/daemon/run.ts
 var APP_SERVER_CRASHED_ON_RESTART_REASON = "app_server_crashed_on_restart";
+var DAEMON_STDERR_PATH_ENV = "CODEX_TEAM_DAEMON_STDERR_PATH";
 async function runDaemon() {
   const config = new ConfigStore();
   const ctx = buildContext({
     config,
     cursors: new CursorStore(config.resolvedDataDir())
   });
+  const socketBindPreflight = await probeSocketBind(ctx.sockPath);
+  if (!socketBindPreflight.ok) {
+    writeSocketBindPreflightFailure(socketBindPreflight.error, socketBindPreflight.probedPath);
+    return 1;
+  }
   warnLegacyWindowsDataDir((warning) => {
     logger.warn(warning.message);
   });
@@ -12981,7 +13394,7 @@ async function runDaemon() {
   const cleanup = () => {
     unlinkSockIfStale(ctx.sockPath);
     try {
-      import_node_fs17.default.unlinkSync(pidPath);
+      import_node_fs18.default.unlinkSync(pidPath);
     } catch {
     }
   };
@@ -13001,7 +13414,7 @@ async function runDaemon() {
   } catch (e) {
     logger.error("failed to start server", { err: e.message });
     try {
-      import_node_fs17.default.unlinkSync(pidPath);
+      import_node_fs18.default.unlinkSync(pidPath);
     } catch {
     }
     throw translateBootstrapError(e, ctx.sockPath);
@@ -13074,15 +13487,15 @@ async function reconcileLoadedSessionsAfterRestart(ctx) {
 }
 function acquirePid(pidPath) {
   try {
-    import_node_fs17.default.mkdirSync(import_node_path16.default.dirname(pidPath), { recursive: true });
-    const fd = import_node_fs17.default.openSync(pidPath, "wx");
+    import_node_fs18.default.mkdirSync(import_node_path17.default.dirname(pidPath), { recursive: true });
+    const fd = import_node_fs18.default.openSync(pidPath, "wx");
     try {
-      import_node_fs17.default.writeFileSync(fd, JSON.stringify({
+      import_node_fs18.default.writeFileSync(fd, JSON.stringify({
         pid: process.pid,
         created_at: (/* @__PURE__ */ new Date()).toISOString()
       }));
     } finally {
-      import_node_fs17.default.closeSync(fd);
+      import_node_fs18.default.closeSync(fd);
     }
     return true;
   } catch (e) {
@@ -13169,13 +13582,13 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
     }
     if (pid !== null && !pidAlive) {
       try {
-        import_node_fs17.default.unlinkSync(pidPath);
+        import_node_fs18.default.unlinkSync(pidPath);
       } catch {
       }
     }
     if (legacyPidPath && legacyPid !== null && !legacyPidAlive) {
       try {
-        import_node_fs17.default.unlinkSync(legacyPidPath);
+        import_node_fs18.default.unlinkSync(legacyPidPath);
       } catch {
       }
     }
@@ -13195,7 +13608,7 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
 }
 function readPidFile3(pidPath) {
   try {
-    const raw = import_node_fs17.default.readFileSync(pidPath, "utf8");
+    const raw = import_node_fs18.default.readFileSync(pidPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
     return {
@@ -13218,7 +13631,7 @@ function legacyWindowsPidFilePath(currentPidPath) {
   if (process.platform !== "win32") return null;
   const legacyHome = process.env.HOME;
   if (!legacyHome) return null;
-  const legacyPath = import_node_path16.default.join(legacyHome, `.${APP}`, "daemon.pid");
+  const legacyPath = import_node_path17.default.join(legacyHome, `.${APP}`, "daemon.pid");
   if (legacyPath === currentPidPath) return null;
   if (legacyHome === homeDir()) return null;
   return legacyPath;
@@ -13246,8 +13659,50 @@ function translateBootstrapError(error, sockPath) {
   if (error instanceof Error) return error;
   return new Error(String(error));
 }
+function writeSocketBindPreflightFailure(error, probedPath) {
+  const line = JSON.stringify(buildSocketBindPreflightPayload(error, probedPath)) + "\n";
+  const stderrPath = process.env[DAEMON_STDERR_PATH_ENV];
+  if (stderrPath) {
+    try {
+      import_node_fs18.default.mkdirSync(import_node_path17.default.dirname(stderrPath), { recursive: true });
+      import_node_fs18.default.appendFileSync(stderrPath, line, "utf8");
+      return;
+    } catch {
+    }
+  }
+  if (typeof process.stderr.fd === "number") {
+    try {
+      import_node_fs18.default.writeSync(process.stderr.fd, line);
+      return;
+    } catch {
+    }
+  }
+  process.stderr.write(line);
+}
+function buildSocketBindPreflightPayload(error, probedPath) {
+  const errno = error?.code ?? "UNKNOWN";
+  if (errno === "EPERM" || errno === "EACCES") {
+    return {
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      level: "error",
+      msg: "socket bind denied",
+      kind: "socket_bind_denied",
+      errno,
+      probed_path: probedPath
+    };
+  }
+  return {
+    ts: (/* @__PURE__ */ new Date()).toISOString(),
+    level: "error",
+    msg: error?.message ?? "socket bind probe failed",
+    kind: "socket_bind_error",
+    errno,
+    probed_path: probedPath
+  };
+}
 
 // src/main.ts
+var DAEMON_STDERR_PATH_ENV2 = "CODEX_TEAM_DAEMON_STDERR_PATH";
 async function main() {
   const argv = process.argv.slice(2);
   const hasDaemonInternal = argv.includes("--daemon-internal");
@@ -13255,7 +13710,12 @@ async function main() {
   const daemonIdx = argv.indexOf("--daemon-internal");
   if (daemonIdx >= 0) {
     argv.splice(daemonIdx, 1);
-    if (stderrPath) redirectProcessStderr(stderrPath);
+    if (stderrPath) {
+      process.env[DAEMON_STDERR_PATH_ENV2] = stderrPath;
+      redirectProcessStderr(stderrPath);
+    } else {
+      delete process.env[DAEMON_STDERR_PATH_ENV2];
+    }
     const code2 = await runDaemonWithBootstrapReporting();
     process.exit(code2);
   }
@@ -13294,8 +13754,8 @@ function takeOptionValue(argv, flag) {
   return value;
 }
 function redirectProcessStderr(stderrPath) {
-  import_node_fs18.default.mkdirSync(import_node_path17.default.dirname(stderrPath), { recursive: true });
-  const stream = import_node_fs18.default.createWriteStream(stderrPath, { flags: "a" });
+  import_node_fs19.default.mkdirSync(import_node_path18.default.dirname(stderrPath), { recursive: true });
+  const stream = import_node_fs19.default.createWriteStream(stderrPath, { flags: "a" });
   stream.on("error", () => void 0);
   const write = stream.write.bind(stream);
   process.stderr.write = ((chunk, encoding, cb) => {
