@@ -6,6 +6,62 @@ describe("formatCompact", () => {
   it.each([
     ["version", { daemon_version: "0.5.3", extra: true }, { daemon_version: "0.5.3" }],
     [
+      "profiles:list",
+      {
+        profiles: [
+          {
+            name: "fixer",
+            description: "Default worker",
+            flags: {
+              model: "gpt-5.4",
+              sandbox: "workspace-write",
+              approval: "on-request",
+              effort: "high",
+              auto_approve: "git*",
+            },
+          },
+        ],
+      },
+      {
+        profiles: [
+          {
+            name: "fixer",
+            flags: {
+              model: "gpt-5.4",
+              sandbox: "workspace-write",
+              approval: "on-request",
+              effort: "high",
+              auto_approve: "git*",
+            },
+          },
+        ],
+      },
+    ],
+    [
+      "profiles:show",
+      {
+        name: "fixer",
+        description: "Default worker",
+        flags: {
+          model: "gpt-5.4",
+          sandbox: "workspace-write",
+          approval: "on-request",
+          effort: "high",
+        },
+        command: "codex-team -b $TOK session new <name> --cwd <repo>",
+      },
+      {
+        name: "fixer",
+        flags: {
+          model: "gpt-5.4",
+          sandbox: "workspace-write",
+          approval: "on-request",
+          effort: "high",
+        },
+        command: "codex-team -b $TOK session new <name> --cwd <repo>",
+      },
+    ],
+    [
       "status",
       {
         token: "agent-a",

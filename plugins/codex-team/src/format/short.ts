@@ -4,6 +4,12 @@ export function formatShort(method: string, data: unknown): string {
   const value = asObject(data);
   let body: string;
   switch (method) {
+    case "profiles:list":
+      body = formatProfilesList(data);
+      break;
+    case "profiles:show":
+      body = formatProfileShow(data);
+      break;
     case "status":
       body = formatStatus(data);
       break;
@@ -38,6 +44,41 @@ export function formatShort(method: string, data: unknown): string {
 
   const footerLines = extractFooterLines(method, value);
   return footerLines.length > 0 ? `${body}\n${footerLines.join("\n")}` : body;
+}
+
+function formatProfilesList(data: unknown): string {
+  const value = asObject(data);
+  const profiles = Array.isArray(value.profiles) ? value.profiles : [];
+  if (profiles.length === 0) return "(no profiles)";
+
+  const rows = profiles.map((entry) => {
+    const profile = asObject(entry);
+    const flags = asObject(profile.flags);
+    return [
+      formatScalar(profile.name),
+      formatScalar(flags.sandbox),
+      formatScalar(flags.effort),
+      formatScalar(flags.approval),
+      formatScalar(profile.description),
+    ];
+  });
+
+  const widths = rows[0]!.map((_, index) =>
+    Math.max(...rows.map((row) => row[index]!.length)),
+  );
+
+  return rows
+    .map((row) =>
+      row
+        .map((cell, index) => index === row.length - 1 ? cell : cell.padEnd(widths[index]!))
+        .join("  "),
+    )
+    .join("\n");
+}
+
+function formatProfileShow(data: unknown): string {
+  const value = asObject(data);
+  return asString(value.command) ?? "unknown";
 }
 
 function formatStatus(data: unknown): string {

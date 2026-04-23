@@ -2,6 +2,10 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
   switch (method) {
     case "version":
       return pickFields(data, ["daemon_version"]);
+    case "profiles:list":
+      return compactProfilesList(data);
+    case "profiles:show":
+      return compactProfileShow(data);
     case "status":
       return pickFields(data, [
         "token",
@@ -147,6 +151,17 @@ interface SessionProjectionOptions {
   includePendingUserInputs?: boolean;
   includeBusy?: boolean;
   nameOnly?: boolean;
+}
+
+function compactProfilesList(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  return {
+    profiles: asArray(value.profiles).map((entry) => pickFields(entry, ["name", "flags"])),
+  };
+}
+
+function compactProfileShow(data: unknown): Record<string, unknown> {
+  return pickFields(data, ["name", "flags", "command"]);
 }
 
 function compactDaemonUserList(data: unknown): Record<string, unknown> {
