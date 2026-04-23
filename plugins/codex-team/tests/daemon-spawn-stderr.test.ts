@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -35,6 +36,8 @@ vi.mock("../src/daemon/config", () => ({
 }));
 
 import { runCli } from "../src/cli/run";
+
+const DAEMON_STDERR_PATH_ENV = "CODEX_TEAM_DAEMON_STDERR_PATH";
 
 function makeChildProcess() {
   const exitListeners = new Set<(code: number | null, signal: NodeJS.Signals | null) => void>();
@@ -74,7 +77,14 @@ describe("daemon spawn stderr retry", () => {
 
   afterEach(() => {
     stdoutSpy.mockRestore();
+    delete process.env[DAEMON_STDERR_PATH_ENV];
     process.env.HOME = originalHome;
+    vi.doUnmock("../src/daemon/context");
+    vi.doUnmock("../src/daemon/server");
+    vi.doUnmock("../src/daemon/orphans");
+    vi.doUnmock("../src/daemon/wire");
+    vi.doUnmock("../src/daemon/processes");
+    vi.resetModules();
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
@@ -112,6 +122,57 @@ describe("daemon spawn stderr retry", () => {
     expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("daemon-spawn.stderr"));
   });
 
+  it("writes a raw socket_bind_denied diagnostic during daemon preflight", async () => {
+    vi.resetModules();
+    const stderrPath = path.join(tempHome, ".codex-team", "daemon-spawn.stderr");
+    process.env[DAEMON_STDERR_PATH_ENV] = stderrPath;
+
+    const buildContext = vi.fn(() => ({
+      sockPath: path.join(tempHome, ".codex-team", "daemon.sock"),
+      dataDir: path.join(tempHome, ".codex-team"),
+      config: { getEffective: () => 6 },
+      users: { list: () => [] },
+      sessions: { listLive: () => [] },
+      activity: { lastActivityAt: new Date(), touch() {} },
+    }));
+    const startServer = vi.fn();
+    vi.doMock("../src/daemon/context", () => ({ buildContext }));
+    vi.doMock("../src/daemon/server", () => ({ startServer }));
+    vi.doMock("../src/daemon/orphans", () => ({ reapOrphans: vi.fn() }));
+    vi.doMock("../src/daemon/wire", () => ({ wireDaemonEvents: vi.fn() }));
+    vi.doMock("../src/daemon/processes", () => ({ isLikelyCodexTeamDaemonProcess: vi.fn(() => true) }));
+
+    const fakeServer = {
+      once: vi.fn(() => fakeServer),
+      off: vi.fn(() => fakeServer),
+      listen: vi.fn(() => {
+        throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+      }),
+      close: vi.fn((callback?: (err?: Error) => void) => {
+        callback?.();
+        return fakeServer;
+      }),
+    };
+    const createServerSpy = vi.spyOn(net, "createServer").mockImplementation(() => fakeServer as unknown as net.Server);
+
+    const { runDaemon } = await import("../src/daemon/run");
+    const code = await runDaemon();
+    createServerSpy.mockRestore();
+
+    expect(code).toBe(1);
+    expect(startServer).not.toHaveBeenCalled();
+    const payload = JSON.parse(fs.readFileSync(stderrPath, "utf8").trim()) as {
+      kind: string;
+      errno: string;
+      msg: string;
+      probed_path: string;
+    };
+    expect(payload.kind).toBe("socket_bind_denied");
+    expect(payload.errno).toBe("EPERM");
+    expect(payload.msg).toBe("socket bind denied");
+    expect(payload.probed_path).toContain(path.join(tempHome, ".codex-team"));
+  });
+
   it("surfaces early bootstrap stderr and translates socket bind denial", async () => {
     sockMocks.probeSock.mockResolvedValue(false);
     const firstChild = makeChildProcess();
@@ -125,13 +186,13 @@ describe("daemon spawn stderr retry", () => {
           fs.mkdirSync(path.dirname(stderrPath), { recursive: true });
           fs.writeFileSync(
             stderrPath,
-            `[codex-team-daemon-bootstrap] ${JSON.stringify({
-              code: "socket_bind_denied",
-              message: "local Unix socket bind denied by environment (error: EPERM). codex-team requires socket bind for daemon IPC - likely running in a restricted sandbox.",
-              data: {
-                error: "EPERM",
-                suggested_action: "run `codex-team doctor` to diagnose",
-              },
+            `${JSON.stringify({
+              ts: "2026-04-23T00:00:00.000Z",
+              level: "error",
+              msg: "socket bind denied",
+              kind: "socket_bind_denied",
+              errno: "EPERM",
+              probed_path: "/tmp/codex-team-probe.sock",
             })}\n`,
           );
           secondChild.emitExit(1);
@@ -144,7 +205,78 @@ describe("daemon spawn stderr retry", () => {
     expect(code).toBe(1);
     expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"socket_bind_denied\""));
     expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"bootstrap_stderr\""));
-    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("run `codex-team doctor` to diagnose"));
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"errno\":\"EPERM\""));
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"probed_path\":\"/tmp/codex-team-probe.sock\""));
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      expect.stringContaining("codex-team cannot bind a local IPC socket here"),
+    );
+    expect(stdoutSpy).not.toHaveBeenCalledWith(expect.stringContaining("\"daemon_unreachable\""));
+  });
+
+  it("adds a doctor suggested_action when the daemon exits without bootstrap stderr", async () => {
+    sockMocks.probeSock.mockResolvedValue(false);
+    const firstChild = makeChildProcess();
+    const secondChild = makeChildProcess();
+
+    processMocks.spawn
+      .mockImplementationOnce(() => firstChild)
+      .mockImplementationOnce(() => {
+        setTimeout(() => {
+          secondChild.emitExit(1);
+        }, 0);
+        return secondChild;
+      });
+
+    const code = await runCli(["-b", "token-1", "status"]);
+
+    expect(code).toBe(1);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"daemon_unreachable\""));
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"exit_code\":1"));
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      expect.stringContaining("\"suggested_action\":\"run `codex-team doctor` to diagnose\""),
+    );
+  });
+
+  it("still succeeds when the daemon becomes ready on the retry path", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            session_count: 0,
+          },
+        });
+      }, 0);
+    });
+
+    const firstChild = makeChildProcess();
+    const secondChild = makeChildProcess();
+    processMocks.spawn
+      .mockImplementationOnce(() => firstChild)
+      .mockImplementationOnce(() => secondChild);
+
+    const code = await runCli(["-b", "token-1", "status"]);
+
+    expect(code).toBe(0);
+    expect(processMocks.spawn).toHaveBeenCalledTimes(2);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"ok\":true"));
   });
 
   it("fails fast on stale pid and sock artifacts without respawning", async () => {

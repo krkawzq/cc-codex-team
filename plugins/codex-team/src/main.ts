@@ -5,6 +5,8 @@ import { runCli } from "./cli/run";
 import { runDaemon } from "./daemon/run";
 import { CodexTeamError } from "./errors";
 
+const DAEMON_STDERR_PATH_ENV = "CODEX_TEAM_DAEMON_STDERR_PATH";
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
 
@@ -13,7 +15,12 @@ async function main(): Promise<void> {
   const daemonIdx = argv.indexOf("--daemon-internal");
   if (daemonIdx >= 0) {
     argv.splice(daemonIdx, 1);
-    if (stderrPath) redirectProcessStderr(stderrPath);
+    if (stderrPath) {
+      process.env[DAEMON_STDERR_PATH_ENV] = stderrPath;
+      redirectProcessStderr(stderrPath);
+    } else {
+      delete process.env[DAEMON_STDERR_PATH_ENV];
+    }
     const code = await runDaemonWithBootstrapReporting();
     process.exit(code);
   }

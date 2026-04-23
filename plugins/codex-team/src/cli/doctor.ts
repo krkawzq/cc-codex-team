@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { ConfigStore } from "../daemon/config";
 import { isLikelyCodexTeamDaemonProcess } from "../daemon/processes";
-import { defaultSockPath, isFilesystemSockPath, normalizeSockPath, pidFilePath } from "../paths";
+import { probeSocketBind } from "../ipc/socket-bind-probe";
+import { defaultSockPath, normalizeSockPath, pidFilePath } from "../paths";
 import { PACKAGE_ROOT } from "../version";
 
 export type DoctorStatus = "ok" | "warn" | "fail" | "skip";
@@ -130,51 +130,20 @@ export function checkDataDirWritable(ctx: DoctorContext, deps: DoctorDeps = DEFA
   }
 }
 
-export async function checkSocketBind(_ctx: DoctorContext, deps: DoctorDeps = DEFAULT_DEPS): Promise<DoctorCheckResult> {
-  const sockPath = path.join(os.tmpdir(), `ct-doctor-${process.pid}-${Date.now()}.sock`);
-  const endpoint = normalizeSockPath(sockPath);
-  const server = deps.createServer();
-  const cleanup = async () => {
-    await new Promise<void>((resolve) => {
-      try {
-        server.close(() => resolve());
-      } catch {
-        resolve();
-      }
-    });
-    if (isFilesystemSockPath(sockPath)) {
-      try { deps.fs.unlinkSync(endpoint); } catch { /* ignore */ }
-    }
-  };
-
-  if (isFilesystemSockPath(sockPath)) {
-    try { deps.fs.unlinkSync(endpoint); } catch { /* ignore */ }
-  }
-
-  const listenResult = await new Promise<{ ok: true } | { ok: false; error: NodeJS.ErrnoException }>((resolve) => {
-    const onError = (error: NodeJS.ErrnoException) => {
-      server.off("listening", onListening);
-      resolve({ ok: false, error });
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      resolve({ ok: true });
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(endpoint);
+export async function checkSocketBind(ctx: DoctorContext, deps: DoctorDeps = DEFAULT_DEPS): Promise<DoctorCheckResult> {
+  const result = await probeSocketBind(ctx.sockPath, {
+    fs: deps.fs,
+    createServer: deps.createServer,
   });
 
-  if (!listenResult.ok) {
-    await cleanup();
-    const code = listenResult.error.code ?? "UNKNOWN";
+  if (!result.ok) {
+    const code = result.error?.code ?? "UNKNOWN";
     if (code === "EPERM" || code === "EACCES") {
       return fail("socket_bind", `socket_bind ${code} - sandbox forbids listen(); codex-team won't work here`);
     }
-    return fail("socket_bind", `socket_bind ${code} - listen() failed: ${listenResult.error.message}`);
+    return fail("socket_bind", `socket_bind ${code} - listen() failed: ${result.error?.message ?? "unknown error"}`);
   }
 
-  await cleanup();
   return ok("socket_bind", "socket_bind permitted");
 }
 

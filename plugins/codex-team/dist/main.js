@@ -23,12 +23,12 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/main.ts
-var import_node_fs18 = __toESM(require("fs"));
-var import_node_path16 = __toESM(require("path"));
+var import_node_fs19 = __toESM(require("fs"));
+var import_node_path17 = __toESM(require("path"));
 
 // src/cli/run.ts
-var import_node_fs7 = __toESM(require("fs"));
-var import_node_path7 = __toESM(require("path"));
+var import_node_fs8 = __toESM(require("fs"));
+var import_node_path8 = __toESM(require("path"));
 var import_node_child_process3 = require("child_process");
 var import_promises = require("timers/promises");
 
@@ -492,8 +492,8 @@ function matchCommand(tokens, available) {
   }
   return null;
 }
-function commandKey(path17) {
-  return path17.join(":");
+function commandKey(path18) {
+  return path18.join(":");
 }
 var SHORT_COMMANDS = /* @__PURE__ */ new Set([
   "doctor",
@@ -2104,15 +2104,15 @@ var HELP_TREE = {
   ],
   needs_bearer: false
 };
-function findNode(path17, node = HELP_TREE) {
-  if (path17.length === 0) return node;
-  const [head, ...rest] = path17;
+function findNode(path18, node = HELP_TREE) {
+  if (path18.length === 0) return node;
+  const [head, ...rest] = path18;
   const child = node.subcommands.find((entry) => entry.name === head);
   if (!child) return null;
   return findNode(rest, child);
 }
-function formatCommandPath(path17) {
-  return path17.length === 0 ? "codex-team" : `codex-team ${path17.join(" ")}`;
+function formatCommandPath(path18) {
+  return path18.length === 0 ? "codex-team" : `codex-team ${path18.join(" ")}`;
 }
 function formatPositional(positional) {
   return positional.required ? `<${positional.name}>` : `[${positional.name}]`;
@@ -2192,9 +2192,9 @@ function renderExamples(node) {
     ...node.examples.map((example) => `  ${example}`)
   ];
 }
-function renderHelp(path17) {
-  const node = findNode(path17) ?? HELP_TREE;
-  const resolvedPath = findNode(path17) ? path17 : [];
+function renderHelp(path18) {
+  const node = findNode(path18) ?? HELP_TREE;
+  const resolvedPath = findNode(path18) ? path18 : [];
   const sections = [
     [formatCommandPath(resolvedPath), node.summary],
     ["USAGE", `  ${node.usage}`]
@@ -3440,10 +3440,9 @@ function hasOwn2(record, key) {
 }
 
 // src/cli/doctor.ts
-var import_node_fs6 = __toESM(require("fs"));
-var import_node_net2 = __toESM(require("net"));
-var import_node_os2 = __toESM(require("os"));
-var import_node_path6 = __toESM(require("path"));
+var import_node_fs7 = __toESM(require("fs"));
+var import_node_net3 = __toESM(require("net"));
+var import_node_path7 = __toESM(require("path"));
 var import_node_child_process2 = require("child_process");
 
 // src/daemon/processes.ts
@@ -3583,12 +3582,88 @@ function looksLikeCodexAppServerCommand(commandLine) {
   return commandLine.includes("app-server") && (commandLine.includes("codex") || commandLine.includes("codex-cli-bin"));
 }
 
+// src/ipc/socket-bind-probe.ts
+var import_node_fs6 = __toESM(require("fs"));
+var import_node_net2 = __toESM(require("net"));
+var import_node_path6 = __toESM(require("path"));
+function buildSocketBindProbePath(sockPath) {
+  const endpoint = normalizeSockPath(sockPath);
+  if (!isFilesystemSockPath(sockPath)) {
+    return `${endpoint}-probe-${process.pid}-${Date.now()}`;
+  }
+  const parentDir = import_node_path6.default.dirname(endpoint);
+  const baseName = import_node_path6.default.basename(endpoint, import_node_path6.default.extname(endpoint)) || "daemon";
+  return import_node_path6.default.join(parentDir, `${baseName}-probe-${process.pid}-${Date.now()}.sock`);
+}
+async function probeSocketBind(sockPath, deps = {
+  fs: import_node_fs6.default,
+  createServer: import_node_net2.default.createServer
+}) {
+  const probedPath = buildSocketBindProbePath(sockPath);
+  const endpoint = normalizeSockPath(probedPath);
+  const server = deps.createServer();
+  const cleanup = async () => {
+    await new Promise((resolve) => {
+      try {
+        server.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+    if (isFilesystemSockPath(probedPath)) {
+      try {
+        deps.fs.unlinkSync(endpoint);
+      } catch {
+      }
+    }
+  };
+  if (isFilesystemSockPath(probedPath)) {
+    deps.fs.mkdirSync(import_node_path6.default.dirname(endpoint), { recursive: true });
+    try {
+      deps.fs.unlinkSync(endpoint);
+    } catch {
+    }
+  }
+  const listenResult = await new Promise((resolve) => {
+    const onError = (error) => {
+      server.off("listening", onListening);
+      resolve({ ok: false, error });
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve({ ok: true });
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    try {
+      server.listen(endpoint);
+    } catch (error) {
+      server.off("error", onError);
+      server.off("listening", onListening);
+      resolve({ ok: false, error });
+    }
+  });
+  if (!listenResult.ok) {
+    await cleanup();
+    return {
+      ok: false,
+      probedPath,
+      error: listenResult.error
+    };
+  }
+  await cleanup();
+  return {
+    ok: true,
+    probedPath
+  };
+}
+
 // src/cli/doctor.ts
 var DEFAULT_DEPS = {
-  fs: import_node_fs6.default,
+  fs: import_node_fs7.default,
   spawnSync: import_node_child_process2.spawnSync,
-  createServer: import_node_net2.default.createServer,
-  createConnection: import_node_net2.default.createConnection,
+  createServer: import_node_net3.default.createServer,
+  createConnection: import_node_net3.default.createConnection,
   kill: process.kill.bind(process),
   isLikelyCodexTeamDaemonProcess
 };
@@ -3601,7 +3676,7 @@ function buildDoctorContext(options = {}) {
     dataDir,
     sockPath,
     pidPath: pidFilePath(dataDir),
-    launcherPath: import_node_path6.default.join(options.packageRoot ?? PACKAGE_ROOT, "bin", "codex-team"),
+    launcherPath: import_node_path7.default.join(options.packageRoot ?? PACKAGE_ROOT, "bin", "codex-team"),
     pathEnv: options.pathEnv ?? process.env.PATH
   };
 }
@@ -3637,7 +3712,7 @@ function checkLauncherOnPath(ctx, deps = DEFAULT_DEPS) {
   return warn("path", `codex-team not on PATH; use ${ctx.launcherPath}`);
 }
 function checkDataDirWritable(ctx, deps = DEFAULT_DEPS) {
-  const testPath = import_node_path6.default.join(ctx.dataDir, ".doctor-write-test");
+  const testPath = import_node_path7.default.join(ctx.dataDir, ".doctor-write-test");
   try {
     deps.fs.mkdirSync(ctx.dataDir, { recursive: true });
     deps.fs.writeFileSync(testPath, "ok");
@@ -3651,53 +3726,18 @@ function checkDataDirWritable(ctx, deps = DEFAULT_DEPS) {
     return fail("data_dir", `data_dir not writable: ${ctx.dataDir}`);
   }
 }
-async function checkSocketBind(_ctx, deps = DEFAULT_DEPS) {
-  const sockPath = import_node_path6.default.join(import_node_os2.default.tmpdir(), `ct-doctor-${process.pid}-${Date.now()}.sock`);
-  const endpoint = normalizeSockPath(sockPath);
-  const server = deps.createServer();
-  const cleanup = async () => {
-    await new Promise((resolve) => {
-      try {
-        server.close(() => resolve());
-      } catch {
-        resolve();
-      }
-    });
-    if (isFilesystemSockPath(sockPath)) {
-      try {
-        deps.fs.unlinkSync(endpoint);
-      } catch {
-      }
-    }
-  };
-  if (isFilesystemSockPath(sockPath)) {
-    try {
-      deps.fs.unlinkSync(endpoint);
-    } catch {
-    }
-  }
-  const listenResult = await new Promise((resolve) => {
-    const onError = (error) => {
-      server.off("listening", onListening);
-      resolve({ ok: false, error });
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      resolve({ ok: true });
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(endpoint);
+async function checkSocketBind(ctx, deps = DEFAULT_DEPS) {
+  const result = await probeSocketBind(ctx.sockPath, {
+    fs: deps.fs,
+    createServer: deps.createServer
   });
-  if (!listenResult.ok) {
-    await cleanup();
-    const code = listenResult.error.code ?? "UNKNOWN";
+  if (!result.ok) {
+    const code = result.error?.code ?? "UNKNOWN";
     if (code === "EPERM" || code === "EACCES") {
       return fail("socket_bind", `socket_bind ${code} - sandbox forbids listen(); codex-team won't work here`);
     }
-    return fail("socket_bind", `socket_bind ${code} - listen() failed: ${listenResult.error.message}`);
+    return fail("socket_bind", `socket_bind ${code} - listen() failed: ${result.error?.message ?? "unknown error"}`);
   }
-  await cleanup();
   return ok2("socket_bind", "socket_bind permitted");
 }
 function checkDaemonPid(ctx, deps = DEFAULT_DEPS) {
@@ -3737,12 +3777,12 @@ async function checkDaemonSocket(ctx, pidResult, deps = DEFAULT_DEPS) {
   return fail("daemon_socket", `daemon_socket ${code} - ${interpretSocketConnectError(code, result.message)}`);
 }
 function checkDistFreshness(ctx, deps = DEFAULT_DEPS) {
-  const distPath = import_node_path6.default.join(ctx.packageRoot, "dist", "main.js");
+  const distPath = import_node_path7.default.join(ctx.packageRoot, "dist", "main.js");
   const distStat = statIfExists(distPath, deps.fs);
   if (!distStat) {
     return warn("dist", "dist missing; run `npm run build` in plugins/codex-team");
   }
-  const sourceNewest = newestMtime(import_node_path6.default.join(ctx.packageRoot, "src"), deps.fs);
+  const sourceNewest = newestMtime(import_node_path7.default.join(ctx.packageRoot, "src"), deps.fs);
   if (sourceNewest !== null && sourceNewest > distStat.mtimeMs) {
     return warn("dist", "source newer than dist; run `npm run build` in plugins/codex-team");
   }
@@ -3817,11 +3857,11 @@ function skip(id, message) {
   return { id, status: "skip", message };
 }
 function resolveOnPath(command, pathEnv, doctorFs) {
-  const segments = (pathEnv ?? "").split(import_node_path6.default.delimiter).filter(Boolean);
+  const segments = (pathEnv ?? "").split(import_node_path7.default.delimiter).filter(Boolean);
   const candidates = process.platform === "win32" ? windowsExecutableCandidates(command) : [command];
   for (const segment of segments) {
     for (const candidate of candidates) {
-      const target = import_node_path6.default.join(segment, candidate);
+      const target = import_node_path7.default.join(segment, candidate);
       try {
         const stat = doctorFs.statSync(target);
         if (!stat.isFile()) continue;
@@ -3874,7 +3914,7 @@ function newestMtime(target, doctorFs) {
     return null;
   }
   for (const entry of entries) {
-    const childNewest = newestMtime(import_node_path6.default.join(target, entry.name), doctorFs);
+    const childNewest = newestMtime(import_node_path7.default.join(target, entry.name), doctorFs);
     if (childNewest !== null && (newest === null || childNewest > newest)) {
       newest = childNewest;
     }
@@ -3938,6 +3978,8 @@ var DEFAULT_DAEMON_CONNECT_TIMEOUT_MS = 5e3;
 var DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS = 3;
 var DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS = 250;
 var DAEMON_STDERR_FLAG = "--stderr-to";
+var DOCTOR_SUGGESTED_ACTION = "run `codex-team doctor` to diagnose";
+var SOCKET_BIND_DENIED_SUGGESTED_ACTION = "codex-team cannot bind a local IPC socket here \u2014 run `codex-team doctor` for details";
 async function readStdinAll() {
   return await new Promise((resolve, reject) => {
     let buf = "";
@@ -4345,24 +4387,13 @@ async function ensureDaemon(sockPath) {
   const stderrTail = readTail(stderrPath, 4096);
   const parsedBootstrap = parseBootstrapStderr(stderrTail);
   if (parsedBootstrap?.code === "socket_bind_denied") {
-    return {
-      ok: false,
-      code: parsedBootstrap.code,
-      message: parsedBootstrap.message,
-      data: {
-        ...parsedBootstrap.data ?? {},
-        ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-      }
-    };
+    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
   }
   return {
     ok: false,
     code: "daemon_unreachable",
     message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`,
-    data: {
-      stderr_path: stderrPath,
-      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-    }
+    data: buildDaemonUnreachableData(stderrPath, stderrTail)
   };
 }
 async function connectSockWithRetry(sockPath, timeoutMs, retryAttempts, retryDelayMs) {
@@ -4409,8 +4440,8 @@ function spawnDaemon(stderrPath) {
   let stderrFd = null;
   try {
     if (stderrPath) {
-      import_node_fs7.default.mkdirSync(import_node_path7.default.dirname(stderrPath), { recursive: true });
-      stderrFd = import_node_fs7.default.openSync(stderrPath, "w");
+      import_node_fs8.default.mkdirSync(import_node_path8.default.dirname(stderrPath), { recursive: true });
+      stderrFd = import_node_fs8.default.openSync(stderrPath, "w");
       args.push(DAEMON_STDERR_FLAG, stderrPath);
     }
     const child = (0, import_node_child_process3.spawn)(process.execPath, args, {
@@ -4422,7 +4453,7 @@ function spawnDaemon(stderrPath) {
     child.unref();
     return child;
   } finally {
-    if (stderrFd !== null) import_node_fs7.default.closeSync(stderrFd);
+    if (stderrFd !== null) import_node_fs8.default.closeSync(stderrFd);
   }
 }
 function getCliVersion() {
@@ -4432,7 +4463,7 @@ function randomId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 function daemonSpawnStderrPath(dataDir) {
-  return import_node_path7.default.join(dataDir, "daemon-spawn.stderr");
+  return import_node_path8.default.join(dataDir, "daemon-spawn.stderr");
 }
 function detectStaleDaemonArtifacts(sockPath, pidPath) {
   const pidRecord = readPidFile(pidPath);
@@ -4440,7 +4471,7 @@ function detectStaleDaemonArtifacts(sockPath, pidPath) {
   if (isPidAlive(pidRecord.pid)) return null;
   if (!isFilesystemSockPath(sockPath)) return null;
   const normalizedSockPath = normalizeSockPath(sockPath);
-  if (!import_node_fs7.default.existsSync(normalizedSockPath)) return null;
+  if (!import_node_fs8.default.existsSync(normalizedSockPath)) return null;
   return {
     pid: pidRecord.pid,
     sockPath: normalizedSockPath
@@ -4448,7 +4479,7 @@ function detectStaleDaemonArtifacts(sockPath, pidPath) {
 }
 function readPidFile(targetPath) {
   try {
-    const raw = import_node_fs7.default.readFileSync(targetPath, "utf8");
+    const raw = import_node_fs8.default.readFileSync(targetPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
     return { pid: Math.floor(parsed.pid) };
@@ -4464,35 +4495,41 @@ function isPidAlive(pid) {
     return false;
   }
 }
+function buildSocketBindDeniedFailure(parsedBootstrap, stderrTail) {
+  return {
+    ok: false,
+    code: parsedBootstrap.code,
+    message: parsedBootstrap.message,
+    data: {
+      ...parsedBootstrap.data ?? {},
+      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
+    }
+  };
+}
+function buildDaemonUnreachableData(stderrPath, stderrTail, result) {
+  return {
+    stderr_path: stderrPath,
+    ...typeof result?.exitCode === "number" ? { exit_code: result.exitCode } : {},
+    ...result?.signal ? { signal: result.signal } : {},
+    ...stderrTail ? { bootstrap_stderr: stderrTail } : { suggested_action: DOCTOR_SUGGESTED_ACTION }
+  };
+}
 function buildEarlyExitFailure(stderrPath, result) {
   const stderrTail = readTail(stderrPath, 4096);
   const parsedBootstrap = parseBootstrapStderr(stderrTail);
   if (parsedBootstrap?.code === "socket_bind_denied") {
-    return {
-      ok: false,
-      code: parsedBootstrap.code,
-      message: parsedBootstrap.message,
-      data: {
-        ...parsedBootstrap.data ?? {},
-        ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-      }
-    };
+    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
   }
   return {
     ok: false,
     code: "daemon_unreachable",
     message: parsedBootstrap?.message ?? "daemon exited before becoming ready",
-    data: {
-      stderr_path: stderrPath,
-      ...typeof result.exitCode === "number" ? { exit_code: result.exitCode } : {},
-      ...result.signal ? { signal: result.signal } : {},
-      ...stderrTail ? { bootstrap_stderr: stderrTail } : {}
-    }
+    data: buildDaemonUnreachableData(stderrPath, stderrTail, result)
   };
 }
 function readTail(filePath, maxBytes) {
   try {
-    const raw = import_node_fs7.default.readFileSync(filePath, "utf8");
+    const raw = import_node_fs8.default.readFileSync(filePath, "utf8");
     if (raw.length <= maxBytes) return raw.trim();
     return raw.slice(-maxBytes).trim();
   } catch {
@@ -4504,6 +4541,8 @@ function parseBootstrapStderr(stderrTail) {
   const prefix = "[codex-team-daemon-bootstrap] ";
   const lines = stderrTail.split(/\r?\n/).reverse();
   for (const line of lines) {
+    const socketBindDenied = parseSocketBindDeniedLine(line);
+    if (socketBindDenied) return socketBindDenied;
     if (!line.startsWith(prefix)) continue;
     try {
       const parsed = JSON.parse(line.slice(prefix.length));
@@ -4518,6 +4557,24 @@ function parseBootstrapStderr(stderrTail) {
     }
   }
   return null;
+}
+function parseSocketBindDeniedLine(line) {
+  try {
+    const parsed = JSON.parse(line);
+    if (parsed.kind !== "socket_bind_denied") return null;
+    const errno = typeof parsed.errno === "string" && parsed.errno.length > 0 ? parsed.errno : "UNKNOWN";
+    return {
+      code: "socket_bind_denied",
+      message: `local socket bind denied by environment (${errno})`,
+      data: {
+        suggested_action: SOCKET_BIND_DENIED_SUGGESTED_ACTION,
+        errno,
+        ...typeof parsed.probed_path === "string" && parsed.probed_path.length > 0 ? { probed_path: parsed.probed_path } : {}
+      }
+    };
+  } catch {
+    return null;
+  }
 }
 function truthy(v) {
   return v === true || v === "true" || v === "1";
@@ -4657,8 +4714,8 @@ function formatDuration(ms) {
 }
 
 // src/daemon/run.ts
-var import_node_fs17 = __toESM(require("fs"));
-var import_node_path15 = __toESM(require("path"));
+var import_node_fs18 = __toESM(require("fs"));
+var import_node_path16 = __toESM(require("path"));
 
 // src/errors.ts
 var CodexTeamError = class extends Error {
@@ -4679,8 +4736,8 @@ function methodNotFound(method) {
 }
 
 // src/daemon/users.ts
-var import_node_fs8 = __toESM(require("fs"));
-var import_node_path8 = __toESM(require("path"));
+var import_node_fs9 = __toESM(require("fs"));
+var import_node_path9 = __toESM(require("path"));
 var SCHEMA_VERSION = 1;
 var UserRegistry = class {
   users = /* @__PURE__ */ new Map();
@@ -4691,12 +4748,12 @@ var UserRegistry = class {
   }
   loadFromDisk() {
     const root = usersDir(this.dataDir);
-    if (!import_node_fs8.default.existsSync(root)) return;
-    for (const dirname of import_node_fs8.default.readdirSync(root)) {
-      const metaPath = import_node_path8.default.join(root, dirname, "metadata.json");
-      if (import_node_fs8.default.existsSync(metaPath)) {
+    if (!import_node_fs9.default.existsSync(root)) return;
+    for (const dirname of import_node_fs9.default.readdirSync(root)) {
+      const metaPath = import_node_path9.default.join(root, dirname, "metadata.json");
+      if (import_node_fs9.default.existsSync(metaPath)) {
         try {
-          const raw = import_node_fs8.default.readFileSync(metaPath, "utf8");
+          const raw = import_node_fs9.default.readFileSync(metaPath, "utf8");
           const parsed = JSON.parse(raw);
           const user = normalizePersistedUser(parsed);
           if (user && typeof user.token === "string") {
@@ -4751,7 +4808,7 @@ var UserRegistry = class {
     this.users.delete(token);
     const dir = userDir(token, this.dataDir);
     try {
-      import_node_fs8.default.rmSync(dir, { recursive: true, force: true });
+      import_node_fs9.default.rmSync(dir, { recursive: true, force: true });
     } catch {
     }
   }
@@ -4763,14 +4820,14 @@ var UserRegistry = class {
   }
   persist(user) {
     const dir = userDir(user.token, this.dataDir);
-    import_node_fs8.default.mkdirSync(dir, { recursive: true });
+    import_node_fs9.default.mkdirSync(dir, { recursive: true });
     const metaPath = userMetadataPath(user.token, this.dataDir);
     const tmp = metaPath + ".tmp";
-    import_node_fs8.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs9.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION,
       user
     }, null, 2));
-    import_node_fs8.default.renameSync(tmp, metaPath);
+    import_node_fs9.default.renameSync(tmp, metaPath);
   }
 };
 function validateToken(token) {
@@ -4802,8 +4859,8 @@ function isCanonicalUserDir(dirname) {
 
 // src/daemon/sessions.ts
 var import_node_crypto2 = __toESM(require("crypto"));
-var import_node_fs9 = __toESM(require("fs"));
-var import_node_path9 = __toESM(require("path"));
+var import_node_fs10 = __toESM(require("fs"));
+var import_node_path10 = __toESM(require("path"));
 var NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var SCHEMA_VERSION2 = 1;
@@ -4841,12 +4898,12 @@ var SessionRegistry = class {
     if (this.users.has(user)) return;
     const bucket = this.emptyBucket();
     const p = userSessionsPath(user, this.dataDir);
-    if (!import_node_fs9.default.existsSync(p)) {
+    if (!import_node_fs10.default.existsSync(p)) {
       this.users.set(user, bucket);
       return;
     }
     try {
-      const raw = import_node_fs9.default.readFileSync(p, "utf8");
+      const raw = import_node_fs10.default.readFileSync(p, "utf8");
       const parsed = JSON.parse(raw);
       if (typeof parsed.schema_version === "number" && parsed.schema_version > SCHEMA_VERSION2) {
         throw new Error(`sessions.json schema_version ${parsed.schema_version} is newer than supported ${SCHEMA_VERSION2}`);
@@ -5015,7 +5072,7 @@ var SessionRegistry = class {
   }
   async persistAsync(user) {
     const dir = userDir(user, this.dataDir);
-    await import_node_fs9.default.promises.mkdir(dir, { recursive: true });
+    await import_node_fs10.default.promises.mkdir(dir, { recursive: true });
     const p = userSessionsPath(user, this.dataDir);
     const bucket = this.users.get(user);
     const payload = {
@@ -5023,8 +5080,8 @@ var SessionRegistry = class {
       sessions: bucket ? Array.from(bucket.byName.values()).map((record) => toPersistedRecord(record)) : []
     };
     const tmp = p + ".tmp";
-    await import_node_fs9.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
-    await import_node_fs9.default.promises.rename(tmp, p);
+    await import_node_fs10.default.promises.writeFile(tmp, JSON.stringify(payload, null, 2));
+    await import_node_fs10.default.promises.rename(tmp, p);
   }
   schedulePersist(user, delayMs) {
     const existing = this.touchTimers.get(user);
@@ -5241,8 +5298,8 @@ function clampPersistDebounceMs(value) {
 }
 
 // src/daemon/events.ts
-var import_node_fs10 = __toESM(require("fs"));
-var import_node_path10 = __toESM(require("path"));
+var import_node_fs11 = __toESM(require("fs"));
+var import_node_path11 = __toESM(require("path"));
 var DELTA_SUFFIX = "_delta";
 var SCHEMA_VERSION3 = 1;
 var DEFAULT_FLUSH_DELAY_MS = 25;
@@ -5376,13 +5433,13 @@ var EventLog = class {
       return;
     }
     const filePath = userEventLogPath(user, this.dataDir);
-    if (!import_node_fs10.default.existsSync(filePath)) {
+    if (!import_node_fs11.default.existsSync(filePath)) {
       this.ensureUserState(user);
       this.loaded.add(user);
       this.loadPromises.delete(user);
       return;
     }
-    const raw = import_node_fs10.default.readFileSync(filePath, "utf8");
+    const raw = import_node_fs11.default.readFileSync(filePath, "utf8");
     const lines = raw.split("\n").filter(Boolean);
     const { events, totalLines } = parsePersistedEvents(lines);
     this.hydrateLoadedUser(user, events, totalLines);
@@ -5519,7 +5576,7 @@ var EventLog = class {
         return;
       }
       const filePath = userEventLogPath(user, this.dataDir);
-      const raw = await import_node_fs10.default.promises.readFile(filePath, "utf8");
+      const raw = await import_node_fs11.default.promises.readFile(filePath, "utf8");
       const lines = raw.split("\n").filter(Boolean);
       const { events, totalLines } = parsePersistedEvents(lines);
       this.hydrateLoadedUser(user, events, totalLines);
@@ -5658,11 +5715,11 @@ var EventLog = class {
       const contents = serializeEventFile(this.buffers.get(user)?.toArray() ?? []);
       writePromise = this.enqueueFsOp(user, async () => {
         try {
-          await import_node_fs10.default.promises.mkdir(import_node_path10.default.dirname(filePath), { recursive: true });
-          await import_node_fs10.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+          await import_node_fs11.default.promises.mkdir(import_node_path11.default.dirname(filePath), { recursive: true });
+          await import_node_fs11.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
           const tmp = filePath + ".tmp";
-          await import_node_fs10.default.promises.writeFile(tmp, contents);
-          await import_node_fs10.default.promises.rename(tmp, filePath);
+          await import_node_fs11.default.promises.writeFile(tmp, contents);
+          await import_node_fs11.default.promises.rename(tmp, filePath);
           return true;
         } catch (e) {
           logger.warn("event log compaction failed", { user, err: e.message });
@@ -5721,12 +5778,12 @@ var EventLog = class {
       this.pendingBytes.delete(user);
       writePromise = this.enqueueFsOp(user, async () => {
         try {
-          await import_node_fs10.default.promises.mkdir(import_node_path10.default.dirname(filePath), { recursive: true });
-          await import_node_fs10.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
-          if (!import_node_fs10.default.existsSync(filePath)) {
-            await import_node_fs10.default.promises.writeFile(filePath, serializeHeaderLine() + snapshotLines.join(""));
+          await import_node_fs11.default.promises.mkdir(import_node_path11.default.dirname(filePath), { recursive: true });
+          await import_node_fs11.default.promises.mkdir(userDir(user, this.dataDir), { recursive: true });
+          if (!import_node_fs11.default.existsSync(filePath)) {
+            await import_node_fs11.default.promises.writeFile(filePath, serializeHeaderLine() + snapshotLines.join(""));
           } else {
-            await import_node_fs10.default.promises.appendFile(filePath, snapshotLines.join(""));
+            await import_node_fs11.default.promises.appendFile(filePath, snapshotLines.join(""));
           }
           return true;
         } catch (e) {
@@ -5907,9 +5964,9 @@ function serializeEventFile(buf) {
 }
 
 // src/daemon/cursors.ts
-var import_node_fs11 = __toESM(require("fs"));
-var import_node_os3 = __toESM(require("os"));
-var import_node_path11 = __toESM(require("path"));
+var import_node_fs12 = __toESM(require("fs"));
+var import_node_os2 = __toESM(require("os"));
+var import_node_path12 = __toESM(require("path"));
 var import_promises2 = require("timers/promises");
 var CURSOR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 var SCHEMA_VERSION4 = 1;
@@ -6076,9 +6133,9 @@ var CursorStore = class {
     if (this.loaded.has(user)) return;
     const bucket = /* @__PURE__ */ new Map();
     const filePath = cursorFilePath(user, this.dataDir);
-    if (import_node_fs11.default.existsSync(filePath)) {
+    if (import_node_fs12.default.existsSync(filePath)) {
       try {
-        for (const cursor of loadEnvelopeFromText(import_node_fs11.default.readFileSync(filePath, "utf8")).cursors.values()) {
+        for (const cursor of loadEnvelopeFromText(import_node_fs12.default.readFileSync(filePath, "utf8")).cursors.values()) {
           bucket.set(cursor.name, cloneCursor(cursor));
         }
       } catch (error) {
@@ -6097,7 +6154,7 @@ var CursorStore = class {
   }
   async persistAsync(user, ops) {
     const dir = userDir(user, this.dataDir);
-    await import_node_fs11.default.promises.mkdir(dir, { recursive: true });
+    await import_node_fs12.default.promises.mkdir(dir, { recursive: true });
     const filePath = cursorFilePath(user, this.dataDir);
     const lock = await acquireCursorLock(filePath);
     const tmpPath = makeTempPath(filePath);
@@ -6108,10 +6165,10 @@ var CursorStore = class {
         schema_version: SCHEMA_VERSION4,
         cursors: sorted(persisted)
       };
-      await import_node_fs11.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
-      await import_node_fs11.default.promises.rename(tmpPath, filePath);
+      await import_node_fs12.default.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2));
+      await import_node_fs12.default.promises.rename(tmpPath, filePath);
     } finally {
-      await import_node_fs11.default.promises.unlink(tmpPath).catch(() => void 0);
+      await import_node_fs12.default.promises.unlink(tmpPath).catch(() => void 0);
       await lock.release();
     }
   }
@@ -6153,7 +6210,7 @@ var CursorStore = class {
   }
 };
 function cursorFilePath(user, dataDir) {
-  return import_node_path11.default.join(userDir(user, dataDir), "cursors.json");
+  return import_node_path12.default.join(userDir(user, dataDir), "cursors.json");
 }
 async function acquireCursorLock(filePath) {
   const lockPath = `${filePath}.lock`;
@@ -6178,7 +6235,7 @@ async function reclaimStaleCursorLock(lockPath) {
   const lock = await readCursorLock(lockPath);
   if (!lock || !isStaleCursorLock(lock)) return null;
   try {
-    await import_node_fs11.default.promises.unlink(lockPath);
+    await import_node_fs12.default.promises.unlink(lockPath);
   } catch (error) {
     const err2 = error;
     if (err2.code === "ENOENT") return null;
@@ -6199,13 +6256,13 @@ function makeCursorLockRecord() {
   return {
     pid: process.pid,
     started_at: (/* @__PURE__ */ new Date()).toISOString(),
-    host: import_node_os3.default.hostname(),
+    host: import_node_os2.default.hostname(),
     nonce: Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
   };
 }
 async function loadEnvelopeFromFile(filePath) {
   try {
-    const raw = await import_node_fs11.default.promises.readFile(filePath, "utf8");
+    const raw = await import_node_fs12.default.promises.readFile(filePath, "utf8");
     return loadEnvelopeFromText(raw).cursors;
   } catch (error) {
     const err2 = error;
@@ -6227,7 +6284,7 @@ function loadEnvelopeFromText(raw) {
 }
 async function readCursorLock(lockPath) {
   try {
-    const raw = await import_node_fs11.default.promises.readFile(lockPath, "utf8");
+    const raw = await import_node_fs12.default.promises.readFile(lockPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || typeof parsed.started_at !== "string" || typeof parsed.host !== "string") {
       return null;
@@ -6295,7 +6352,7 @@ function cloneCursorRecord(cursor) {
   };
 }
 async function tryCreateCursorLock(lockPath) {
-  const handle = await import_node_fs11.default.promises.open(lockPath, "wx");
+  const handle = await import_node_fs12.default.promises.open(lockPath, "wx");
   const record = makeCursorLockRecord();
   try {
     await handle.writeFile(JSON.stringify(record));
@@ -6311,7 +6368,7 @@ async function tryCreateCursorLock(lockPath) {
         const owned = await verifyCursorLockOwnership(lockPath, record);
         await handle.close().catch(() => void 0);
         if (owned) {
-          await import_node_fs11.default.promises.unlink(lockPath).catch(() => void 0);
+          await import_node_fs12.default.promises.unlink(lockPath).catch(() => void 0);
         }
       }
     };
@@ -6969,21 +7026,21 @@ function queueHeadRetryMax(retry) {
 
 // src/daemon/orphans.ts
 var import_node_crypto5 = __toESM(require("crypto"));
-var import_node_fs12 = __toESM(require("fs"));
-var import_node_path12 = __toESM(require("path"));
+var import_node_fs13 = __toESM(require("fs"));
+var import_node_path13 = __toESM(require("path"));
 var import_promises4 = require("timers/promises");
 var SCHEMA_VERSION5 = 2;
 var TERM_GRACE_MS = 2e3;
 var KILL_GRACE_MS = 500;
 var POLL_MS = 100;
 function orphanPidsPath(dataDir) {
-  return import_node_path12.default.join(dataDir, "codex-pids.json");
+  return import_node_path13.default.join(dataDir, "codex-pids.json");
 }
 function readPidFile2(dataDir) {
   const p = orphanPidsPath(dataDir);
-  if (!import_node_fs12.default.existsSync(p)) return [];
+  if (!import_node_fs13.default.existsSync(p)) return [];
   try {
-    const raw = import_node_fs12.default.readFileSync(p, "utf8");
+    const raw = import_node_fs13.default.readFileSync(p, "utf8");
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
       return parsed.filter((x) => typeof x === "number" && Number.isFinite(x)).map((pid) => ({
@@ -7008,13 +7065,13 @@ function readPidFile2(dataDir) {
 function writePidFile(dataDir, pids) {
   const p = orphanPidsPath(dataDir);
   try {
-    import_node_fs12.default.mkdirSync(import_node_path12.default.dirname(p), { recursive: true });
+    import_node_fs13.default.mkdirSync(import_node_path13.default.dirname(p), { recursive: true });
     const tmp = p + ".tmp";
-    import_node_fs12.default.writeFileSync(tmp, JSON.stringify({
+    import_node_fs13.default.writeFileSync(tmp, JSON.stringify({
       schema_version: SCHEMA_VERSION5,
       processes: pids
     }));
-    import_node_fs12.default.renameSync(tmp, p);
+    import_node_fs13.default.renameSync(tmp, p);
   } catch (e) {
     logger.warn("failed to persist codex pid file", { err: e.message });
   }
@@ -7151,7 +7208,7 @@ var import_node_events2 = require("events");
 var import_node_child_process4 = require("child_process");
 var import_node_events = require("events");
 var import_node_crypto6 = require("crypto");
-var import_node_path13 = __toESM(require("path"));
+var import_node_path14 = __toESM(require("path"));
 var STDERR_TAIL_LINES = 400;
 var DEFAULT_REQUEST_TIMEOUT_MS = 12e4;
 var AppServerClient = class extends import_node_events.EventEmitter {
@@ -7413,7 +7470,7 @@ function resolveLaunch(bin, args) {
   return { command: resolved, args };
 }
 function resolveWindowsCommand(bin) {
-  if (bin.includes("\\") || bin.includes("/") || import_node_path13.default.extname(bin).length > 0) return bin;
+  if (bin.includes("\\") || bin.includes("/") || import_node_path14.default.extname(bin).length > 0) return bin;
   try {
     const raw = (0, import_node_child_process4.execFileSync)("where", [bin], {
       stdio: ["ignore", "pipe", "ignore"],
@@ -7823,12 +7880,12 @@ var status = async (ctx, req) => {
 };
 
 // src/daemon/handlers/daemon.ts
-var import_node_fs14 = __toESM(require("fs"));
-var import_node_path14 = __toESM(require("path"));
+var import_node_fs15 = __toESM(require("fs"));
+var import_node_path15 = __toESM(require("path"));
 var import_node_child_process5 = require("child_process");
 
 // src/daemon/shutdown.ts
-var import_node_fs13 = __toESM(require("fs"));
+var import_node_fs14 = __toESM(require("fs"));
 var shuttingDown = false;
 async function shutdownDaemon(ctx, reason, exitCode = 0) {
   if (shuttingDown) return;
@@ -7875,7 +7932,7 @@ async function shutdownDaemon(ctx, reason, exitCode = 0) {
   }
   unlinkSockIfStale(ctx.sockPath);
   try {
-    import_node_fs13.default.unlinkSync(pidFilePath(ctx.dataDir));
+    import_node_fs14.default.unlinkSync(pidFilePath(ctx.dataDir));
   } catch {
   }
   setTimeout(() => process.exit(exitCode), 10);
@@ -8114,7 +8171,7 @@ var daemonLogsStream = async (ctx, req, stream) => {
   }
   const syncAppended = async () => {
     try {
-      const stat = await import_node_fs14.default.promises.stat(logPath);
+      const stat = await import_node_fs15.default.promises.stat(logPath);
       if (stat.size < offset) offset = 0;
       if (stat.size === offset) return;
       const chunk = await readBytes(logPath, offset, stat.size - offset);
@@ -8136,8 +8193,8 @@ var daemonLogsStream = async (ctx, req, stream) => {
     }, 50);
     debounceTimer.unref();
   };
-  const watcher = import_node_fs14.default.watch(import_node_path14.default.dirname(logPath), { persistent: true }, (_event, filename) => {
-    if (!filename || filename.toString() === import_node_path14.default.basename(logPath)) scheduleSync();
+  const watcher = import_node_fs15.default.watch(import_node_path15.default.dirname(logPath), { persistent: true }, (_event, filename) => {
+    if (!filename || filename.toString() === import_node_path15.default.basename(logPath)) scheduleSync();
   });
   stream.onClose(() => {
     closed = true;
@@ -8206,7 +8263,7 @@ function safeParseOr(line, fallback) {
 }
 async function readTextIfExists(filePath) {
   try {
-    return await import_node_fs14.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs15.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     if (e.code === "ENOENT") return null;
     throw e;
@@ -8214,7 +8271,7 @@ async function readTextIfExists(filePath) {
 }
 async function readBytes(filePath, start, length) {
   if (length <= 0) return "";
-  const handle = await import_node_fs14.default.promises.open(filePath, "r");
+  const handle = await import_node_fs15.default.promises.open(filePath, "r");
   try {
     const buffer = Buffer.alloc(length);
     const { bytesRead } = await handle.read(buffer, 0, length, start);
@@ -8227,7 +8284,7 @@ function getPkgVersion() {
   return VERSION;
 }
 async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
-  const distPath = import_node_path14.default.join(packageRoot, "dist", "main.js");
+  const distPath = import_node_path15.default.join(packageRoot, "dist", "main.js");
   const distStat = await statIfExists2(distPath);
   if (!distStat) {
     return {
@@ -8237,7 +8294,7 @@ async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
     };
   }
   const builtAt = new Date(distStat.mtimeMs).toISOString();
-  const sourceNewestMtime = await getNewestMtime(import_node_path14.default.join(packageRoot, "src"));
+  const sourceNewestMtime = await getNewestMtime(import_node_path15.default.join(packageRoot, "src"));
   return {
     dist_built_at: builtAt,
     dist_age_seconds: Math.max(0, Math.floor((Date.now() - distStat.mtimeMs) / 1e3)),
@@ -8246,7 +8303,7 @@ async function getDistFreshness(packageRoot = PACKAGE_ROOT) {
 }
 async function statIfExists2(filePath) {
   try {
-    return await import_node_fs14.default.promises.stat(filePath);
+    return await import_node_fs15.default.promises.stat(filePath);
   } catch (e) {
     if (e.code === "ENOENT") return null;
     return null;
@@ -8255,14 +8312,14 @@ async function statIfExists2(filePath) {
 async function getNewestMtime(dirPath) {
   let entries;
   try {
-    entries = await import_node_fs14.default.promises.readdir(dirPath, { withFileTypes: true });
+    entries = await import_node_fs15.default.promises.readdir(dirPath, { withFileTypes: true });
   } catch (e) {
     if (e.code === "ENOENT") return null;
     return null;
   }
   let newest = null;
   for (const entry of entries) {
-    const entryPath = import_node_path14.default.join(dirPath, entry.name);
+    const entryPath = import_node_path15.default.join(dirPath, entry.name);
     if (entry.isDirectory()) {
       const childNewest = await getNewestMtime(entryPath);
       if (childNewest !== null && (newest === null || childNewest > newest)) newest = childNewest;
@@ -8275,7 +8332,7 @@ async function getNewestMtime(dirPath) {
 }
 
 // src/daemon/handlers/session.ts
-var import_node_fs15 = __toESM(require("fs"));
+var import_node_fs16 = __toESM(require("fs"));
 
 // src/daemon/experimentalTools.ts
 var TOOL_SPECS = [
@@ -8536,8 +8593,8 @@ function renderCommandExecution(item, ctx) {
 }
 function renderFileChange(item, ctx) {
   const attrs = baseItemAttrs(item, { includeType: false });
-  const path17 = asString4(item.path);
-  if (path17) attrs.path = path17;
+  const path18 = asString4(item.path);
+  if (path18) attrs.path = path18;
   if (item.status !== void 0) attrs.status = item.status;
   const diffBody = extractDiff(item) ?? "";
   return renderBodyTag("file-patch", attrs, diffBody, ctx);
@@ -9535,7 +9592,7 @@ async function readInstructionFile(value, flag) {
   const filePath = asString5(value);
   if (!filePath) return null;
   try {
-    return await import_node_fs15.default.promises.readFile(filePath, "utf8");
+    return await import_node_fs16.default.promises.readFile(filePath, "utf8");
   } catch (e) {
     throw invalidParams(`${flag} not readable: ${e.message}`);
   }
@@ -10315,7 +10372,7 @@ function isSessionEventDeltaType(type) {
 }
 
 // src/daemon/handlers/message.ts
-var import_node_fs16 = __toESM(require("fs"));
+var import_node_fs17 = __toESM(require("fs"));
 var messageSend = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const prompt = await readPromptInput(req);
@@ -10621,7 +10678,7 @@ async function readPromptInput(req, positional = asPositionalOptional2(req, 1)) 
   if (positional) return positional;
   if (fromFile) {
     try {
-      return await import_node_fs16.default.promises.readFile(fromFile, "utf8");
+      return await import_node_fs17.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -10641,7 +10698,7 @@ async function readJsonInput(req) {
   if (jsonRaw) raw = jsonRaw;
   else if (fromFile) {
     try {
-      raw = await import_node_fs16.default.promises.readFile(fromFile, "utf8");
+      raw = await import_node_fs17.default.promises.readFile(fromFile, "utf8");
     } catch (e) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
@@ -10658,9 +10715,9 @@ async function readJsonInput(req) {
 }
 async function buildUserInput(text, attachments) {
   const items = [{ type: "text", text }];
-  for (const path17 of attachments) {
-    await assertAttachable(path17);
-    items.push({ type: "localImage", path: path17 });
+  for (const path18 of attachments) {
+    await assertAttachable(path18);
+    items.push({ type: "localImage", path: path18 });
   }
   return items;
 }
@@ -11134,7 +11191,7 @@ function pickDefined(source, keys) {
 async function assertAttachable(filePath) {
   let stat;
   try {
-    stat = await import_node_fs16.default.promises.stat(filePath);
+    stat = await import_node_fs17.default.promises.stat(filePath);
   } catch (e) {
     throw invalidParams(`--attach not readable: ${filePath}: ${e.message}`);
   }
@@ -12654,12 +12711,18 @@ async function appendSessionCrashed(ctx, user, session, threadId, reason, lastTu
 
 // src/daemon/run.ts
 var APP_SERVER_CRASHED_ON_RESTART_REASON = "app_server_crashed_on_restart";
+var DAEMON_STDERR_PATH_ENV = "CODEX_TEAM_DAEMON_STDERR_PATH";
 async function runDaemon() {
   const config = new ConfigStore();
   const ctx = buildContext({
     config,
     cursors: new CursorStore(config.resolvedDataDir())
   });
+  const socketBindPreflight = await probeSocketBind(ctx.sockPath);
+  if (!socketBindPreflight.ok) {
+    writeSocketBindPreflightFailure(socketBindPreflight.error, socketBindPreflight.probedPath);
+    return 1;
+  }
   warnLegacyWindowsDataDir((warning) => {
     logger.warn(warning.message);
   });
@@ -12674,7 +12737,7 @@ async function runDaemon() {
   const cleanup = () => {
     unlinkSockIfStale(ctx.sockPath);
     try {
-      import_node_fs17.default.unlinkSync(pidPath);
+      import_node_fs18.default.unlinkSync(pidPath);
     } catch {
     }
   };
@@ -12694,7 +12757,7 @@ async function runDaemon() {
   } catch (e) {
     logger.error("failed to start server", { err: e.message });
     try {
-      import_node_fs17.default.unlinkSync(pidPath);
+      import_node_fs18.default.unlinkSync(pidPath);
     } catch {
     }
     throw translateBootstrapError(e, ctx.sockPath);
@@ -12767,15 +12830,15 @@ async function reconcileLoadedSessionsAfterRestart(ctx) {
 }
 function acquirePid(pidPath) {
   try {
-    import_node_fs17.default.mkdirSync(import_node_path15.default.dirname(pidPath), { recursive: true });
-    const fd = import_node_fs17.default.openSync(pidPath, "wx");
+    import_node_fs18.default.mkdirSync(import_node_path16.default.dirname(pidPath), { recursive: true });
+    const fd = import_node_fs18.default.openSync(pidPath, "wx");
     try {
-      import_node_fs17.default.writeFileSync(fd, JSON.stringify({
+      import_node_fs18.default.writeFileSync(fd, JSON.stringify({
         pid: process.pid,
         created_at: (/* @__PURE__ */ new Date()).toISOString()
       }));
     } finally {
-      import_node_fs17.default.closeSync(fd);
+      import_node_fs18.default.closeSync(fd);
     }
     return true;
   } catch (e) {
@@ -12862,13 +12925,13 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
     }
     if (pid !== null && !pidAlive) {
       try {
-        import_node_fs17.default.unlinkSync(pidPath);
+        import_node_fs18.default.unlinkSync(pidPath);
       } catch {
       }
     }
     if (legacyPidPath && legacyPid !== null && !legacyPidAlive) {
       try {
-        import_node_fs17.default.unlinkSync(legacyPidPath);
+        import_node_fs18.default.unlinkSync(legacyPidPath);
       } catch {
       }
     }
@@ -12888,7 +12951,7 @@ async function acquireDaemonOwnership(sockPath, pidPath) {
 }
 function readPidFile3(pidPath) {
   try {
-    const raw = import_node_fs17.default.readFileSync(pidPath, "utf8");
+    const raw = import_node_fs18.default.readFileSync(pidPath, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid) || parsed.pid <= 0) return null;
     return {
@@ -12911,7 +12974,7 @@ function legacyWindowsPidFilePath(currentPidPath) {
   if (process.platform !== "win32") return null;
   const legacyHome = process.env.HOME;
   if (!legacyHome) return null;
-  const legacyPath = import_node_path15.default.join(legacyHome, `.${APP}`, "daemon.pid");
+  const legacyPath = import_node_path16.default.join(legacyHome, `.${APP}`, "daemon.pid");
   if (legacyPath === currentPidPath) return null;
   if (legacyHome === homeDir()) return null;
   return legacyPath;
@@ -12939,8 +13002,50 @@ function translateBootstrapError(error, sockPath) {
   if (error instanceof Error) return error;
   return new Error(String(error));
 }
+function writeSocketBindPreflightFailure(error, probedPath) {
+  const line = JSON.stringify(buildSocketBindPreflightPayload(error, probedPath)) + "\n";
+  const stderrPath = process.env[DAEMON_STDERR_PATH_ENV];
+  if (stderrPath) {
+    try {
+      import_node_fs18.default.mkdirSync(import_node_path16.default.dirname(stderrPath), { recursive: true });
+      import_node_fs18.default.appendFileSync(stderrPath, line, "utf8");
+      return;
+    } catch {
+    }
+  }
+  if (typeof process.stderr.fd === "number") {
+    try {
+      import_node_fs18.default.writeSync(process.stderr.fd, line);
+      return;
+    } catch {
+    }
+  }
+  process.stderr.write(line);
+}
+function buildSocketBindPreflightPayload(error, probedPath) {
+  const errno = error?.code ?? "UNKNOWN";
+  if (errno === "EPERM" || errno === "EACCES") {
+    return {
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      level: "error",
+      msg: "socket bind denied",
+      kind: "socket_bind_denied",
+      errno,
+      probed_path: probedPath
+    };
+  }
+  return {
+    ts: (/* @__PURE__ */ new Date()).toISOString(),
+    level: "error",
+    msg: error?.message ?? "socket bind probe failed",
+    kind: "socket_bind_error",
+    errno,
+    probed_path: probedPath
+  };
+}
 
 // src/main.ts
+var DAEMON_STDERR_PATH_ENV2 = "CODEX_TEAM_DAEMON_STDERR_PATH";
 async function main() {
   const argv = process.argv.slice(2);
   const hasDaemonInternal = argv.includes("--daemon-internal");
@@ -12948,7 +13053,12 @@ async function main() {
   const daemonIdx = argv.indexOf("--daemon-internal");
   if (daemonIdx >= 0) {
     argv.splice(daemonIdx, 1);
-    if (stderrPath) redirectProcessStderr(stderrPath);
+    if (stderrPath) {
+      process.env[DAEMON_STDERR_PATH_ENV2] = stderrPath;
+      redirectProcessStderr(stderrPath);
+    } else {
+      delete process.env[DAEMON_STDERR_PATH_ENV2];
+    }
     const code2 = await runDaemonWithBootstrapReporting();
     process.exit(code2);
   }
@@ -12987,8 +13097,8 @@ function takeOptionValue(argv, flag) {
   return value;
 }
 function redirectProcessStderr(stderrPath) {
-  import_node_fs18.default.mkdirSync(import_node_path16.default.dirname(stderrPath), { recursive: true });
-  const stream = import_node_fs18.default.createWriteStream(stderrPath, { flags: "a" });
+  import_node_fs19.default.mkdirSync(import_node_path17.default.dirname(stderrPath), { recursive: true });
+  const stream = import_node_fs19.default.createWriteStream(stderrPath, { flags: "a" });
   stream.on("error", () => void 0);
   const write = stream.write.bind(stream);
   process.stderr.write = ((chunk, encoding, cb) => {
