@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/Node-18%2B-brightgreen.svg)](#requirements)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A4FFF.svg)](https://code.claude.com/docs/en/plugins)
-[![Release](https://img.shields.io/badge/Release-0.5.3-success.svg)](plugins/codex-team/docs/releases/0.5.3.md)
+[![Release](https://img.shields.io/badge/Release-0.5.4-success.svg)](plugins/codex-team/docs/releases/0.5.4.md)
 
 </div>
 
@@ -171,7 +171,7 @@ The CLI is self-documenting (`codex-team --help`, `<cmd> --help`). For deeper ma
 | Tune models, profiles, tricks | [`skills/configure-codex-team/`](plugins/codex-team/skills/configure-codex-team/) |
 | Handle errors, crashes, recovery | [`skills/recover-codex-team/`](plugins/codex-team/skills/recover-codex-team/) |
 | Interactive walkthrough | `/codex-team:tutorial` |
-| Latest changes | [`docs/releases/0.5.3.md`](plugins/codex-team/docs/releases/0.5.3.md) |
+| Latest changes | [`docs/releases/0.5.4.md`](plugins/codex-team/docs/releases/0.5.4.md) |
 | Output format spec | [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md) |
 
 ## Requirements

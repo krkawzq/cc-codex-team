@@ -1,6 +1,6 @@
 {
   "name": "codex-team",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Manage long-lived Codex app-server sessions from Claude Code.",
   "author": {
     "name": "krkawzq",

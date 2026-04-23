@@ -1,6 +1,6 @@
 {
   "name": "codex-team",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "private": true,
   "description": "CLI + daemon orchestrating long-lived Codex app-server sessions for agents",
   "license": "MIT",
