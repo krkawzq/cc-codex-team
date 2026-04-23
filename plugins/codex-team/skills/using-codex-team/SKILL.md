@@ -149,7 +149,7 @@ Do not violate these, even under duress:
 
 ## Output rendering
 
-`session context` / `message history` / `message tail` all accept `--format markdown` and return a tag-structured markdown blob (`<turn>`, `<shell>`, `<file-patch>`, …). Tag names + attributes follow `plugins/codex-team/docs/html-md-format.md`.
+`session context` / `message history` / `message tail` all accept `--format markdown`. The CLI prints the raw tag-structured markdown blob to stdout (`<context>`, `<turn>`, `<shell>`, `<file-patch>`, …); tag names + attributes follow `plugins/codex-team/docs/html-md-format.md`.
 
 ## Output modes: concise default, `--full` for the rest
 

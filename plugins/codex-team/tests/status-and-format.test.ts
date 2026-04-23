@@ -182,6 +182,18 @@ describe("format helpers", () => {
     expect(rendered).toContain("1 result");
   });
 
+  it("clips inline userMessage text without flipping it into block form", () => {
+    const rendered = renderItem({
+      id: "item-clip",
+      type: "userMessage",
+      text: "x".repeat(120),
+    }, "", { truncate: 80 });
+
+    expect(rendered).toContain("<user-input>{\"id\":\"item-clip\",\"text\":\"");
+    expect(rendered).not.toContain("<user-input> {");
+    expect(rendered).toContain("…[40 bytes truncated; use --truncate 0 to disable]");
+  });
+
   it("keeps large userMessage bodies in block form even when truncate exceeds the inline limit", () => {
     const rendered = renderItem({
       id: "item-5",

@@ -12,8 +12,8 @@ vi.mock("../src/codex/rpc", () => ({
   turnSteer: vi.fn(),
 }));
 
-import { messageApproval, messageHistory, messageInterrupt, messageSend } from "../src/daemon/handlers/message";
-import { threadTurnsList, turnInterrupt } from "../src/codex/rpc";
+import { messageApproval, messageHistory, messageInterrupt, messageSend, messageTail } from "../src/daemon/handlers/message";
+import { threadRead, threadTurnsList, turnInterrupt } from "../src/codex/rpc";
 import { PendingRegistry } from "../src/daemon/pending";
 
 function makeReq(positionals: string[], flags: Record<string, unknown> = {}) {
@@ -344,5 +344,58 @@ describe("message handlers", () => {
       turns: [{ id: "turn-3" }, { id: "turn-2" }],
       next_cursor: "cursor-4",
     });
+  });
+
+  it("hydrates markdown history and tail output from thread/read when turns/list omits items", async () => {
+    const hydratedTurn = {
+      id: "turn-1",
+      status: "completed",
+      durationMs: 42,
+      items: [
+        {
+          id: "user-1",
+          type: "userMessage",
+          content: [{ type: "text", text: "Inspect the failing turn." }],
+        },
+        {
+          id: "cmd-1",
+          type: "commandExecution",
+          command: "npm test",
+          exit: 1,
+          stdout: "FAIL message-handlers.test.ts",
+        },
+        {
+          id: "agent-1",
+          type: "agentMessage",
+          content: [{ type: "text", text: "I found the missing turn items." }],
+        },
+      ],
+    };
+    vi.mocked(threadTurnsList).mockResolvedValue({
+      data: [{ id: "turn-1", status: "completed", durationMs: 42 }],
+      nextCursor: null,
+    } as never);
+    vi.mocked(threadRead).mockResolvedValue({
+      thread: {
+        id: "th-1",
+        turns: [hydratedTurn],
+      },
+    } as never);
+
+    const ctx = makeLiveContext();
+    const history = await messageHistory(ctx as never, makeReq(["sess-1"], { format: "markdown" }) as never);
+    const tail = await messageTail(ctx as never, makeReq(["sess-1"], { format: "markdown", n: 1 }) as never);
+
+    expect(history.turns).toEqual([hydratedTurn]);
+    expect(history.markdown).toContain("<message> {\"role\":\"user\"}");
+    expect(history.markdown).toContain("Inspect the failing turn.");
+    expect(history.markdown).toContain("<shell>");
+    expect(history.markdown).toContain("FAIL message-handlers.test.ts");
+
+    expect(tail.turns).toEqual([hydratedTurn]);
+    expect(tail.markdown).toContain("<message> {\"role\":\"user\"}");
+    expect(tail.markdown).toContain("Inspect the failing turn.");
+    expect(tail.markdown).toContain("<message> {\"role\":\"assistant\"}");
+    expect(tail.markdown).toContain("I found the missing turn items.");
   });
 });

@@ -210,21 +210,26 @@ export const messageHistory: HandlerFn = async (ctx, req) => {
         cursor: sinceRaw ?? undefined,
         sortDirection: "desc",
       }, ctx.retryOptions());
+  const turns = format === "markdown"
+    ? await hydrateTurnsFromThreadRead(client, rec.thread_id, result.data, ctx.retryOptions())
+    : result.data;
 
   const response: Record<string, unknown> = {
     session: rec.name,
     thread_id: rec.thread_id,
-    turns: result.data,
+    turns,
     next_cursor: result.nextCursor,
     format,
-    note: "Turn items are not included in turnsList responses (protocol limitation). Use 'session context' for per-thread metadata.",
   };
+  if (format === "json") {
+    response.note = "Turn items are not included in turnsList responses (protocol limitation). Use 'session context' for per-thread metadata.";
+  }
   if (relativeSince) response.relative_since = relativeSince;
   if (format === "markdown") {
     response.markdown = renderHistory({
       session: rec.name,
       thread_id: rec.thread_id,
-      turns: result.data,
+      turns,
       nextCursor: result.nextCursor,
     }, { truncate });
   }
@@ -246,9 +251,12 @@ export const messageTail: HandlerFn = async (ctx, req, stream) => {
       sortDirection: "desc",
     }, ctx.retryOptions());
     const thread = await threadRead(client, rec.thread_id, ctx.retryOptions()).catch(() => null);
+    const turns = format === "markdown"
+      ? hydrateTurnsFromThreadSnapshot(result.data, thread?.thread ?? null)
+      : result.data;
     const response: Record<string, unknown> = {
       session: rec.name,
-      turns: result.data,
+      turns,
       format,
       follow,
       thread: thread?.thread ?? null,
@@ -257,7 +265,7 @@ export const messageTail: HandlerFn = async (ctx, req, stream) => {
       response.markdown = renderTail({
         session: rec.name,
         thread_id: rec.thread_id,
-        turns: result.data,
+        turns,
         thread: thread?.thread ?? null,
         follow,
       }, { truncate });
@@ -1100,4 +1108,33 @@ async function listTurnsFromRelativeOffset(
   }
 
   return { data, nextCursor };
+}
+
+async function hydrateTurnsFromThreadRead(
+  client: AppServerClient,
+  threadId: string,
+  turns: TurnListItem[],
+  retry: RetryOptions,
+): Promise<TurnListItem[]> {
+  if (turns.length === 0) return turns;
+  const thread = await threadRead(client, threadId, retry).catch(() => null);
+  return hydrateTurnsFromThreadSnapshot(turns, thread?.thread ?? null);
+}
+
+function hydrateTurnsFromThreadSnapshot(turns: TurnListItem[], thread: { turns?: unknown[] } | null): TurnListItem[] {
+  const snapshotTurns = Array.isArray(thread?.turns)
+    ? thread.turns.filter((turn): turn is TurnListItem => Boolean(turn) && typeof turn === "object" && typeof (turn as { id?: unknown }).id === "string")
+    : [];
+  if (snapshotTurns.length === 0) return turns;
+
+  const byId = new Map(snapshotTurns.map((turn) => [turn.id, turn]));
+  return turns.map((turn) => {
+    const hydrated = byId.get(turn.id);
+    if (!hydrated) return turn;
+    const merged: TurnListItem = { ...hydrated, ...turn };
+    if ("items" in hydrated) {
+      merged.items = hydrated.items;
+    }
+    return merged;
+  });
 }

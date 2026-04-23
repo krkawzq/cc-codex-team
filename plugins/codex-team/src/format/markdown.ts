@@ -345,7 +345,7 @@ function renderItemWithContext(item: TurnItem, ctx: RenderContext): string {
 function createRenderContext(options: MarkdownRenderOptions = {}): RenderContext {
   const normalized = normalizeTruncateOption(options.truncate);
   return {
-    inlineMaxBytes: normalized === 0 ? INLINE_MAX_BYTES : Math.min(normalized ?? INLINE_MAX_BYTES, INLINE_MAX_BYTES),
+    inlineMaxBytes: INLINE_MAX_BYTES,
     truncateBytes: normalized === 0 ? null : normalized ?? INLINE_MAX_BYTES,
   };
 }
@@ -383,7 +383,7 @@ function renderUserMessage(item: TurnItem, ctx: RenderContext): string {
   if (byteLength(text) > ctx.inlineMaxBytes) {
     return renderBodyTag("user-input", attrs, text, ctx);
   }
-  attrs.text = text;
+  attrs.text = fitInlineText(text, ctx);
   return renderInline("user-input", attrs);
 }
 
@@ -497,7 +497,7 @@ function renderReasoning(item: TurnItem, ctx: RenderContext): string {
   const text = extractReasoningText(item);
   if (!text) return renderInline("reasoning", attrs);
   if (byteLength(text) <= ctx.inlineMaxBytes) {
-    attrs.text = text;
+    attrs.text = fitInlineText(text, ctx);
     return renderInline("reasoning", attrs);
   }
   return renderBodyTag("reasoning", attrs, text, ctx);
