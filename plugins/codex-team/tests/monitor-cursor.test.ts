@@ -117,7 +117,7 @@ describe("monitor events --cursor", () => {
     stream.ack("evt-3");
     await Promise.resolve();
     await Promise.resolve();
-    await cursors.clearUser("user-1");
+    await cursors.flushUser("user-1");
 
     const reloaded = new CursorStore(dir);
     expect(reloaded.get("user-1", "audit-tail")).toEqual(expect.objectContaining({
@@ -169,7 +169,7 @@ describe("monitor events --cursor", () => {
     stream.ack("evt-2");
     await Promise.resolve();
     await Promise.resolve();
-    await cursors.clearUser("user-1");
+    await cursors.flushUser("user-1");
 
     expect(new CursorStore(dir).get("user-1", "audit-tail")).toEqual(expect.objectContaining({
       name: "audit-tail",
@@ -225,7 +225,7 @@ describe("monitor events --cursor", () => {
     stream.ack(overflow.id);
     await Promise.resolve();
     await vi.advanceTimersByTimeAsync(250);
-    await cursors.clearUser("user-1");
+    await cursors.flushUser("user-1");
 
     expect(new CursorStore(dir).get("user-1", "audit-tail")).toEqual(expect.objectContaining({
       name: "audit-tail",
@@ -264,7 +264,7 @@ describe("monitor events --cursor", () => {
 
     await vi.advanceTimersByTimeAsync(200);
     await stream.close();
-    await cursors.clearUser("user-1");
+    await cursors.flushUser("user-1");
 
     expect(renameSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(renameSpy.mock.calls.length).toBeLessThanOrEqual(2);
@@ -295,7 +295,7 @@ describe("monitor events --cursor", () => {
 
     stream.ack("evt-42");
     await stream.close();
-    await cursors.clearUser("user-1");
+    await cursors.flushUser("user-1");
 
     expect(new CursorStore(dir).get("user-1", "audit-tail")).toEqual(expect.objectContaining({
       name: "audit-tail",
@@ -339,7 +339,7 @@ describe("monitor events --cursor", () => {
     await Promise.resolve();
 
     await stream.close();
-    await cursors.clearUser("user-1");
+    await cursors.flushUser("user-1");
 
     expect(new CursorStore(dir).get("user-1", "audit-tail")).toEqual(expect.objectContaining({
       name: "audit-tail",

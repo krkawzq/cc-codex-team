@@ -196,8 +196,12 @@ export class EventLog {
 
     const raw = fs.readFileSync(filePath, "utf8");
     const lines = raw.split("\n").filter(Boolean);
-    const { events, totalLines } = parsePersistedEvents(lines);
-    this.hydrateLoadedUser(user, events, totalLines);
+    const parsed = parsePersistedEvents(lines);
+    this.hydrateLoadedUser(user, parsed.events, parsed.totalLines);
+    logPersistedEventWarnings(user, parsed.warnings);
+    if (parsed.warnings.length > 0) {
+      rewritePersistedEventFileSync(filePath, parsed.events);
+    }
     this.loaded.add(user);
     this.loadPromises.delete(user);
   }
@@ -354,8 +358,12 @@ export class EventLog {
       const filePath = userEventLogPath(user, this.dataDir);
       const raw = await fs.promises.readFile(filePath, "utf8");
       const lines = raw.split("\n").filter(Boolean);
-      const { events, totalLines } = parsePersistedEvents(lines);
-      this.hydrateLoadedUser(user, events, totalLines);
+      const parsed = parsePersistedEvents(lines);
+      this.hydrateLoadedUser(user, parsed.events, parsed.totalLines);
+      logPersistedEventWarnings(user, parsed.warnings);
+      if (parsed.warnings.length > 0) {
+        await rewritePersistedEventFile(filePath, parsed.events);
+      }
       shouldMarkLoaded = true;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") {
@@ -745,33 +753,61 @@ interface EventLogHeader {
   kind: "event_log_header";
 }
 
-function parsePersistedEvents(lines: string[]): { events: TeamEvent[]; totalLines: number } {
-  if (lines.length === 0) return { events: [], totalLines: 0 };
+interface PersistedEventWarning {
+  line: number;
+  err: string;
+  tornFinalLine: boolean;
+}
+
+function parsePersistedEvents(lines: string[]): {
+  events: TeamEvent[];
+  totalLines: number;
+  warnings: PersistedEventWarning[];
+} {
+  if (lines.length === 0) return { events: [], totalLines: 0, warnings: [] };
   let eventLines = lines;
+  let lineOffset = 0;
   let totalLines = lines.length;
-  const first = parseLine(lines[0]!);
-  if (isHeader(first)) {
-    if (first.schema_version > SCHEMA_VERSION) {
-      throw new Error(`event log schema_version ${first.schema_version} is newer than supported ${SCHEMA_VERSION}`);
+  const first = tryParseLine(lines[0]!);
+  if (first.ok && isHeader(first.value)) {
+    if (first.value.schema_version > SCHEMA_VERSION) {
+      throw new Error(`event log schema_version ${first.value.schema_version} is newer than supported ${SCHEMA_VERSION}`);
     }
     eventLines = lines.slice(1);
+    lineOffset = 1;
     totalLines = eventLines.length;
   }
   const events: TeamEvent[] = [];
-  for (const line of eventLines) {
-    const parsed = parseLine(line);
-    if (isPersistedEvent(parsed)) {
-      events.push(parsed);
+  const warnings: PersistedEventWarning[] = [];
+  for (const [index, line] of eventLines.entries()) {
+    const parsed = tryParseLine(line);
+    const tornFinalLine = index === eventLines.length - 1;
+    if (!parsed.ok) {
+      warnings.push({
+        line: lineOffset + index + 1,
+        err: parsed.err,
+        tornFinalLine,
+      });
+      continue;
     }
+    if (isPersistedEvent(parsed.value)) {
+      events.push(parsed.value);
+      continue;
+    }
+    warnings.push({
+      line: lineOffset + index + 1,
+      err: "invalid event log record",
+      tornFinalLine,
+    });
   }
-  return { events, totalLines };
+  return { events, totalLines, warnings };
 }
 
-function parseLine(line: string): unknown | null {
+function tryParseLine(line: string): { ok: true; value: unknown } | { ok: false; err: string } {
   try {
-    return JSON.parse(line) as unknown;
+    return { ok: true, value: JSON.parse(line) as unknown };
   } catch (e) {
-    throw new Error(`failed to parse event log line: ${(e as Error).message}`);
+    return { ok: false, err: `failed to parse event log line: ${(e as Error).message}` };
   }
 }
 
@@ -801,4 +837,36 @@ function serializeHeaderLine(): string {
 
 function serializeEventFile(buf: TeamEvent[]): string {
   return serializeHeaderLine() + buf.map((e) => JSON.stringify(e)).join("\n") + (buf.length ? "\n" : "");
+}
+
+function logPersistedEventWarnings(user: string, warnings: PersistedEventWarning[]): void {
+  for (const warning of warnings) {
+    logger.warn(warning.tornFinalLine ? "trimmed torn final event log line" : "skipping invalid event log line", {
+      user,
+      line: warning.line,
+      err: warning.err,
+    });
+  }
+}
+
+function rewritePersistedEventFileSync(filePath: string, events: TeamEvent[]): void {
+  try {
+    fs.writeFileSync(filePath, serializeEventFile(events));
+  } catch (e) {
+    logger.warn("failed to rewrite repaired event log", {
+      path: filePath,
+      err: (e as Error).message,
+    });
+  }
+}
+
+async function rewritePersistedEventFile(filePath: string, events: TeamEvent[]): Promise<void> {
+  try {
+    await fs.promises.writeFile(filePath, serializeEventFile(events));
+  } catch (e) {
+    logger.warn("failed to rewrite repaired event log", {
+      path: filePath,
+      err: (e as Error).message,
+    });
+  }
 }

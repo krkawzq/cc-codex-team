@@ -159,7 +159,16 @@ export class CursorStore {
   }
 
   async clearUser(user: string): Promise<void> {
-    await this.flushUser(user);
+    const state = this.pendingPersists.get(user);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    state?.ops.clear();
+    if (state && !state.flushing) {
+      this.pendingPersists.delete(user);
+    }
+    await (state?.flushing?.catch(() => undefined) ?? Promise.resolve());
     await (this.writeChains.get(user)?.catch(() => undefined) ?? Promise.resolve());
     this.writeChains.delete(user);
     this.clearPendingPersistState(user);

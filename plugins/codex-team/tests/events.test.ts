@@ -280,6 +280,67 @@ describe("EventLog", () => {
     });
   });
 
+  it("trims a torn final event-log line on restart and preserves the valid prefix", async () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const filePath = path.join(dir, "users", encodeToken("user-1"), "events.log");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, [
+      JSON.stringify({ schema_version: 1, kind: "event_log_header" }),
+      JSON.stringify(makeEvent(1)),
+      JSON.stringify(makeEvent(2)),
+      "{\"id\":\"evt-3\"",
+    ].join("\n"));
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+
+    const log = new EventLog(100, dir);
+    const listed = await log.listSince("user-1", null);
+
+    expect(listed).toEqual({
+      ok: true,
+      events: [
+        expect.objectContaining({ id: "evt-1" }),
+        expect.objectContaining({ id: "evt-2" }),
+      ],
+    });
+    expect(warnSpy).toHaveBeenCalledWith("trimmed torn final event log line", expect.objectContaining({
+      user: "user-1",
+      line: 4,
+    }));
+    expect(readPersistedEvents(filePath).map((event) => event.id)).toEqual(["evt-1", "evt-2"]);
+  });
+
+  it("skips malformed event-log lines in the middle and keeps surrounding events", async () => {
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const filePath = path.join(dir, "users", encodeToken("user-1"), "events.log");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, [
+      JSON.stringify({ schema_version: 1, kind: "event_log_header" }),
+      JSON.stringify(makeEvent(1)),
+      "{not-json}",
+      JSON.stringify(makeEvent(2)),
+      "",
+    ].join("\n"));
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+
+    const log = new EventLog(100, dir);
+    const listed = await log.listSince("user-1", null);
+
+    expect(listed).toEqual({
+      ok: true,
+      events: [
+        expect.objectContaining({ id: "evt-1" }),
+        expect.objectContaining({ id: "evt-2" }),
+      ],
+    });
+    expect(warnSpy).toHaveBeenCalledWith("skipping invalid event log line", expect.objectContaining({
+      user: "user-1",
+      line: 3,
+    }));
+    expect(readPersistedEvents(filePath).map((event) => event.id)).toEqual(["evt-1", "evt-2"]);
+  });
+
   it("clearUser drops memory state and closes cleanly", async () => {
     const dir = mkTmpDir();
     dirs.push(dir);
