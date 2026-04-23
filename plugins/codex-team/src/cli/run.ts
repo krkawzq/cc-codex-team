@@ -27,6 +27,8 @@ const DAEMON_STDERR_FLAG = "--stderr-to";
 const DOCTOR_SUGGESTED_ACTION = "run `codex-team doctor` to diagnose";
 const SOCKET_BIND_DENIED_SUGGESTED_ACTION =
   "codex-team cannot bind a local IPC socket here — run `codex-team doctor` for details";
+const DATA_DIR_NOT_WRITABLE_SUGGESTED_ACTION =
+  "set CODEX_TEAM_DATA_DIR to a writable path and retry, e.g. CODEX_TEAM_DATA_DIR=/tmp/codex-team-$USER. Run `codex-team doctor` to verify.";
 
 export async function readStdinAll(): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
@@ -100,6 +102,12 @@ export async function runCli(argv: string[]): Promise<number> {
   if (approvalValidationError) {
     process.stdout.write(JSON.stringify(err("invalid_params", approvalValidationError)) + "\n");
     return 2;
+  }
+
+  const cwdPreflightError = validateCliCwdPreflight(method, parsed);
+  if (cwdPreflightError) {
+    process.stdout.write(JSON.stringify(err("invalid_params", cwdPreflightError)) + "\n");
+    return 1;
   }
 
   const ready = await ensureDaemon(sockPath);
@@ -491,6 +499,9 @@ async function ensureDaemon(sockPath: string): Promise<EnsureDaemonResult> {
     try { fs.unlinkSync(staleState.sockPath); } catch { /* already gone */ }
   }
 
+  const dataDirFailure = validateDaemonDataDirWritable(dataDir);
+  if (dataDirFailure) return dataDirFailure;
+
   try {
     const child = spawnDaemon();
     const firstAttempt = await waitForDaemonReady(sockPath, child, cliConfig.readyTimeoutMs);
@@ -498,11 +509,7 @@ async function ensureDaemon(sockPath: string): Promise<EnsureDaemonResult> {
       return { ok: true, code: "", message: "" };
     }
   } catch (e) {
-    return {
-      ok: false,
-      code: "daemon_unreachable",
-      message: `failed to spawn daemon: ${(e as Error).message}`,
-    };
+    return buildSpawnFailure(dataDir, e, false);
   }
 
   try {
@@ -515,11 +522,7 @@ async function ensureDaemon(sockPath: string): Promise<EnsureDaemonResult> {
       return buildEarlyExitFailure(stderrPath, secondAttempt);
     }
   } catch (e) {
-    return {
-      ok: false,
-      code: "daemon_unreachable",
-      message: `failed to spawn daemon with stderr capture: ${(e as Error).message}`,
-    };
+    return buildSpawnFailure(dataDir, e, true);
   }
 
   const stderrTail = readTail(stderrPath, 4096);
@@ -694,7 +697,8 @@ function buildDaemonUnreachableData(
     stderr_path: stderrPath,
     ...(typeof result?.exitCode === "number" ? { exit_code: result.exitCode } : {}),
     ...(result?.signal ? { signal: result.signal } : {}),
-    ...(stderrTail ? { bootstrap_stderr: stderrTail } : { suggested_action: DOCTOR_SUGGESTED_ACTION }),
+    ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
+    suggested_action: DOCTOR_SUGGESTED_ACTION,
   };
 }
 
@@ -778,6 +782,93 @@ function parseSocketBindDeniedLine(line: string): BootstrapPayload | null {
   } catch {
     return null;
   }
+}
+
+function validateCliCwdPreflight(method: string, parsed: ParsedArgs): string | null {
+  if (method !== "session:new" && method !== "session:fork" && method !== "session:heal") return null;
+  const cwd = asStringFlag(parsed.flags.cwd);
+  if (!cwd) return null;
+  return validateRequestedCwd(cwd);
+}
+
+function validateRequestedCwd(rawCwd: string): string | null {
+  if (!fs.existsSync(rawCwd)) {
+    return `cwd '${rawCwd}' does not exist`;
+  }
+
+  try {
+    const stat = fs.statSync(rawCwd);
+    if (!stat.isDirectory()) {
+      return `cwd '${rawCwd}' is not a directory`;
+    }
+  } catch (error) {
+    return `cwd '${rawCwd}' could not be inspected: ${(error as Error).message}`;
+  }
+
+  return null;
+}
+
+function validateDaemonDataDirWritable(dataDir: string): EnsureDaemonResult | null {
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.accessSync(dataDir, fs.constants.W_OK);
+    return null;
+  } catch (error) {
+    return buildDataDirNotWritableFailure(dataDir, error);
+  }
+}
+
+function buildSpawnFailure(
+  dataDir: string,
+  error: unknown,
+  withStderrCapture: boolean,
+): EnsureDaemonResult {
+  const errorWithCode = error as Error & { code?: string };
+  const errno = normalizeErrno(errorWithCode.code);
+  if (errno && isDataDirWriteErrno(errno)) {
+    const dataDirFailure = validateDaemonDataDirWritable(dataDir);
+    if (dataDirFailure) return dataDirFailure;
+  }
+
+  return {
+    ok: false,
+    code: "daemon_unreachable",
+    message: `failed to spawn daemon${withStderrCapture ? " with stderr capture" : ""}: ${errorWithCode.message}`,
+    data: {
+      suggested_action: DOCTOR_SUGGESTED_ACTION,
+    },
+  };
+}
+
+function buildDataDirNotWritableFailure(
+  dataDir: string,
+  error: unknown,
+): EnsureDaemonResult | null {
+  const errno = extractErrno(error);
+  if (!errno || !isDataDirWriteErrno(errno)) return null;
+  return {
+    ok: false,
+    code: "data_dir_not_writable",
+    message: `daemon data_dir is not writable: ${dataDir} (${errno})`,
+    data: {
+      data_dir: dataDir,
+      errno,
+      suggested_action: DATA_DIR_NOT_WRITABLE_SUGGESTED_ACTION,
+    },
+  };
+}
+
+function extractErrno(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  return normalizeErrno((error as { code?: unknown }).code);
+}
+
+function normalizeErrno(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function isDataDirWriteErrno(errno: string): boolean {
+  return errno === "EACCES" || errno === "ENOENT" || errno === "EROFS";
 }
 
 function truthy(v: unknown): boolean {
