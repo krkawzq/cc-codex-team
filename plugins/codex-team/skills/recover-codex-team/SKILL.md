@@ -37,8 +37,8 @@ If the pid is alive but has been reused by some unrelated process, startup treat
 |---|---|
 | `daemon_unreachable` on any cli call | Wait up to 15s; cli already retries transient connect/request failures. If still failing: `codex-team daemon logs -n 100` or `ps | grep codex-team` |
 | `user_not_found` | Run `codex-team daemon user create <token>` once; treat `user_already_exists` as success |
-| `session_not_found` on a session you created | Was it auto-detached via `thread.closed`? Check events log. Re-create or attach by thread_id |
-| `session_not_live` | Session was detached. Run `codex-team -b $TOK session attach <name>` |
+| `session_not_found` on a session you created | Was it auto-detached via `thread.closed`? Check events log. Re-create it, or re-attach by name / `thread_id` if the detached thread still exists |
+| `session_not_live` | Session was detached. Run `codex-team -b $TOK session attach <name|thread_id>` |
 | `session.crashed` event, or `session health` shows `state=crashed` / `app_server_alive=false` | Run `codex-team -b $TOK session heal <name>`. If runtime state looks half-baked or heal fails repeatedly, retry with `--force` |
 | `session.closed` event | The live binding was intentionally torn down. If the thread still exists, `session attach` it again; otherwise start or fork a fresh session |
 | `session_busy` | Another user has it live. Either pick a different thread, or `--takeover` (emits `session.seized` to the original holder) |
@@ -88,7 +88,7 @@ If interrupt is rejected (`active_turn_not_steerable`), the turn is in a review 
 
 ### Recover a session after `thread.closed`
 
-`thread.closed` is permanent on codex's side. The session cannot be attached again with the same thread_id. Options:
+`thread.closed` is permanent on codex's side. The session cannot be attached again under the same thread. Options:
 
 - Fork from an earlier turn if you have the turn_id: `session fork <old-name> <new-name> --at-turn <turn_id>` — but only while the original session is still live (i.e. BEFORE codex closes it)
 - Start a fresh session and hand-replay necessary context

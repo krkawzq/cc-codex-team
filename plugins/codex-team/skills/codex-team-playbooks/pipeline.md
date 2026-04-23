@@ -86,7 +86,7 @@ stage reviewer:
 Claude reads reviewer.md, decides to ship or loop back.
 ```
 
-In 0.5.2, `turn.completed` only tells you `{turn_id, status, duration_ms, items_count, token_usage, ended_at}`. Read the stage file or `message tail` for actual content.
+`turn.completed` only tells you that the stage reached a terminal boundary. Read the stage file or `message tail` for actual content.
 
 ## Handling stage failures
 

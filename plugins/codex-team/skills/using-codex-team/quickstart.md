@@ -31,7 +31,7 @@ Daemon auto-spawns if it wasn't running. Response (concise default):
 
 Pass `--full` to also see `created_at`. If the user already exists (e.g. you reused a token from a prior conversation), you get `{"ok":false,"error":{"code":"user_already_exists",...}}` — treat as success.
 
-If `~/.codex-team` is not writable in your environment (common in sandboxed workspaces), either set `CODEX_TEAM_DATA_DIR=/tmp/ct-$USER` before first run to start a fresh daemon there, or set `CODEX_TEAM_DAEMON_SOCK=$HOME/.codex-team/daemon.sock` to attach to an existing host daemon instead.
+If `~/.codex-team` is not writable in your environment (common in sandboxed workspaces), either set `CODEX_TEAM_DATA_DIR=/tmp/ct-$USER` before first run to start a fresh daemon there, or set `CODEX_TEAM_DAEMON_SOCK=$HOME/.codex-team/daemon.sock` to attach to an existing host daemon instead. `CODEX_TEAM_DAEMON_SOCK` is the escape hatch for sandboxed child processes that can reach the host socket but cannot bootstrap their own daemon.
 
 ## 3. Create a session
 
@@ -112,7 +112,7 @@ The turn is now running. Your cli returned immediately. Watch the events panel:
 codex-team -b $TOKEN message tail demo -n 1 --format markdown
 ```
 
-The CLI prints raw tag-structured markdown to stdout — paste it into your working notes or parse it for downstream logic.
+The CLI prints raw tagged markdown to stdout. This is a tagged markdown interchange format, not plain prose markdown: expect container tags like `<tail>` / `<turn>`, then item tags such as `<message>`, `<shell>`, `<file-patch>`, `tool.<name>`, and `hook.<name>` carrying the readable content.
 
 ## 7. Second turn — queued automatically
 
@@ -120,7 +120,7 @@ The CLI prints raw tag-structured markdown to stdout — paste it into your work
 codex-team -b $TOKEN message send demo "Now propose a patch for the first three issues."
 ```
 
-If the previous turn is still running, `started` comes back `false`, `queue_id` is set, and `queued_depth` goes up. The daemon dispatches it when the previous turn completes and emits `turn.queued_started`.
+If the previous turn is still running, the concise response becomes `{"status":"queued","queue_id":"...","queued_depth":N}`. The daemon dispatches it when the previous turn completes and emits `turn.queued_started`.
 
 ## 8. Respond to an approval event
 
@@ -149,14 +149,16 @@ codex-team -b $TOKEN message approval demo req-abc123 \
 codex-team -b $TOKEN session detach demo
 ```
 
-This interrupts any in-flight turn, releases the app-server slot, and removes the session from live tracking. The thread file is preserved — you can `attach` the same thread_id in a future conversation.
+This interrupts any in-flight turn, releases the app-server slot, and removes the session from live tracking. The thread file is preserved — you can `attach` the same session again later by name or `thread_id`.
 
 ## Day 2 — resume a session
 
 ```bash
 # tomorrow
 codex-team -b $TOKEN session attach refactor         # resumes the same thread
-codex-team -b $TOKEN message send refactor "..."     # continues the conversation
+codex-team -b $TOKEN message history refactor --short  # confirm the old turns are still there
+codex-team -b $TOKEN message tail refactor -n 1 --format markdown
+codex-team -b $TOKEN message send refactor "..."       # continues the conversation
 ```
 
 ## 10. Stop the daemon (optional)

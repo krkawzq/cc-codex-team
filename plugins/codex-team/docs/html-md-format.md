@@ -1,6 +1,6 @@
 # codex-team 标签化 Markdown 格式
 
-用于 `message history` / `message tail` / `session context` / `session info` 等读取类命令的 `--format markdown` 输出。
+用于 `message history` / `message tail` / `session context` 等读取类命令的 `--format markdown` 输出。这是**标签化 markdown 交换格式**，不是 plain markdown，也不是 HTML：容器 tag 承载结构化元数据，可读正文放在 markdown body 里。
 
 ## 设计目标
 
@@ -8,15 +8,20 @@
 
 - **结构化字段** → tag 开头那行的 JSON inline（agent 一次 `JSON.parse` 拿齐）
 - **自然语言 / 代码 / diff / 输出** → tag 正文的 markdown（agent 可以直接读）
-- tag 边界本身已经表明"这是一段 X 类型的内容"，正文里**不再嵌套 ``` 壳**
+- tag 边界本身已经表明"这是一段 X 类型的内容"，正文里**不再额外包一层 ``` 壳**
 
 和 `monitor events` 的 NDJSON/JSONL 互补：events 是**摘要通知**（某个 turn 完成了），要拿**可读 transcript**（消息正文、工具摘要、错误文本）就用这套 markdown。
 
-当前主线语义：
+当前 0.5.5 语义：
 
-- `message history --format markdown`：**简洁 transcript**。展示多轮 `<turn>`，保留 `<message role="user|assistant">` 正文，并展示 `<shell>` / `<file-patch>` / `tool.*` 等的**摘要**。
-- `message tail --format markdown`：**最新回复视图**。只展示 message，用户输入压成单行摘要，assistant message 保留正文；多轮时依然用 `<turn>` 分隔。
-- `session context --format markdown`：**thread 快照视图**。输出 `<context>` 根标签，携带 thread 元数据，并在 `thread/read` 返回 turn 内容时内嵌 `<turn>` transcript。
+- `message history --format markdown`：**简洁 transcript**。输出 `<history>` 根标签，内含多个 `<turn>`；正文使用 `<message role="user|assistant">`，工具/命令/补丁/自动审批/hook 等用各自 tag 的摘要。
+- `message tail --format markdown`：**最新回复视图**。输出 `<tail>` 根标签，内含多个 `<turn>`；user message 压成单行摘要，assistant message 保留正文。
+- `session context --format markdown`：**thread 快照视图**。输出 `<context>` 根标签和 thread 元数据。当前运行时通常只拿到 thread 元数据；如果 `thread/read` 没有 turn 内容，会输出注释占位而不是伪造 transcript。
+
+术语说明：
+
+- 文中说的 `<tool>` / `<hook>` 是**类别名**。运行时实际输出的是具体 tag 名：`tool.<name>` 与 `hook.<name>`。
+- `--truncate 0` 表示不裁剪正文；不会把输出退回默认上限。
 
 ## 语法
 
@@ -42,11 +47,11 @@ tag 正文：任意 markdown，直接写，不包裹。
 
 ### 什么时候在正文里写 ```` ``` ````？
 
-只有当正文是 **prose 里穿插代码/diff 需要渲染成代码块** 时才用（自然 markdown 用法），例如 `<agent-message>` 里 assistant 贴了一段 TypeScript。结构化 tag（`<shell>` / `<file-patch>` / `<file-read>`）的正文是**纯内容**，不包一层 ``` 壳。
+只有当正文是 **prose 里穿插代码/diff 需要渲染成代码块** 时才用（自然 markdown 用法），例如 `<agent-message>` 里 assistant 贴了一段 TypeScript。结构化 tag（`<shell>` / `<file-patch>` / `tool.<name>` / `hook.<name>`）的正文是**纯内容**，不包一层 ``` 壳。
 
 ### 其它约定
 
-- Tag 名：kebab-case，允许点分命名空间（`tool.<mcp-name>`）
+- Tag 名：kebab-case，允许点分命名空间（`tool.<mcp-name>` / `hook.<hook-name>`）
 - JSON 属性键：snake_case，和事件 payload 保持一致
 - 属性值任意 JSON 类型（string / number / bool / array / nested object）
 - 时间：ISO 8601 UTC；duration 统一 `duration_ms` 整数毫秒
@@ -55,66 +60,52 @@ tag 正文：任意 markdown，直接写，不包裹。
 - JSON 必须单行；值为长字符串时用 `\n` 转义
 - 属性空 → `{}`；也可以写 `<tag>{}` 紧贴空 JSON
 
-## Tag 词表
+## 当前运行时 tag 词表
 
 ### 根容器
 
 | Tag | 命令 | 正文 |
 |---|---|---|
-| `<context>` | `session context --format markdown` | 嵌套 |
-| `<history>` | `message history --format markdown` | 嵌套 |
-| `<tail>` | `message tail --format markdown` | 嵌套 |
-| `<session-info>` | `session info --format markdown` | markdown 列表 |
+| `<context>` | `session context --format markdown` | thread 快照；有 turn 内容时嵌套 `<turn>`，否则通常是注释占位 |
+| `<history>` | `message history --format markdown` | 多轮 transcript |
+| `<tail>` | `message tail --format markdown` | 最新回复视图 |
 
-根容器常见属性：`session` / `thread_id` / `count` / `next_cursor` / `follow`。
+根容器常见属性：`session` / `thread_id` / `count` / `next_cursor` / `follow` / `generated_at`。
 
-### Context 专用
+### `<turn>`
 
-| Tag | 正文 | 说明 |
-|---|---|---|
-| `<system>` | markdown | 系统级 instructions |
-| `<developer>` | markdown | 开发者级 instructions |
-| `<compacted>` | markdown 摘要 | 属性含 `from_turn` / `to_turn` / `token_saving` |
+当前读取命令输出的 `<turn>` 一般只保证这些属性：
 
-### Turn
+- `id`
+- `status`
+- `duration_ms`（存在时）
 
-```
-<turn> {"id":"tu-5","status":"completed|interrupted|failed|in-progress",
-        "model":"gpt-5.4",
-        "started":"...","completed":"...","duration_ms":135000,
-        "tokens_in":1234,"tokens_out":567,
-        "interrupted_by":"message-interrupt"}
-...
-<\turn>
-```
+原始 turn/item 渲染路径还可能带上 `started_at` / `completed_at` / `error` 等属性，但不要把额外字段当成 `history` / `tail` / `context` 的稳定 contract。
 
 ### Turn 内元素
 
 | Tag | 正文 | 关键属性 |
 |---|---|---|
-| `<message>` | message 正文（markdown） | `role=user|assistant` / `phase?` |
-| `<user-input>` | 旧式 prompt tag（兼容旧示例） | `attachments`（数组，也可独立 `<attachment>` tag） |
-| `<environment>` | env 说明 | — |
-| `<attachment>` | 无（内联） | `path` / `mime` / `bytes` |
-| `<agent-message>` | 旧式 assistant tag（兼容旧示例） | `id` |
-| `<reasoning>` | reasoning prose | `id` |
-| `<plan>` | markdown checklist | `id` |
-| `<shell>` | 命令输出（stdout / 合并 stderr） | `id` / `cmd` / `exit` / `duration_ms` / `cwd` / `sandbox` / `interrupted` / `stderr`（短 stderr 单列） |
-| `<file-patch>` | unified diff | `id` / `path` / `status` |
-| `<file-read>` | 文件内容 | `id` / `path` / `from_line` / `to_line` / `lang` |
-| `<file-write>` | 写入内容 | `id` / `path` |
-| `<tool.<name>>` | tool 结果（文本 / markdown） | `id` / `server` / `status` / `duration_ms` / `args`（对象） |
-| `<mcp-args>` | 无（内联 JSON） | — |
-| `<mcp-result>` | MCP/tool 文本结果 | — |
-| `<web-search>` | markdown 列表 | `id` / `query` / `engine` |
-| `<auto-approval-review>` | 无（全部 JSON，内联） | `id` / `kind` / `matched_pattern` / `command_preview` / `decision` |
-| `<approval-request>` | 无（全部 JSON，内联） | `id` / `kind` / `status` / `decided_by` / `decided_at` / `cmd` / `reason` / `decision`（对象） |
-| `<user-input-request>` | 无（全部 JSON，内联） | `id` / `status` / `answered_by` / `answered_at` / `questions`（数组） / `answers`（对象） |
+| `<message>` | transcript message 正文（markdown） | `role=user|assistant` / `phase?` |
+| `<user-input>` | 原始 user item 渲染 | `id` / `phase` / `status` / `text?` |
+| `<agent-message>` | 原始 assistant item 渲染 | `id` / `phase` / `status` |
+| `<reasoning>` | reasoning prose 或 inline 文本 | `id` |
+| `<shell>` | 命令输出（stdout + stderr 合并或摘要） | `id` / `cmd` / `exit` / `duration_ms` / `cwd` |
+| `<file-patch>` | diff / patch 内容或摘要 | `id` / `path` / `status` |
+| `<tool.<name>>` | MCP tool 调用容器 | `id` / `server` / `tool` / `duration_ms` |
+| `<mcp-args>` | tool 参数（inline JSON 或 pretty JSON） | — |
+| `<mcp-result>` | tool 结果文本 / JSON | — |
+| `<hook.<name>>` | hook item | `id` / `hook_id` / `status` / `command` / `cwd` / `exit` / `duration_ms` |
 | `<hook-output>` | hook 输出正文 | — |
-| `<error>` | 错误描述 prose | `kind` / `codex_error_info` / `will_retry` |
+| `<auto-approval-review>` | 自动审批审计记录（inline JSON） | `id` / `kind` / `matched_pattern` / `command_preview` / `decision` |
+| `<error>` | fallback 错误正文 | — |
 | `<item>` | 通用兜底 | `id` / `type` |
 
 `<shell>` 的 `cmd` 作为 JSON 属性存（通常短）；超长多行 shell 脚本可以把 `cmd` 放进正文前面（用 ```bash 代码块），或拆成单独 tag——按 agent 可读性选。
+
+## 历史 / 兼容说明
+
+下面的若干示例保留了旧版 / 兼容词表（例如 `<user-input>`、`<agent-message>`、`<session-info>`、`<system>`、`<developer>`、`<compacted>`、`<approval-request>`、`<user-input-request>`、`<plan>`、`<attachment>`、`<file-read>`、`<web-search>` 等），用于说明历史演进和兼容渲染，不代表当前 0.5.5 CLI 在 `message history` / `message tail` / `session context` 上一定会直接输出这些 tag。
 
 ---
 
@@ -124,7 +115,7 @@ tag 正文：任意 markdown，直接写，不包裹。
 
 说明：
 
-- 下面部分 `<context>` / `<user-input>` / `<agent-message>` 示例是**旧格式兼容示例**，保留用于说明历史 tag 词表，不代表当前主线默认输出。
+- 下面部分 `<context>` / `<user-input>` / `<agent-message>` / `<session-info>` / `<system>` / `<developer>` / `<compacted>` / `<approval-request>` / `<user-input-request>` / `<plan>` / `<attachment>` / `<file-read>` / `<web-search>` 示例是**旧格式兼容示例**，保留用于说明历史 tag 词表，不代表当前主线默认输出。
 - 当前主线默认输出遵循本页上方的语义说明：`history` 是简洁 transcript，`tail` 是 message-focused 视图，`context` 是 thread snapshot 视图。
 
 ### 1 — `session context`

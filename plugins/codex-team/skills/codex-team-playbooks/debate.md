@@ -78,7 +78,7 @@ codex-team -b $TOK message wait advocate-a
 codex-team -b $TOK message wait advocate-b
 ```
 
-`turn.completed` is compact metadata only in 0.5.2, so read the actual opening via `message tail ... --format markdown` or the generated file.
+`turn.completed` is compact metadata only, so read the actual opening via `message tail ... --format markdown` or the generated file.
 
 ### Round 2 — rebuttals (parallel, optional)
 

@@ -8,17 +8,19 @@ If you `session new` and immediately `session detach` without sending any turn, 
 
 **Mitigation**: send at least one turn before detaching, or don't detach a brand-new session you plan to reuse.
 
-## 2. `thread/turns/list` returns turns with empty `items`
+## 2. `thread/turns/list` still returns turns with empty `items`
 
-The protocol explicitly defines `Turn.items` as populated only on `thread/resume` or `thread/fork` responses. `message history` and `message tail` use `thread/turns/list` under the hood, so they return turn metadata (id, status, timings) but no item content.
+The protocol still defines `Turn.items` as empty in `thread/turns/list` responses. Raw JSON `message history` therefore remains metadata-first.
 
-**Mitigation**: use `session context` (`thread/read`) for a thread-level snapshot, or parse `item.completed` events as they arrive for live progress.
+In 0.5.5, though, `message history --format markdown` and `message tail --format markdown` are no longer metadata-only. codex-team now hydrates readable turn content from thread snapshots when available and renders a rich tagged transcript.
 
-## 3. `thread/read` doesn't return items either
+**Mitigation**: prefer `message history --format markdown` / `message tail --format markdown` for post-hoc reading, or parse `item.completed` events live when you need every step as it happens.
 
-Thread/read returns the `Thread` object only (`{ thread: Thread }`). There's no protocol method that returns past turn items for a session. Items come from the event stream (`item.completed`) while the turn is running.
+## 3. `thread/read` is metadata-first, not a guaranteed full transcript API
 
-**Mitigation**: listen to events in real time. After a turn completes, the items are only recoverable via codex's on-disk rollout files (`~/.codex/sessions/<date>/rollout-*.json`) — codex-team does not parse those.
+`thread/read` returns the `Thread` object (`{ thread: Thread }`). Depending on what the app-server includes, that may or may not contain past turn items. codex-team treats it as a best-effort hydration source for markdown rendering, not as a protocol guarantee that every historical item will always be present.
+
+**Mitigation**: use the event stream for live progress, and use `message history` / `message tail --format markdown` for the best readable retrospective view. If you need codex's raw persisted artefacts, inspect the rollout files directly under `~/.codex/sessions/...`.
 
 ## 4. Long-context reply mismatch (first occurrence is usually spurious)
 
@@ -38,11 +40,13 @@ with `turnKind: "Review"` or `"Compact"`.
 
 **Mitigation**: wait for the internal turn to finish (usually 5–30s). The daemon does NOT retry these — it's not an overload error.
 
-## 6. Turn completed notifications arrive with `turn.items = []`
+## 6. Terminal turn notifications are summaries, not transcript payloads
 
-The wire-level `turn.completed` notification does include a `Turn` object, but its `items` field is always empty (per protocol spec). Turn content arrives through separate `item.completed` notifications during the turn. codex-team normalizes `turn.completed`'s payload to a compact summary in 0.5.2: `{turn_id, status, duration_ms, items_count, token_usage, ended_at, turn_items_included: false}`. The raw `Turn` object and its empty `items` array are intentionally dropped to keep the event log small.
+The wire-level `turn.completed` notification is not the place to recover rich turn content. codex-team 0.5.5 intentionally normalizes the terminal event to a compact summary: `{turn_id, status, duration_ms, items_count, token_usage, ended_at, turn_items_included: false}`.
 
-**Mitigation**: collect items via `item.completed` events during the turn; `turn.completed` is a boundary marker, not a content source.
+That event shape is separate from the markdown read path: `message history` / `message tail --format markdown` can still render rich readable content by hydrating from thread snapshots when available.
+
+**Mitigation**: treat `turn.completed` as the boundary marker, not the content source. Fetch readable content with `message tail` / `message history`, or follow `item.completed` live if you need every step.
 
 ## 7. Token case: camelCase on the wire, snake_case in codex-team events
 

@@ -113,7 +113,7 @@ while task not complete:
 codex-team -b $TOK session detach manager
 ```
 
-`turn.completed` no longer embeds items in 0.5.2. Treat it as the stop signal only; fetch content with `message tail` / `message history` or read the worker's output file.
+`turn.completed` is the stop signal only; fetch content with `message tail` / `message history` or read the worker's output file.
 
 ## Feeding back bounded state
 

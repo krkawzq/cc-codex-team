@@ -1,7 +1,7 @@
 ---
 name: configure-codex-team
 description: >-
-  Reference index for codex-team: complete CLI (every command, positional, flag, error code), daemon config keys (hot vs. restart), codex profiles (`--profile` contract, precedence), environment overrides (`CODEX_TEAM_DATA_DIR`, `CODEX_TEAM_SOCK`, `CLAUDE_PLUGIN_DATA`). **Load proactively when looking up any command/flag signature, changing a daemon knob (`daemon config set …`), tuning `codex.default_*` / `retry.*` / `monitor.*` / `app_server.*`, defining reusable codex profiles (`reviewer`, `fixer`, `planner`, `tester`, `explorer`), checking Node/codex prerequisites, troubleshooting env var routing, or verifying `dist` freshness.** Not for: session lifecycle (`manage-codex-team`), failure triage (`recover-codex-team`), collaboration patterns (`codex-team-playbooks`), first-time mental model (`using-codex-team`).
+  Reference index for codex-team: complete CLI (every command, positional, flag, error code), daemon config keys (hot vs. restart), codex profiles (`--profile` contract, precedence), environment overrides (`CODEX_TEAM_DATA_DIR`, `CODEX_TEAM_DAEMON_SOCK`, `CODEX_TEAM_SOCK`, `CLAUDE_PLUGIN_DATA`). **Load proactively when looking up any command/flag signature, changing a daemon knob (`daemon config set …`), tuning `codex.default_*` / `retry.*` / `monitor.*` / `app_server.*`, defining reusable codex profiles (`reviewer`, `fixer`, `planner`, `tester`, `explorer`), checking Node/codex prerequisites, troubleshooting env var routing, or verifying `dist` freshness.** Not for: session lifecycle (`manage-codex-team`), failure triage (`recover-codex-team`), collaboration patterns (`codex-team-playbooks`), first-time mental model (`using-codex-team`).
 ---
 
 # Configure codex-team
@@ -16,7 +16,7 @@ description: >-
 | `config-keys.md` | Every `daemon config` key: type, default, hot vs restart |
 | `profiles-library.md` | **Built-in role profiles (`fixer` / `reviewer` / `planner` / `tester` / `explorer`) — read this before any playbook work** |
 | `profiles.md` | The two profile systems: skill-bundled library vs user-local `~/.codex/config.toml` `--profile <name>` |
-| `env-vars.md` | `CODEX_TEAM_DATA_DIR`, `CODEX_TEAM_SOCK`, `CLAUDE_PLUGIN_DATA` routing |
+| `env-vars.md` | `CODEX_TEAM_DATA_DIR`, `CODEX_TEAM_DAEMON_SOCK`, `CODEX_TEAM_SOCK`, `CLAUDE_PLUGIN_DATA` routing |
 
 ## Quick lookups
 
@@ -106,7 +106,7 @@ Returns every key with current value, default, type, whether explicit, and hot/c
 codex-team daemon status
 ```
 
-In 0.5.2 this also reports:
+This also reports:
 
 - `session_count`
 - `dist_built_at`

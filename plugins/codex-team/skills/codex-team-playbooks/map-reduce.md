@@ -67,13 +67,13 @@ done
 
 All N mappers run concurrently. Events flow in. Claude tracks which mappers have fired `turn.completed`.
 
-In 0.5.2, use the summary stream for the fan-out and `message wait` only when you need to block on one specific mapper:
+Use the summary stream for the fan-out and `message wait` only when you need to block on one specific mapper:
 
 ```bash
 codex-team -b $TOK message wait mapper-3 --timeout 0
 ```
 
-`turn.completed` is now compact metadata only, so inspect mapper output via `.codex-team/mapper-<i>.md` or `message tail`.
+`turn.completed` is the boundary signal only, so inspect mapper output via `.codex-team/mapper-<i>.md` or `message tail`.
 
 ### Reduce phase
 

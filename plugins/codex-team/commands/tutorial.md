@@ -20,7 +20,7 @@ Raw user request: $ARGUMENTS
 
 If `$ARGUMENTS` names a branch (`what`, `quickstart`, `cli`, `events`, `approvals`, `playbooks`, `recovery`, `config`), jump straight there. Otherwise intro:
 
-> codex-team runs a team of long-lived Codex worker sessions. You (Claude) are the orchestrator; workers do the coding. Each session is a thread coordinated by a single daemon and backed by `codex app-server`; live sessions are isolated by default, while read-only adhoc work may reuse clients. You pick a bearer token (any string), create a user once, then drive sessions with `codex-team -b <token> ...`. Events stream out via `monitor events`; use `--summary --cursor <name>` for orchestration fleets and `message wait` when you're blocked on one turn. Details come from `message tail` / `message history`.
+> codex-team runs a team of long-lived Codex worker sessions. You (Claude) are the orchestrator; workers do the coding. Each session is a thread coordinated by a single daemon and backed by `codex app-server`; live sessions are isolated by default, while read-only adhoc work may reuse clients. You pick a bearer token (any string), create a user once, then drive sessions with `codex-team -b <token> ...`. Events stream out via `monitor events`; use `--summary --cursor <name>` for orchestration fleets and `message wait` when you're blocked on one turn. Terminal turn outcomes arrive as `turn.completed` with `status: completed | failed | cancelled | interrupted`; readable details come from `message tail` / `message history`.
 
 Then `AskUserQuestion` with:
 

@@ -2,7 +2,7 @@
 
 Every command in `codex-team`. Successful non-streaming commands return one JSON object per line by default; errors still use the standard `{"ok":false,"error":{...}}` envelope. Streaming commands emit JSONL/NDJSON unless you request markdown.
 
-## Output modes (0.5.3+)
+## Output modes
 
 Most leaf commands accept the same three output modes — pick based on what you're going to do with the result, not which command you're running. `doctor` is the carve-out: human-readable by default, `--short` for a one-line summary, `--json` for the structured result body.
 
@@ -16,7 +16,7 @@ Most leaf commands accept the same three output modes — pick based on what you
 - `--short` and `--full` are mutually exclusive (→ `invalid_params`).
 - `--short` cannot combine with `--format markdown|table`.
 - Errors are never projected — error envelopes always surface in full regardless of mode.
-- `--format markdown` (available on `message tail` / `message history` / `session context`) overrides JSON projection and renders tag-structured markdown.
+- `--format markdown` (available on `message tail` / `message history` / `session context`) overrides JSON projection and renders a tagged markdown interchange format, not plain prose markdown.
 
 ## Global
 
@@ -92,6 +92,8 @@ Returns your user's live session count, retained event count, pending requests, 
 | `--base-instructions <file>` | path | — | System-level instructions file |
 | `--developer-instructions <file>` | path | — | Developer-level instructions file |
 | `--profile <name>` | string | — | Codex config profile. Single flags override same-name fields |
+| `--experimental-tools <csv>` | string | — | Enable experimental Codex tools for the session |
+| `--auto-approve <csv-or-/regex/>` | string | daemon default | Per-session auto-approve matcher list |
 
 Session auto-goes live on creation. Name rules: `^[A-Za-z0-9_\-]{1,128}$`, not UUID, not `th-*`.
 
@@ -100,17 +102,34 @@ Session auto-goes live on creation. Name rules: `^[A-Za-z0-9_\-]{1,128}$`, not U
 | Flag | Type | Default | Notes |
 |---|---|---|---|
 | `--takeover` | bool | false | Seize a session currently live under another user |
+| `--experimental-tools <csv>` | string | inherit session/default | Enable experimental Codex tools when attaching or rehydrating a thread |
 
 Notes:
 - By name, attach only resolves your own live registry entry or a uniquely live session under another user.
-- Detached threads can be addressed by either session name or `thread_id`.
+- Detached threads can be addressed by either session name or `thread_id`; the CLI resolves the matching detached thread automatically.
 - If another user has the same session name live and the name is ambiguous, attach errors instead of picking one arbitrarily.
 
 ### `session detach <name|thread_id>`
 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
+| `--all` | bool | false | Detach every live session for the current bearer |
+| `--match <glob>` | glob | — | Filter `--all` targets by session name using `*` / `?` wildcards |
 | `--graceful` | bool | false | Skip `turn/interrupt`; wait for the current turn to go idle before detaching |
+
+Exactly one target is required unless you pass `--all`.
+
+### `session archive <name|thread_id>`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--and-detach` | bool | false | Hard-detach a live session before archiving it |
+
+Live sessions refuse without `--and-detach`.
+
+### `session unarchive <thread_id>`
+
+No flags. Restores an archived detached thread. Fails if the thread is currently live.
 
 ### `session fork <source> [new_name]`
 
@@ -118,13 +137,32 @@ Notes:
 |---|---|---|---|
 | `--at-turn <turn_id>` | string | tip | Fork point |
 
+Detached source threads can be addressed by either saved name or `thread_id`; the CLI resolves detached names automatically.
+
 ### `session rename <name|thread_id> <new_name>`
 
-No flags. Target must already be live in your user registry.
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--detached-ok` | bool | false | Allow renaming a detached thread via persisted thread metadata |
+
+Without `--detached-ok`, target must already be live in your user registry.
+
+### `session rollback <name|thread_id> --to-turn <turn_id>`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--to-turn <turn_id>` | string | required | Fork point to roll back to |
+| `--detach-after` | bool | false | Leave the new fork detached instead of resuming it live |
+
+Rolls the named session forward to a forked replacement and archives the old thread as `<name>-pre-rollback-<iso8601>`.
 
 ### `session info <name|thread_id>`
 
-No flags. Live and detached sessions can be addressed by either session name or `thread_id`; detached results return thread metadata only.
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--short` | bool | false | One compact status line to stdout |
+
+Live and detached sessions can be addressed by either session name or `thread_id`; detached results return the persisted thread snapshot from `thread/read`.
 
 ### `session context <name|thread_id>`
 
@@ -132,14 +170,24 @@ No flags. Live and detached sessions can be addressed by either session name or 
 |---|---|---|---|
 | `--format <fmt>` | enum | `json` | `json` / `markdown` |
 
+Detached threads can be addressed by either saved name or `thread_id`; the CLI resolves detached names automatically.
+
 ### `session list`
 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
-| `--all` | bool | false | Include non-live threads (from `thread/list`) |
+| `--all` | bool | false | Include non-live threads visible to the current bearer token |
+| `--cursor <cursor>` | string | — | Pagination cursor from a previous response |
+| `--limit <n>` | int | 50 | Maximum rows to return |
+| `--archived <mode>` | enum | `exclude` | `only` / `exclude` / `include` |
+| `--state <csv>` | string | — | Keep only `live`, `crashed`, `closed`, `archived` |
+| `--owner <filter>` | string | `self` | `self`, `any`, or an explicit bearer token; detached-thread visibility under `--all` stays scoped to the current bearer |
+| `--loaded-only` | bool | false | Read the in-memory loaded thread set instead of persisted `thread/list` results |
 | `--sort <field>` | enum | `last_active` | `name` / `last_active` / `turn_count` / `created_at` |
 | `--format <fmt>` | enum | `json` | `json` / `table` |
 | `--short` | bool | false | One compact line per session to stdout; cannot combine with `--format table` |
+
+`session list --all` does not enumerate other users' detached threads; those rows are filtered server-side to sessions visible to the calling bearer token.
 
 ### `session health <name|thread_id>`
 
@@ -147,6 +195,9 @@ Returns a compact live snapshot. Default JSONL keeps `session`, `state`, `busy`,
 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
+| `--all` | bool | false | Return one health snapshot per tracked session |
+| `--only-unhealthy` | bool | false | With `--all`, hide idle healthy live sessions |
+| `--state <csv>` | string | — | With `--all`, keep only `live`, `crashed`, `closed` |
 | `--short` | bool | false | One-line summary for grep/dashboards |
 
 If state is `crashed` or `app_server_alive` is `false`, run `session heal`.
@@ -158,6 +209,8 @@ Re-attach a crashed or dead live session to a fresh `codex app-server`. Healthy 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
 | `--force` | bool | false | Drop half-baked in-memory queue state before retrying the resume — use only after a plain `session heal` fails |
+
+Detached threads can be addressed by saved name or `thread_id`, but detached targets still return `session_not_live` with an attach hint.
 
 ## message group
 
@@ -174,6 +227,15 @@ Re-attach a crashed or dead live session to a fresh `codex app-server`. Healthy 
 | `--attach <path>` | repeatable | — | Attach local image file(s) only (`png/jpg/jpeg/gif/webp/bmp/svg`) |
 
 Non-blocking. Returns `{"status":"started","turn_id":"..."}` when the turn starts immediately, or `{"status":"queued","queue_id":"...","queued_depth":N}` when it queues.
+
+### `message send-many <name|thread_id> <name|thread_id> [...name|thread_id] [prompt]`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--stdin` | bool | false | Read prompt from stdin |
+| `--file <path>` | path | — | Read prompt from file |
+
+Same prompt-source flags as `message send`, except `--attach` is not supported. Requires at least two explicit live-session targets. Returns one result per target; overall command exits `1` if any target fails.
 
 ### `message peer <session> [prompt]`
 
@@ -210,38 +272,76 @@ Shortcut validity depends on approval kind:
 
 Flags: `--json` / `--file` / `--stdin` for multi-question.
 
-### `message wait <session>`
+### `message wait <name|thread_id>...`
 
-Blocks until a turn on `<session>` finishes, errors, or times out.
+Blocks until one or more turns reach terminal `turn.completed` or time out.
 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
-| `--for <turn_id>` | string | current/next | Specific turn ID; without `--for`, waits for the current in-flight turn or the next one if idle |
+| `--all` | bool | false | Wait for every listed session |
+| `--any` | bool | false | Return when the first listed session reaches a terminal outcome |
+| `--for <turn_id>` | string | current/next | Specific turn ID for a single-session wait; without `--for`, waits for the current in-flight turn or the next one if idle |
 | `--timeout <s>` | int | 600 | Seconds before returning `outcome: "timeout"`; use `0` to disable |
 
 Exit codes:
 
 - `0` — turn completed
-- `1` — turn errored / cancelled / crashed
+- `1` — turn failed / cancelled / crashed
 - `124` — timeout
 
-### `message history <session>`
+Terminal outcomes arrive as `turn.completed` with `status: "completed" | "failed" | "cancelled" | "interrupted"`. There is no separate terminal failure event in 0.5.5.
+`--all` and `--any` are mutually exclusive. `--for` only applies to single-session waits.
+
+### `message history <name|thread_id>`
 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
 | `--limit <n>` | int | 50 | Max turns returned |
 | `--since <cursor\|-N>` | string\|int | tip | Pagination cursor from a previous response, or relative `-N` = start N turns back from tip |
 | `--format <fmt>` | enum | `json` | `json` / `markdown` |
+| `--truncate <bytes>` | int | 2048 | Clip markdown transcript bodies; use `0` to disable |
+| `--short` | bool | false | One compact line per turn; cannot combine with `--format markdown` |
 
 Output is newest-to-oldest.
+Detached threads can be addressed by either saved name or `thread_id`; the CLI resolves detached names automatically.
 
-### `message tail <session>`
+### `message tail <name|thread_id>`
 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
 | `-n <count>` | int | 3 | Return last N turns |
 | `-f, --follow` | bool | false | Stream new turn snapshots as they complete |
 | `--format <fmt>` | enum | `json` | `json` / `markdown` |
+| `--truncate <bytes>` | int | 2048 | Clip markdown bodies; use `0` to disable |
+
+Detached threads can be addressed by either saved name or `thread_id`; `--follow` still requires a live session.
+
+### `session events <name|thread_id>`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--type <csv>` | string | — | Only include matching event types |
+| `--turn <turn_id>` | string | — | Only include events for one turn |
+| `--since <event_id>` | event_id | — | Start after this retained event ID |
+| `--limit <n>` | int | 50 | Initial backlog size |
+| `--follow` | bool | false | Keep streaming future matching events |
+| `--summary` | bool | false | Ask the daemon to emit summary objects directly; without `--full`, visible CLI output is already compacted to nearly the same shape client-side |
+| `--by-tool` | bool | false | Count `item.completed` events by rendered tool bucket; cannot combine with `--follow` or `--summary` |
+| `--by-item-kind` | bool | false | Count `item.completed` events by normalized item kind; cannot combine with `--follow` or `--summary` |
+
+Default CLI output is chronological oldest-to-newest summary JSONL for the retained window; pass `--full` to inspect raw event objects.
+
+### `session logs <name|thread_id>`
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `-n <count>` | int | 100 | Return the last N captured log lines |
+| `-f, --follow` | bool | false | Keep streaming new log lines |
+| `--stream <kind>` | enum | `stderr` | `stderr` / `stdout` / `all` |
+| `--truncate <bytes>` | int | 2048 | Clip each log line; use `0` to disable |
+| `--short` | bool | false | Print `<ts> <stream> <line>` per line |
+
+Detached sessions return `session_not_live`; crashed sessions return the last captured tail with `state=crashed`.
 
 ## monitor group
 
@@ -256,7 +356,7 @@ Streaming. Emits NDJSON.
 | `--filter <type,...>` | string | — | Whitelist |
 | `--exclude <type,...>` | string | — | Blacklist |
 | `--include-delta` | bool | false | Include `*_delta` events |
-| `--summary` | bool | false | Ask the daemon to pre-summarize events. Visible CLI output already uses the same concise summary shape unless you pass `--full`. |
+| `--summary` | bool | false | Ask the daemon to emit summary objects directly. Without `--full`, visible CLI output is already compacted to nearly the same shape client-side; this mainly changes the wire payload. |
 | `--since <id>` | string | — | Resume from event id. `id_rotated` if evicted; `invalid_params` if the id never existed in the current log. Mutually exclusive with `--cursor` |
 | `--cursor <name>` | string | — | Resume from a saved named cursor and auto-advance it as events are delivered. Mutually exclusive with `--since` |
 | `--session <name\|uuid>` | string | — | Only events for this session |

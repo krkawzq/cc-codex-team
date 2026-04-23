@@ -60,13 +60,18 @@ Claude:
 
 Bounded: stop after 3 accept-loops. If still rejecting, escalate (human intervention or fork-and-restart).
 
-`turn.completed` is compact in 0.5.2, so the worker's diff/log still comes from `worker.md` or `message tail`, not the event payload.
+`turn.completed` is still the boundary signal only, so the worker's diff/log still comes from `worker.md` or `message tail`, not the event payload.
 
 ## Message-only variant
 
 Use this when the worker is producing prose, analysis, or a rewrite plan and there are no files worth diffing.
 
-Claude waits for the worker turn to finish, runs `codex-team -b $TOK message tail worker -n 1 --format markdown`, and pipes that output verbatim into the reviewer session as the review target.
+Claude waits for the worker turn to finish, runs `codex-team -b $TOK message tail worker -n 1 --format markdown`, and pipes that output to the reviewer via stdin. Do not try to inline the raw tagged markdown inside shell quotes.
+
+```bash
+codex-team -b $TOK message tail worker -n 1 --format markdown \
+  | codex-team -b $TOK message send reviewer --stdin
+```
 
 Ask the critic to answer with one of these verdicts: `approved`, `needs-rewrite: <reason>`, or `reject: <reason>`.
 
