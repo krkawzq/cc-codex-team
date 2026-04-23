@@ -23,6 +23,9 @@ const DEFAULT_DAEMON_CONNECT_TIMEOUT_MS = 5000;
 const DEFAULT_DAEMON_CONNECT_RETRY_ATTEMPTS = 3;
 const DEFAULT_DAEMON_CONNECT_RETRY_DELAY_MS = 250;
 const DAEMON_STDERR_FLAG = "--stderr-to";
+const DOCTOR_SUGGESTED_ACTION = "run `codex-team doctor` to diagnose";
+const SOCKET_BIND_DENIED_SUGGESTED_ACTION =
+  "codex-team cannot bind a local IPC socket here — run `codex-team doctor` for details";
 
 export async function readStdinAll(): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
@@ -491,25 +494,14 @@ async function ensureDaemon(sockPath: string): Promise<EnsureDaemonResult> {
   const stderrTail = readTail(stderrPath, 4096);
   const parsedBootstrap = parseBootstrapStderr(stderrTail);
   if (parsedBootstrap?.code === "socket_bind_denied") {
-    return {
-      ok: false,
-      code: parsedBootstrap.code,
-      message: parsedBootstrap.message,
-      data: {
-        ...(parsedBootstrap.data ?? {}),
-        ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
-      },
-    };
+    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
   }
 
   return {
     ok: false,
     code: "daemon_unreachable",
     message: `daemon failed to start within ${formatDuration(cliConfig.readyTimeoutMs)}. See ${stderrPath} for details`,
-    data: {
-      stderr_path: stderrPath,
-      ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
-    },
+    data: buildDaemonUnreachableData(stderrPath, stderrTail),
   };
 }
 
@@ -647,31 +639,46 @@ interface BootstrapPayload {
   data?: Record<string, unknown>;
 }
 
+function buildSocketBindDeniedFailure(
+  parsedBootstrap: BootstrapPayload,
+  stderrTail: string | null,
+): EnsureDaemonResult {
+  return {
+    ok: false,
+    code: parsedBootstrap.code,
+    message: parsedBootstrap.message,
+    data: {
+      ...(parsedBootstrap.data ?? {}),
+      ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
+    },
+  };
+}
+
+function buildDaemonUnreachableData(
+  stderrPath: string,
+  stderrTail: string | null,
+  result?: WaitForDaemonReadyResult,
+): Record<string, unknown> {
+  return {
+    stderr_path: stderrPath,
+    ...(typeof result?.exitCode === "number" ? { exit_code: result.exitCode } : {}),
+    ...(result?.signal ? { signal: result.signal } : {}),
+    ...(stderrTail ? { bootstrap_stderr: stderrTail } : { suggested_action: DOCTOR_SUGGESTED_ACTION }),
+  };
+}
+
 function buildEarlyExitFailure(stderrPath: string, result: WaitForDaemonReadyResult): EnsureDaemonResult {
   const stderrTail = readTail(stderrPath, 4096);
   const parsedBootstrap = parseBootstrapStderr(stderrTail);
   if (parsedBootstrap?.code === "socket_bind_denied") {
-    return {
-      ok: false,
-      code: parsedBootstrap.code,
-      message: parsedBootstrap.message,
-      data: {
-        ...(parsedBootstrap.data ?? {}),
-        ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
-      },
-    };
+    return buildSocketBindDeniedFailure(parsedBootstrap, stderrTail);
   }
 
   return {
     ok: false,
     code: "daemon_unreachable",
     message: parsedBootstrap?.message ?? "daemon exited before becoming ready",
-    data: {
-      stderr_path: stderrPath,
-      ...(typeof result.exitCode === "number" ? { exit_code: result.exitCode } : {}),
-      ...(result.signal ? { signal: result.signal } : {}),
-      ...(stderrTail ? { bootstrap_stderr: stderrTail } : {}),
-    },
+    data: buildDaemonUnreachableData(stderrPath, stderrTail, result),
   };
 }
 
@@ -690,6 +697,8 @@ function parseBootstrapStderr(stderrTail: string | null): BootstrapPayload | nul
   const prefix = "[codex-team-daemon-bootstrap] ";
   const lines = stderrTail.split(/\r?\n/).reverse();
   for (const line of lines) {
+    const socketBindDenied = parseSocketBindDeniedLine(line);
+    if (socketBindDenied) return socketBindDenied;
     if (!line.startsWith(prefix)) continue;
     try {
       const parsed = JSON.parse(line.slice(prefix.length)) as {
@@ -710,6 +719,34 @@ function parseBootstrapStderr(stderrTail: string | null): BootstrapPayload | nul
     }
   }
   return null;
+}
+
+function parseSocketBindDeniedLine(line: string): BootstrapPayload | null {
+  try {
+    const parsed = JSON.parse(line) as {
+      kind?: unknown;
+      errno?: unknown;
+      probed_path?: unknown;
+    };
+    if (parsed.kind !== "socket_bind_denied") return null;
+
+    const errno = typeof parsed.errno === "string" && parsed.errno.length > 0
+      ? parsed.errno
+      : "UNKNOWN";
+    return {
+      code: "socket_bind_denied",
+      message: `local socket bind denied by environment (${errno})`,
+      data: {
+        suggested_action: SOCKET_BIND_DENIED_SUGGESTED_ACTION,
+        errno,
+        ...(typeof parsed.probed_path === "string" && parsed.probed_path.length > 0
+          ? { probed_path: parsed.probed_path }
+          : {}),
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 function truthy(v: unknown): boolean {

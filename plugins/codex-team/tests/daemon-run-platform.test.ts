@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const runMocks = vi.hoisted(() => ({
   buildContext: vi.fn(),
   startServer: vi.fn(),
+  probeSocketBind: vi.fn(),
   probeSock: vi.fn(),
   unlinkSockIfStale: vi.fn(),
   shutdownDaemon: vi.fn().mockResolvedValue(undefined),
@@ -20,6 +21,9 @@ vi.mock("../src/daemon/context", () => ({
 }));
 vi.mock("../src/daemon/server", () => ({
   startServer: runMocks.startServer,
+}));
+vi.mock("../src/ipc/socket-bind-probe", () => ({
+  probeSocketBind: runMocks.probeSocketBind,
 }));
 vi.mock("../src/ipc/sock", () => ({
   probeSock: runMocks.probeSock,
@@ -64,6 +68,10 @@ describe("daemon/run platform behavior", () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     runMocks.isLikelyCodexTeamDaemonProcess.mockReturnValue(true);
+    runMocks.probeSocketBind.mockResolvedValue({
+      ok: true,
+      probedPath: path.join(os.tmpdir(), `codex-team-probe-${Date.now()}.sock`),
+    });
   });
 
   afterEach(() => {
