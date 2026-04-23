@@ -20,6 +20,7 @@ import type { PendingRequest } from "../pending";
 import type { RetryOptions } from "../../codex/retry";
 import type { SessionRecord } from "../sessions";
 import type { TeamEvent } from "../../types";
+import { detachedAttachMessage, resolveSessionTarget } from "./session";
 
 const RECENT_TERMINAL_WAIT_EVENT_WINDOW_MS = 30_000;
 
@@ -193,7 +194,8 @@ export const messageAnswer: HandlerFn = async (ctx, req) => {
 };
 
 export const messageHistory: HandlerFn = async (ctx, req) => {
-  const { rec, client } = await resolveLive(ctx, req);
+  const user = requireUser(ctx, req);
+  const identifier = asPositional(req, 0, "session");
   const limitRaw = getFlag(req, "limit");
   const limit = typeof limitRaw === "string" ? parseInt(limitRaw, 10) : typeof limitRaw === "number" ? limitRaw : 50;
   const sinceRaw = asString(getFlag(req, "since"));
@@ -203,6 +205,12 @@ export const messageHistory: HandlerFn = async (ctx, req) => {
 
   const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit as number)) : 50;
   const relativeSince = sinceRaw && /^-\d+$/.test(sinceRaw) ? Math.max(1, Math.floor(Math.abs(Number(sinceRaw)))) : null;
+  const detached = await resolveDetachedReadableTarget(ctx, user, identifier);
+  if (detached) {
+    return await renderDetachedHistory(ctx, user, detached, safeLimit, relativeSince, sinceRaw, format, truncate);
+  }
+
+  const { rec, client } = await resolveLiveTarget(ctx, user, identifier);
   const result = relativeSince
     ? await listTurnsFromRelativeOffset(client, rec.thread_id, relativeSince, safeLimit, ctx.retryOptions())
     : await threadTurnsList(client, rec.thread_id, {
@@ -237,13 +245,23 @@ export const messageHistory: HandlerFn = async (ctx, req) => {
 };
 
 export const messageTail: HandlerFn = async (ctx, req, stream) => {
-  const { user, rec, client } = await resolveLive(ctx, req);
+  const user = requireUser(ctx, req);
+  const identifier = asPositional(req, 0, "session");
   const nRaw = getFlag(req, "n");
   const n = typeof nRaw === "string" ? parseInt(nRaw, 10) : typeof nRaw === "number" ? nRaw : 3;
   const format = asString(getFlag(req, "format")) ?? "json";
   const truncate = parseTruncateFlag(getFlag(req, "truncate"));
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
   const follow = isTrue(getFlag(req, "follow")) || isTrue(getFlag(req, "f"));
+  const detached = await resolveDetachedReadableTarget(ctx, user, identifier);
+  if (detached) {
+    if (follow) {
+      throw new CodexTeamError("session_not_live", detachedAttachMessage(user, detached.session));
+    }
+    return await renderDetachedTail(ctx, user, detached, Number.isFinite(n) ? Math.max(1, Math.floor(n as number)) : 3, format, truncate);
+  }
+
+  const { rec, client } = await resolveLiveTarget(ctx, user, identifier);
 
   const snapshot = async () => {
     const result = await threadTurnsList(client, rec.thread_id, {
@@ -324,6 +342,111 @@ export const messageWait: HandlerFn = async (ctx, req) => {
 };
 
 // ----- helpers -----
+
+async function resolveDetachedReadableTarget(
+  ctx: DaemonContext,
+  user: string,
+  identifier: string,
+): Promise<{ session: string; threadId: string } | null> {
+  const rec = ctx.sessions.get(user, identifier);
+  if (rec) return null;
+
+  const target = await resolveSessionTarget(ctx, user, identifier);
+  if (target.kind === "live") return null;
+  return {
+    session: target.name ?? identifier,
+    threadId: target.threadId,
+  };
+}
+
+async function renderDetachedHistory(
+  ctx: DaemonContext,
+  user: string,
+  target: { session: string; threadId: string },
+  limit: number,
+  relativeSince: number | null,
+  sinceRaw: string | null,
+  format: string,
+  truncate: number | undefined,
+): Promise<Record<string, unknown>> {
+  if (sinceRaw && !relativeSince) {
+    throw new CodexTeamError("session_not_live", detachedAttachMessage(user, target.session));
+  }
+
+  const thread = await readDetachedThreadSnapshot(ctx, user, target);
+  const turns = selectDetachedTurns(thread, limit, relativeSince);
+  const response: Record<string, unknown> = {
+    session: target.session,
+    thread_id: target.threadId,
+    turns,
+    next_cursor: null,
+    format,
+  };
+  if (relativeSince) response.relative_since = relativeSince;
+  if (format === "markdown") {
+    response.markdown = renderHistory({
+      session: target.session,
+      thread_id: target.threadId,
+      turns,
+      nextCursor: null,
+    }, { truncate });
+  }
+  return response;
+}
+
+async function renderDetachedTail(
+  ctx: DaemonContext,
+  user: string,
+  target: { session: string; threadId: string },
+  limit: number,
+  format: string,
+  truncate: number | undefined,
+): Promise<Record<string, unknown>> {
+  const thread = await readDetachedThreadSnapshot(ctx, user, target);
+  const turns = selectDetachedTurns(thread, limit, null);
+  const response: Record<string, unknown> = {
+    session: target.session,
+    turns,
+    format,
+    follow: false,
+    thread,
+  };
+  if (format === "markdown") {
+    response.markdown = renderTail({
+      session: target.session,
+      thread_id: target.threadId,
+      turns,
+      thread,
+      follow: false,
+    }, { truncate });
+  }
+  return response;
+}
+
+async function readDetachedThreadSnapshot(
+  ctx: DaemonContext,
+  user: string,
+  target: { session: string; threadId: string },
+): Promise<{ id: string; turns?: unknown[] }> {
+  const client = await ctx.pool.acquireForAdhoc(user);
+  try {
+    return (await threadRead(client, target.threadId, ctx.retryOptions())).thread;
+  } catch {
+    throw new CodexTeamError("session_not_live", detachedAttachMessage(user, target.session));
+  }
+}
+
+function selectDetachedTurns(
+  thread: { turns?: unknown[] },
+  limit: number,
+  relativeSince: number | null,
+): TurnListItem[] {
+  const snapshotTurns = Array.isArray(thread.turns)
+    ? thread.turns.filter((turn): turn is TurnListItem => Boolean(turn) && typeof turn === "object" && typeof (turn as { id?: unknown }).id === "string")
+    : [];
+  const offset = relativeSince ? Math.max(0, relativeSince - 1) : 0;
+  return snapshotTurns.slice(offset, offset + limit);
+}
 
 async function resolveLive(
   ctx: DaemonContext,

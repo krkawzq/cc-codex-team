@@ -346,7 +346,11 @@ function createRenderContext(options: MarkdownRenderOptions = {}): RenderContext
   const normalized = normalizeTruncateOption(options.truncate);
   return {
     inlineMaxBytes: INLINE_MAX_BYTES,
-    truncateBytes: normalized === 0 ? null : normalized ?? INLINE_MAX_BYTES,
+    truncateBytes: normalized === 0
+      ? null
+      : normalized === null
+        ? INLINE_MAX_BYTES
+        : normalized,
   };
 }
 
