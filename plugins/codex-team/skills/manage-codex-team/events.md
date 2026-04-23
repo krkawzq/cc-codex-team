@@ -19,13 +19,25 @@ Every `monitor events` line is a JSON object with the shape:
 
 ### `turn.started` / `turn.completed`
 
-Turn lifecycle. `completed` is the authoritative end signal.
+Turn lifecycle. `completed` is the authoritative end signal. **The two have different payload shapes in 0.5.2** — `turn.started` carries the full `Turn` object, `turn.completed` is intentionally compact so the event log stays small.
 
 ```json
+// turn.started
 payload: { "turn_id", "status", "started_at", "completed_at", "duration_ms", "item_count", "turn" }
+
+// turn.completed (0.5.2 compact)
+payload: {
+  "turn_id",
+  "status",              // "completed" | "failed" | "interrupted" | "cancelled"
+  "duration_ms",
+  "items_count",         // NOTE: plural, differs from turn.started's "item_count"
+  "token_usage",         // { input, cached_input, output, reasoning_output, total } | null
+  "ended_at",            // wall-clock ms since epoch
+  "turn_items_included": false   // always false in 0.5.2 — fetch content with message tail / history
+}
 ```
 
-Status values: `inProgress` / `completed` / `failed` / `interrupted`.
+Status values for `turn.started`: `inProgress` / `completed` / `failed` / `interrupted`.
 
 ### `turn.error`
 

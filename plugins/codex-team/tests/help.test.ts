@@ -13,6 +13,7 @@ describe("renderHelp", () => {
     expect(help).toContain("message");
     expect(help).toContain("monitor");
     expect(help).toContain("cursor");
+    expect(help).toContain("Default JSON output is concise.");
   });
 
   it("renders session new flags from the schema", () => {
@@ -47,6 +48,14 @@ describe("renderHelp", () => {
     expect(renderHelp(["session", "info"])).toContain("--short");
     expect(renderHelp(["session", "list"])).toContain("cannot be used with --format table");
     expect(renderHelp(["message", "history"])).toContain("cannot be used with --format markdown");
+  });
+
+  it("documents --full on leaf commands", () => {
+    expect(renderHelp(["status"])).toContain("--full");
+    expect(renderHelp(["daemon", "config", "get"])).toContain("--full");
+    expect(renderHelp(["session", "new"])).toContain("--full");
+    expect(renderHelp(["message", "send"])).toContain("--full");
+    expect(renderHelp(["cursor", "save"])).toContain("--full");
   });
 
   it("marks monitor events stream and interval flags as mutually exclusive", () => {

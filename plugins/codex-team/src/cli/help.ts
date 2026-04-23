@@ -25,8 +25,19 @@ export interface HelpNode {
   needs_bearer: boolean;
 }
 
+const FULL_FLAG: HelpFlag = {
+  long: "--full",
+  type: "bool",
+  default: "false",
+  required: false,
+  description: "Print the full JSON response body instead of the default concise projection.",
+};
+
 function leaf(node: Omit<HelpNode, "subcommands">): HelpNode {
-  return { ...node, subcommands: [] };
+  const flags = node.flags.some((flag) => flag.long === "--full")
+    ? [...node.flags]
+    : [...node.flags, { ...FULL_FLAG }];
+  return { ...node, flags, subcommands: [] };
 }
 
 const PROMPT_SOURCE_FLAGS: HelpFlag[] = [
@@ -1198,6 +1209,9 @@ const HELP_TREE: HelpNode = {
     "codex-team --help",
     "codex-team -b $TOKEN session new audit --model gpt-5.4",
   ],
+  notes: [
+    "Default JSON output is concise. Pass --full on any leaf command to restore the complete response body.",
+  ],
   subcommands: [
     leaf({
       name: "version",
@@ -1355,8 +1369,8 @@ export function renderHelp(path: string[]): string {
   } else {
     sections.push(renderPositionals(node));
     sections.push(renderFlags(node));
-    if (node.notes && node.notes.length > 0) sections.push(renderNotes(node));
   }
+  if (node.notes && node.notes.length > 0) sections.push(renderNotes(node));
 
   sections.push(renderExamples(node));
 

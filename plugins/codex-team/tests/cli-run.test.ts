@@ -195,6 +195,106 @@ describe("runCli", () => {
     expect(stdoutSpy).not.toHaveBeenCalledWith(expect.stringContaining("\"ok\":true"));
   });
 
+  it("emits concise JSON by default for successful responses", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            token: "token-1",
+            created_at: "2026-04-23T00:00:00.000Z",
+            last_active_at: "2026-04-23T00:01:00.000Z",
+            live_sessions: 2,
+            retained_events: 4,
+            retained_limit: 10,
+            pending_requests: 1,
+            app_server_count: 3,
+            daemon: {
+              pid: 77,
+              started_at: "2026-04-23T00:59:00.000Z",
+              data_dir: "/tmp/data",
+            },
+          },
+        });
+      }, 0);
+    });
+
+    const code = await runCli(["-b", "token-1", "status"]);
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      "{\"ok\":true,\"data\":{\"token\":\"token-1\",\"live_sessions\":2,\"retained_events\":4,\"retained_limit\":10,\"pending_requests\":1,\"app_server_count\":3}}\n",
+    );
+  });
+
+  it("restores the full JSON body with --full", async () => {
+    let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
+    const socket = {
+      end: vi.fn(),
+      destroy: vi.fn(),
+      on: vi.fn(() => socket),
+      once: vi.fn(() => socket),
+    };
+
+    sockMocks.probeSock.mockResolvedValue(true);
+    sockMocks.connectSock.mockResolvedValue(socket);
+    sockMocks.onMessages.mockImplementation((_sock, handler) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({
+          kind: "response",
+          id: req.id,
+          result: {
+            token: "token-1",
+            created_at: "2026-04-23T00:00:00.000Z",
+            last_active_at: "2026-04-23T00:01:00.000Z",
+            live_sessions: 2,
+            retained_events: 4,
+            retained_limit: 10,
+            pending_requests: 1,
+            app_server_count: 3,
+            daemon: {
+              pid: 77,
+              started_at: "2026-04-23T00:59:00.000Z",
+              data_dir: "/tmp/data",
+            },
+          },
+        });
+      }, 0);
+    });
+
+    const code = await runCli(["-b", "token-1", "status", "--full"]);
+
+    expect(code).toBe(0);
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      "{\"ok\":true,\"data\":{\"token\":\"token-1\",\"created_at\":\"2026-04-23T00:00:00.000Z\",\"last_active_at\":\"2026-04-23T00:01:00.000Z\",\"live_sessions\":2,\"retained_events\":4,\"retained_limit\":10,\"pending_requests\":1,\"app_server_count\":3,\"daemon\":{\"pid\":77,\"started_at\":\"2026-04-23T00:59:00.000Z\",\"data_dir\":\"/tmp/data\"}}}\n",
+    );
+  });
+
+  it("rejects --short and --full together before contacting the daemon", async () => {
+    const code = await runCli(["-b", "token-1", "status", "--short", "--full"]);
+
+    expect(code).toBe(1);
+    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("--short and --full are mutually exclusive"));
+    expect(sockMocks.probeSock).not.toHaveBeenCalled();
+  });
+
   it("emits one compact line for successful --short responses", async () => {
     let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
     const socket = {

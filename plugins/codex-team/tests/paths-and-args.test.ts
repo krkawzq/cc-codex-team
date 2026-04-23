@@ -215,4 +215,11 @@ describe("parseArgs", () => {
     expect(wait.flags.for).toBe("turn-1");
     expect(wait.flags.timeout).toBe("30");
   });
+
+  it("treats --short and --full as mutually exclusive output modes", () => {
+    const parsed = parseArgs(["-b", "token-1", "status", "--short", "--full"]);
+
+    expect(parsed.commandPath).toEqual(["status"]);
+    expect(parsed.unknown).toBe("--short and --full are mutually exclusive");
+  });
 });

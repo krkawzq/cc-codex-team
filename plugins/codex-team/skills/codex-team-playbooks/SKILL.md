@@ -1,7 +1,7 @@
 ---
 name: codex-team-playbooks
 description: >-
-  Library of multi-session collaboration patterns for codex-team. Trigger when deciding how many Codex workers to spin up, what roles each plays, and the communication protocol between them. Typical task shapes: worker+reviewer, map-reduce, plan-execute-verify, pipeline, reflexion, debate, swarm/hierarchical. Not for: single-session mechanics (`manage-codex-team`), tuning (`configure-codex-team`), error triage (`recover-codex-team`).
+  Library of multi-session collaboration patterns (topologies) for codex-team. **Proactively load this skill once you've decided to use codex-team and need to pick how many workers to spawn, what roles each plays, and how they communicate — especially when the task involves parallel/concurrent workers, fan-out, map-reduce, pipelines, worker+reviewer loops, plan→execute→verify, reflexion, debate, swarm, hierarchical delegation, 并行 / 并发 / 分工协作 / 多 agent 配合.** Trigger signals: ≥2 independent subtasks, need for a dedicated reviewer/critic, multi-stage processing, delegation trees, dynamic task claim. Not for: single-session mechanics (`manage-codex-team`), CLI lookup / tuning (`configure-codex-team`), error triage (`recover-codex-team`), or deciding whether to use codex-team at all (`using-codex-team`).
 ---
 
 # codex-team Playbooks

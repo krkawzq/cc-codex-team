@@ -14,6 +14,7 @@ import { ConfigStore } from "../daemon/config";
 import { validateApprovalAction } from "./approval-validation";
 import { VERSION } from "../version";
 import { formatShort } from "../format/short";
+import { formatCompact } from "../format/compact";
 
 const DAEMON_POLL_INTERVAL_MS = 100;
 const DEFAULT_DAEMON_READY_TIMEOUT_MS = 15000;
@@ -185,7 +186,8 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
       process.stdout.write(markdown + "\n");
       return exitCodeForResult(method, resp.result);
     }
-    process.stdout.write(JSON.stringify({ ok: true, data: resp.result }) + "\n");
+    const rendered = truthy(parsed.flags.full) ? resp.result : formatCompact(method, resp.result);
+    process.stdout.write(JSON.stringify({ ok: true, data: rendered }) + "\n");
     return exitCodeForResult(method, resp.result);
   } catch (e) {
     process.stdout.write(
@@ -285,7 +287,8 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
         if (markdown !== null) {
           writeStdout(markdown + "\n", ackAfterWrite);
         } else {
-          writeStdout(JSON.stringify(msg.data) + "\n", ackAfterWrite);
+          const rendered = truthy(parsed.flags.full) ? msg.data : formatCompact(method, msg.data);
+          writeStdout(JSON.stringify(rendered) + "\n", ackAfterWrite);
         }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {

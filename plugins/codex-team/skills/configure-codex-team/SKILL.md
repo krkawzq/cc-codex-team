@@ -1,7 +1,7 @@
 ---
 name: configure-codex-team
 description: >-
-  CLI reference, daemon config, codex profiles, and environment overrides for codex-team. Trigger when looking up a command/flag, wanting to change a daemon knob (`daemon config set …`), adjusting codex.default_* values, verifying Node/codex prerequisites, or troubleshooting env var routing. Not for: session lifecycle (`manage-codex-team`), failure triage (`recover-codex-team`), collaboration patterns (`codex-team-playbooks`).
+  Reference index for codex-team: complete CLI (every command, positional, flag, error code), daemon config keys (hot vs. restart), codex profiles (`--profile` contract, precedence), environment overrides (`CODEX_TEAM_DATA_DIR`, `CODEX_TEAM_SOCK`, `CLAUDE_PLUGIN_DATA`). **Load proactively when looking up any command/flag signature, changing a daemon knob (`daemon config set …`), tuning `codex.default_*` / `retry.*` / `monitor.*` / `app_server.*`, defining reusable codex profiles (`reviewer`, `fixer`, `planner`, `tester`, `explorer`), checking Node/codex prerequisites, troubleshooting env var routing, or verifying `dist` freshness.** Not for: session lifecycle (`manage-codex-team`), failure triage (`recover-codex-team`), collaboration patterns (`codex-team-playbooks`), first-time mental model (`using-codex-team`).
 ---
 
 # Configure codex-team

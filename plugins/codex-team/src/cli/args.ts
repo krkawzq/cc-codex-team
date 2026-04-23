@@ -162,6 +162,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
+  if (truthyFlag(result.flags.short) && truthyFlag(result.flags.full)) {
+    result.unknown = "--short and --full are mutually exclusive";
+  }
+
   return result;
 }
 
@@ -226,4 +230,9 @@ const SHORT_COMMANDS: Set<string> = new Set([
 
 export function supportsShort(method: string): boolean {
   return SHORT_COMMANDS.has(method);
+}
+
+function truthyFlag(value: unknown): boolean {
+  if (Array.isArray(value)) return truthyFlag(value[value.length - 1]);
+  return value === true || value === "true" || value === "1";
 }

@@ -404,6 +404,9 @@ function parseArgs(argv) {
       result.positionals.push(a);
     }
   }
+  if (truthyFlag(result.flags.short) && truthyFlag(result.flags.full)) {
+    result.unknown = "--short and --full are mutually exclusive";
+  }
   return result;
 }
 function isFlagLike(s) {
@@ -461,10 +464,22 @@ var SHORT_COMMANDS = /* @__PURE__ */ new Set([
 function supportsShort(method) {
   return SHORT_COMMANDS.has(method);
 }
+function truthyFlag(value) {
+  if (Array.isArray(value)) return truthyFlag(value[value.length - 1]);
+  return value === true || value === "true" || value === "1";
+}
 
 // src/cli/help.ts
+var FULL_FLAG = {
+  long: "--full",
+  type: "bool",
+  default: "false",
+  required: false,
+  description: "Print the full JSON response body instead of the default concise projection."
+};
 function leaf(node) {
-  return { ...node, subcommands: [] };
+  const flags = node.flags.some((flag) => flag.long === "--full") ? [...node.flags] : [...node.flags, { ...FULL_FLAG }];
+  return { ...node, flags, subcommands: [] };
 }
 var PROMPT_SOURCE_FLAGS = [
   {
@@ -1623,6 +1638,9 @@ var HELP_TREE = {
     "codex-team --help",
     "codex-team -b $TOKEN session new audit --model gpt-5.4"
   ],
+  notes: [
+    "Default JSON output is concise. Pass --full on any leaf command to restore the complete response body."
+  ],
   subcommands: [
     leaf({
       name: "version",
@@ -1765,8 +1783,8 @@ function renderHelp(path16) {
   } else {
     sections.push(renderPositionals(node));
     sections.push(renderFlags(node));
-    if (node.notes && node.notes.length > 0) sections.push(renderNotes(node));
   }
+  if (node.notes && node.notes.length > 0) sections.push(renderNotes(node));
   sections.push(renderExamples(node));
   return `${sections.map((section) => section.join("\n")).join("\n\n")}
 `;
@@ -2447,6 +2465,391 @@ function encodeFooterValue(value) {
   return typeof encoded === "string" ? encoded : null;
 }
 
+// src/format/compact.ts
+function formatCompact(method, data) {
+  switch (method) {
+    case "version":
+      return pickFields(data, ["daemon_version"]);
+    case "status":
+      return pickFields(data, [
+        "token",
+        "live_sessions",
+        "retained_events",
+        "retained_limit",
+        "pending_requests",
+        "app_server_count"
+      ]);
+    case "daemon:status":
+      return pickFields(data, [
+        "pid",
+        "version",
+        "uptime_s",
+        "sock",
+        "session_count",
+        "user_count",
+        "app_server_count",
+        "dist_age_seconds",
+        "source_newer_than_dist"
+      ]);
+    case "daemon:start":
+      return pickFields(data, ["already_running"]);
+    case "daemon:stop":
+      return pickFields(data, ["stopping", "force"]);
+    case "daemon:restart":
+      return pickFields(data, ["restarting"]);
+    case "daemon:logs":
+      return asObject2(data);
+    case "daemon:user:create":
+      return pickFields(data, ["token"]);
+    case "daemon:user:destroy":
+      return pickFields(data, ["destroyed"]);
+    case "daemon:user:list":
+      return compactDaemonUserList(data);
+    case "daemon:config:get":
+      return pickFields(data, ["key", "value", "default", "source", "needs_restart"]);
+    case "daemon:config:set":
+      return pickFields(data, ["key", "value", "needs_restart"]);
+    case "daemon:config:unset":
+      return pickFields(data, ["key", "needs_restart"]);
+    case "daemon:config:list":
+      return compactDaemonConfigList(data);
+    case "daemon:config:reset":
+      return pickFields(data, ["reset"]);
+    case "session:new":
+      return compactSessionWithFlags(data, {
+        sessionOptions: { includeCreatedAt: true }
+      });
+    case "session:attach":
+      return compactSessionWithFlags(data, {
+        sessionOptions: {},
+        extraKeys: ["noop"]
+      });
+    case "session:detach":
+      return compactSessionWithFlags(data, {
+        sessionOptions: {},
+        extraKeys: ["noop", "graceful"],
+        allowNullSession: true
+      });
+    case "session:fork":
+      return compactSessionWithFlags(data, {
+        sessionOptions: {}
+      });
+    case "session:rename":
+      return compactSessionWithFlags(data, {
+        sessionOptions: { nameOnly: true }
+      });
+    case "session:info":
+      return compactSessionInfo(data);
+    case "session:context":
+      return compactSessionContext(data);
+    case "session:list":
+      return compactSessionList(data);
+    case "session:health":
+      return pickFields(data, [
+        "session",
+        "thread_id",
+        "state",
+        "busy",
+        "current_turn_id",
+        "current_turn_elapsed_ms",
+        "current_item_type",
+        "items_done_in_turn",
+        "pending_approval_requests",
+        "pending_user_input_requests",
+        "app_server_alive",
+        "last_event_id"
+      ]);
+    case "session:heal":
+      return compactSessionHeal(data);
+    case "message:send":
+      return pickFields(data, ["turn_id", "started", "queue_id", "queued_depth"]);
+    case "message:peer":
+      return pickFields(data, ["turn_id", "peered"]);
+    case "message:interrupt":
+      return pickFields(data, ["turn_id", "interrupted"]);
+    case "message:approval":
+    case "message:answer":
+      return {};
+    case "message:history":
+      return compactMessageHistory(data);
+    case "message:tail":
+      return compactMessageTail(data);
+    case "message:wait":
+      return pickFields(data, [
+        "thread_id",
+        "turn_id",
+        "outcome",
+        "event_type",
+        "event_id",
+        "error",
+        "duration_ms",
+        "items_count",
+        "timeout_s"
+      ]);
+    case "monitor:events":
+      return compactMonitorEvent(data);
+    case "monitor:alarm":
+      return asObject2(data);
+    case "cursor:save":
+      return compactCursorSave(data);
+    case "cursor:list":
+      return compactCursorList(data);
+    case "cursor:get":
+      return pickFields(data, ["event_id"]);
+    case "cursor:delete":
+      return pickFields(data, ["deleted", "name"]);
+    default:
+      return asObject2(data);
+  }
+}
+function compactDaemonUserList(data) {
+  const value = asObject2(data);
+  return {
+    users: asArray(value.users).map((entry) => pickFields(entry, ["token"]))
+  };
+}
+function compactDaemonConfigList(data) {
+  const value = asObject2(data);
+  return {
+    config: asArray(value.config).map((entry) => pickFields(entry, [
+      "key",
+      "value",
+      "default",
+      "explicit",
+      "needs_restart",
+      "type"
+    ]))
+  };
+}
+function compactSessionWithFlags(data, options) {
+  const value = asObject2(data);
+  const out = {};
+  if (hasOwn2(value, "session")) {
+    if (value.session === null && options.allowNullSession) {
+      out.session = null;
+    } else {
+      out.session = projectSession(value.session, options.sessionOptions);
+    }
+  }
+  for (const key of options.extraKeys ?? []) {
+    copyIfPresent(out, value, key);
+  }
+  return out;
+}
+function compactSessionInfo(data) {
+  const value = asObject2(data);
+  if (value.session === null) {
+    const out = { session: null };
+    copyIfPresent(out, value, "live");
+    const thread = projectThread(value.thread);
+    if (Object.keys(thread).length > 0) out.thread = thread;
+    return out;
+  }
+  return compactSessionWithFlags(data, {
+    sessionOptions: {
+      includeModel: true,
+      includeTurnCount: true,
+      includeCurrentTurnId: true,
+      includeItemsInTurn: true,
+      includePendingApprovals: true,
+      includePendingUserInputs: true
+    }
+  });
+}
+function compactSessionContext(data) {
+  const value = asObject2(data);
+  const out = pickFields(value, ["thread_id"]);
+  const thread = projectThread(value.thread);
+  if (Object.keys(thread).length > 0) out.thread = thread;
+  return out;
+}
+function compactSessionList(data) {
+  const value = asObject2(data);
+  const all = value.all === true;
+  const out = {
+    sessions: asArray(value.sessions).map((entry) => all ? projectThread(entry) : projectSession(entry, {
+      includeModel: true,
+      includeTurnCount: true,
+      includeCurrentTurnId: true
+    }))
+  };
+  copyIfPresent(out, value, "all");
+  if (all) copyIfPresent(out, value, "next_cursor");
+  return out;
+}
+function compactSessionHeal(data) {
+  const value = asObject2(data);
+  const out = {};
+  if (hasOwn2(value, "session")) out.session = projectSession(value.session, {});
+  copyIfPresent(out, value, "healed");
+  copyIfPresent(out, value, "note");
+  return out;
+}
+function compactMessageHistory(data) {
+  const value = asObject2(data);
+  const out = {
+    session: value.session,
+    thread_id: value.thread_id,
+    turns: asArray(value.turns)
+  };
+  copyIfPresent(out, value, "next_cursor");
+  copyIfPresent(out, value, "relative_since");
+  return stripUndefined(out);
+}
+function compactMessageTail(data) {
+  const value = asObject2(data);
+  const out = {
+    session: value.session,
+    turns: asArray(value.turns)
+  };
+  copyIfPresent(out, value, "follow");
+  const thread = projectThread(value.thread);
+  if (Object.keys(thread).length > 0) out.thread = thread;
+  return stripUndefined(out);
+}
+function compactMonitorEvent(data) {
+  const value = asObject2(data);
+  if (!hasOwn2(value, "payload")) {
+    return stripUndefined({
+      id: value.id,
+      ts: value.ts,
+      type: value.type,
+      session: value.session,
+      thread_id: value.thread_id,
+      key: value.key
+    });
+  }
+  return stripUndefined({
+    id: value.id,
+    ts: value.ts,
+    type: value.type,
+    session: value.session,
+    thread_id: value.thread_id,
+    key: summarizeEventKey(value)
+  });
+}
+function compactCursorSave(data) {
+  const value = asObject2(data);
+  return {
+    cursor: projectCursor(value.cursor, { includeUpdatedAt: false, includeAutoUpdate: false })
+  };
+}
+function compactCursorList(data) {
+  const value = asObject2(data);
+  return {
+    cursors: asArray(value.cursors).map((entry) => projectCursor(entry, {
+      includeUpdatedAt: true,
+      includeAutoUpdate: true
+    }))
+  };
+}
+function projectSession(value, options) {
+  const session = asObject2(value);
+  if (options.nameOnly) {
+    return pickFields(session, ["name"]);
+  }
+  const out = pickFields(session, ["name", "thread_id", "state"]);
+  if (options.includeCreatedAt) copyIfPresent(out, session, "created_at");
+  if (options.includeModel) copyIfPresent(out, session, "model");
+  if (options.includeTurnCount) copyIfPresent(out, session, "turn_count");
+  if (options.includeCurrentTurnId) copyIfPresent(out, session, "current_turn_id");
+  if (options.includeItemsInTurn) copyIfPresent(out, session, "items_in_turn");
+  if (options.includePendingApprovals) copyIfPresent(out, session, "pending_approvals");
+  if (options.includePendingUserInputs) copyIfPresent(out, session, "pending_user_inputs");
+  return out;
+}
+function projectThread(value) {
+  const thread = asObject2(value);
+  const out = pickFields(thread, [
+    "id",
+    "name",
+    "cwd",
+    "source",
+    "model_provider",
+    "created_at",
+    "updated_at"
+  ]);
+  const status2 = extractStatus2(thread.status);
+  if (status2) out.status = status2;
+  return out;
+}
+function projectCursor(value, options) {
+  const cursor = asObject2(value);
+  const out = pickFields(cursor, ["name", "event_id"]);
+  if (options.includeUpdatedAt) copyIfPresent(out, cursor, "updated_at");
+  if (options.includeAutoUpdate) copyIfPresent(out, cursor, "auto_update");
+  return out;
+}
+function summarizeEventKey(event) {
+  const payload = asObject2(event.payload);
+  const type = asString2(event.type);
+  if (!type) return null;
+  if (type.startsWith("turn.")) return scalarString(payload.turn_id);
+  if (type === "session.crashed" || type === "session.closed") {
+    return labeledSummaryValue("reason", payload.reason ?? payload.crash_reason ?? payload.why);
+  }
+  if (type === "auto_approved") {
+    return labeledSummaryValue("matched_pattern", payload.matched_pattern ?? payload.matchedPattern) ?? scalarString(payload.request_id);
+  }
+  if (type.startsWith("approval.") || type === "user_input.request" || type === "server_request_resolved") {
+    return scalarString(payload.request_id);
+  }
+  if (type.startsWith("item.")) {
+    return scalarString(payload.type) ?? scalarString(payload.item_type) ?? scalarString(payload.item_id);
+  }
+  if (type.startsWith("thread.")) return scalarString(payload.thread_id) ?? scalarString(event.thread_id);
+  if (type.startsWith("hook.")) return scalarString(payload.hook_id);
+  if (type.startsWith("mcp_server.")) return scalarString(payload.name);
+  if (type.startsWith("fuzzy_file_search.")) return scalarString(payload.search_session_id);
+  if (type === "monitor.overflow") return scalarString(payload.dropped_count);
+  return scalarString(payload.turn_id) ?? scalarString(payload.request_id) ?? scalarString(payload.type) ?? scalarString(payload.item_id) ?? scalarString(payload.thread_id) ?? scalarString(payload.name) ?? scalarString(event.thread_id);
+}
+function labeledSummaryValue(label, value) {
+  const rendered = scalarString(value);
+  return rendered ? `${label}=${rendered}` : null;
+}
+function extractStatus2(value) {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const type = value.type;
+    return typeof type === "string" && type.length > 0 ? type : null;
+  }
+  return null;
+}
+function pickFields(value, keys) {
+  const record = asObject2(value);
+  const out = {};
+  for (const key of keys) copyIfPresent(out, record, key);
+  return out;
+}
+function copyIfPresent(target, source, key) {
+  if (hasOwn2(source, key)) target[key] = source[key];
+}
+function stripUndefined(record) {
+  return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== void 0));
+}
+function asObject2(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  return {};
+}
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+function asString2(value) {
+  if (Array.isArray(value)) return asString2(value[value.length - 1]);
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+function scalarString(value) {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+function hasOwn2(record, key) {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
 // src/cli/run.ts
 var DAEMON_POLL_INTERVAL_MS = 100;
 var DEFAULT_DAEMON_READY_TIMEOUT_MS = 15e3;
@@ -2595,7 +2998,8 @@ async function dispatchCommand(sockPath, parsed, method) {
       process.stdout.write(markdown + "\n");
       return exitCodeForResult(method, resp.result);
     }
-    process.stdout.write(JSON.stringify({ ok: true, data: resp.result }) + "\n");
+    const rendered = truthy(parsed.flags.full) ? resp.result : formatCompact(method, resp.result);
+    process.stdout.write(JSON.stringify({ ok: true, data: rendered }) + "\n");
     return exitCodeForResult(method, resp.result);
   } catch (e) {
     process.stdout.write(
@@ -2692,7 +3096,8 @@ async function runStream(sock, parsed, method) {
         if (markdown !== null) {
           writeStdout(markdown + "\n", ackAfterWrite);
         } else {
-          writeStdout(JSON.stringify(msg.data) + "\n", ackAfterWrite);
+          const rendered = truthy(parsed.flags.full) ? msg.data : formatCompact(method, msg.data);
+          writeStdout(JSON.stringify(rendered) + "\n", ackAfterWrite);
         }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
@@ -3349,7 +3754,7 @@ function sessionRuntimeDefaults() {
   };
 }
 function normalizeTokenUsage(value) {
-  const usage = asObject2(value);
+  const usage = asObject3(value);
   const prompt = asNumber(
     usage.prompt ?? usage.prompt_tokens ?? usage.promptTokens ?? usage.input ?? usage.input_tokens ?? usage.inputTokens
   );
@@ -3368,7 +3773,7 @@ function isoFromUnixSeconds(value, fallback = null) {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return new Date(value * 1e3).toISOString();
 }
-function asObject2(value) {
+function asObject3(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
   return {};
 }
@@ -3380,7 +3785,7 @@ function normalizeAutoApprovePatterns(value) {
   return value.filter((pattern) => typeof pattern === "string");
 }
 function normalizeLoadedRecord(value) {
-  const rec = asObject2(value);
+  const rec = asObject3(value);
   const name = typeof rec.name === "string" ? rec.name : null;
   const threadId = typeof rec.thread_id === "string" && rec.thread_id.length > 0 ? rec.thread_id : null;
   if (!name || !threadId) return null;
@@ -4535,7 +4940,7 @@ async function threadSetName(client, threadId, name, retry = DEFAULT_RETRY) {
 }
 async function threadList(client, params = {}, retry = DEFAULT_RETRY) {
   const result = await retryOnOverload(() => client.request("thread/list", params), retry);
-  const obj = asObject3(result);
+  const obj = asObject4(result);
   const data = Array.isArray(obj.data) ? obj.data : [];
   return {
     data,
@@ -4545,8 +4950,8 @@ async function threadList(client, params = {}, retry = DEFAULT_RETRY) {
 }
 async function threadRead(client, threadId, retry = DEFAULT_RETRY) {
   const result = await retryOnOverload(() => client.request("thread/read", { threadId }), retry);
-  const obj = asObject3(result);
-  const thread = asObject3(obj.thread);
+  const obj = asObject4(result);
+  const thread = asObject4(obj.thread);
   if (!thread.id) throw new Error(`thread/read: response missing thread.id`);
   return { thread };
 }
@@ -4562,7 +4967,7 @@ async function threadTurnsList(client, threadId, opts = {}, retry = DEFAULT_RETR
   if (opts.cursor !== void 0) params.cursor = opts.cursor;
   if (opts.sortDirection !== void 0) params.sortDirection = opts.sortDirection;
   const result = await retryOnOverload(() => client.request("thread/turns/list", params), retry);
-  const obj = asObject3(result);
+  const obj = asObject4(result);
   return {
     data: Array.isArray(obj.data) ? obj.data : [],
     nextCursor: obj.nextCursor ?? null,
@@ -4571,8 +4976,8 @@ async function threadTurnsList(client, threadId, opts = {}, retry = DEFAULT_RETR
 }
 async function turnStart(client, threadId, input, retry = DEFAULT_RETRY) {
   const result = await retryOnOverload(() => client.request("turn/start", { threadId, input }), retry);
-  const obj = asObject3(result);
-  const turn = asObject3(obj.turn);
+  const obj = asObject4(result);
+  const turn = asObject4(obj.turn);
   const turnId = typeof turn.id === "string" ? turn.id : null;
   if (!turnId) throw new Error("turn/start: response missing turn.id");
   return { turnId };
@@ -4587,14 +4992,14 @@ function threadIdOf(resp) {
   return resp.thread.id;
 }
 function coerceLifecycle(result, rpc) {
-  const obj = asObject3(result);
-  const thread = asObject3(obj.thread);
+  const obj = asObject4(result);
+  const thread = asObject4(obj.thread);
   if (typeof thread.id !== "string" || !thread.id) {
     throw new Error(`${rpc}: response missing thread.id`);
   }
   return { ...obj, thread };
 }
-function asObject3(value) {
+function asObject4(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value;
   }
@@ -6010,7 +6415,7 @@ var daemonLogsStream = async (ctx, req, stream) => {
   const logPath = ctx.logPath;
   const follow = isTrue(getFlag(req.params, "follow")) || isTrue(getFlag(req.params, "f"));
   const n = toInt3(getFlag(req.params, "n"), 100);
-  const level = asString2(getFlag(req.params, "level"));
+  const level = asString3(getFlag(req.params, "level"));
   let offset = 0;
   let closed = false;
   let debounceTimer = null;
@@ -6091,7 +6496,7 @@ function toInt3(v, fallback) {
   }
   return fallback;
 }
-function asString2(v) {
+function asString3(v) {
   return typeof v === "string" ? v : null;
 }
 function lineMatchesLevel(line, level) {
@@ -6430,7 +6835,7 @@ function renderCommandExecution(item, ctx) {
   const attrs = baseItemAttrs(item, { includeType: false });
   const cmd = extractCommand(item);
   if (cmd) attrs.cmd = fitInlineText(cmd, ctx);
-  const cwd = asString3(item.cwd);
+  const cwd = asString4(item.cwd);
   if (cwd) attrs.cwd = cwd;
   const exit = item.exit ?? item.exitCode;
   if (exit !== void 0) attrs.exit = exit;
@@ -6441,7 +6846,7 @@ function renderCommandExecution(item, ctx) {
 }
 function renderFileChange(item, ctx) {
   const attrs = baseItemAttrs(item, { includeType: false });
-  const path16 = asString3(item.path);
+  const path16 = asString4(item.path);
   if (path16) attrs.path = path16;
   if (item.status !== void 0) attrs.status = item.status;
   const diffBody = extractDiff(item) ?? "";
@@ -6449,7 +6854,7 @@ function renderFileChange(item, ctx) {
 }
 function renderMcpToolCall(item, ctx) {
   const attrs = baseItemAttrs(item, { includeType: false });
-  const server = asString3(item.server) ?? asString3(item.serverName);
+  const server = asString4(item.server) ?? asString4(item.serverName);
   if (server) attrs.server = server;
   const tool = extractToolName(item);
   attrs.tool = tool;
@@ -6463,15 +6868,15 @@ function renderMcpToolCall(item, ctx) {
   return renderTag(`tool.${toTagSegment(tool)}`, attrs, bodyParts.join("\n\n"));
 }
 function renderHook(item, type, ctx) {
-  const run = asObject4(item.run);
+  const run = asObject5(item.run);
   const attrs = baseItemAttrs(item, { includeType: false });
-  const hookId = asString3(item.hook_id) ?? asString3(item.hookId) ?? asString3(run.id);
+  const hookId = asString4(item.hook_id) ?? asString4(item.hookId) ?? asString4(run.id);
   if (hookId) attrs.hook_id = hookId;
-  const status2 = asString3(item.status) ?? asString3(run.status);
+  const status2 = asString4(item.status) ?? asString4(run.status);
   if (status2) attrs.status = status2;
   const command = extractCommand(item) ?? extractCommand(run);
   if (command) attrs.command = fitInlineText(command, ctx);
-  const cwd = asString3(item.cwd) ?? asString3(run.cwd);
+  const cwd = asString4(item.cwd) ?? asString4(run.cwd);
   if (cwd) attrs.cwd = cwd;
   const exit = item.exit ?? item.exitCode ?? run.exit ?? run.exitCode;
   if (exit !== void 0) attrs.exit = exit;
@@ -6483,15 +6888,15 @@ function renderHook(item, type, ctx) {
   return renderTag(tagName, attrs, renderBodyTag("hook-output", {}, output, ctx));
 }
 function renderAutoApprovalReview(item, ctx) {
-  const review = asObject4(item.review);
+  const review = asObject5(item.review);
   const attrs = baseItemAttrs(item, { includeType: false });
-  const kind = asString3(item.kind) ?? asString3(review.kind) ?? asString3(review.request_kind) ?? asString3(review.requestKind) ?? asString3(review.approval_kind) ?? asString3(review.approvalKind);
+  const kind = asString4(item.kind) ?? asString4(review.kind) ?? asString4(review.request_kind) ?? asString4(review.requestKind) ?? asString4(review.approval_kind) ?? asString4(review.approvalKind);
   if (kind) attrs.kind = kind;
-  const matchedPattern = asString3(item.matched_pattern) ?? asString3(item.matchedPattern) ?? asString3(review.matched_pattern) ?? asString3(review.matchedPattern) ?? asString3(review.pattern);
+  const matchedPattern = asString4(item.matched_pattern) ?? asString4(item.matchedPattern) ?? asString4(review.matched_pattern) ?? asString4(review.matchedPattern) ?? asString4(review.pattern);
   if (matchedPattern) attrs.matched_pattern = fitInlineText(matchedPattern, ctx);
   const commandPreview = extractCommandPreview(item, review);
   if (commandPreview) attrs.command_preview = fitInlineText(commandPreview, ctx);
-  const decision = asString3(item.decision) ?? asString3(item.action) ?? asString3(item.decision_source) ?? asString3(item.decisionSource) ?? asString3(review.decision) ?? asString3(review.action);
+  const decision = asString4(item.decision) ?? asString4(item.action) ?? asString4(item.decision_source) ?? asString4(item.decisionSource) ?? asString4(review.decision) ?? asString4(review.action);
   if (decision) attrs.decision = fitInlineText(decision, ctx);
   return renderInline("auto-approval-review", attrs);
 }
@@ -6543,7 +6948,7 @@ function extractReasoningText(item) {
   return firstText(item.text, item.summaryText, item.summary, item.content);
 }
 function extractCommand(item) {
-  const direct = asString3(item.command) ?? asString3(item.cmd);
+  const direct = asString4(item.command) ?? asString4(item.cmd);
   if (direct) return direct;
   const command = item.command;
   if (Array.isArray(command)) {
@@ -6557,22 +6962,22 @@ function extractCommand(item) {
   return null;
 }
 function extractCommandOutput(item) {
-  const direct = asString3(item.output);
+  const direct = asString4(item.output);
   if (direct) return direct;
   const output = item.output;
   if (output && typeof output === "object" && !Array.isArray(output)) {
-    const stdout = asString3(output.stdout);
-    const stderr = asString3(output.stderr);
+    const stdout = asString4(output.stdout);
+    const stderr = asString4(output.stderr);
     const merged = joinText([stdout, stderr], "\n");
     if (merged) return merged;
   }
-  return joinText([asString3(item.stdout), asString3(item.stderr)], "\n");
+  return joinText([asString4(item.stdout), asString4(item.stderr)], "\n");
 }
 function extractDiff(item) {
-  return asString3(item.diff) ?? asString3(item.patch) ?? asString3(item.changes);
+  return asString4(item.diff) ?? asString4(item.patch) ?? asString4(item.changes);
 }
 function extractToolName(item) {
-  return asString3(item.tool) ?? asString3(item.toolName) ?? asString3(item.name) ?? "unknown";
+  return asString4(item.tool) ?? asString4(item.toolName) ?? asString4(item.name) ?? "unknown";
 }
 function extractMcpArgs(item) {
   const args = item.args ?? item.arguments ?? item.input ?? item.parameters;
@@ -6586,7 +6991,7 @@ function extractHookOutput(item, run) {
 }
 function extractCommandPreview(...values) {
   for (const value of values) {
-    const preview = asString3(value.command_preview) ?? asString3(value.commandPreview) ?? extractCommand(value);
+    const preview = asString4(value.command_preview) ?? asString4(value.commandPreview) ?? extractCommand(value);
     if (preview) return preview;
   }
   return null;
@@ -6685,10 +7090,10 @@ function joinText(values, separator) {
 function stripOuterNewlines(value) {
   return value.replace(/^\n+/, "").replace(/\n+$/, "");
 }
-function asString3(value) {
+function asString4(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
-function asObject4(value) {
+function asObject5(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value;
   }
@@ -6780,14 +7185,14 @@ var sessionNew = async (ctx, req) => {
     name,
     thread_id: threadId,
     state: "live",
-    model: asString4(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
-    cwd: asString4(flags["cwd"]) ?? process.cwd(),
-    sandbox: asString4(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
-    approval: asString4(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
-    effort: asString4(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
-    profile: asString4(flags["profile"]) ?? void 0,
-    base_instructions: asString4(flags["base-instructions"]) ?? void 0,
-    developer_instructions: asString4(flags["developer-instructions"]) ?? void 0,
+    model: asString5(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
+    cwd: asString5(flags["cwd"]) ?? process.cwd(),
+    sandbox: asString5(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
+    approval: asString5(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
+    effort: asString5(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
+    profile: asString5(flags["profile"]) ?? void 0,
+    base_instructions: asString5(flags["base-instructions"]) ?? void 0,
+    developer_instructions: asString5(flags["developer-instructions"]) ?? void 0,
     experimental_tools: experimentalTools.length > 0 ? experimentalTools : void 0,
     autoApprovePatterns,
     created_at: now,
@@ -6932,7 +7337,7 @@ var sessionFork = async (ctx, req) => {
   const identifier = asPositional(req, 0, "session");
   const newNameRaw = asPositionalOptional(req, 1);
   const flags = asFlags(req);
-  const atTurn = asString4(flags["at-turn"]);
+  const atTurn = asString5(flags["at-turn"]);
   const source = ctx.sessions.get(user, identifier);
   if (!source) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
   let newName = newNameRaw ?? generateSessionName();
@@ -6998,7 +7403,7 @@ var sessionContext = async (ctx, req) => {
   const user = req.bearer;
   const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
-  const format = asString4(flags["format"]) ?? "json";
+  const format = asString5(flags["format"]) ?? "json";
   if (format !== "json" && format !== "markdown") {
     throw invalidParams(`--format must be 'json' or 'markdown'`);
   }
@@ -7037,8 +7442,8 @@ var sessionList = async (ctx, req) => {
   const user = req.bearer;
   const flags = asFlags(req);
   const all = isTrue2(flags["all"]);
-  const sortField = asString4(flags["sort"]) ?? "last_active";
-  const format = asString4(flags["format"]) ?? "json";
+  const sortField = asString5(flags["sort"]) ?? "last_active";
+  const format = asString5(flags["format"]) ?? "json";
   if (format !== "json" && format !== "table") {
     throw invalidParams(`--format must be 'json' or 'table'`);
   }
@@ -7173,7 +7578,7 @@ function asPositionalOptional(req, idx) {
   const v = positionals[idx];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
-function asString4(v) {
+function asString5(v) {
   if (Array.isArray(v)) return v[v.length - 1] ?? null;
   return typeof v === "string" ? v : null;
 }
@@ -7183,23 +7588,23 @@ function isTrue2(v) {
 async function buildThreadStartParams(ctx, flags, experimentalTools) {
   const p = {};
   const config = {};
-  const model = asString4(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
+  const model = asString5(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
   if (model) p.model = model;
-  const cwd = asString4(flags["cwd"]) ?? process.cwd();
+  const cwd = asString5(flags["cwd"]) ?? process.cwd();
   if (cwd) p.cwd = cwd;
-  const sandbox = asString4(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
+  const sandbox = asString5(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
   if (sandbox) p.sandbox = sandbox;
-  const approval = asString4(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
+  const approval = asString5(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
   if (approval) p.approvalPolicy = approval;
-  const effort = asString4(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
+  const effort = asString5(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
   if (effort) config.model_reasoning_effort = effort;
-  const profile = asString4(flags["profile"]);
+  const profile = asString5(flags["profile"]);
   if (profile) config.profile = profile;
   const baseInstr = await readInstructionFile(flags["base-instructions"], "--base-instructions");
   if (baseInstr) p.baseInstructions = baseInstr;
   const devInstr = await readInstructionFile(flags["developer-instructions"], "--developer-instructions");
   if (devInstr) p.developerInstructions = devInstr;
-  const personality = asString4(flags["personality"]);
+  const personality = asString5(flags["personality"]);
   if (personality) p.personality = personality;
   const experimentalConfig = buildExperimentalToolThreadConfig(experimentalTools);
   if (experimentalConfig) Object.assign(config, experimentalConfig);
@@ -7219,7 +7624,7 @@ function resolveAutoApprovePatternsForCreate(ctx, flags) {
   if (!hasFlag(flags, "auto-approve")) {
     return parseConfiguredAutoApprovePatterns(ctx.config.getEffective("session.auto_approve_command_patterns"));
   }
-  const raw = asString4(flags["auto-approve"]);
+  const raw = asString5(flags["auto-approve"]);
   if (raw === null) throw invalidParams("--auto-approve requires a comma-separated value");
   const validationError = validateAutoApprovePatterns(raw);
   if (validationError) throw invalidParams(validationError);
@@ -7286,7 +7691,7 @@ async function withAttachLock(threadId, fn) {
   }
 }
 async function readInstructionFile(value, flag) {
-  const filePath = asString4(value);
+  const filePath = asString5(value);
   if (!filePath) return null;
   try {
     return await import_node_fs14.default.promises.readFile(filePath, "utf8");
@@ -7477,8 +7882,8 @@ var messageHistory = async (ctx, req) => {
   const { rec, client } = await resolveLive(ctx, req);
   const limitRaw = getFlag2(req, "limit");
   const limit = typeof limitRaw === "string" ? parseInt(limitRaw, 10) : typeof limitRaw === "number" ? limitRaw : 50;
-  const sinceRaw = asString5(getFlag2(req, "since"));
-  const format = asString5(getFlag2(req, "format")) ?? "json";
+  const sinceRaw = asString6(getFlag2(req, "since"));
+  const format = asString6(getFlag2(req, "format")) ?? "json";
   const truncate = parseTruncateFlag(getFlag2(req, "truncate"));
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
   const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 50;
@@ -7511,7 +7916,7 @@ var messageTail = async (ctx, req, stream) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const nRaw = getFlag2(req, "n");
   const n = typeof nRaw === "string" ? parseInt(nRaw, 10) : typeof nRaw === "number" ? nRaw : 3;
-  const format = asString5(getFlag2(req, "format")) ?? "json";
+  const format = asString6(getFlag2(req, "format")) ?? "json";
   const truncate = parseTruncateFlag(getFlag2(req, "truncate"));
   if (format !== "json" && format !== "markdown") throw invalidParams("--format must be json or markdown");
   const follow = isTrue3(getFlag2(req, "follow")) || isTrue3(getFlag2(req, "f"));
@@ -7566,7 +7971,7 @@ var messageWait = async (ctx, req) => {
       }
     };
   }
-  const requestedTurnId = asString5(getFlag2(req, "for"));
+  const requestedTurnId = asString6(getFlag2(req, "for"));
   const timeoutSeconds = parseTimeoutSeconds(getFlag2(req, "timeout"));
   const sessionKey = keyFor2(user, rec.name);
   const initialTurnId = requestedTurnId ?? rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
@@ -7717,7 +8122,7 @@ function emitPendingWarning(ctx, user, session, threadId, payload) {
 }
 async function readPromptInput(req) {
   const positional = asPositionalOptional2(req, 1);
-  const fromFile = asString5(getFlag2(req, "file"));
+  const fromFile = asString6(getFlag2(req, "file"));
   const fromStdin = isTrue3(getFlag2(req, "stdin"));
   const sources = [positional, fromFile, fromStdin].filter((v) => v !== null && v !== false).length;
   if (sources === 0) {
@@ -7734,13 +8139,13 @@ async function readPromptInput(req) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
   }
-  const stdinContent = asString5(req.params.stdin_content);
+  const stdinContent = asString6(req.params.stdin_content);
   if (stdinContent === null) throw invalidParams("--stdin requested but no content forwarded from cli");
   return stdinContent;
 }
 async function readJsonInput(req) {
-  const jsonRaw = asString5(getFlag2(req, "json"));
-  const fromFile = asString5(getFlag2(req, "file"));
+  const jsonRaw = asString6(getFlag2(req, "json"));
+  const fromFile = asString6(getFlag2(req, "file"));
   const fromStdin = isTrue3(getFlag2(req, "stdin"));
   const sources = [jsonRaw, fromFile, fromStdin].filter((v) => v !== null && v !== false).length;
   if (sources === 0) return null;
@@ -7754,7 +8159,7 @@ async function readJsonInput(req) {
       throw invalidParams(`--file not readable: ${e.message}`);
     }
   } else {
-    const stdinContent = asString5(req.params.stdin_content);
+    const stdinContent = asString6(req.params.stdin_content);
     if (stdinContent === null) throw invalidParams("--stdin requested but no content forwarded from cli");
     raw = stdinContent;
   }
@@ -7868,7 +8273,7 @@ function asPositionalOptional2(req, idx) {
   const v = list[idx];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
-function asString5(v) {
+function asString6(v) {
   if (Array.isArray(v)) {
     const last = v[v.length - 1];
     return typeof last === "string" ? last : null;
@@ -8012,7 +8417,7 @@ async function listTurnsFromRelativeOffset(client, threadId, relativeSince, limi
 var cursorSave = async (ctx, req) => {
   const user = requireUser2(ctx, req);
   const name = reqPositional2(req, 0, "name");
-  const explicitEventId = asString6(getFlag3(req, "event-id"));
+  const explicitEventId = asString7(getFlag3(req, "event-id"));
   const eventId = explicitEventId ?? await currentTailEventId(ctx, user);
   const cursor = await ctx.cursors.save(user, {
     name,
@@ -8069,7 +8474,7 @@ function getFlag3(req, key) {
   if (!flags || typeof flags !== "object") return void 0;
   return flags[key];
 }
-function asString6(value) {
+function asString7(value) {
   if (Array.isArray(value)) {
     const last = value[value.length - 1];
     return typeof last === "string" ? last : null;
@@ -8100,10 +8505,10 @@ var monitorEvents = async (ctx, req, stream) => {
   const summaryMode = isTrue4(flags["summary"]);
   const filterTypes = parseTypeList(flags["filter"]);
   const excludeTypes = parseTypeList(flags["exclude"]);
-  const sinceId = asString7(flags["since"]);
-  const cursorName = asString7(flags["cursor"]);
+  const sinceId = asString8(flags["since"]);
+  const cursorName = asString8(flags["cursor"]);
   if (sinceId && cursorName) throw invalidParams("--since and --cursor are mutually exclusive");
-  const sessionFilter = asString7(flags["session"]);
+  const sessionFilter = asString8(flags["session"]);
   let effectiveSinceId = sinceId;
   let persistedCursorEventId = null;
   let lastObservedEventId = null;
@@ -8416,7 +8821,7 @@ function asPositionals3(req) {
 function isTrue4(v) {
   return v === true || v === "true" || v === "1";
 }
-function asString7(v) {
+function asString8(v) {
   if (Array.isArray(v)) {
     const last = v[v.length - 1];
     return typeof last === "string" ? last : null;
@@ -8432,7 +8837,7 @@ function toInt4(v, fallback) {
   return fallback;
 }
 function parseTypeList(v) {
-  const s = asString7(v);
+  const s = asString8(v);
   if (!s) return null;
   return s.split(",").map((x) => x.trim()).filter(Boolean);
 }
@@ -8449,17 +8854,17 @@ function summarizeEvent(event) {
     ts: event.ts,
     type: event.type,
     session: event.session,
-    key: summarizeEventKey(event)
+    key: summarizeEventKey2(event)
   };
 }
-function summarizeEventKey(event) {
+function summarizeEventKey2(event) {
   const payload = event.payload;
   if (event.type.startsWith("turn.")) return asPayloadString(payload.turn_id);
   if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
-    return labeledSummaryValue("reason", payload.reason ?? payload.crash_reason ?? payload.why);
+    return labeledSummaryValue2("reason", payload.reason ?? payload.crash_reason ?? payload.why);
   }
   if (event.type === AUTO_APPROVED_EVENT_TYPE) {
-    return labeledSummaryValue("matched_pattern", payload.matched_pattern ?? payload.matchedPattern) ?? asPayloadString(payload.request_id);
+    return labeledSummaryValue2("matched_pattern", payload.matched_pattern ?? payload.matchedPattern) ?? asPayloadString(payload.request_id);
   }
   if (event.type.startsWith("approval.") || event.type === "user_input.request" || event.type === "server_request_resolved") {
     return asPayloadString(payload.request_id);
@@ -8479,7 +8884,7 @@ function asPayloadString(value) {
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return null;
 }
-function labeledSummaryValue(label, value) {
+function labeledSummaryValue2(label, value) {
   const rendered = asPayloadString(value);
   return rendered ? `${label}=${rendered}` : null;
 }
@@ -8699,17 +9104,17 @@ function createStreamHandle(socket, id, closeCallbacks, onRetire) {
 }
 function handleNotification(msg, activeStreams) {
   if (msg.method !== "stream_ack") return;
-  const streamId = asString8(msg.params?.id);
+  const streamId = asString9(msg.params?.id);
   if (!streamId) return;
   const params = msg.params && typeof msg.params === "object" && !Array.isArray(msg.params) ? msg.params : {};
   activeStreams.get(streamId)?.ack(params);
 }
 function normalizeStreamAck(params) {
-  const eventId = asString8(params.event_id);
+  const eventId = asString9(params.event_id);
   if (!eventId) return null;
   return { event_id: eventId };
 }
-function asString8(value) {
+function asString9(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 function sendError(socket, id, e) {
@@ -8797,14 +9202,14 @@ var REQUEST_MAP = {
 };
 function normalizeNotification(n) {
   const type = NOTIF_MAP[n.method] ?? fallbackType(n.method);
-  const params = asObject5(n.params);
+  const params = asObject6(n.params);
   const threadId = extractThreadId(params);
   const payload = buildNotificationPayload(type, params);
   return { type, threadId, payload, isDelta: type.endsWith("_delta") };
 }
 function normalizeServerRequest(r) {
   const kind = REQUEST_MAP[r.method] ?? fallbackType(r.method);
-  const params = asObject5(r.params);
+  const params = asObject6(r.params);
   const threadId = typeof params.threadId === "string" ? params.threadId : null;
   const payload = {
     kind,
@@ -8839,7 +9244,7 @@ function buildNotificationPayload(type, params) {
   switch (type) {
     case "turn.started":
     case "turn.completed": {
-      const turn = asObject5(params.turn);
+      const turn = asObject6(params.turn);
       const items = Array.isArray(turn.items) ? turn.items : [];
       if (type === "turn.completed") {
         return {
@@ -8863,7 +9268,7 @@ function buildNotificationPayload(type, params) {
       };
     }
     case "turn.error": {
-      const err2 = asObject5(params.error);
+      const err2 = asObject6(params.error);
       return {
         turn_id: params.turnId ?? null,
         will_retry: Boolean(params.willRetry),
@@ -8876,7 +9281,7 @@ function buildNotificationPayload(type, params) {
     }
     case "item.started":
     case "item.completed": {
-      const item = asObject5(params.item);
+      const item = asObject6(params.item);
       return {
         item_id: params.itemId ?? item.id ?? null,
         turn_id: params.turnId ?? null,
@@ -8885,7 +9290,7 @@ function buildNotificationPayload(type, params) {
       };
     }
     case "thread.started": {
-      const thread = asObject5(params.thread);
+      const thread = asObject6(params.thread);
       return {
         thread_id: thread.id ?? null,
         source: thread.source ?? null,
@@ -8943,7 +9348,7 @@ function buildNotificationPayload(type, params) {
       };
     case "hook.started":
     case "hook.completed": {
-      const run = asObject5(params.run);
+      const run = asObject6(params.run);
       return {
         turn_id: params.turnId ?? null,
         hook_id: run.id ?? null,
@@ -8994,7 +9399,7 @@ function normalizeTurnCompletedStatus(value) {
 }
 function deriveTurnTokenUsage(turn) {
   const usageSource = turn.tokenUsage ?? turn.token_usage ?? turn.usage;
-  const usage = asObject5(usageSource);
+  const usage = asObject6(usageSource);
   const prompt = asNumber2(usage.prompt) ?? asNumber2(usage.promptTokens) ?? asNumber2(usage.prompt_tokens) ?? asNumber2(usage.input) ?? asNumber2(usage.inputTokens) ?? asNumber2(usage.input_tokens);
   const completion = asNumber2(usage.completion) ?? asNumber2(usage.completionTokens) ?? asNumber2(usage.completion_tokens) ?? asNumber2(usage.output) ?? asNumber2(usage.outputTokens) ?? asNumber2(usage.output_tokens);
   const total = asNumber2(usage.total) ?? asNumber2(usage.totalTokens) ?? asNumber2(usage.total_tokens);
@@ -9006,21 +9411,21 @@ function fallbackType(method) {
 function extractAutoApproveTarget(kind, payload) {
   switch (kind) {
     case "approval.command_execution":
-      return asString9(payload.command);
+      return asString10(payload.command);
     case "approval.permissions":
-      return asString9(payload.command) ?? asString9(payload.reason);
+      return asString10(payload.command) ?? asString10(payload.reason);
     case "approval.file_change":
-      return asString9(payload.reason) ?? asString9(payload.grant_root);
+      return asString10(payload.reason) ?? asString10(payload.grant_root);
     case "approval.mcp_elicitation":
-      return asString9(payload.url) ?? asString9(payload.message) ?? asString9(payload.server_name);
+      return asString10(payload.url) ?? asString10(payload.message) ?? asString10(payload.server_name);
     default:
       return null;
   }
 }
-function asString9(value) {
+function asString10(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
-function asObject5(value) {
+function asObject6(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
   return {};
 }
@@ -9029,7 +9434,7 @@ function asNumber2(value) {
 }
 function extractThreadId(params) {
   if (typeof params.threadId === "string") return params.threadId;
-  const thread = asObject5(params.thread);
+  const thread = asObject6(params.thread);
   return typeof thread.id === "string" ? thread.id : null;
 }
 

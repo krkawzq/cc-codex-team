@@ -2,6 +2,22 @@
 
 Every command in `codex-team`. Output is always a single JSON object (`{"ok":true,"data":...}` or `{"ok":false,"error":{...}}`), except streaming commands which emit NDJSON.
 
+## Output modes (0.5.3+)
+
+Every command accepts the same three output modes — pick based on what you're going to do with the result, not which command you're running.
+
+| Mode | Flag | What you get |
+|---|---|---|
+| **Concise (default)** | _none_ | Inline JSON with only the fields Claude needs to decide what to do next (correlation ids, flow-control flags, outcome). ~2–6× smaller than `--full`. |
+| **Verbose** | `--full` | Pre-0.5.3 shape — the complete record including timestamps, config echo, nested objects. Use when you need a field the concise form omits. |
+| **Plain-text** | `--short` | One-line `key=value` for dashboards / `grep`. Not JSON. Available on state-heavy commands only (`status`, `session list`, `session info`, `session health`, `daemon status`, `daemon user list`, `message history`, `cursor list`, `daemon config list/get`, and the new action-command subset). |
+
+**Rules**:
+- `--short` and `--full` are mutually exclusive (→ `invalid_params`).
+- `--short` cannot combine with `--format markdown|table`.
+- Errors are never projected — error envelopes always surface in full regardless of mode.
+- `--format markdown` (available on `message tail` / `message history` / `session context`) overrides JSON projection and renders tag-structured markdown.
+
 ## Global
 
 ```
@@ -13,6 +29,7 @@ codex-team [global-flags] <command> [args] [flags]
 | `-b, --bearer <token>` | string | Yes (except `daemon` group + `version`) | — | User identity |
 | `-v, --verbose` | bool | No | false | cli-side debug to stderr |
 | `--daemon-sock <path>` | path | No | from config | Override sock for debug/test |
+| `--full` | bool | No | false | Restore pre-0.5.3 full response body (opt-out of concise default) |
 | `-h, --help` | bool | No | false | Print help |
 
 Top-level convenience: `codex-team version` (no `-b`).
@@ -107,6 +124,25 @@ No flags. Live names work directly; detached lookup is only reliable by `thread_
 | `--all` | bool | false | Include non-live threads (from `thread/list`) |
 | `--sort <field>` | enum | `last_active` | `name` / `last_active` / `turn_count` / `created_at` |
 | `--format <fmt>` | enum | `json` | `json` / `table` |
+| `--short` | bool | false | One compact line per session to stdout; cannot combine with `--format table` |
+
+### `session health <name|thread_id>`
+
+Returns a compact live snapshot: `state`, `busy`, `current_turn_id`, `pending_approvals`, `app_server_alive`, `queued_depth`, `token_usage`, etc. Read-only.
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--short` | bool | false | One-line summary for grep/dashboards |
+
+If state is `crashed` or `app_server_alive` is `false`, run `session heal`.
+
+### `session heal <name|thread_id>`
+
+Re-attach a crashed or dead live session to a fresh `codex app-server`. Healthy sessions return `{ ok: true, note: "already healthy" }`.
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--force` | bool | false | Drop half-baked in-memory queue state before retrying the resume — use only after a plain `session heal` fails |
 
 ## message group
 
@@ -159,6 +195,21 @@ Shortcut validity depends on approval kind:
 
 Flags: `--json` / `--file` / `--stdin` for multi-question.
 
+### `message wait <session>`
+
+Blocks until a turn on `<session>` finishes, errors, or times out.
+
+| Flag | Type | Default | Notes |
+|---|---|---|---|
+| `--for <turn_id>` | string | current/next | Specific turn ID; without `--for`, waits for the current in-flight turn or the next one if idle |
+| `--timeout <s>` | int | 600 | Seconds before returning `outcome: "timeout"`; use `0` to disable |
+
+Exit codes:
+
+- `0` — turn completed
+- `1` — turn errored / cancelled / crashed
+- `124` — timeout
+
 ### `message history <session>`
 
 | Flag | Type | Default | Notes |
@@ -190,7 +241,9 @@ Streaming. Emits NDJSON.
 | `--filter <type,...>` | string | — | Whitelist |
 | `--exclude <type,...>` | string | — | Blacklist |
 | `--include-delta` | bool | false | Include `*_delta` events |
-| `--since <id>` | string | — | Resume from event id. `id_rotated` if evicted; `invalid_params` if the id never existed in the current log |
+| `--summary` | bool | false | Emit compact NDJSON with only `id`, `ts`, `type`, `session`, and one type-specific key — huge bandwidth win for fan-out orchestration |
+| `--since <id>` | string | — | Resume from event id. `id_rotated` if evicted; `invalid_params` if the id never existed in the current log. Mutually exclusive with `--cursor` |
+| `--cursor <name>` | string | — | Resume from a saved named cursor and auto-advance it as events are delivered. Mutually exclusive with `--since` |
 | `--session <name\|uuid>` | string | — | Only events for this session |
 
 ### `monitor alarm <interval_s> <command>`
@@ -203,6 +256,19 @@ Streaming. Runs `<command>` via the platform shell every `<interval_s>` seconds 
 | `--timeout <s>` | int | 60 | SIGTERM after this many seconds, SIGKILL 5s later; emits `__alarm_event: timeout` |
 
 Emits `{stdout, stderr, __alarm_event: exit|timeout|spawn_error, exit_code, duration_ms}` per run.
+
+## cursor group
+
+Named, daemon-persisted resume points in your event log. Survive daemon restarts. Pair with `monitor events --cursor <name>` to resume cleanly after Claude reconnects.
+
+| Command | Purpose |
+|---|---|
+| `cursor save <name> [--event-id <id>]` | Save the current tail event id (or an explicit id) under `<name>`; `--event-id` lets you seed a cursor at a known earlier point |
+| `cursor list [--short]` | List every saved cursor with its current event id |
+| `cursor get <name>` | Print just the saved event id |
+| `cursor delete <name>` | Remove the named cursor |
+
+Cursors automatically advance when used via `monitor events --cursor <name>`.
 
 ## Error codes
 
@@ -217,7 +283,7 @@ Emits `{stdout, stderr, __alarm_event: exit|timeout|spawn_error, exit_code, dura
 | `invalid_params` | Missing positional, mutually-exclusive flags, bad enum |
 | `invalid_decision` | Shortcut mismatches approval kind |
 | `id_rotated` | `--since <id>` points at an evicted event |
-| `codex_error` | codex JSON-RPC returned an error — `data.codex_error_info` has the type |
+| `codex_error` | codex JSON-RPC returned an error — `data.codex_error_info` has the type (`context_window_exceeded`, `usage_limit_exceeded`, `unauthorized`, `sandbox_error`, `active_turn_not_steerable`, `server_overloaded`, …). See `skills/recover-codex-team/` for per-case handling |
 | `internal` | Daemon bug — check `daemon logs` |
 | `not_implemented` / `method_not_found` | Typo in the command path |
 
