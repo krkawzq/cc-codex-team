@@ -4,6 +4,7 @@ import type { HandlerFn } from "../dispatch";
 import type { DaemonContext } from "../context";
 import type { IpcRequest } from "../../ipc/protocol";
 import type { JsonValue } from "../../codex/errors";
+import type { AppServerClient } from "../../codex/appServerClient";
 import { CodexTeamError, invalidParams } from "../../errors";
 import { SESSION_CLOSED_EVENT_TYPE, SESSION_CRASHED_EVENT_TYPE } from "../events";
 import {
@@ -17,7 +18,8 @@ import {
 import { renderHistory, renderTail } from "../../format/markdown";
 import type { PendingRequest } from "../pending";
 import type { RetryOptions } from "../../codex/retry";
-import { buildExperimentalToolAppServerOptions } from "../experimentalTools";
+import type { SessionRecord } from "../sessions";
+import type { TeamEvent } from "../../types";
 
 export const messageSend: HandlerFn = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
@@ -35,6 +37,43 @@ export const messageSend: HandlerFn = async (ctx, req) => {
     queue_id: result.queue_id,
     queued_depth: result.queued_depth,
   };
+};
+
+export const messageSendMany: HandlerFn = async (ctx, req) => {
+  const user = requireUser(ctx, req);
+  const positionals = asPositionals(req);
+  const promptPositional = hasPromptFlagSource(req) ? null : positionals[positionals.length - 1] ?? null;
+  const identifiers = hasPromptFlagSource(req) ? positionals : positionals.slice(0, -1);
+  if (identifiers.length < 2) {
+    throw invalidParams("message send-many requires at least two target sessions");
+  }
+
+  const prompt = await readPromptInput(req, promptPositional);
+  const input = await buildUserInput(prompt, []);
+  const retry = ctx.retryOptions();
+  const results = await Promise.all(identifiers.map(async (identifier) => {
+    try {
+      const { rec, client } = await resolveLiveTarget(ctx, user, identifier);
+      const sessionKey = keyFor(user, rec.name);
+      const result = await ctx.queues.sendOrQueue(sessionKey, client, rec.thread_id, input, retry);
+      ctx.sessions.touch(user, rec.name);
+      return {
+        session: rec.name,
+        turn_id: result.turn_id,
+        started: result.started,
+        queue_id: result.queue_id,
+        queued_depth: result.queued_depth,
+      };
+    } catch (error) {
+      return {
+        session: identifier,
+        ok: false,
+        error: normalizeHandlerError(error),
+      };
+    }
+  }));
+
+  return { results };
 };
 
 export const messagePeer: HandlerFn = async (ctx, req) => {
@@ -241,122 +280,37 @@ export const messageTail: HandlerFn = async (ctx, req, stream) => {
 };
 
 export const messageWait: HandlerFn = async (ctx, req) => {
-  const { user, rec } = await resolveSessionRecord(ctx, req);
-  if (rec.state !== "live") {
-    return {
-      session: rec.name,
-      thread_id: rec.thread_id,
-      turn_id: rec.current_turn_id ?? rec.last_turn_id ?? null,
-      outcome: "error",
-      event_type: SESSION_CRASHED_EVENT_TYPE,
-      error: {
-        reason: rec.crash_reason ?? "session_crashed",
-      },
-    };
+  const user = requireUser(ctx, req);
+  const waitAll = isTrue(getFlag(req, "all"));
+  const waitAny = isTrue(getFlag(req, "any"));
+  if (waitAll && waitAny) {
+    throw invalidParams("--all and --any are mutually exclusive");
   }
+
+  const positionals = asPositionals(req);
   const requestedTurnId = asString(getFlag(req, "for"));
   const timeoutSeconds = parseTimeoutSeconds(getFlag(req, "timeout"));
-  const sessionKey = keyFor(user, rec.name);
-  const initialTurnId = requestedTurnId ?? rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
 
-  if (requestedTurnId) {
-    const historical = await findTerminalEvent(ctx, user, rec.name, requestedTurnId);
-    if (historical) return terminalWaitResult(rec.name, rec.thread_id, requestedTurnId, historical);
-  } else if (initialTurnId) {
-    const historical = await findTerminalEvent(ctx, user, rec.name, initialTurnId);
-    if (historical) return terminalWaitResult(rec.name, rec.thread_id, initialTurnId, historical);
+  if (!waitAll && !waitAny) {
+    if (positionals.length !== 1) {
+      throw invalidParams("message wait accepts exactly one session unless --all or --any is set");
+    }
+    const rec = resolveSessionRecordTarget(ctx, user, positionals[0]!);
+    return await waitForSingleSession(ctx, user, rec, requestedTurnId, timeoutSeconds);
   }
 
-  return await new Promise((resolve) => {
-    let settled = false;
-    let targetTurnId = requestedTurnId;
-    let timer: NodeJS.Timeout | null = null;
+  if (requestedTurnId) {
+    throw invalidParams("--for is only supported when waiting on a single session");
+  }
+  if (positionals.length === 0) {
+    throw invalidParams("message wait requires at least one session");
+  }
 
-    const settle = (result: Record<string, unknown>) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      sub.dispose();
-      resolve(result);
-    };
-
-    const sub = ctx.events.subscribe(user, (event) => {
-      if (event.session !== rec.name) return;
-      if (event.thread_id !== rec.thread_id) return;
-
-      if (!targetTurnId) {
-        targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
-      }
-
-      if (!targetTurnId) {
-        if (event.type === "turn.started") {
-          const turnId = eventTurnId(event);
-          if (!turnId) return;
-          targetTurnId = turnId;
-        } else if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
-          settle({
-            session: rec.name,
-            thread_id: rec.thread_id,
-            turn_id: null,
-            outcome: "error",
-            event_type: event.type,
-            event_id: event.id,
-            error: event.payload,
-          });
-        }
-        return;
-      }
-
-      if (event.type === "turn.completed" && eventTurnId(event) === targetTurnId) {
-        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
-        return;
-      }
-      if (event.type === "turn.error" && eventTurnId(event) === targetTurnId) {
-        settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
-        return;
-      }
-      if (event.type === SESSION_CRASHED_EVENT_TYPE && eventCrashTurnId(event) === targetTurnId) {
-        settle({
-          session: rec.name,
-          thread_id: rec.thread_id,
-          turn_id: targetTurnId,
-          outcome: "error",
-          event_type: event.type,
-          event_id: event.id,
-          error: event.payload,
-        });
-        return;
-      }
-      if (event.type === SESSION_CLOSED_EVENT_TYPE) {
-        settle({
-          session: rec.name,
-          thread_id: rec.thread_id,
-          turn_id: targetTurnId,
-          outcome: "error",
-          event_type: event.type,
-          event_id: event.id,
-          error: event.payload,
-        });
-      }
-    });
-
-    if (!targetTurnId && !requestedTurnId) {
-      targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
-    }
-
-    if (timeoutSeconds > 0) {
-      timer = setTimeout(() => {
-        settle({
-          session: rec.name,
-          thread_id: rec.thread_id,
-          turn_id: targetTurnId ?? null,
-          outcome: "timeout",
-          timeout_s: timeoutSeconds,
-        });
-      }, timeoutSeconds * 1000);
-      timer.unref();
-    }
-  });
+  const records = positionals.map((identifier) => resolveSessionRecordTarget(ctx, user, identifier));
+  if (waitAll) {
+    return await waitForAllSessions(ctx, user, records, timeoutSeconds);
+  }
+  return await waitForAnySession(ctx, user, records, timeoutSeconds);
 };
 
 // ----- helpers -----
@@ -364,42 +318,20 @@ export const messageWait: HandlerFn = async (ctx, req) => {
 async function resolveLive(
   ctx: DaemonContext,
   req: IpcRequest,
-): Promise<{ user: string; rec: import("../sessions").SessionRecord; client: import("../../codex/appServerClient").AppServerClient }> {
-  const user = req.bearer;
-  if (!user) throw invalidParams("bearer token required");
-  if (!ctx.users.has(user)) {
-    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
-  }
+) : Promise<{ user: string; rec: SessionRecord; client: AppServerClient }> {
+  const user = requireUser(ctx, req);
   const identifier = asPositional(req, 0, "session");
-  const rec = ctx.sessions.get(user, identifier);
-  if (!rec) {
-    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
-  }
-  if (rec.state === "crashed") {
-    throw new CodexTeamError("session_not_live", `session '${rec.name}' is crashed; run 'codex-team -b ${user} session heal ${rec.name}'`);
-  }
-  const client = ctx.pool.clientForSession(keyFor(user, rec.name));
-  if (!isClientAlive(client)) {
-    throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
-  }
-  return { user, rec, client };
+  const resolved = await resolveLiveTarget(ctx, user, identifier);
+  return { user, ...resolved };
 }
 
 async function resolveSessionRecord(
   ctx: DaemonContext,
   req: IpcRequest,
-): Promise<{ user: string; rec: import("../sessions").SessionRecord }> {
-  const user = req.bearer;
-  if (!user) throw invalidParams("bearer token required");
-  if (!ctx.users.has(user)) {
-    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
-  }
+) : Promise<{ user: string; rec: SessionRecord }> {
+  const user = requireUser(ctx, req);
   const identifier = asPositional(req, 0, "session");
-  const rec = ctx.sessions.get(user, identifier);
-  if (!rec) {
-    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
-  }
-  return { user, rec };
+  return { user, rec: resolveSessionRecordTarget(ctx, user, identifier) };
 }
 
 function requirePending(ctx: DaemonContext, user: string, requestId: string): PendingRequest {
@@ -432,8 +364,7 @@ function emitPendingWarning(
   });
 }
 
-async function readPromptInput(req: IpcRequest): Promise<string> {
-  const positional = asPositionalOptional(req, 1);
+async function readPromptInput(req: IpcRequest, positional = asPositionalOptional(req, 1)): Promise<string> {
   const fromFile = asString(getFlag(req, "file"));
   const fromStdin = isTrue(getFlag(req, "stdin"));
   const sources = [positional, fromFile, fromStdin].filter((v) => v !== null && v !== false).length;
@@ -574,6 +505,11 @@ function keyFor(user: string, name: string): string {
   return `${user}::${name}`;
 }
 
+function asPositionals(req: IpcRequest): string[] {
+  const positionals = (req.params as Record<string, unknown>).positionals;
+  return Array.isArray(positionals) ? positionals.filter((value): value is string => typeof value === "string") : [];
+}
+
 function getFlag(req: IpcRequest, key: string): unknown {
   const flags = (req.params as Record<string, unknown>).flags;
   if (flags && typeof flags === "object") return (flags as Record<string, unknown>)[key];
@@ -581,16 +517,14 @@ function getFlag(req: IpcRequest, key: string): unknown {
 }
 
 function asPositional(req: IpcRequest, idx: number, name: string): string {
-  const positionals = (req.params as Record<string, unknown>).positionals;
-  const list = Array.isArray(positionals) ? positionals : [];
+  const list = asPositionals(req);
   const v = list[idx];
   if (typeof v !== "string" || v.length === 0) throw invalidParams(`missing positional '${name}'`);
   return v;
 }
 
 function asPositionalOptional(req: IpcRequest, idx: number): string | null {
-  const positionals = (req.params as Record<string, unknown>).positionals;
-  const list = Array.isArray(positionals) ? positionals : [];
+  const list = asPositionals(req);
   const v = list[idx];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
@@ -627,6 +561,10 @@ function isTrue(v: unknown): boolean {
   return v === true || v === "true" || v === "1";
 }
 
+function hasPromptFlagSource(req: IpcRequest): boolean {
+  return asString(getFlag(req, "file")) !== null || isTrue(getFlag(req, "stdin"));
+}
+
 function eventTurnId(event: { payload: Record<string, unknown> }): string | null {
   const turnId = event.payload.turn_id;
   return typeof turnId === "string" && turnId.length > 0 ? turnId : null;
@@ -641,7 +579,7 @@ function terminalWaitResult(
   session: string,
   threadId: string,
   turnId: string,
-  event: { id: string; type: string; payload: Record<string, unknown> },
+  event: TeamEvent,
 ): Record<string, unknown> {
   const completedStatus = event.type === "turn.completed" ? event.payload.status : null;
   const completedFields = event.type === "turn.completed"
@@ -658,7 +596,11 @@ function terminalWaitResult(
     session,
     thread_id: threadId,
     turn_id: turnId,
-    outcome: event.type === "turn.completed" && completedStatus === "completed" ? "completed" : "error",
+    outcome: event.type === "turn.interrupted"
+      ? "interrupted"
+      : event.type === "turn.completed" && completedStatus === "completed"
+        ? "completed"
+        : "error",
     event_type: event.type,
     event_id: event.id,
     ...completedFields,
@@ -677,11 +619,373 @@ async function findTerminalEvent(
   for (let i = listed.events.length - 1; i >= 0; i--) {
     const event = listed.events[i]!;
     if (event.session !== session) continue;
-    if (event.type !== "turn.completed" && event.type !== "turn.error") continue;
+    if (event.type !== "turn.completed" && event.type !== "turn.error" && event.type !== "turn.interrupted") continue;
     if (eventTurnId(event) !== turnId) continue;
     return event;
   }
   return null;
+}
+
+function requireUser(ctx: DaemonContext, req: IpcRequest): string {
+  const user = req.bearer;
+  if (!user) throw invalidParams("bearer token required");
+  if (!ctx.users.has(user)) {
+    throw new CodexTeamError("user_not_found", `user '${user}' not found`);
+  }
+  return user;
+}
+
+async function resolveLiveTarget(
+  ctx: DaemonContext,
+  user: string,
+  identifier: string,
+): Promise<{ rec: SessionRecord; client: AppServerClient }> {
+  const rec = resolveSessionRecordTarget(ctx, user, identifier);
+  if (rec.state === "crashed") {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is crashed; run 'codex-team -b ${user} session heal ${rec.name}'`);
+  }
+  const client = ctx.pool.clientForSession(keyFor(user, rec.name));
+  if (!isClientAlive(client)) {
+    throw new CodexTeamError("session_not_live", `session '${rec.name}' is unhealthy; run 'codex-team -b ${user} session heal ${rec.name}'`);
+  }
+  return { rec, client };
+}
+
+function resolveSessionRecordTarget(
+  ctx: DaemonContext,
+  user: string,
+  identifier: string,
+): SessionRecord {
+  const rec = ctx.sessions.get(user, identifier);
+  if (!rec) {
+    throw new CodexTeamError("session_not_found", `session '${identifier}' not live in this user`);
+  }
+  return rec;
+}
+
+function normalizeHandlerError(error: unknown): Record<string, unknown> {
+  if (error instanceof CodexTeamError) {
+    return {
+      code: error.code,
+      message: error.message,
+    };
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    code: "internal",
+    message,
+  };
+}
+
+interface WaitObserver {
+  immediateResult?: Record<string, unknown>;
+  promise: Promise<Record<string, unknown> | null>;
+  cancel(): void;
+  currentTurnId(): string | null;
+}
+
+async function waitForSingleSession(
+  ctx: DaemonContext,
+  user: string,
+  rec: SessionRecord,
+  requestedTurnId: string | null,
+  timeoutSeconds: number,
+): Promise<Record<string, unknown>> {
+  const observer = await createWaitObserver(ctx, user, rec, requestedTurnId);
+  if (observer.immediateResult) return observer.immediateResult;
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const settle = (result: Record<string, unknown>) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      observer.cancel();
+      resolve(result);
+    };
+
+    void observer.promise.then((result) => {
+      if (!result) return;
+      settle(result);
+    });
+
+    if (timeoutSeconds > 0) {
+      timer = setTimeout(() => {
+        settle(timeoutWaitResult(rec, observer.currentTurnId(), timeoutSeconds));
+      }, timeoutSeconds * 1000);
+      timer.unref();
+    }
+  });
+}
+
+async function waitForAllSessions(
+  ctx: DaemonContext,
+  user: string,
+  records: SessionRecord[],
+  timeoutSeconds: number,
+): Promise<Record<string, unknown>> {
+  const observers = await Promise.all(records.map((rec) => createWaitObserver(ctx, user, rec, null)));
+  const outcomes = observers.map((observer) => observer.immediateResult ? projectBatchWaitOutcome(observer.immediateResult) : null);
+  let pending = outcomes.filter((outcome) => outcome === null).length;
+
+  if (pending === 0) {
+    const finalized = outcomes.filter((outcome): outcome is Record<string, unknown> => outcome !== null);
+    return {
+      outcomes: finalized,
+      overall: overallWaitOutcome(finalized),
+    };
+  }
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const finalize = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      for (const observer of observers) observer.cancel();
+      const finalized = outcomes.map((outcome, index) => outcome ?? timeoutBatchWaitOutcome(records[index]!, observers[index]!, timeoutSeconds));
+      resolve({
+        outcomes: finalized,
+        overall: overallWaitOutcome(finalized),
+      });
+    };
+
+    observers.forEach((observer, index) => {
+      if (outcomes[index] !== null) return;
+      void observer.promise.then((result) => {
+        if (settled || !result) return;
+        outcomes[index] = projectBatchWaitOutcome(result);
+        pending -= 1;
+        if (pending === 0) finalize();
+      });
+    });
+
+    if (timeoutSeconds > 0) {
+      timer = setTimeout(finalize, timeoutSeconds * 1000);
+      timer.unref();
+    }
+  });
+}
+
+async function waitForAnySession(
+  ctx: DaemonContext,
+  user: string,
+  records: SessionRecord[],
+  timeoutSeconds: number,
+): Promise<Record<string, unknown>> {
+  const observers = await Promise.all(records.map((rec) => createWaitObserver(ctx, user, rec, null)));
+  const immediateIndex = observers.findIndex((observer) => observer.immediateResult !== undefined);
+  if (immediateIndex >= 0) {
+    observers.forEach((observer, index) => {
+      if (index !== immediateIndex) observer.cancel();
+    });
+    return projectAnyWaitResult(
+      observers[immediateIndex]!.immediateResult!,
+      records
+        .filter((_rec, index) => index !== immediateIndex && observers[index]!.immediateResult === undefined)
+        .map((rec) => rec.name),
+    );
+  }
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const settle = (result: Record<string, unknown>) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      observers.forEach((observer) => observer.cancel());
+      resolve(result);
+    };
+
+    observers.forEach((observer, index) => {
+      void observer.promise.then((result) => {
+        if (settled || !result) return;
+        settle(projectAnyWaitResult(
+          result,
+          records.filter((_rec, otherIndex) => otherIndex !== index).map((rec) => rec.name),
+        ));
+      });
+    });
+
+    if (timeoutSeconds > 0) {
+      timer = setTimeout(() => {
+        settle({
+          outcome: "timeout",
+          timeout_s: timeoutSeconds,
+          still_running: records.map((rec) => rec.name),
+        });
+      }, timeoutSeconds * 1000);
+      timer.unref();
+    }
+  });
+}
+
+async function createWaitObserver(
+  ctx: DaemonContext,
+  user: string,
+  rec: SessionRecord,
+  requestedTurnId: string | null,
+): Promise<WaitObserver> {
+  if (rec.state !== "live") {
+    return immediateWaitObserver(crashedWaitResult(rec));
+  }
+
+  const sessionKey = keyFor(user, rec.name);
+  let targetTurnId = requestedTurnId ?? rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+  if (requestedTurnId) {
+    const historical = await findTerminalEvent(ctx, user, rec.name, requestedTurnId);
+    if (historical) return immediateWaitObserver(terminalWaitResult(rec.name, rec.thread_id, requestedTurnId, historical));
+  } else if (targetTurnId) {
+    const historical = await findTerminalEvent(ctx, user, rec.name, targetTurnId);
+    if (historical) return immediateWaitObserver(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, historical));
+  }
+
+  let settled = false;
+  let sub: { dispose(): void } | null = null;
+  let resolvePromise!: (result: Record<string, unknown> | null) => void;
+  const promise = new Promise<Record<string, unknown> | null>((resolve) => {
+    resolvePromise = resolve;
+  });
+
+  const settle = (result: Record<string, unknown> | null) => {
+    if (settled) return;
+    settled = true;
+    sub?.dispose();
+    resolvePromise(result);
+  };
+
+  sub = ctx.events.subscribe(user, (event) => {
+    if (event.session !== rec.name) return;
+    if (event.thread_id !== rec.thread_id) return;
+
+    if (!targetTurnId) {
+      targetTurnId = rec.current_turn_id ?? ctx.queues.getCurrentTurn(sessionKey);
+    }
+
+    if (!targetTurnId) {
+      if (event.type === "turn.started") {
+        const turnId = eventTurnId(event);
+        if (!turnId) return;
+        targetTurnId = turnId;
+      } else if (event.type === SESSION_CRASHED_EVENT_TYPE || event.type === SESSION_CLOSED_EVENT_TYPE) {
+        settle(waitErrorResult(rec, null, event.type, event.id, event.payload));
+      }
+      return;
+    }
+
+    if (isTurnTerminalEvent(event) && eventTurnId(event) === targetTurnId) {
+      settle(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, event));
+      return;
+    }
+    if (event.type === SESSION_CRASHED_EVENT_TYPE && eventCrashTurnId(event) === targetTurnId) {
+      settle(waitErrorResult(rec, targetTurnId, event.type, event.id, event.payload));
+      return;
+    }
+    if (event.type === SESSION_CLOSED_EVENT_TYPE) {
+      settle(waitErrorResult(rec, targetTurnId, event.type, event.id, event.payload));
+    }
+  });
+
+  return {
+    promise,
+    cancel: () => settle(null),
+    currentTurnId: () => targetTurnId ?? null,
+  };
+}
+
+function immediateWaitObserver(result: Record<string, unknown>): WaitObserver {
+  return {
+    immediateResult: result,
+    promise: Promise.resolve(result),
+    cancel: () => undefined,
+    currentTurnId: () => asString(result.turn_id) ?? null,
+  };
+}
+
+function crashedWaitResult(rec: SessionRecord): Record<string, unknown> {
+  return waitErrorResult(
+    rec,
+    rec.current_turn_id ?? rec.last_turn_id ?? null,
+    SESSION_CRASHED_EVENT_TYPE,
+    null,
+    { reason: rec.crash_reason ?? "session_crashed" },
+  );
+}
+
+function waitErrorResult(
+  rec: SessionRecord,
+  turnId: string | null,
+  eventType: string,
+  eventId: string | null,
+  error: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    turn_id: turnId,
+    outcome: "error",
+    event_type: eventType,
+    error,
+  };
+  if (eventId !== null) result.event_id = eventId;
+  return result;
+}
+
+function timeoutWaitResult(rec: SessionRecord, turnId: string | null, timeoutSeconds: number): Record<string, unknown> {
+  return {
+    session: rec.name,
+    thread_id: rec.thread_id,
+    turn_id: turnId,
+    outcome: "timeout",
+    timeout_s: timeoutSeconds,
+  };
+}
+
+function isTurnTerminalEvent(event: TeamEvent): boolean {
+  return event.type === "turn.completed" || event.type === "turn.error" || event.type === "turn.interrupted";
+}
+
+function projectBatchWaitOutcome(result: Record<string, unknown>): Record<string, unknown> {
+  const projected = pickDefined(result, ["session", "outcome", "turn_id"]);
+  const codexErrorInfo = extractCodexErrorInfo(result);
+  if (codexErrorInfo) projected.codex_error_info = codexErrorInfo;
+  return projected;
+}
+
+function timeoutBatchWaitOutcome(rec: SessionRecord, observer: WaitObserver, timeoutSeconds: number): Record<string, unknown> {
+  return projectBatchWaitOutcome(timeoutWaitResult(rec, observer.currentTurnId(), timeoutSeconds));
+}
+
+function projectAnyWaitResult(result: Record<string, unknown>, stillRunning: string[]): Record<string, unknown> {
+  const projected = pickDefined(result, ["session", "outcome", "turn_id", "timeout_s"]);
+  const codexErrorInfo = extractCodexErrorInfo(result);
+  if (codexErrorInfo) projected.codex_error_info = codexErrorInfo;
+  projected.still_running = stillRunning;
+  return projected;
+}
+
+function extractCodexErrorInfo(result: Record<string, unknown>): string | null {
+  const error = result.error;
+  if (!error || typeof error !== "object" || Array.isArray(error)) return null;
+  const info = (error as Record<string, unknown>).codex_error_info;
+  return typeof info === "string" && info.length > 0 ? info : null;
+}
+
+function overallWaitOutcome(outcomes: Record<string, unknown>[]): "completed" | "error" | "timeout" | "partial" {
+  const values = outcomes.map((outcome) => outcome.outcome);
+  if (values.every((value) => value === "completed")) return "completed";
+  const hasError = values.includes("error");
+  const hasTimeout = values.includes("timeout");
+  if (hasError && hasTimeout) return "partial";
+  if (hasError) return "error";
+  if (hasTimeout) return "timeout";
+  return "partial";
 }
 
 function parseTruncateFlag(value: unknown): number | undefined {

@@ -96,6 +96,12 @@ const LIVE_SESSION_TARGET: HelpPositional = {
   description: "Target live session name or thread ID.",
 };
 
+const LIVE_SESSION_TARGETS: HelpPositional = {
+  name: "name|thread_id...",
+  required: true,
+  description: "One or more live session names or thread IDs.",
+};
+
 const REQUEST_ID: HelpPositional = {
   name: "request_id",
   required: true,
@@ -531,11 +537,24 @@ const sessionGroup: HelpNode = {
     leaf({
       name: "detach",
       summary: "Stop tracking a live session and release its runtime.",
-      usage: "codex-team -b <token> session detach <name|thread_id> [flags]",
+      usage: "codex-team -b <token> session detach [<name|thread_id>|--all] [flags]",
       positionals: [
-        { ...SESSION_TARGET },
+        { ...SESSION_TARGET, required: false, description: "Target session unless using --all." },
       ],
       flags: [
+        {
+          long: "--all",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Detach every live session for the current bearer.",
+        },
+        {
+          long: "--match",
+          type: "glob",
+          required: false,
+          description: "Filter --all targets by session name using * and ? wildcards.",
+        },
         {
           long: "--graceful",
           type: "bool",
@@ -546,6 +565,7 @@ const sessionGroup: HelpNode = {
       ],
       examples: [
         "codex-team -b $TOKEN session detach audit --graceful",
+        "codex-team -b $TOKEN session detach --all --match 'mapper-*'",
       ],
       needs_bearer: true,
     }),
@@ -751,6 +771,42 @@ const messageGroup: HelpNode = {
       needs_bearer: true,
     }),
     leaf({
+      name: "send-many",
+      summary: "Broadcast one prompt to multiple live sessions.",
+      usage: "codex-team -b <token> message send-many <name|thread_id> <name|thread_id> [...name|thread_id] [prompt] [flags]",
+      positionals: [
+        { ...LIVE_SESSION_TARGETS, description: "Two or more live sessions to broadcast to." },
+        {
+          name: "prompt",
+          required: false,
+          description: "Prompt text when not using --stdin or --file.",
+        },
+      ],
+      flags: [
+        {
+          long: "--stdin",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Read the prompt from stdin.",
+        },
+        {
+          long: "--file",
+          type: "path",
+          required: false,
+          description: "Read the prompt from a file.",
+        },
+      ],
+      notes: [
+        "Requires at least two explicit targets.",
+      ],
+      examples: [
+        "codex-team -b $TOKEN message send-many audit lint typecheck \"Run all pending checks.\"",
+        "codex-team -b $TOKEN message send-many audit lint typecheck --file prompt.md",
+      ],
+      needs_bearer: true,
+    }),
+    leaf({
       name: "peer",
       summary: "Soft-interrupt the session, then send a prompt.",
       usage: "codex-team -b <token> message peer <name|thread_id> [prompt] [flags]",
@@ -931,11 +987,25 @@ const messageGroup: HelpNode = {
     leaf({
       name: "wait",
       summary: "Block until a turn completes, errors, or times out.",
-      usage: "codex-team -b <token> message wait <name|thread_id> [flags]",
+      usage: "codex-team -b <token> message wait <name|thread_id>... [flags]",
       positionals: [
-        { ...LIVE_SESSION_TARGET, description: "Session to watch." },
+        { ...LIVE_SESSION_TARGETS, description: "One session by default, or multiple with --all/--any." },
       ],
       flags: [
+        {
+          long: "--all",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Wait until every listed session reaches a terminal outcome.",
+        },
+        {
+          long: "--any",
+          type: "bool",
+          default: "false",
+          required: false,
+          description: "Return when the first listed session reaches a terminal outcome.",
+        },
         {
           long: "--for",
           type: "string",
@@ -952,10 +1022,13 @@ const messageGroup: HelpNode = {
       ],
       notes: [
         "Without --for, waits for the current in-flight turn. If the session is idle, waits for the next turn that starts after this call.",
+        "--all and --any are mutually exclusive. --for only applies to single-session waits.",
       ],
       examples: [
         "codex-team -b $TOKEN message wait audit",
         "codex-team -b $TOKEN message wait audit --for turn-42 --timeout 30",
+        "codex-team -b $TOKEN message wait --all audit lint typecheck --timeout 300",
+        "codex-team -b $TOKEN message wait --any audit lint typecheck --timeout 60",
       ],
       needs_bearer: true,
     }),

@@ -57,11 +57,7 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
         extraKeys: ["noop"],
       });
     case "session:detach":
-      return compactSessionWithFlags(data, {
-        sessionOptions: {},
-        extraKeys: ["noop", "graceful"],
-        allowNullSession: true,
-      });
+      return compactSessionDetach(data);
     case "session:fork":
       return compactSessionWithFlags(data, {
         sessionOptions: {},
@@ -95,6 +91,8 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
       return compactSessionHeal(data);
     case "message:send":
       return pickFields(data, ["turn_id", "started", "queue_id", "queued_depth"]);
+    case "message:send-many":
+      return compactBatchResults(data, ["turn_id", "started", "queue_id", "queued_depth"]);
     case "message:peer":
       return pickFields(data, ["turn_id", "peered"]);
     case "message:interrupt":
@@ -107,17 +105,7 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
     case "message:tail":
       return compactMessageTail(data);
     case "message:wait":
-      return pickFields(data, [
-        "thread_id",
-        "turn_id",
-        "outcome",
-        "event_type",
-        "event_id",
-        "error",
-        "duration_ms",
-        "items_count",
-        "timeout_s",
-      ]);
+      return compactMessageWait(data);
     case "monitor:events":
       return compactMonitorEvent(data);
     case "monitor:alarm":
@@ -212,6 +200,18 @@ function compactSessionInfo(data: unknown): Record<string, unknown> {
   });
 }
 
+function compactSessionDetach(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  if (Array.isArray(value.results)) {
+    return compactBatchResults(data, ["detached", "graceful"]);
+  }
+  return compactSessionWithFlags(data, {
+    sessionOptions: {},
+    extraKeys: ["noop", "graceful"],
+    allowNullSession: true,
+  });
+}
+
 function compactSessionContext(data: unknown): Record<string, unknown> {
   const value = asObject(data);
   const out = pickFields(value, ["thread_id"]);
@@ -269,6 +269,49 @@ function compactMessageTail(data: unknown): Record<string, unknown> {
   const thread = projectThread(value.thread);
   if (Object.keys(thread).length > 0) out.thread = thread;
   return stripUndefined(out);
+}
+
+function compactMessageWait(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  if (Array.isArray(value.outcomes)) {
+    return stripUndefined({
+      outcomes: asArray(value.outcomes).map((entry) => pickFields(entry, [
+        "session",
+        "outcome",
+        "turn_id",
+        "codex_error_info",
+      ])),
+      overall: value.overall,
+    });
+  }
+  if (Array.isArray(value.still_running)) {
+    return stripUndefined({
+      session: value.session,
+      outcome: value.outcome,
+      turn_id: value.turn_id,
+      codex_error_info: value.codex_error_info,
+      timeout_s: value.timeout_s,
+      still_running: asArray(value.still_running),
+    });
+  }
+  return pickFields(data, [
+    "thread_id",
+    "turn_id",
+    "outcome",
+    "event_type",
+    "event_id",
+    "error",
+    "duration_ms",
+    "items_count",
+    "timeout_s",
+  ]);
+}
+
+function compactBatchResults(data: unknown, successKeys: string[]): Record<string, unknown> {
+  const value = asObject(data);
+  return {
+    results: asArray(value.results).map((entry) => projectBatchResultEntry(entry, successKeys)),
+  };
 }
 
 function compactMonitorEvent(data: unknown): Record<string, unknown> {
@@ -353,6 +396,19 @@ function projectCursor(
   if (options.includeUpdatedAt) copyIfPresent(out, cursor, "updated_at");
   if (options.includeAutoUpdate) copyIfPresent(out, cursor, "auto_update");
   return out;
+}
+
+function projectBatchResultEntry(value: unknown, successKeys: string[]): Record<string, unknown> {
+  const entry = asObject(value);
+  if (entry.ok === false) {
+    const error = asObject(entry.error);
+    return stripUndefined({
+      session: entry.session,
+      ok: false,
+      error: Object.keys(error).length > 0 ? pickFields(error, ["code"]) : undefined,
+    });
+  }
+  return pickFields(entry, ["session", ...successKeys]);
 }
 
 function summarizeEventKey(event: Record<string, unknown>): string | null {

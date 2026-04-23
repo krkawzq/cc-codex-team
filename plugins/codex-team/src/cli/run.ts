@@ -198,9 +198,31 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
 }
 
 function exitCodeForResult(method: string, result: unknown): number {
-  if (method !== "message:wait" || !result || typeof result !== "object") return 0;
-  const outcome = (result as Record<string, unknown>).outcome;
-  if (outcome === "error") return 1;
+  if (!result || typeof result !== "object") return 0;
+
+  if (method === "message:send-many" || method === "session:detach") {
+    const results = (result as Record<string, unknown>).results;
+    if (Array.isArray(results) && results.some((entry) => entry && typeof entry === "object" && (entry as Record<string, unknown>).ok === false)) {
+      return 1;
+    }
+    return 0;
+  }
+
+  if (method !== "message:wait") return 0;
+  const value = result as Record<string, unknown>;
+  const outcomes = Array.isArray(value.outcomes)
+    ? value.outcomes
+        .map((entry) => entry && typeof entry === "object" ? (entry as Record<string, unknown>).outcome : null)
+        .filter((entry): entry is string => typeof entry === "string")
+    : [];
+  if (outcomes.length > 0) {
+    if (outcomes.includes("error") || outcomes.includes("interrupted")) return 1;
+    if (outcomes.includes("timeout")) return 124;
+    return 0;
+  }
+
+  const outcome = value.outcome;
+  if (outcome === "error" || outcome === "interrupted") return 1;
   if (outcome === "timeout") return 124;
   return 0;
 }
@@ -559,10 +581,24 @@ function forwardDaemonError(error: { code: string; message: string; data?: unkno
 }
 
 function validateCliFlags(parsed: ParsedArgs, method: string): string | null {
-  if (method !== "monitor:events") return null;
-  if (parsed.flags.cursor === true) return "--cursor requires a value";
-  if (parsed.flags.since !== undefined && parsed.flags.cursor !== undefined) {
-    return "--since and --cursor are mutually exclusive";
+  if (method === "monitor:events") {
+    if (parsed.flags.cursor === true) return "--cursor requires a value";
+    if (parsed.flags.since !== undefined && parsed.flags.cursor !== undefined) {
+      return "--since and --cursor are mutually exclusive";
+    }
+    return null;
+  }
+  if (method === "message:wait") {
+    if ((truthy(parsed.flags.all) || truthy(parsed.flags.any)) && parsed.flags.for !== undefined) {
+      return "--for is only supported when waiting on a single session";
+    }
+    return null;
+  }
+  if (method === "session:detach") {
+    if (parsed.flags.match !== undefined && !truthy(parsed.flags.all)) {
+      return "--match requires --all";
+    }
+    return null;
   }
   return null;
 }
