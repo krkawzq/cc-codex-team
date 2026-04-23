@@ -1345,8 +1345,12 @@ var sessionGroup = {
         }
       ],
       examples: [
+        "codex-team -b $TOKEN session attach audit",
         "codex-team -b $TOKEN session attach th-abc123 --takeover",
         "codex-team -b $TOKEN session attach th-abc123 --experimental-tools ask-user-question"
+      ],
+      notes: [
+        "Detached threads can be addressed by either saved name or thread ID; the CLI resolves the matching detached thread automatically."
       ],
       needs_bearer: true
     }),
@@ -1454,6 +1458,9 @@ var sessionGroup = {
       examples: [
         "codex-team -b $TOKEN session fork audit audit-fix --at-turn turn-42"
       ],
+      notes: [
+        "Detached source threads can be addressed by either saved name or thread ID; the CLI resolves detached names automatically."
+      ],
       needs_bearer: true
     }),
     leaf({
@@ -1516,7 +1523,7 @@ var sessionGroup = {
     }),
     leaf({
       name: "info",
-      summary: "Show metadata for one session.",
+      summary: "Show metadata for one live or detached session.",
       usage: "codex-team -b <token> session info <name|thread_id> [flags]",
       positionals: [
         { ...SESSION_TARGET }
@@ -1533,6 +1540,9 @@ var sessionGroup = {
       examples: [
         "codex-team -b $TOKEN session info audit"
       ],
+      notes: [
+        "Detached threads can be addressed by either saved name or thread ID; detached results return the persisted thread snapshot."
+      ],
       needs_bearer: true
     }),
     leaf({
@@ -1542,10 +1552,22 @@ var sessionGroup = {
       positionals: [
         { ...SESSION_TARGET }
       ],
-      flags: [],
+      flags: [
+        {
+          long: "--format",
+          type: "enum",
+          default: "json",
+          required: false,
+          description: "Render output as json or markdown."
+        }
+      ],
       examples: [
         "codex-team -b $TOKEN session context audit",
+        "codex-team -b $TOKEN session context audit --format markdown",
         "codex-team -b $TOKEN session context audit --full"
+      ],
+      notes: [
+        "Detached threads can be addressed by either saved name or thread ID; the CLI resolves detached names automatically."
       ],
       needs_bearer: true
     }),
@@ -1595,7 +1617,7 @@ var sessionGroup = {
           type: "string",
           default: "self",
           required: false,
-          description: "Best-effort owner filter: self, any, or an explicit bearer token."
+          description: "Best-effort owner filter for live/loaded rows: self, any, or an explicit bearer token. Detached-thread visibility under --all stays scoped to the current bearer."
         },
         {
           long: "--loaded-only",
@@ -1630,6 +1652,9 @@ var sessionGroup = {
         "codex-team -b $TOKEN session list --all --format table",
         "codex-team -b $TOKEN session list --all --limit 25 --cursor abc123",
         "codex-team -b $TOKEN session list --loaded-only --owner any"
+      ],
+      notes: [
+        "With --all, detached-thread rows are filtered server-side to sessions visible to the calling bearer token; the command does not enumerate other users' detached threads."
       ],
       needs_bearer: true
     }),
@@ -1729,7 +1754,7 @@ var sessionGroup = {
           type: "bool",
           default: "false",
           required: false,
-          description: "Ask the daemon to pre-summarize events; visible CLI output already uses the same concise summary shape unless you pass --full."
+          description: "Ask the daemon to emit summary objects directly. Without --full, visible CLI output is already compacted to nearly the same shape client-side; this mainly changes the wire payload."
         },
         {
           long: "--by-tool",
@@ -1837,7 +1862,8 @@ var sessionGroup = {
       ],
       notes: [
         "Use 'codex-team -b <token> session health <name|thread_id>' first to inspect crash state and pending work.",
-        'Healthy live sessions return compact JSONL like {"name":"audit","note":"already healthy"}.'
+        'Healthy live sessions return compact JSONL like {"name":"audit","note":"already healthy"}.',
+        "Detached threads can be addressed by saved name or thread ID, but detached targets still return session_not_live with an attach hint."
       ],
       needs_bearer: true
     })
@@ -2000,7 +2026,7 @@ var messageGroup = {
       summary: "Show a concise multi-turn transcript with message bodies and summarized tools.",
       usage: "codex-team -b <token> message history <name|thread_id> [flags]",
       positionals: [
-        { ...LIVE_SESSION_TARGET, description: "Session to inspect." }
+        { ...SESSION_TARGET, description: "Live session or detached thread to inspect by name or thread ID." }
       ],
       flags: [
         {
@@ -2042,6 +2068,9 @@ var messageGroup = {
       examples: [
         "codex-team -b $TOKEN message history audit --since -3 --format markdown"
       ],
+      notes: [
+        "Detached threads can be addressed by either saved name or thread ID; the CLI resolves detached names automatically."
+      ],
       needs_bearer: true
     }),
     leaf({
@@ -2049,7 +2078,7 @@ var messageGroup = {
       summary: "Show the latest message-focused turn view and optionally follow new ones.",
       usage: "codex-team -b <token> message tail <name|thread_id> [flags]",
       positionals: [
-        { ...LIVE_SESSION_TARGET, description: "Session to inspect." }
+        { ...SESSION_TARGET, description: "Live session or detached thread to inspect by name or thread ID." }
       ],
       flags: [
         {
@@ -2085,11 +2114,14 @@ var messageGroup = {
       examples: [
         "codex-team -b $TOKEN message tail audit -n 5 --follow"
       ],
+      notes: [
+        "Detached threads can be addressed by either saved name or thread ID; --follow still requires a live session."
+      ],
       needs_bearer: true
     }),
     leaf({
       name: "wait",
-      summary: "Block until a turn completes, errors, or times out.",
+      summary: "Block until a turn reaches terminal turn.completed or times out.",
       usage: "codex-team -b <token> message wait <name|thread_id>... [flags]",
       positionals: [
         { ...LIVE_SESSION_TARGETS, description: "One session by default, or multiple with --all/--any." }
@@ -2125,6 +2157,7 @@ var messageGroup = {
       ],
       notes: [
         "Without --for, waits for the current in-flight turn. If the session is idle, waits for the next turn that starts after this call.",
+        "Terminal outcomes arrive as turn.completed with status completed, failed, cancelled, or interrupted.",
         "--all and --any are mutually exclusive. --for only applies to single-session waits."
       ],
       examples: [
@@ -2192,7 +2225,7 @@ var monitorGroup = {
           type: "bool",
           default: "false",
           required: false,
-          description: "Ask the daemon to emit summary objects directly; visible CLI output already uses the same concise summary shape unless you pass --full."
+          description: "Ask the daemon to emit summary objects directly. Without --full, visible CLI output is already compacted to nearly the same shape client-side; this mainly changes the wire payload."
         },
         {
           long: "--since",
@@ -2429,6 +2462,7 @@ var HELP_TREE = {
       notes: [
         "Human-readable by default. Use --short for a one-line verdict summary.",
         "Use --json for the same verdict/check payload in machine-readable form.",
+        "Exit codes: 0 = HEALTHY, 1 = DEGRADED (warnings only), 2 = BROKEN (one or more failed checks).",
         "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
         "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness."
       ],
