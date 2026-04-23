@@ -4591,16 +4591,18 @@ async function ensureDaemon(sockPath) {
   }
   const staleState = detectStaleDaemonArtifacts(sockPath, pidPath);
   if (staleState) {
-    return {
-      ok: false,
-      code: "daemon_unreachable",
-      message: `stale daemon.pid + daemon.sock (pid ${staleState.pid} is not running); remove them and retry`,
-      data: {
-        pid_path: pidPath,
-        sock_path: staleState.sockPath,
-        pid: staleState.pid
-      }
-    };
+    process.stderr.write(
+      `[codex-team] auto-cleanup: removed stale daemon.pid (pid ${staleState.pid} not running) + stale daemon.sock at ${staleState.sockPath}
+`
+    );
+    try {
+      import_node_fs8.default.unlinkSync(pidPath);
+    } catch {
+    }
+    try {
+      import_node_fs8.default.unlinkSync(staleState.sockPath);
+    } catch {
+    }
   }
   try {
     const child = spawnDaemon();

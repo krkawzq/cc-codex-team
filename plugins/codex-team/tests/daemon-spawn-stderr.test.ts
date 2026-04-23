@@ -279,12 +279,16 @@ describe("daemon spawn stderr retry", () => {
     expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"ok\":true"));
   });
 
-  it("fails fast on stale pid and sock artifacts without respawning", async () => {
-    sockMocks.probeSock.mockResolvedValue(false);
+  it("auto-cleans stale pid and sock artifacts and spawns a fresh daemon", async () => {
+    // probeSock: first call false (initial check), later true (daemon alive)
+    let probeSeq = 0;
+    sockMocks.probeSock.mockImplementation(async () => ++probeSeq > 1);
     const dataDir = path.join(tempHome, ".codex-team");
     fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(path.join(dataDir, "daemon.pid"), JSON.stringify({ pid: 999999 }));
-    fs.writeFileSync(path.join(dataDir, "daemon.sock"), "");
+    const staleSockPath = path.join(dataDir, "daemon.sock");
+    const stalePidPath = path.join(dataDir, "daemon.pid");
+    fs.writeFileSync(stalePidPath, JSON.stringify({ pid: 999999 }));
+    fs.writeFileSync(staleSockPath, "");
     vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (pid === 999999 && signal === 0) {
         throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
@@ -292,11 +296,28 @@ describe("daemon spawn stderr retry", () => {
       return true;
     }) as typeof process.kill);
 
+    let responseHandler: ((m: { kind: string; id: string; result?: unknown }) => void) | null = null;
+    sockMocks.onMessages.mockImplementation((_sock, handler: (msg: { kind: string; id: string; result?: unknown }) => void) => {
+      responseHandler = handler;
+    });
+    sockMocks.writeMessage.mockImplementation((_sock, req: { id: string }) => {
+      setTimeout(() => {
+        responseHandler?.({ kind: "response", id: req.id, result: { session_count: 0 } });
+      }, 0);
+    });
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const child = makeChildProcess();
+    processMocks.spawn.mockImplementationOnce(() => child);
+
     const code = await runCli(["-b", "token-1", "status"]);
 
-    expect(code).toBe(1);
-    expect(processMocks.spawn).not.toHaveBeenCalled();
-    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("stale daemon.pid + daemon.sock"));
-    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"pid\":999999"));
+    expect(code).toBe(0);
+    // pidfile + sock were cleaned up, then daemon was spawned
+    expect(fs.existsSync(stalePidPath)).toBe(false);
+    expect(fs.existsSync(staleSockPath)).toBe(false);
+    expect(processMocks.spawn).toHaveBeenCalledTimes(1);
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("auto-cleanup"));
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("999999"));
   });
 });

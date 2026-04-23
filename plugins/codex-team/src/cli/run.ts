@@ -480,16 +480,15 @@ async function ensureDaemon(sockPath: string): Promise<EnsureDaemonResult> {
 
   const staleState = detectStaleDaemonArtifacts(sockPath, pidPath);
   if (staleState) {
-    return {
-      ok: false,
-      code: "daemon_unreachable",
-      message: `stale daemon.pid + daemon.sock (pid ${staleState.pid} is not running); remove them and retry`,
-      data: {
-        pid_path: pidPath,
-        sock_path: staleState.sockPath,
-        pid: staleState.pid,
-      },
-    };
+    // Pid is confirmed dead (detectStaleDaemonArtifacts verified isPidAlive is false).
+    // Auto-clean the stale artefacts and proceed to spawn a fresh daemon — don't
+    // require manual intervention for an obviously recoverable state. Log a notice
+    // to stderr for visibility.
+    process.stderr.write(
+      `[codex-team] auto-cleanup: removed stale daemon.pid (pid ${staleState.pid} not running) + stale daemon.sock at ${staleState.sockPath}\n`,
+    );
+    try { fs.unlinkSync(pidPath); } catch { /* already gone */ }
+    try { fs.unlinkSync(staleState.sockPath); } catch { /* already gone */ }
   }
 
   try {
