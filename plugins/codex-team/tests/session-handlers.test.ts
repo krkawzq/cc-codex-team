@@ -25,6 +25,7 @@ import { sessionAttach, sessionDetach, sessionFork, sessionList, sessionNew, ses
 import {
   threadFork,
   threadList,
+  threadRead,
   threadResume,
   threadStart,
   threadSetName,
@@ -429,6 +430,93 @@ describe("session handlers", () => {
 
     await expect(sessionAttach(ctx as never, makeReq("session:attach", ["shared-name"]) as never))
       .rejects.toMatchObject({ code: "invalid_params" });
+  });
+
+  it("attaches a detached session by name", async () => {
+    const adhocClient = { kind: "adhoc-client" };
+    const liveClient = { kind: "live-client" };
+    vi.mocked(threadList).mockResolvedValue({
+      data: [{ id: "th-detached", name: "refactor" }],
+      nextCursor: null,
+    } as never);
+    vi.mocked(threadResume).mockResolvedValue(undefined as never);
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+        touch: vi.fn(),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue(null),
+        findLiveAnywhere: vi.fn().mockReturnValue(null),
+        findUniqueLiveByNameAnywhere: vi.fn().mockReturnValue(null),
+        add: vi.fn(),
+      },
+      pool: {
+        acquireForAdhoc: vi.fn().mockResolvedValue(adhocClient),
+        acquire: vi.fn().mockResolvedValue(liveClient),
+        release: vi.fn(),
+      },
+      config: {
+        getEffective: vi.fn().mockReturnValue(null),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    const result = await sessionAttach(ctx as never, makeReq("session:attach", ["refactor"]) as never);
+
+    expect(result).toMatchObject({
+      session: {
+        name: "refactor",
+        thread_id: "th-detached",
+      },
+    });
+    expect(ctx.pool.acquireForAdhoc).toHaveBeenCalled();
+    expect(vi.mocked(threadList)).toHaveBeenCalledWith(adhocClient, {
+      pageSize: 200,
+      includeArchived: true,
+    }, {});
+    expect(vi.mocked(threadResume)).toHaveBeenCalledWith(liveClient, "th-detached", {});
+    expect(ctx.pool.acquire).toHaveBeenCalledWith("user-1", "user-1::refactor", undefined);
+  });
+
+  it("keeps direct UUID attach on the existing thread-id path", async () => {
+    const threadId = "019db000-1111-2222-3333-444444444444";
+    const client = { kind: "live-client" };
+    vi.mocked(threadResume).mockResolvedValue(undefined as never);
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+        touch: vi.fn(),
+      },
+      sessions: {
+        get: vi.fn().mockReturnValue(null),
+        findLiveAnywhere: vi.fn().mockReturnValue(null),
+        findUniqueLiveByNameAnywhere: vi.fn(),
+        add: vi.fn(),
+      },
+      pool: {
+        acquire: vi.fn().mockResolvedValue(client),
+        release: vi.fn(),
+      },
+      config: {
+        getEffective: vi.fn().mockReturnValue(null),
+      },
+      retryOptions: vi.fn().mockReturnValue({}),
+    };
+
+    const result = await sessionAttach(ctx as never, makeReq("session:attach", [threadId]) as never);
+
+    expect(result).toMatchObject({
+      session: {
+        name: "s-019db000",
+        thread_id: threadId,
+      },
+    });
+    expect(vi.mocked(threadResume)).toHaveBeenCalledWith(client, threadId, {});
+    expect(vi.mocked(threadList)).not.toHaveBeenCalled();
+    expect(vi.mocked(threadRead)).not.toHaveBeenCalled();
   });
 
   it("serializes concurrent thread takeover attaches so only one resume runs", async () => {

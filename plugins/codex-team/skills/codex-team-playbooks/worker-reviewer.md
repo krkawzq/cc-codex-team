@@ -62,6 +62,16 @@ Bounded: stop after 3 accept-loops. If still rejecting, escalate (human interven
 
 `turn.completed` is compact in 0.5.2, so the worker's diff/log still comes from `worker.md` or `message tail`, not the event payload.
 
+## Message-only variant
+
+Use this when the worker is producing prose, analysis, or a rewrite plan and there are no files worth diffing.
+
+Claude waits for the worker turn to finish, runs `codex-team -b $TOK message tail worker -n 1 --format markdown`, and pipes that output verbatim into the reviewer session as the review target.
+
+Ask the critic to answer with one of these verdicts: `approved`, `needs-rewrite: <reason>`, or `reject: <reason>`.
+
+Keep the same default iteration cap of 3 rounds. If the critic still has not said `approved` at the cap, stop the loop and escalate to a human or restart with a narrower brief.
+
 ## Variants
 
 - **Parallel review**: spin up a second reviewer with a different angle (e.g. one checks correctness, one checks performance). Claude merges reviews before sending to worker.

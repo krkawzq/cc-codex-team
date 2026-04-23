@@ -149,6 +149,14 @@ codex-team -b $TOKEN session detach demo
 
 This interrupts any in-flight turn, releases the app-server slot, and removes the session from live tracking. The thread file is preserved — you can `attach` the same thread_id in a future conversation.
 
+## Day 2 — resume a session
+
+```bash
+# tomorrow
+codex-team -b $TOKEN session attach refactor         # resumes the same thread
+codex-team -b $TOKEN message send refactor "..."     # continues the conversation
+```
+
 ## 10. Stop the daemon (optional)
 
 Daemon auto-shuts down after 6h idle. If you want to be tidy:

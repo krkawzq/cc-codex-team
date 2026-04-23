@@ -119,7 +119,7 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
   const flags = asFlags(req);
   const takeover = isTrue(flags["takeover"]);
 
-  const lockThreadId = resolveAttachLockThreadId(ctx, identifier);
+  const lockThreadId = await resolveAttachLockThreadId(ctx, user, identifier);
   const attach = async () => {
     const existing = ctx.sessions.get(user, identifier);
     if (existing) {
@@ -134,6 +134,16 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
     if (anywhere === "ambiguous") {
       throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
     }
+
+    let detached: Thread | null = null;
+    if (!anywhere && !looksLikeThreadId(identifier)) {
+      const detachedMatch = await findDetachedThreadByName(ctx, user, identifier);
+      if (detachedMatch === "ambiguous") {
+        throw invalidParams(`session name '${identifier}' is ambiguous across detached threads; use a thread_id`);
+      }
+      detached = detachedMatch;
+    }
+
     const autoApprovePatterns = validateSessionAutoApprovePatterns(anywhere?.record.autoApprovePatterns ?? []);
     if (anywhere && anywhere.user !== user) {
       if (!takeover) {
@@ -142,13 +152,13 @@ export const sessionAttach: HandlerFn = async (ctx, req) => {
       await seizeFromOtherUser(ctx, anywhere.user, user, anywhere.record);
     }
 
-    const threadId = looksLikeThreadId(identifier) ? identifier : (anywhere?.record.thread_id ?? null);
+    const threadId = looksLikeThreadId(identifier) ? identifier : (anywhere?.record.thread_id ?? detached?.id ?? null);
     if (!threadId) {
       throw new CodexTeamError("session_not_found", `no session matches '${identifier}' in this user`);
     }
     ensureAttachOwnership(ctx, user, threadId);
 
-    const name = anywhere?.record.name ?? deriveNameFromThreadId(threadId, ctx, user);
+    const name = anywhere?.record.name ?? asString(detached?.name) ?? deriveNameFromThreadId(threadId, ctx, user);
     const experimentalTools = resolveExperimentalToolsForAttach(ctx, flags, anywhere?.record.experimental_tools);
     const sessionKey = keyFor(user, name);
     const client = await ctx.pool.acquire(user, sessionKey, buildExperimentalToolAppServerOptions(experimentalTools));
@@ -901,13 +911,22 @@ function deriveNameFromThreadId(threadId: string, ctx: DaemonContext, user: stri
   return candidate;
 }
 
-function resolveAttachLockThreadId(ctx: DaemonContext, identifier: string): string | null {
+async function resolveAttachLockThreadId(
+  ctx: DaemonContext,
+  user: string,
+  identifier: string,
+): Promise<string | null> {
   if (looksLikeThreadId(identifier)) return identifier;
   const anywhere = ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
   if (anywhere === "ambiguous") {
     throw invalidParams(`session name '${identifier}' is ambiguous across users; use a thread_id or attach within the owning user`);
   }
-  return anywhere?.record.thread_id ?? null;
+  if (anywhere) return anywhere.record.thread_id;
+  const detached = await findDetachedThreadByName(ctx, user, identifier);
+  if (detached === "ambiguous") {
+    throw invalidParams(`session name '${identifier}' is ambiguous across detached threads; use a thread_id`);
+  }
+  return detached?.id ?? null;
 }
 
 function ensureAttachOwnership(ctx: DaemonContext, user: string, threadId: string): void {
