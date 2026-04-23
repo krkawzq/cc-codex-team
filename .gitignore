@@ -6,3 +6,4 @@ forks/
 .claude/
 
 plugins/codex-team/package-lock.json
+.codex
