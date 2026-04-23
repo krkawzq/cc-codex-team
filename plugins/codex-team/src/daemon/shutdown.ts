@@ -51,6 +51,12 @@ export async function shutdownDaemon(ctx: DaemonContext, reason: string, exitCod
     logger.error("event log flush error", { err: (e as Error).message });
   }
 
+  try {
+    await ctx.cursors.flush();
+  } catch (e) {
+    logger.error("cursor flush error", { err: (e as Error).message });
+  }
+
   unlinkSockIfStale(ctx.sockPath);
   try { fs.unlinkSync(pidFilePath(ctx.dataDir)); } catch { /* ignore */ }
 

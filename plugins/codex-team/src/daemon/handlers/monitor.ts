@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 
 import type { HandlerFn } from "../dispatch";
 import { CodexTeamError, invalidParams } from "../../errors";
+import { logger } from "../../logger";
 import type { TeamEvent } from "../../types";
 import {
   AUTO_APPROVED_EVENT_TYPE,
@@ -13,6 +14,8 @@ import {
 const MAX_INTERVAL_QUEUE_EVENTS = 512;
 const MAX_INTERVAL_QUEUE_BYTES = 512 * 1024;
 const MAX_FLUSH_EVENTS_PER_TICK = 64;
+const DEFAULT_CURSOR_PERSIST_DEBOUNCE_MS = 200;
+const ACKABLE_EVENT_ID_RE = /^evt-\d+$/;
 
 interface MonitorEventSummary {
   id: string;
@@ -20,6 +23,7 @@ interface MonitorEventSummary {
   type: string;
   session: string | null;
   key: string | null;
+  ackable?: boolean;
 }
 
 export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
@@ -43,15 +47,14 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
   const summaryMode = isTrue(flags["summary"]);
   const filterTypes = parseTypeList(flags["filter"]);
   const excludeTypes = parseTypeList(flags["exclude"]);
+  const cursorPersistDebounceMs = numConfig(ctx, "monitor.cursor_persist_debounce_ms", DEFAULT_CURSOR_PERSIST_DEBOUNCE_MS);
   const sinceId = asString(flags["since"]);
   const cursorName = asString(flags["cursor"]);
   if (sinceId && cursorName) throw invalidParams("--since and --cursor are mutually exclusive");
   const sessionFilter = asString(flags["session"]);
   let effectiveSinceId = sinceId;
-  let persistedCursorEventId: string | null = null;
-  let lastObservedEventId: string | null = null;
+  let queuedCursorEventId: string | null = null;
   let lastAckedEventId: string | null = null;
-  let cursorWriteChain = Promise.resolve();
 
   if (cursorName) {
     const cursor = await ctx.cursors.ensure(user, {
@@ -60,32 +63,38 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
       auto_update: true,
     });
     effectiveSinceId = cursor.event_id;
-    persistedCursorEventId = cursor.event_id;
-    lastObservedEventId = cursor.event_id;
+    queuedCursorEventId = cursor.event_id;
     lastAckedEventId = cursor.event_id;
   }
 
-  const emit = (event: TeamEvent): void => {
-    stream.chunk(summaryMode ? summarizeEvent(event) : event);
+  const emit = (event: TeamEvent, ackable = isAckableMonitorEventId(event.id)): void => {
+    stream.chunk(summaryMode ? summarizeEvent(event, ackable) : withAckableState(event, ackable));
   };
   const scheduleCursorPersist = (): void => {
     if (!cursorName) return;
     const nextEventId = lastAckedEventId;
-    if (!nextEventId || nextEventId === persistedCursorEventId) return;
-    cursorWriteChain = cursorWriteChain
-      .catch(() => undefined)
-      .then(async () => {
-        if (!nextEventId || nextEventId === persistedCursorEventId) return;
-        await ctx.cursors.saveBestEffort(user, {
-          name: cursorName,
-          event_id: nextEventId,
-          auto_update: true,
-        });
-        persistedCursorEventId = nextEventId;
-      });
+    if (!nextEventId || nextEventId === queuedCursorEventId) return;
+    ctx.cursors.saveBestEffortDebounced(user, {
+      name: cursorName,
+      event_id: nextEventId,
+      auto_update: true,
+    }, cursorPersistDebounceMs);
+    queuedCursorEventId = nextEventId;
+  };
+  const flushCursorPersist = async (): Promise<void> => {
+    if (!cursorName) return;
+    await ctx.cursors.flushUser(user);
   };
   stream.onAck((ack) => {
     if (!ack.event_id) return;
+    if (!isAckableMonitorEventId(ack.event_id)) {
+      logger.warn("ignoring non-event monitor ack for cursor update", {
+        user,
+        cursor: cursorName,
+        event_id: ack.event_id,
+      });
+      return;
+    }
     lastAckedEventId = ack.event_id;
     scheduleCursorPersist();
   });
@@ -113,9 +122,6 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     return { streaming: true };
   }
 
-  if (backlog.events.length > 0) {
-    lastObservedEventId = backlog.events[backlog.events.length - 1]?.id ?? lastObservedEventId;
-  }
   const initialEvents = backlog.events.filter(accept);
   const queue: TeamEvent[] = streamMode ? [...initialEvents] : [];
   let queueBytes = 0;
@@ -164,17 +170,16 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     for (const e of queue) emit(e);
     queue.length = 0;
     const sub = ctx.events.subscribe(user, (e) => {
-      lastObservedEventId = e.id;
       if (accept(e)) emit(e);
     });
-    stream.onClose(() => {
+    stream.onClose(async () => {
       sub.dispose();
+      await flushCursorPersist();
     });
     return { streaming: true };
   }
 
   const sub = ctx.events.subscribe(user, (e) => {
-    lastObservedEventId = e.id;
     if (accept(e)) enqueueIntervalEvent(e);
   });
   let closed = false;
@@ -192,7 +197,7 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     if (closed || draining) return;
     draining = true;
     const overflowEvent = takeOverflowEvent();
-    if (overflowEvent) emit(overflowEvent);
+    if (overflowEvent) emit(overflowEvent, false);
     const batch = queue.splice(0, MAX_FLUSH_EVENTS_PER_TICK);
     for (const event of batch) {
       queueBytes = Math.max(0, queueBytes - eventSize(event));
@@ -211,11 +216,12 @@ export const monitorEvents: HandlerFn = async (ctx, req, stream) => {
     scheduleDrain(0);
   }
 
-  stream.onClose(() => {
+  stream.onClose(async () => {
     closed = true;
     clearInterval(timer);
     if (drainTimer) clearTimeout(drainTimer);
     sub.dispose();
+    await flushCursorPersist();
   });
   return { streaming: true };
 };
@@ -414,14 +420,34 @@ function eventSize(event: TeamEvent): number {
   return Buffer.byteLength(JSON.stringify(event));
 }
 
-function summarizeEvent(event: TeamEvent): MonitorEventSummary {
-  return {
+function summarizeEvent(event: TeamEvent, ackable: boolean): MonitorEventSummary {
+  return stripUndefined({
     id: event.id,
     ts: event.ts,
     type: event.type,
     session: event.session,
     key: summarizeEventKey(event),
+    ackable: ackable ? undefined : false,
+  });
+}
+
+function withAckableState(event: TeamEvent, ackable: boolean): TeamEvent | (TeamEvent & { ackable: false }) {
+  if (ackable) return event;
+  return {
+    ...event,
+    ackable: false,
   };
+}
+
+function isAckableMonitorEventId(eventId: string): boolean {
+  return ACKABLE_EVENT_ID_RE.test(eventId);
+}
+
+function stripUndefined<T extends Record<string, unknown>>(value: T): T {
+  for (const [key, entry] of Object.entries(value)) {
+    if (entry === undefined) delete value[key];
+  }
+  return value;
 }
 
 function summarizeEventKey(event: TeamEvent): string | null {

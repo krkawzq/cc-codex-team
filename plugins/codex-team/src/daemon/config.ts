@@ -32,6 +32,7 @@ export const CONFIG_KEYS: Record<string, ConfigSpec> = {
   "daemon.connect_retry_delay_seconds": { type: "float", default: 0.25, needsRestart: false, description: "delay between transient daemon connect retries" },
 
   "monitor.default_interval_seconds": { type: "int", default: 30, needsRestart: false, description: "default --interval for `monitor events`" },
+  "monitor.cursor_persist_debounce_ms": { type: "int", default: 200, needsRestart: false, description: "debounce for cursor auto-updates from `monitor events` (milliseconds)" },
   "monitor.event_log_retention": { type: "int", default: 10000, needsRestart: false, description: "per-user ring-buffer event retention" },
   "session.auto_approve_command_patterns": {
     type: "string",
