@@ -50,7 +50,7 @@ Takeover cancels pending approvals on the previous holder. If another agent had 
 
 ## 12. Reading `turn.completed` as the source of truth for turn content
 
-Events are summaries. In 0.5.2, `turn.completed` is explicitly compact and no longer embeds items. Fetch content with `message tail` / `message history` or read the work-doc files on disk.
+Events are summaries. `turn.completed` is explicitly compact and does not embed items. Fetch content with `message tail` / `message history` or read the work-doc files on disk.
 
 ## 13. Treating `--since <id>` as a durable bookmark
 

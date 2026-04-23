@@ -47,7 +47,7 @@ Claude:
 Notes:
 
 - If you are actively blocked on the worker, `message wait` is simpler and more reliable than a polling loop.
-- `turn.completed` is compact metadata only in 0.5.2; always fetch the turn or read the worker's output file for substance.
+- `turn.completed` is still just the terminal boundary signal. In 0.5.5, fetch substance with `message tail ... --format markdown`, which now renders rich tagged content for reasoning, shell output, file patches, tool calls, and messages.
 - If you do not want unattended approvals, pass `--auto-approve ""` or omit the flag and rely on the daemon default being empty.
 
 ## Termination

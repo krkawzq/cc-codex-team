@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/Node-18%2B-brightgreen.svg)](#requirements)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A4FFF.svg)](https://code.claude.com/docs/en/plugins)
-[![Release](https://img.shields.io/badge/Release-0.5.4-success.svg)](plugins/codex-team/docs/releases/0.5.4.md)
+[![Release](https://img.shields.io/badge/Release-0.5.5-success.svg)](plugins/codex-team/docs/releases/0.5.5.md)
 
 </div>
 
@@ -43,7 +43,7 @@ Four concepts:
 | --- | --- |
 | **bearer token** | Any string you pick. Namespaces your sessions from other agents sharing the daemon. |
 | **session** | A codex thread with a human name. Persistent on disk by codex; codex-team owns the **live binding** to an app-server. |
-| **event** | A NDJSON summary line pushed by the daemon when something happens (turn started/completed/errored, approval request, session crashed, …). |
+| **event** | A NDJSON summary line pushed by the daemon when something happens (`turn.started`, terminal `turn.completed`, approval request, session crashed, …). |
 | **named cursor** | Daemon-maintained resume point in the event stream. Survives restarts. |
 
 Daemon-per-OS-user. Isolation-per-token. No per-project workspaces — just token scoping.
@@ -123,7 +123,7 @@ codex-team -b $TOK session list [--short]         # one line per session
 ```bash
 codex-team -b $TOK message send NAME "prompt"      # non-blocking; starts a turn
 codex-team -b $TOK message peer NAME "..."         # inject into the active turn (soft redirect)
-codex-team -b $TOK message wait NAME [--timeout S] # block until turn.completed / turn.error / timeout
+codex-team -b $TOK message wait NAME [--timeout S] # block until terminal turn.completed (including status=failed) or timeout
 codex-team -b $TOK message tail NAME -n 1 --format markdown   # fetch the last turn
 codex-team -b $TOK message approval NAME REQ_ID accept         # respond to approval.request
 codex-team -b $TOK message answer NAME REQ_ID "..."            # respond to user_input.request
@@ -139,7 +139,7 @@ codex-team -b $TOK cursor get NAME                                   # {"event_i
 
 **Output & status**
 
-Successful non-streaming commands emit concise single-line JSONL by default. Pass `--full` to print the complete response body as multi-line JSON. All status-returning commands also accept `--short` for compact plain-text output (friendly for grep and dashboards). `message history` and `message tail` accept `--truncate <bytes>` to clip long bodies. Tagged-markdown output (`--format markdown`) follows [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md) with per-type renderers for user messages, agent messages, shell, file patches, MCP tool calls, hooks, reasoning, and auto-approval reviews.
+Successful non-streaming commands emit concise single-line JSONL by default. Pass `--full` to print the complete response body as multi-line JSON. All status-returning commands also accept `--short` for compact plain-text output (friendly for grep and dashboards). `message history` and `message tail` accept `--truncate <bytes>` to clip long bodies; `--truncate 0` disables clipping. Tagged-markdown output (`--format markdown`) follows [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md). It is a tagged markdown interchange format, not plain prose markdown: container tags like `<history>` / `<tail>` / `<turn>` carry metadata, and item tags like `<message>`, `<shell>`, `<file-patch>`, `tool.<name>`, `hook.<name>`, `<reasoning>`, and `<auto-approval-review>` carry content.
 
 ## Playbooks
 
@@ -171,7 +171,7 @@ The CLI is self-documenting (`codex-team --help`, `<cmd> --help`). For deeper ma
 | Tune models, profiles, tricks | [`skills/configure-codex-team/`](plugins/codex-team/skills/configure-codex-team/) |
 | Handle errors, crashes, recovery | [`skills/recover-codex-team/`](plugins/codex-team/skills/recover-codex-team/) |
 | Interactive walkthrough | `/codex-team:tutorial` |
-| Latest changes | [`docs/releases/0.5.4.md`](plugins/codex-team/docs/releases/0.5.4.md) |
+| Latest changes | [`docs/releases/0.5.5.md`](plugins/codex-team/docs/releases/0.5.5.md) |
 | Output format spec | [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md) |
 
 ## Requirements

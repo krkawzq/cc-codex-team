@@ -1,10 +1,10 @@
 ---
-description: Arm the codex-team event stream (Monitor tool) for your bearer token. Events flow as NDJSON summaries; call `codex-team -b <token> message tail <session>` for turn content. If no token is supplied, prompt via AskUserQuestion.
+description: Arm the codex-team event stream (Monitor tool) for your bearer token. Events flow as NDJSON summaries; terminal failures arrive as `turn.completed` with `payload.status="failed"`. Call `codex-team -b <token> message tail <session>` for turn content. If no token is supplied, prompt via AskUserQuestion.
 argument-hint: "[-b <token>] [--stream] [--filter <types>] [--session <name>] [--since <id>]"
 allowed-tools: Bash, Monitor, AskUserQuestion
 ---
 
-Attach a persistent Monitor that pipes codex-team events to the task panel. Every event is a single NDJSON line; each is a **summary** — fetch details on demand via `message tail` / `message history`.
+Attach a persistent Monitor that pipes codex-team events to the task panel. Every event is a single NDJSON line; each is a **summary**. Terminal turn outcomes are always `turn.completed` with `status: completed | failed | cancelled | interrupted` — fetch details on demand via `message tail` / `message history`.
 
 Raw user request: $ARGUMENTS
 

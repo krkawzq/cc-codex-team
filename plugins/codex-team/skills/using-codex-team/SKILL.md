@@ -149,11 +149,11 @@ Do not violate these, even under duress:
 
 ## Output rendering
 
-`session context` / `message history` / `message tail` all accept `--format markdown`. The CLI prints the raw tag-structured markdown blob to stdout (`<context>`, `<turn>`, `<shell>`, `<file-patch>`, …); tag names + attributes follow `plugins/codex-team/docs/html-md-format.md`.
+`session context` / `message history` / `message tail` all accept `--format markdown`. The CLI prints a tagged markdown interchange format to stdout, not plain prose markdown. Expect root/container tags like `<context>` / `<history>` / `<tail>` / `<turn>`, then readable item tags like `<message>`, `<shell>`, `<file-patch>`, `tool.<name>`, `hook.<name>`, `<reasoning>`, and `<auto-approval-review>`. Tag names + attributes follow `plugins/codex-team/docs/html-md-format.md`.
 
 ## Output modes: concise default, `--full` for the rest
 
-**From 0.5.3 the default JSON output is concise** — only the fields Claude needs to decide what to do next (correlation ids, flow-control flags, outcome). This eliminates a large class of wasted-token problems. You don't pass any flag to get it — it's just the default.
+**Default JSON output is concise** — only the fields Claude needs to decide what to do next (correlation ids, flow-control flags, outcome). This eliminates a large class of wasted-token problems. You don't pass any flag to get it — it's just the default.
 
 Three output modes:
 
@@ -188,8 +188,6 @@ Combine with Monitor filters for the event stream:
 monitor events --stream --summary --cursor review-tail \
   --filter turn.completed,approval.command_execution,approval.file_change,user_input.request,session.crashed
 ```
-
-## Slash commands
 
 ## Slash commands
 

@@ -104,7 +104,7 @@ Use the same blocker for the verifier:
 codex-team -b $TOK message wait verifier --timeout 0
 ```
 
-Remember that `turn.completed` is compact metadata only in 0.5.2; the verification detail lives in `verification.md` / `message tail`.
+Remember that `turn.completed` is compact metadata only; the verification detail lives in `verification.md` / `message tail`.
 
 ## When to short-circuit
 

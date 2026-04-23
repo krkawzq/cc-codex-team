@@ -31,7 +31,7 @@ description: >-
     └──────────────────────────────┘
 ```
 
-## Output modes (0.5.3+)
+## Output modes
 
 **Default output is concise** — single-line JSONL with only the fields Claude needs to act. You don't pass any flag to get it.
 
@@ -168,7 +168,7 @@ See `events.md` in this skill for the full type catalogue. The common ones are:
 
 `monitor events --stream` is safe to leave open during high-rate sessions. The cli now applies stdout back-pressure so a noisy worker does not blow up the stream reader's memory.
 
-Use `--summary` for high-fanout orchestration and `--cursor <name>` when the stream needs to resume cleanly across Claude restarts. In 0.5.2, `turn.completed` is compact metadata only; it no longer embeds turn items.
+Use `--summary` for high-fanout orchestration when you want the daemon itself to emit summary objects on the wire, and `--cursor <name>` when the stream needs to resume cleanly across Claude restarts. Without `--full`, the visible CLI output is already compacted to nearly the same shape client-side. `turn.completed` is still a boundary signal only; fetch content with `message tail` / `message history`.
 
 ### Blocking on one turn
 
@@ -177,7 +177,7 @@ codex-team -b $TOKEN message wait <session> [--for <turn_id>] [--timeout <s>]
 ```
 
 - Exit `0` on a completed turn
-- Exit `1` on errored/cancelled/crashed paths
+- Exit `1` on failed/cancelled/crashed paths
 - Exit `124` on timeout
 
 ### Fetching content on demand
@@ -224,13 +224,13 @@ codex-team -b $TOKEN message answer <s> <request_id> --json \
 
 ## Reading state
 
-Default output on these read-only commands is already concise (post-0.5.3). Pass `--short` for plain-text dashboard lines, or `--full` when you need a field the default omits.
+Default output on these read-only commands is already concise. Pass `--short` for plain-text dashboard lines, or `--full` when you need a field the default omits.
 
 | Command | Purpose |
 |---|---|
 | `codex-team -b <TOK> status` | Your user's summary: live sessions, retained events, pending requests |
 | `codex-team -b <TOK> session list` | Live sessions in your registry |
-| `codex-team -b <TOK> session list --all` | Every thread on disk (including other users) |
+| `codex-team -b <TOK> session list --all` | Every session visible to your bearer token, including its detached threads; detached visibility is still user-scoped server-side |
 | `codex-team -b <TOK> session info <s>` | Session metadata: state, model, busy, turn id, items |
 | `codex-team -b <TOK> session health <s>` | Live runtime snapshot: busy, current turn, pending approvals, app-server liveness |
 | `codex-team -b <TOK> session heal <s> [--force]` | Re-attach a crashed/dead live session to a fresh app-server |
