@@ -25,6 +25,12 @@ export function defaultDataDir(): string {
   return path.join(homeDir(), `.${APP}`);
 }
 
+export function clientOnlyDaemonSock(env: NodeJS.ProcessEnv = process.env, platform = process.platform): string | null {
+  const configured = env.CODEX_TEAM_DAEMON_SOCK?.trim();
+  if (!configured) return null;
+  return normalizeSockPath(expandUserPath(configured, platform), platform);
+}
+
 export function defaultSockPath(dataDir = defaultDataDir(), platform = process.platform): string {
   const configured = process.env.CODEX_TEAM_SOCK;
   if (configured) return normalizeSockPath(expandUserPath(configured, platform), platform);
@@ -71,6 +77,14 @@ export function normalizeSockPath(sockPath: string, platform = process.platform)
   if (platform !== "win32") return sockPath;
   if (isNamedPipePath(sockPath)) return sockPath.replace(/\//g, "\\");
   return namedPipePath(sockPath);
+}
+
+export function formatPathForEnvHint(targetPath: string, platform = process.platform, home = homeDir()): string {
+  if (platform !== "win32" && home && targetPath === home) return "$HOME";
+  if (platform !== "win32" && home && targetPath.startsWith(`${home}/`)) {
+    return `$HOME/${targetPath.slice(home.length + 1)}`;
+  }
+  return targetPath;
 }
 
 export function isNamedPipePath(sockPath: string): boolean {
@@ -169,6 +183,8 @@ function getLegacyWindowsDataDirWarning(opts: {
 }
 
 export const __private__ = {
+  clientOnlyDaemonSock,
+  formatPathForEnvHint,
   getLegacyWindowsDataDirWarning,
   resetLegacyWindowsDataDirWarning(): void {
     legacyWindowsDataDirWarned = false;

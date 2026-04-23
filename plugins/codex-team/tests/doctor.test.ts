@@ -264,6 +264,41 @@ describe("doctor", () => {
     expect(lines.join("")).toContain("=== BROKEN ===");
   });
 
+  it("hints to attach to an existing host daemon when bind is denied but daemon.sock already exists", async () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-team-home-"));
+    tempDirs.push(homeDir);
+    const dataDir = path.join(homeDir, ".codex-team");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "daemon.sock"), "");
+    const packageRoot = createDoctorPackageRoot(tempDirs);
+    const { launcherDir } = createLauncherDir(tempDirs);
+    const originalHome = process.env.HOME;
+    process.env.HOME = homeDir;
+
+    try {
+      const lines: string[] = [];
+      const code = await runDoctor({
+        packageRoot,
+        dataDir,
+        pathEnv: launcherDir,
+        write: (line) => { lines.push(line); },
+      }, makeDeps({
+        createServer: (() => new FakeServer(
+          "error",
+          Object.assign(new Error("permission denied"), { code: "EPERM" }),
+        ) as unknown as net.Server) as typeof net.createServer,
+      }));
+
+      expect(code).toBe(2);
+      expect(lines.join("")).toContain(
+        "Hint: a daemon is already running on this host. Set CODEX_TEAM_DAEMON_SOCK=$HOME/.codex-team/daemon.sock and retry.",
+      );
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  });
+
   it("surfaces socket bind probe setup errors instead of aborting doctor", async () => {
     const ctx = makeContext();
     tempDirs.push(ctx.dataDir);

@@ -4,7 +4,18 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { parseArgs } from "../src/cli/args";
-import { decodeToken, defaultDataDir, defaultSockPath, encodeToken, expandUserPath, homeDir, isFilesystemSockPath, isNamedPipePath, normalizeSockPath } from "../src/paths";
+import {
+  __private__,
+  decodeToken,
+  defaultDataDir,
+  defaultSockPath,
+  encodeToken,
+  expandUserPath,
+  homeDir,
+  isFilesystemSockPath,
+  isNamedPipePath,
+  normalizeSockPath,
+} from "../src/paths";
 
 function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
   const original = Object.getOwnPropertyDescriptor(process, "platform");
@@ -92,6 +103,27 @@ describe("paths", () => {
       if (originalHome === undefined) delete process.env.HOME;
       else process.env.HOME = originalHome;
     }
+  });
+
+  it("resolves CODEX_TEAM_DAEMON_SOCK as a client-only socket override", () => {
+    const originalSock = process.env.CODEX_TEAM_DAEMON_SOCK;
+    const originalHome = process.env.HOME;
+    process.env.CODEX_TEAM_DAEMON_SOCK = "~/.codex-team/daemon.sock";
+    process.env.HOME = "/home/tester";
+
+    try {
+      expect(__private__.clientOnlyDaemonSock()).toBe("/home/tester/.codex-team/daemon.sock");
+    } finally {
+      if (originalSock === undefined) delete process.env.CODEX_TEAM_DAEMON_SOCK;
+      else process.env.CODEX_TEAM_DAEMON_SOCK = originalSock;
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  });
+
+  it("renders home-relative daemon sock hints with $HOME", () => {
+    expect(__private__.formatPathForEnvHint("/home/tester/.codex-team/daemon.sock", "linux", "/home/tester"))
+      .toBe("$HOME/.codex-team/daemon.sock");
   });
 });
 

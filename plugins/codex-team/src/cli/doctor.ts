@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { ConfigStore } from "../daemon/config";
 import { isLikelyCodexTeamDaemonProcess } from "../daemon/processes";
 import { probeSocketBind } from "../ipc/socket-bind-probe";
-import { defaultSockPath, normalizeSockPath, pidFilePath } from "../paths";
+import { defaultSockPath, formatPathForEnvHint, normalizeSockPath, pidFilePath } from "../paths";
 import { PACKAGE_ROOT } from "../version";
 
 export type DoctorStatus = "ok" | "warn" | "fail" | "skip";
@@ -202,10 +202,14 @@ export async function checkSocketBind(ctx: DoctorContext, deps: DoctorDeps = DEF
   if (!result.ok) {
     const code = result.error?.code ?? "UNKNOWN";
     if (code === "EPERM" || code === "EACCES") {
+      const existingDaemonSock = findExistingDaemonSockHintPath(ctx, deps.fs);
+      const hint = existingDaemonSock
+        ? `Hint: a daemon is already running on this host. Set CODEX_TEAM_DAEMON_SOCK=${formatPathForEnvHint(existingDaemonSock)} and retry.`
+        : "Hint: no workaround here; this environment cannot host the daemon. Sanity check: run `codex-team version`.";
       return fail("socket_bind", `socket_bind ${code} - sandbox forbids listen()`, {
         name: "socket_bind",
         detail: `socket_bind ${code} - sandbox forbids listen()`,
-        hint: "Hint: no workaround here; this environment cannot host the daemon. Sanity check: run `codex-team version`.",
+        hint,
         showHintInText: true,
       });
     }
@@ -467,6 +471,17 @@ function resolveBundledPluginLauncher(ctx: DoctorContext): string | null {
   if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
     return invokedAs;
   }
+  return null;
+}
+
+function findExistingDaemonSockHintPath(ctx: DoctorContext, doctorFs: DoctorFs): string | null {
+  const candidate = path.join(ctx.dataDir, "daemon.sock");
+  try {
+    if (doctorFs.existsSync(candidate)) return candidate;
+  } catch {
+    // ignore broken filesystem probes
+  }
+
   return null;
 }
 

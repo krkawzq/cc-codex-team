@@ -28,6 +28,18 @@ CODEX_TEAM_SOCK=/tmp/alt.sock codex-team daemon status
 Equivalent to the `--daemon-sock` flag on the cli, but propagates to spawn env. On Windows this value is normalized into a named-pipe endpoint, not used as a filesystem socket path verbatim.
 `~`, `~/...`, and `~\\...` are expanded here too.
 
+## `CODEX_TEAM_DAEMON_SOCK`
+
+Client-only attach mode. When set, the CLI connects to an already-running daemon at this socket path and does not probe-bind, auto-spawn, or require `$CODEX_TEAM_DATA_DIR` to be writable.
+
+Use this for sandboxed child sessions that can reach the host daemon socket but cannot create sockets or write under `~/.codex-team`:
+
+```bash
+CODEX_TEAM_DAEMON_SOCK=$HOME/.codex-team/daemon.sock codex-team -b "$TOKEN" session list
+```
+
+`--daemon-sock <path>` triggers the same client-only behavior for a single invocation. `~`, `~/...`, and `~\\...` are expanded here too.
+
 ## `CLAUDE_PLUGIN_DATA` + `CLAUDE_PLUGIN_ROOT`
 
 Set by Claude Code when the plugin is invoked. The `bin/codex-team` launcher uses them to route `CODEX_TEAM_DATA_DIR` to `$CLAUDE_PLUGIN_DATA/data`, so each plugin install has isolated state. Do not set these manually outside CC — the launcher is cautious about trusting them when `CLAUDE_PLUGIN_ROOT` is absent.
