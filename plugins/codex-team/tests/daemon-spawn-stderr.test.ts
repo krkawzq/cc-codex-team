@@ -333,7 +333,7 @@ describe("daemon spawn stderr retry", () => {
 
     expect(code).toBe(0);
     expect(processMocks.spawn).toHaveBeenCalledTimes(2);
-    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"ok\":true"));
+    expect(stdoutSpy).toHaveBeenCalledWith("{}\n");
   });
 
   it("auto-cleans stale pid and sock artifacts and spawns a fresh daemon", async () => {

@@ -18,9 +18,9 @@ export function renderTag(name: string, attrs: Record<string, unknown>, body: st
   const line = `<${name}> ${compactJson(attrs)}`;
   const normalizedBody = stripOuterNewlines(body);
   if (!normalizedBody) {
-    return `${line}\n\n<\\${name}>`;
+    return `${line}\n<\\${name}>`;
   }
-  return `${line}\n\n${normalizedBody}\n\n<\\${name}>`;
+  return `${line}\n${normalizedBody}\n<\\${name}>`;
 }
 
 export function renderInline(name: string, attrs: Record<string, unknown>): string {
@@ -41,11 +41,10 @@ export function renderHistory(
     session: input.session,
     thread_id: input.thread_id,
     count: input.turns.length,
-    generated_at: new Date().toISOString(),
   };
   if (input.nextCursor) attrs.next_cursor = input.nextCursor;
 
-  const body = input.turns.map((turn) => renderTurn(turn, ctx)).join("\n\n");
+  const body = input.turns.map((turn) => renderHistoryTurn(turn, ctx)).join("\n\n");
   return renderTag("history", attrs, body);
 }
 
@@ -62,12 +61,10 @@ export function renderTail(
   const ctx = createRenderContext(options);
   const attrs: Record<string, unknown> = {
     session: input.session,
-    thread_id: input.thread_id,
     count: input.turns.length,
-    generated_at: new Date().toISOString(),
   };
   if (input.follow) attrs.follow = true;
-  const body = input.turns.map((turn) => renderTurn(turn, ctx)).join("\n\n");
+  const body = input.turns.map((turn) => renderTailTurn(turn, ctx)).join("\n\n");
   return renderTag("tail", attrs, body);
 }
 
@@ -153,6 +150,167 @@ function renderTurn(turn: TurnListItem, ctx: RenderContext): string {
     .filter(Boolean)
     .join("\n\n");
   return renderTag("turn", attrs, body);
+}
+
+function renderHistoryTurn(turn: TurnListItem, ctx: RenderContext): string {
+  const attrs = historyTurnAttrs(turn);
+  const items = turnItems(turn);
+  const bodyParts = items
+    .map((item) => renderHistoryTranscriptItem(item, ctx))
+    .filter((entry): entry is string => Boolean(entry));
+  if (bodyParts.length === 0) {
+    const fallback = renderTurnFallback(turn, ctx);
+    return fallback ? renderTag("turn", attrs, fallback) : renderInline("turn", attrs);
+  }
+  return renderTag("turn", attrs, bodyParts.join("\n\n"));
+}
+
+function renderTailTurn(turn: TurnListItem, ctx: RenderContext): string {
+  const attrs = tailTurnAttrs(turn);
+  const items = turnItems(turn);
+  const bodyParts = items
+    .map((item) => renderTailTranscriptItem(item, ctx))
+    .filter((entry): entry is string => Boolean(entry));
+  if (bodyParts.length === 0) {
+    const fallback = renderTurnFallback(turn, ctx);
+    return fallback ? renderTag("turn", attrs, fallback) : renderInline("turn", attrs);
+  }
+  return renderTag("turn", attrs, bodyParts.join("\n\n"));
+}
+
+function historyTurnAttrs(turn: TurnListItem): Record<string, unknown> {
+  const attrs: Record<string, unknown> = {
+    id: turn.id,
+    status: turn.status ?? null,
+  };
+  if (turn.durationMs !== undefined && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
+  return attrs;
+}
+
+function tailTurnAttrs(turn: TurnListItem): Record<string, unknown> {
+  const attrs: Record<string, unknown> = {
+    id: turn.id,
+    status: turn.status ?? null,
+  };
+  if (turn.durationMs !== undefined && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
+  return attrs;
+}
+
+function turnItems(turn: TurnListItem): TurnItem[] {
+  const items = Array.isArray((turn as unknown as { items?: unknown[] }).items)
+    ? (turn as unknown as { items: unknown[] }).items
+    : [];
+  return items.filter((item): item is TurnItem => Boolean(item) && typeof item === "object");
+}
+
+function renderHistoryTranscriptItem(item: TurnItem, ctx: RenderContext): string | null {
+  const type = normalizeItemType(item.type);
+  switch (type) {
+    case "userMessage":
+      return renderTranscriptMessage(item, "user", ctx, { singleLine: false });
+    case "agentMessage":
+      return renderTranscriptMessage(item, "assistant", ctx, { singleLine: false });
+    case "commandExecution":
+      return renderTranscriptCommand(item, ctx);
+    case "fileChange":
+    case "file-patch":
+      return renderTranscriptFileChange(item, ctx);
+    case "mcpToolCall":
+      return renderTranscriptMcpToolCall(item, ctx);
+    case "autoApprovalReview":
+      return renderAutoApprovalReview(item, ctx);
+    default:
+      if (type.startsWith("hook.")) return renderTranscriptHook(item, type, ctx);
+      return null;
+  }
+}
+
+function renderTailTranscriptItem(item: TurnItem, ctx: RenderContext): string | null {
+  const type = normalizeItemType(item.type);
+  switch (type) {
+    case "userMessage":
+      return renderTranscriptMessage(item, "user", ctx, { singleLine: true });
+    case "agentMessage":
+      return renderTranscriptMessage(item, "assistant", ctx, { singleLine: false });
+    default:
+      return null;
+  }
+}
+
+function renderTranscriptMessage(
+  item: TurnItem,
+  role: "user" | "assistant",
+  ctx: RenderContext,
+  options: { singleLine: boolean },
+): string {
+  const attrs: Record<string, unknown> = { role };
+  if (role === "assistant" && item.phase !== undefined) attrs.phase = item.phase;
+  const text = extractMessageText(item);
+  if (!text) return renderInline("message", attrs);
+  const body = options.singleLine
+    ? summarizeSingleLineText(text, 160)
+    : text;
+  return renderBodyTag("message", attrs, body, ctx);
+}
+
+function renderTranscriptCommand(item: TurnItem, ctx: RenderContext): string {
+  const attrs: Record<string, unknown> = {};
+  const cmd = extractCommand(item);
+  if (cmd) attrs.cmd = fitInlineText(cmd, ctx);
+  const exit = item.exit ?? item.exitCode;
+  if (exit !== undefined) attrs.exit = exit;
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== undefined) attrs.duration_ms = durationMs;
+  const summary = summarizeBlockText(extractCommandOutput(item), 400);
+  return summary ? renderBodyTag("shell", attrs, summary, ctx) : renderInline("shell", attrs);
+}
+
+function renderTranscriptFileChange(item: TurnItem, ctx: RenderContext): string {
+  const attrs: Record<string, unknown> = {};
+  const filePath = asString(item.path);
+  if (filePath) attrs.path = filePath;
+  if (item.status !== undefined) attrs.status = item.status;
+  const summary = summarizeBlockText(extractDiff(item), 400);
+  return summary ? renderBodyTag("file-patch", attrs, summary, ctx) : renderInline("file-patch", attrs);
+}
+
+function renderTranscriptMcpToolCall(item: TurnItem, ctx: RenderContext): string {
+  const attrs: Record<string, unknown> = {};
+  const server = asString(item.server) ?? asString(item.serverName);
+  if (server) attrs.server = server;
+  attrs.tool = extractToolName(item);
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== undefined) attrs.duration_ms = durationMs;
+  const summary = summarizeBlockText(extractMcpResult(item), 400);
+  return summary ? renderBodyTag(`tool.${toTagSegment(String(attrs.tool))}`, attrs, summary, ctx) : renderInline(`tool.${toTagSegment(String(attrs.tool))}`, attrs);
+}
+
+function renderTranscriptHook(item: TurnItem, type: string, ctx: RenderContext): string {
+  const run = asObject(item.run);
+  const attrs: Record<string, unknown> = {};
+  const hookId = asString(item.hook_id) ?? asString(item.hookId) ?? asString(run.id);
+  if (hookId) attrs.hook_id = hookId;
+  const status = asString(item.status) ?? asString(run.status);
+  if (status) attrs.status = status;
+  const command = extractCommand(item) ?? extractCommand(run);
+  if (command) attrs.command = fitInlineText(command, ctx);
+  const durationMs = item.duration_ms ?? item.durationMs ?? run.duration_ms ?? run.durationMs;
+  if (durationMs !== undefined) attrs.duration_ms = durationMs;
+  const summary = summarizeBlockText(extractHookOutput(item, run), 300);
+  const tagName = typeToTagName(type);
+  return summary ? renderBodyTag(tagName, attrs, summary, ctx) : renderInline(tagName, attrs);
+}
+
+function renderTurnFallback(turn: TurnListItem, ctx: RenderContext): string | null {
+  const error = asObject(turn.error);
+  if (Object.keys(error).length === 0) return null;
+  const message = summarizeBlockText(
+    asString(error.message)
+      ?? asString((error as { additionalDetails?: unknown }).additionalDetails)
+      ?? prettyJson(error),
+    300,
+  );
+  return message ? renderBodyTag("error", {}, message, ctx) : null;
 }
 
 export function renderItem(item: TurnItem, indent = "", options: MarkdownRenderOptions = {}): string {
@@ -532,6 +690,19 @@ function fitInlineText(text: string, ctx: RenderContext): string {
   return truncated.truncatedBytes > 0
     ? `${truncated.text}${buildTruncationMarker(truncated.truncatedBytes)}`
     : text;
+}
+
+function summarizeSingleLineText(text: string, maxBytes: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  return truncateText(normalized, maxBytes).text;
+}
+
+function summarizeBlockText(text: string | null, maxBytes: number): string | null {
+  if (!text) return null;
+  const normalized = stripOuterNewlines(text);
+  if (!normalized) return null;
+  return truncateText(normalized, maxBytes).text;
 }
 
 function truncateText(text: string, maxBytes: number): { text: string; truncatedBytes: number } {

@@ -97,7 +97,7 @@ codex-team -b $TOKEN session new refactor --cwd /abs/path/to/repo \
 codex-team -b $TOKEN cursor save refactor-tail
 
 # Arm the events Monitor — or from Claude Code: /codex-team:events -b $TOKEN
-codex-team -b $TOKEN monitor events --stream --summary --cursor refactor-tail
+codex-team -b $TOKEN monitor events --stream --cursor refactor-tail
 ```
 
 Now tell Claude what you want:
@@ -112,7 +112,7 @@ Claude sends the prompt via `message send`, sleeps, wakes on `turn.completed`, a
 
 ```bash
 codex-team -b $TOK session new NAME --cwd PATH [--auto-approve "git*,npm"] ...
-codex-team -b $TOK session health NAME            # live snapshot: busy, current_turn_id, pending, token_usage
+codex-team -b $TOK session health NAME            # live snapshot: state, busy, current_turn_id when active, pending when non-zero
 codex-team -b $TOK session heal NAME [--force]    # re-attach crashed / dead session
 codex-team -b $TOK session detach NAME            # release app-server; thread persists
 codex-team -b $TOK session list [--short]         # one line per session
@@ -132,14 +132,14 @@ codex-team -b $TOK message answer NAME REQ_ID "..."            # respond to user
 **Event stream**
 
 ```bash
-codex-team -b $TOK monitor events --stream --summary --cursor NAME   # compact NDJSON, auto-advance cursor
+codex-team -b $TOK monitor events --stream --cursor NAME             # concise summary JSONL by default, auto-advance cursor
 codex-team -b $TOK cursor list                                       # named cursors
-codex-team -b $TOK cursor get NAME                                   # print the event id
+codex-team -b $TOK cursor get NAME                                   # {"event_id":"evt-..."}
 ```
 
 **Output & status**
 
-All status-returning commands accept `--short` for compact single-line output (friendly for grep and dashboards). `message history` and `message tail` accept `--truncate <bytes>` to clip long bodies. Tagged-markdown output (`--format markdown`) follows [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md) with per-type renderers for user messages, agent messages, shell, file patches, MCP tool calls, hooks, reasoning, and auto-approval reviews.
+Successful non-streaming commands emit concise single-line JSONL by default. Pass `--full` to print the complete response body as multi-line JSON. All status-returning commands also accept `--short` for compact plain-text output (friendly for grep and dashboards). `message history` and `message tail` accept `--truncate <bytes>` to clip long bodies. Tagged-markdown output (`--format markdown`) follows [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md) with per-type renderers for user messages, agent messages, shell, file patches, MCP tool calls, hooks, reasoning, and auto-approval reviews.
 
 ## Playbooks
 

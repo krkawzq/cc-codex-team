@@ -21,6 +21,8 @@ import type { RetryOptions } from "../../codex/retry";
 import type { SessionRecord } from "../sessions";
 import type { TeamEvent } from "../../types";
 
+const RECENT_TERMINAL_WAIT_EVENT_WINDOW_MS = 30_000;
+
 export const messageSend: HandlerFn = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const prompt = await readPromptInput(req);
@@ -844,6 +846,17 @@ async function createWaitObserver(
   } else if (targetTurnId) {
     const historical = await findTerminalEvent(ctx, user, rec.name, targetTurnId);
     if (historical) return immediateWaitObserver(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, historical));
+  } else {
+    const recent = latestRecentTerminalEvent(ctx, user, rec.name, rec.thread_id);
+    if (recent) {
+      const recentTurnId = eventTurnId(recent) ?? eventCrashTurnId(recent);
+      if (recentTurnId) {
+        return immediateWaitObserver(terminalWaitResult(rec.name, rec.thread_id, recentTurnId, recent));
+      }
+      if (recent.type === SESSION_CRASHED_EVENT_TYPE || recent.type === SESSION_CLOSED_EVENT_TYPE) {
+        return immediateWaitObserver(waitErrorResult(rec, null, recent.type, recent.id, recent.payload));
+      }
+    }
   }
 
   let settled = false;
@@ -949,6 +962,23 @@ function timeoutWaitResult(rec: SessionRecord, turnId: string | null, timeoutSec
 
 function isTurnTerminalEvent(event: TeamEvent): boolean {
   return event.type === "turn.completed" || event.type === "turn.error" || event.type === "turn.interrupted";
+}
+
+function latestRecentTerminalEvent(
+  ctx: DaemonContext,
+  user: string,
+  session: string,
+  threadId: string,
+): TeamEvent | null {
+  const event = ctx.events.latestEvent(user, {
+    session,
+    thread_id: threadId,
+    types: ["turn.completed", "turn.error", "turn.interrupted", SESSION_CRASHED_EVENT_TYPE, SESSION_CLOSED_EVENT_TYPE],
+  });
+  if (!event) return null;
+  const ageMs = Date.now() - Date.parse(event.ts);
+  if (!Number.isFinite(ageMs) || ageMs < 0) return null;
+  return ageMs <= RECENT_TERMINAL_WAIT_EVENT_WINDOW_MS ? event : null;
 }
 
 function projectBatchWaitOutcome(result: Record<string, unknown>): Record<string, unknown> {

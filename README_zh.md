@@ -97,7 +97,7 @@ codex-team -b $TOKEN session new refactor --cwd /abs/path/to/repo \
 codex-team -b $TOKEN cursor save refactor-tail
 
 # 开事件 Monitor（或在 Claude Code 里：/codex-team:events -b $TOKEN）
-codex-team -b $TOKEN monitor events --stream --summary --cursor refactor-tail
+codex-team -b $TOKEN monitor events --stream --cursor refactor-tail
 ```
 
 然后告诉 Claude：
@@ -112,7 +112,7 @@ Claude 用 `message send` 投递 prompt，休眠，`turn.completed` 到达时醒
 
 ```bash
 codex-team -b $TOK session new NAME --cwd PATH [--auto-approve "git*,npm"] ...
-codex-team -b $TOK session health NAME             # 活性快照：busy、current_turn_id、pending、token_usage
+codex-team -b $TOK session health NAME             # 活性快照：state、busy、活跃时的 current_turn_id、非零 pending
 codex-team -b $TOK session heal NAME [--force]     # 给崩了/死了的 session 重新拉起 app-server
 codex-team -b $TOK session detach NAME             # 释放 app-server；线程留在 codex
 codex-team -b $TOK session list [--short]          # 每个 session 一行
@@ -132,14 +132,14 @@ codex-team -b $TOK message answer NAME REQ_ID "..."             # 回复 user_in
 **事件流**
 
 ```bash
-codex-team -b $TOK monitor events --stream --summary --cursor NAME   # 紧凑 NDJSON，游标自动推进
+codex-team -b $TOK monitor events --stream --cursor NAME             # 默认输出精简摘要 JSONL，游标自动推进
 codex-team -b $TOK cursor list                                       # 所有命名 cursor
-codex-team -b $TOK cursor get NAME                                   # 打印 event id
+codex-team -b $TOK cursor get NAME                                   # {"event_id":"evt-..."}
 ```
 
 **输出与状态**
 
-所有返回状态的命令都支持 `--short`——单行紧凑输出，方便 grep 和 dashboard。`message history` / `message tail` 支持 `--truncate <bytes>` 裁剪长内容。带标签的 markdown 输出（`--format markdown`）遵循 [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md)，对 user message、agent message、shell、file patch、MCP tool call、hook、reasoning、auto-approval review 都有专用渲染器。
+默认情况下，成功的非流式命令会输出单行精简 JSONL。传 `--full` 可改为多行完整 JSON；很多状态类命令还支持 `--short`，输出更适合 grep 和 dashboard 的纯文本单行结果。`message history` / `message tail` 支持 `--truncate <bytes>` 裁剪长内容。带标签的 markdown 输出（`--format markdown`）遵循 [`docs/html-md-format.md`](plugins/codex-team/docs/html-md-format.md)，对 user message、agent message、shell、file patch、MCP tool call、hook、reasoning、auto-approval review 都有专用渲染器。
 
 ## Playbooks
 

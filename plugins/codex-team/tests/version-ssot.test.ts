@@ -51,12 +51,13 @@ describe("VERSION", () => {
         throw error;
       }
       const parsed = JSON.parse(stdout) as {
+        cli_version?: string;
         ok?: boolean;
         data?: { cli_version?: string };
       };
 
-      expect(parsed.ok).toBe(true);
-      expect(parsed.data?.cli_version).toBe(pkg.version);
+      const cliVersion = parsed.cli_version ?? parsed.data?.cli_version;
+      expect(cliVersion).toBe(pkg.version);
     } finally {
       fs.rmSync(tempHome, { recursive: true, force: true });
     }

@@ -128,7 +128,7 @@ describe("CLI cwd preflight", () => {
     expect(code).toBe(0);
     expect(sockMocks.probeSock).toHaveBeenCalledTimes(1);
     expect(sockMocks.connectSock).toHaveBeenCalledTimes(1);
-    expect(stdoutSpy).toHaveBeenCalledWith(expect.stringContaining("\"ok\":true"));
+    expect(stdoutSpy).toHaveBeenCalledWith("{\"name\":\"demo\",\"thread_id\":\"th-1\"}\n");
   });
 
   it("rejects session:fork before daemon bootstrap when --cwd does not exist", async () => {

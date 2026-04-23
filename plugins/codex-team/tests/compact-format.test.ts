@@ -148,7 +148,7 @@ describe("formatCompact", () => {
       },
     ],
     ["daemon:start", { already_running: true }, { already_running: true }],
-    ["daemon:stop", { stopping: true, force: true }, { stopping: true, force: true }],
+    ["daemon:stop", { stopping: true, force: true }, { stopping: true }],
     ["daemon:restart", { restarting: true }, { restarting: true }],
     ["daemon:logs", { level: "info", msg: "started" }, { level: "info", msg: "started" }],
     ["daemon:user:create", { token: "agent-a", created_at: "2026-04-23T00:00:00.000Z" }, { token: "agent-a" }],
@@ -215,12 +215,8 @@ describe("formatCompact", () => {
         },
       },
       {
-        session: {
-          name: "audit",
-          thread_id: "th-1",
-          state: "live",
-          created_at: "2026-04-23T00:00:00.000Z",
-        },
+        name: "audit",
+        thread_id: "th-1",
       },
     ],
     [
@@ -230,7 +226,8 @@ describe("formatCompact", () => {
         noop: true,
       },
       {
-        session: { name: "audit", thread_id: "th-1", state: "live" },
+        name: "audit",
+        thread_id: "th-1",
         noop: true,
       },
     ],
@@ -242,9 +239,7 @@ describe("formatCompact", () => {
         graceful: true,
       },
       {
-        session: { name: "audit", thread_id: "th-1", state: "live" },
-        noop: false,
-        graceful: true,
+        name: "audit",
       },
     ],
     [
@@ -255,10 +250,7 @@ describe("formatCompact", () => {
         archived_at: "2026-04-23T00:00:00.000Z",
         detached: true,
       },
-      {
-        thread_id: "th-1",
-        archived: true,
-      },
+      { thread_id: "th-1" },
     ],
     [
       "session:unarchive",
@@ -267,10 +259,7 @@ describe("formatCompact", () => {
         unarchived: true,
         unarchived_at: "2026-04-23T00:00:00.000Z",
       },
-      {
-        thread_id: "th-1",
-        unarchived: true,
-      },
+      { thread_id: "th-1" },
     ],
     [
       "session:fork",
@@ -279,14 +268,14 @@ describe("formatCompact", () => {
         forked_from: "audit",
         at_turn: "turn-1",
       },
-      { session: { name: "audit-fix", thread_id: "th-2", state: "live" } },
+      { name: "audit-fix", thread_id: "th-2" },
     ],
     [
       "session:rename",
       {
         session: { name: "audit-renamed", thread_id: "th-2", state: "live", model: "gpt-5.4" },
       },
-      { session: { name: "audit-renamed" } },
+      { name: "audit-renamed" },
     ],
     [
       "session:rollback",
@@ -299,8 +288,6 @@ describe("formatCompact", () => {
       },
       {
         name: "audit",
-        forked_at_turn: "turn-1",
-        old_thread_id: "th-1",
         new_thread_id: "th-2",
       },
     ],
@@ -312,11 +299,7 @@ describe("formatCompact", () => {
           thread_id: "th-1",
           state: "live",
           model: "gpt-5.4",
-          turn_count: 3,
           current_turn_id: "turn-7",
-          items_in_turn: 2,
-          pending_approvals: 1,
-          pending_user_inputs: 1,
         },
       },
       {
@@ -325,17 +308,14 @@ describe("formatCompact", () => {
           thread_id: "th-1",
           state: "live",
           model: "gpt-5.4",
-          turn_count: 3,
           current_turn_id: "turn-7",
-          items_in_turn: 2,
-          pending_approvals: 1,
-          pending_user_inputs: 1,
         },
       },
     ],
     [
       "session:context",
       {
+        session: "audit",
         thread_id: "th-1",
         thread: {
           id: "th-1",
@@ -351,6 +331,7 @@ describe("formatCompact", () => {
         },
       },
       {
+        session: "audit",
         thread_id: "th-1",
         thread: {
           id: "th-1",
@@ -360,6 +341,7 @@ describe("formatCompact", () => {
           model_provider: "openai",
           created_at: 1,
           updated_at: 2,
+          preview: "large preview",
           status: "running",
         },
       },
@@ -385,14 +367,9 @@ describe("formatCompact", () => {
         sessions: [
           {
             name: "audit",
-            thread_id: "th-1",
             state: "live",
-            model: "gpt-5.4",
-            turn_count: 3,
-            current_turn_id: "turn-7",
           },
         ],
-        all: false,
       },
     ],
     [
@@ -415,13 +392,10 @@ describe("formatCompact", () => {
         sessions: [
           {
             name: "audit",
-            thread_id: "th-1",
             state: "live",
-            model: "gpt-5.4",
             busy: true,
           },
         ],
-        all: true,
         next_cursor: "cursor-2",
       },
     ],
@@ -467,17 +441,11 @@ describe("formatCompact", () => {
         sessions: [
           {
             session: "audit",
-            thread_id: "th-1",
             state: "live",
             busy: true,
             current_turn_id: "turn-7",
-            current_turn_elapsed_ms: 2500,
-            current_item_type: "agent_message",
-            items_done_in_turn: 2,
             pending_approval_requests: 1,
             pending_user_input_requests: 1,
-            app_server_alive: true,
-            last_event_id: "evt-8",
           },
         ],
       },
@@ -501,17 +469,11 @@ describe("formatCompact", () => {
       },
       {
         session: "audit",
-        thread_id: "th-1",
         state: "live",
         busy: true,
         current_turn_id: "turn-7",
-        current_turn_elapsed_ms: 2500,
-        current_item_type: "agent_message",
-        items_done_in_turn: 2,
         pending_approval_requests: 1,
         pending_user_input_requests: 1,
-        app_server_alive: true,
-        last_event_id: "evt-8",
       },
     ],
     [
@@ -527,7 +489,6 @@ describe("formatCompact", () => {
         truncated_from: 400,
       },
       {
-        session: "audit",
         lines: [
           { ts: "2026-04-23T00:00:00.000Z", stream: "stderr", line: "boom" },
         ],
@@ -549,8 +510,7 @@ describe("formatCompact", () => {
         ts: "2026-04-23T00:00:00.000Z",
         type: "turn.completed",
         session: "audit",
-        thread_id: "th-1",
-        payload: { turn_id: "turn-7" },
+        key: "turn-7",
       },
     ],
     [
@@ -561,20 +521,19 @@ describe("formatCompact", () => {
         forced: true,
       },
       {
-        session: { name: "audit", thread_id: "th-1", state: "live" },
-        healed: true,
+        name: "audit",
       },
     ],
     [
       "message:send",
       { session: "audit", thread_id: "th-1", turn_id: "turn-7", started: false, queue_id: "q-1", queued_depth: 2 },
-      { turn_id: "turn-7", started: false, queue_id: "q-1", queued_depth: 2 },
+      { status: "queued", queue_id: "q-1", queued_depth: 2 },
     ],
-    ["message:peer", { session: "audit", turn_id: "turn-7", peered: true }, { turn_id: "turn-7", peered: true }],
+    ["message:peer", { session: "audit", turn_id: "turn-7", peered: true }, { turn_id: "turn-7" }],
     [
       "message:interrupt",
       { session: "audit", turn_id: "turn-7", interrupted: false, noop: true },
-      { turn_id: "turn-7", interrupted: false },
+      { noop: true },
     ],
     [
       "message:approval",
@@ -651,14 +610,8 @@ describe("formatCompact", () => {
         token_usage: { total: 10 },
       },
       {
-        thread_id: "th-1",
         turn_id: "turn-1",
         outcome: "error",
-        event_type: "turn.error",
-        event_id: "evt-9",
-        error: { message: "boom" },
-        duration_ms: 1000,
-        items_count: 2,
       },
     ],
     [
@@ -676,7 +629,6 @@ describe("formatCompact", () => {
         ts: "2026-04-23T00:00:00.000Z",
         type: "turn.completed",
         session: "audit",
-        thread_id: "th-1",
         key: "turn-7",
       },
     ],
@@ -726,6 +678,38 @@ describe("formatCompact", () => {
         model_provider: "openai",
         created_at: 1,
         updated_at: 2,
+      },
+    });
+  });
+
+  it("normalizes camelCase thread metadata for session context", () => {
+    expect(formatCompact("session:context", {
+      session: "audit",
+      thread_id: "th-1",
+      thread: {
+        id: "th-1",
+        name: "audit",
+        cwd: "/repo",
+        source: "vscode",
+        modelProvider: "openai",
+        createdAt: 1,
+        updatedAt: 2,
+        preview: "latest reply",
+        status: { type: "idle" },
+      },
+    })).toEqual({
+      session: "audit",
+      thread_id: "th-1",
+      thread: {
+        id: "th-1",
+        name: "audit",
+        cwd: "/repo",
+        source: "vscode",
+        model_provider: "openai",
+        created_at: 1,
+        updated_at: 2,
+        preview: "latest reply",
+        status: "idle",
       },
     });
   });

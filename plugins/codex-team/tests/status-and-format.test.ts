@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { CodexTeamError, invalidParams, methodNotFound, notImplemented } from "../src/errors";
 import { err, ok } from "../src/result";
-import { INLINE_MAX_BYTES, renderContext, renderHistory, renderInline, renderItem, renderSessionInfo, renderTag } from "../src/format/markdown";
+import { INLINE_MAX_BYTES, renderContext, renderHistory, renderInline, renderItem, renderSessionInfo, renderTag, renderTail } from "../src/format/markdown";
 import { renderTable } from "../src/format/table";
 import { status } from "../src/daemon/handlers/status";
 
@@ -87,6 +87,25 @@ describe("format helpers", () => {
       thread: { id: "th-1", cwd: "/tmp/project", preview: "hello", model_provider: "openai" },
     });
     expect(context).toContain("\"cwd\":\"/tmp/project\"");
+
+    const tail = renderTail({
+      session: "sess-1",
+      thread_id: "th-1",
+      turns: [{
+        id: "turn-2",
+        status: "completed",
+        items: [
+          { type: "userMessage", text: "hello" },
+          { type: "agentMessage", text: "world" },
+        ],
+      }],
+      thread: null,
+      follow: false,
+    });
+    expect(tail).toContain("<message> {\"role\":\"user\"}");
+    expect(tail).toContain("hello");
+    expect(tail).toContain("<message> {\"role\":\"assistant\"}");
+    expect(tail).toContain("world");
 
     const sessionInfo = renderSessionInfo({
       name: "sess-1",

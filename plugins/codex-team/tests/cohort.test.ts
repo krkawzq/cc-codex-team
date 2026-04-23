@@ -180,8 +180,8 @@ describe("cohort commands", () => {
     expect(ctx.queues.sendOrQueue).toHaveBeenCalledTimes(2);
     expect(formatCompact("message:send-many", result)).toEqual({
       results: [
-        { session: "audit", turn_id: "turn-audit", started: true, queue_id: null, queued_depth: 0 },
-        { session: "lint", turn_id: "turn-lint", started: true, queue_id: null, queued_depth: 0 },
+        { session: "audit", status: "started", turn_id: "turn-audit" },
+        { session: "lint", status: "started", turn_id: "turn-lint" },
         { session: "missing", ok: false, error: { code: "session_not_found" } },
       ],
     });
@@ -618,7 +618,13 @@ describe("cohort commands", () => {
     expect(removed).toEqual(["mapper-a", "mapper-b", "mapper-c"]);
     expect(vi.mocked(threadUnsubscribe)).toHaveBeenCalledTimes(3);
     expect(vi.mocked(turnInterrupt)).not.toHaveBeenCalled();
-    expect(formatCompact("session:detach", result)).toEqual(result);
+    expect(formatCompact("session:detach", result)).toEqual({
+      results: [
+        { session: "mapper-a" },
+        { session: "mapper-b" },
+        { session: "mapper-c" },
+      ],
+    });
   });
 
   it("glob helper supports wildcards, anchors matches, and escapes regex metacharacters", () => {

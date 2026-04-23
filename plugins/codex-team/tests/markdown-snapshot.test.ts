@@ -68,7 +68,7 @@ describe("markdown snapshots", () => {
         fs.writeFileSync(expectedPath, actual);
       }
 
-      const expected = fs.readFileSync(expectedPath, "utf8");
+      const expected = fs.readFileSync(expectedPath, "utf8").replace(/\r?\n$/, "");
       expect(actual).toBe(expected);
     });
   }

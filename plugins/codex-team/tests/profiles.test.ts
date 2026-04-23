@@ -28,58 +28,55 @@ describe("profiles commands", () => {
 
     expect(code).toBe(0);
     expect(readStdout(stdoutSpy)).toBe(JSON.stringify({
-      ok: true,
-      data: {
-        profiles: [
-          {
-            name: "fixer",
-            flags: {
-              model: "gpt-5.4",
-              sandbox: "workspace-write",
-              approval: "on-request",
-              effort: "high",
-              auto_approve: "git*,npm test,npm run test*,vitest*,pytest*,cargo test*",
-            },
+      profiles: [
+        {
+          name: "fixer",
+          flags: {
+            model: "gpt-5.4",
+            sandbox: "workspace-write",
+            approval: "on-request",
+            effort: "high",
+            auto_approve: "git*,npm test,npm run test*,vitest*,pytest*,cargo test*",
           },
-          {
-            name: "reviewer",
-            flags: {
-              model: "gpt-5.4",
-              sandbox: "read-only",
-              approval: "never",
-              effort: "xhigh",
-            },
+        },
+        {
+          name: "reviewer",
+          flags: {
+            model: "gpt-5.4",
+            sandbox: "read-only",
+            approval: "never",
+            effort: "xhigh",
           },
-          {
-            name: "planner",
-            flags: {
-              model: "gpt-5.4",
-              sandbox: "read-only",
-              approval: "never",
-              effort: "xhigh",
-            },
+        },
+        {
+          name: "planner",
+          flags: {
+            model: "gpt-5.4",
+            sandbox: "read-only",
+            approval: "never",
+            effort: "xhigh",
           },
-          {
-            name: "tester",
-            flags: {
-              model: "gpt-5.4-mini",
-              sandbox: "workspace-write",
-              approval: "never",
-              effort: "medium",
-              auto_approve: "npm test,vitest*,pytest*,cargo test*,go test*,make test*",
-            },
+        },
+        {
+          name: "tester",
+          flags: {
+            model: "gpt-5.4-mini",
+            sandbox: "workspace-write",
+            approval: "never",
+            effort: "medium",
+            auto_approve: "npm test,vitest*,pytest*,cargo test*,go test*,make test*",
           },
-          {
-            name: "explorer",
-            flags: {
-              model: "gpt-5.4-mini",
-              sandbox: "read-only",
-              approval: "never",
-              effort: "medium",
-            },
+        },
+        {
+          name: "explorer",
+          flags: {
+            model: "gpt-5.4-mini",
+            sandbox: "read-only",
+            approval: "never",
+            effort: "medium",
           },
-        ],
-      },
+        },
+      ],
     }) + "\n");
     expect(sockMocks.probeSock).not.toHaveBeenCalled();
   });
@@ -103,18 +100,15 @@ describe("profiles commands", () => {
 
     expect(code).toBe(0);
     expect(readStdout(stdoutSpy)).toBe(JSON.stringify({
-      ok: true,
-      data: {
-        name: "fixer",
-        flags: {
-          model: "gpt-5.4",
-          sandbox: "workspace-write",
-          approval: "on-request",
-          effort: "high",
-          auto_approve: "git*,npm test,npm run test*,vitest*,pytest*,cargo test*",
-        },
-        command: "codex-team -b $TOK session new <name> --cwd <repo> --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high --auto-approve 'git*,npm test,npm run test*,vitest*,pytest*,cargo test*'",
+      name: "fixer",
+      flags: {
+        model: "gpt-5.4",
+        sandbox: "workspace-write",
+        approval: "on-request",
+        effort: "high",
+        auto_approve: "git*,npm test,npm run test*,vitest*,pytest*,cargo test*",
       },
+      command: "codex-team -b $TOK session new <name> --cwd <repo> --model gpt-5.4 --sandbox workspace-write --approval on-request --effort high --auto-approve 'git*,npm test,npm run test*,vitest*,pytest*,cargo test*'",
     }) + "\n");
     expect(sockMocks.probeSock).not.toHaveBeenCalled();
   });

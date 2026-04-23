@@ -32,7 +32,7 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
     case "daemon:start":
       return pickFields(data, ["already_running"]);
     case "daemon:stop":
-      return pickFields(data, ["stopping", "force"]);
+      return pickFields(data, ["stopping"]);
     case "daemon:restart":
       return pickFields(data, ["restarting"]);
     case "daemon:logs":
@@ -54,30 +54,21 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
     case "daemon:config:reset":
       return pickFields(data, ["reset"]);
     case "session:new":
-      return compactSessionWithFlags(data, {
-        sessionOptions: { includeCreatedAt: true },
-      });
+      return compactSessionCreated(data);
     case "session:attach":
-      return compactSessionWithFlags(data, {
-        sessionOptions: {},
-        extraKeys: ["noop"],
-      });
+      return compactSessionAttached(data);
     case "session:detach":
       return compactSessionDetach(data);
     case "session:archive":
-      return pickFields(data, ["thread_id", "archived"]);
+      return pickFields(data, ["thread_id"]);
     case "session:unarchive":
-      return pickFields(data, ["thread_id", "unarchived"]);
+      return pickFields(data, ["thread_id"]);
     case "session:fork":
-      return compactSessionWithFlags(data, {
-        sessionOptions: {},
-      });
+      return compactSessionCreated(data);
     case "session:rename":
-      return compactSessionWithFlags(data, {
-        sessionOptions: { nameOnly: true },
-      });
+      return compactSessionRenamed(data);
     case "session:rollback":
-      return pickFields(data, ["name", "forked_at_turn", "old_thread_id", "new_thread_id"]);
+      return pickFields(data, ["name", "new_thread_id"]);
     case "session:info":
       return compactSessionInfo(data);
     case "session:context":
@@ -85,36 +76,23 @@ export function formatCompact(method: string, data: unknown): Record<string, unk
     case "session:list":
       return compactSessionList(data);
     case "session:health":
-      return pickFields(data, [
-        "session",
-        "thread_id",
-        "state",
-        "busy",
-        "current_turn_id",
-        "current_turn_elapsed_ms",
-        "current_item_type",
-        "items_done_in_turn",
-        "pending_approval_requests",
-        "pending_user_input_requests",
-        "app_server_alive",
-        "last_event_id",
-      ]);
+      return compactSessionHealth(data);
     case "session:health:all":
       return compactSessionHealthAll(data);
     case "session:events":
-      return asObject(data);
+      return compactMonitorEvent(data);
     case "session:logs":
       return compactSessionLogs(data);
     case "session:heal":
       return compactSessionHeal(data);
     case "message:send":
-      return pickFields(data, ["turn_id", "started", "queue_id", "queued_depth"]);
+      return compactMessageSend(data);
     case "message:send-many":
-      return compactBatchResults(data, ["turn_id", "started", "queue_id", "queued_depth"]);
+      return compactMessageSendMany(data);
     case "message:peer":
-      return pickFields(data, ["turn_id", "peered"]);
+      return pickFields(data, ["turn_id"]);
     case "message:interrupt":
-      return pickFields(data, ["turn_id", "interrupted"]);
+      return compactMessageInterrupt(data);
     case "message:approval":
     case "message:answer":
       return {};
@@ -227,6 +205,23 @@ function compactSessionWithFlags(
   return out;
 }
 
+function compactSessionCreated(data: unknown): Record<string, unknown> {
+  return pickFields(asObject(data).session, ["name", "thread_id"]);
+}
+
+function compactSessionAttached(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  const out = compactSessionCreated(data);
+  if (value.noop === true) out.noop = true;
+  return out;
+}
+
+function compactSessionRenamed(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  const session = asObject(value.session);
+  return pickFields(session, ["name"]);
+}
+
 function compactSessionInfo(data: unknown): Record<string, unknown> {
   const value = asObject(data);
   if (value.session === null) {
@@ -240,11 +235,7 @@ function compactSessionInfo(data: unknown): Record<string, unknown> {
   return compactSessionWithFlags(data, {
     sessionOptions: {
       includeModel: true,
-      includeTurnCount: true,
       includeCurrentTurnId: true,
-      includeItemsInTurn: true,
-      includePendingApprovals: true,
-      includePendingUserInputs: true,
     },
   });
 }
@@ -252,56 +243,48 @@ function compactSessionInfo(data: unknown): Record<string, unknown> {
 function compactSessionDetach(data: unknown): Record<string, unknown> {
   const value = asObject(data);
   if (Array.isArray(value.results)) {
-    return compactBatchResults(data, ["detached", "graceful"]);
+    return compactBatchResults(data, []);
   }
-  return compactSessionWithFlags(data, {
-    sessionOptions: {},
-    extraKeys: ["noop", "graceful"],
-    allowNullSession: true,
-  });
+  const out: Record<string, unknown> = {};
+  const session = asObject(value.session);
+  if (Object.keys(session).length > 0) copyIfPresent(out, session, "name");
+  if (value.noop === true) out.noop = true;
+  return out;
 }
 
 function compactSessionContext(data: unknown): Record<string, unknown> {
   const value = asObject(data);
-  const out = pickFields(value, ["thread_id"]);
-  const thread = projectThread(value.thread);
+  const out = pickFields(value, ["session", "thread_id"]);
+  const thread = projectThread(value.thread, { includePreview: true });
   if (Object.keys(thread).length > 0) out.thread = thread;
   return out;
 }
 
 function compactSessionLogs(data: unknown): Record<string, unknown> {
   const value = asObject(data);
-  return pickFields(value, ["session", "state", "lines", "truncated_from"]);
+  const out = pickFields(value, ["lines"]);
+  if (value.state === "crashed") out.state = "crashed";
+  if (value.truncated_from !== null && value.truncated_from !== undefined) {
+    out.truncated_from = value.truncated_from;
+  }
+  return out;
 }
 
 function compactSessionList(data: unknown): Record<string, unknown> {
   const value = asObject(data);
-  const remote = value.all === true || value.loaded_only === true;
   const out: Record<string, unknown> = {
-    sessions: asArray(value.sessions).map((entry) =>
-      remote
-        ? projectSession(entry, {
-            includeModel: true,
-            includeBusy: true,
-          })
-        : projectSession(entry, {
-            includeModel: true,
-            includeTurnCount: true,
-            includeCurrentTurnId: true,
-          })),
+    sessions: asArray(value.sessions).map((entry) => projectSessionListEntry(entry)),
   };
-  copyIfPresent(out, value, "all");
-  if (value.loaded_only === true) copyIfPresent(out, value, "loaded_only");
-  if (remote) copyIfPresent(out, value, "next_cursor");
+  copyIfPresent(out, value, "next_cursor");
   return out;
 }
 
 function compactSessionHeal(data: unknown): Record<string, unknown> {
   const value = asObject(data);
   const out: Record<string, unknown> = {};
-  if (hasOwn(value, "session")) out.session = projectSession(value.session, {});
-  copyIfPresent(out, value, "healed");
-  copyIfPresent(out, value, "note");
+  const session = asObject(value.session);
+  if (Object.keys(session).length > 0) copyIfPresent(out, session, "name");
+  if (typeof value.note === "string" && value.note.length > 0) out.note = value.note;
   return out;
 }
 
@@ -309,21 +292,20 @@ function compactSessionHealthAll(data: unknown): Record<string, unknown> {
   const value = asObject(data);
   return {
     summary: pickFields(value.summary, ["total", "healthy", "crashed", "closed", "busy", "pending_total"]),
-    sessions: asArray(value.sessions).map((entry) => pickFields(entry, [
-      "session",
-      "thread_id",
-      "state",
-      "busy",
-      "current_turn_id",
-      "current_turn_elapsed_ms",
-      "current_item_type",
-      "items_done_in_turn",
-      "pending_approval_requests",
-      "pending_user_input_requests",
-      "app_server_alive",
-      "last_event_id",
-    ])),
+    sessions: asArray(value.sessions).map((entry) => compactSessionHealth(entry)),
   };
+}
+
+function compactSessionHealth(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  const out = pickFields(value, ["session", "state", "busy"]);
+  if (value.busy === true) copyIfPresent(out, value, "current_turn_id");
+  if (value.pending_approval_requests) copyIfPresent(out, value, "pending_approval_requests");
+  if (value.pending_user_input_requests) copyIfPresent(out, value, "pending_user_input_requests");
+  if (value.app_server_alive === false || value.state !== "live") {
+    copyIfPresent(out, value, "app_server_alive");
+  }
+  return out;
 }
 
 function compactMessageHistory(data: unknown): Record<string, unknown> {
@@ -350,6 +332,52 @@ function compactMessageTail(data: unknown): Record<string, unknown> {
   return stripUndefined(out);
 }
 
+function compactMessageSend(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  if (value.started === true) {
+    return stripUndefined({
+      status: "started",
+      turn_id: value.turn_id,
+    });
+  }
+  return stripUndefined({
+    status: "queued",
+    queue_id: value.queue_id,
+    queued_depth: value.queued_depth,
+  });
+}
+
+function compactMessageSendMany(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  return {
+    results: asArray(value.results).map((entry) => compactMessageSendManyEntry(entry)),
+  };
+}
+
+function compactMessageSendManyEntry(value: unknown): Record<string, unknown> {
+  const entry = asObject(value);
+  if (entry.ok === false) {
+    const error = asObject(entry.error);
+    return stripUndefined({
+      session: entry.session,
+      ok: false,
+      error: Object.keys(error).length > 0 ? pickFields(error, ["code"]) : undefined,
+    });
+  }
+  return stripUndefined({
+    session: entry.session,
+    ...(entry.started === true
+      ? { status: "started", turn_id: entry.turn_id }
+      : { status: "queued", queue_id: entry.queue_id, queued_depth: entry.queued_depth }),
+  });
+}
+
+function compactMessageInterrupt(data: unknown): Record<string, unknown> {
+  const value = asObject(data);
+  if (value.noop === true) return { noop: true };
+  return pickFields(value, ["turn_id"]);
+}
+
 function compactMessageWait(data: unknown): Record<string, unknown> {
   const value = asObject(data);
   if (Array.isArray(value.outcomes)) {
@@ -373,17 +401,10 @@ function compactMessageWait(data: unknown): Record<string, unknown> {
       still_running: asArray(value.still_running),
     });
   }
-  return pickFields(data, [
-    "thread_id",
-    "turn_id",
-    "outcome",
-    "event_type",
-    "event_id",
-    "error",
-    "duration_ms",
-    "items_count",
-    "timeout_s",
-  ]);
+  const out = pickFields(data, ["outcome", "turn_id", "timeout_s"]);
+  const codexErrorInfo = extractCodexErrorInfo(value);
+  if (codexErrorInfo) out.codex_error_info = codexErrorInfo;
+  return out;
 }
 
 function compactBatchResults(data: unknown, successKeys: string[]): Record<string, unknown> {
@@ -401,8 +422,8 @@ function compactMonitorEvent(data: unknown): Record<string, unknown> {
       ts: value.ts,
       type: value.type,
       session: value.session,
-      thread_id: value.thread_id,
       key: value.key,
+      ackable: value.ackable === false ? false : undefined,
     });
   }
 
@@ -411,8 +432,8 @@ function compactMonitorEvent(data: unknown): Record<string, unknown> {
     ts: value.ts,
     type: value.type,
     session: value.session,
-    thread_id: value.thread_id,
     key: summarizeEventKey(value),
+    ackable: value.ackable === false ? false : undefined,
   });
 }
 
@@ -433,6 +454,13 @@ function compactCursorList(data: unknown): Record<string, unknown> {
   };
 }
 
+function projectSessionListEntry(value: unknown): Record<string, unknown> {
+  const session = asObject(value);
+  const out = pickFields(session, ["name", "state"]);
+  if (session.busy === true) out.busy = true;
+  return out;
+}
+
 function projectSession(value: unknown, options: SessionProjectionOptions): Record<string, unknown> {
   const session = asObject(value);
   if (options.nameOnly) {
@@ -451,20 +479,19 @@ function projectSession(value: unknown, options: SessionProjectionOptions): Reco
   return out;
 }
 
-function projectThread(value: unknown): Record<string, unknown> {
+function projectThread(
+  value: unknown,
+  options: { includePreview?: boolean } = {},
+): Record<string, unknown> {
   const thread = asObject(value);
-  const out = pickFields(thread, [
-    "id",
-    "name",
-    "cwd",
-    "source",
-    "model_provider",
-    "created_at",
-    "updated_at",
-  ]);
+  const out = pickFields(thread, ["id", "name", "cwd", "source"]);
+  out.model_provider = thread.model_provider ?? thread.modelProvider;
+  out.created_at = thread.created_at ?? thread.createdAt;
+  out.updated_at = thread.updated_at ?? thread.updatedAt;
+  if (options.includePreview) copyIfPresent(out, thread, "preview");
   const status = extractStatus(thread.status);
   if (status) out.status = status;
-  return out;
+  return stripUndefined(out);
 }
 
 function projectCursor(
@@ -489,6 +516,16 @@ function projectBatchResultEntry(value: unknown, successKeys: string[]): Record<
     });
   }
   return pickFields(entry, ["session", ...successKeys]);
+}
+
+function extractCodexErrorInfo(value: Record<string, unknown>): string | null {
+  if (typeof value.codex_error_info === "string" && value.codex_error_info.length > 0) {
+    return value.codex_error_info;
+  }
+  const error = asObject(value.error);
+  return typeof error.codex_error_info === "string" && error.codex_error_info.length > 0
+    ? error.codex_error_info
+    : null;
 }
 
 function summarizeEventKey(event: Record<string, unknown>): string | null {

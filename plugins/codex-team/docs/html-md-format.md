@@ -1,6 +1,6 @@
 # codex-team 标签化 Markdown 格式
 
-用于 `session context` / `message history` / `message tail` / `session info` 等读取类命令的 `--format markdown` 输出。
+用于 `message history` / `message tail` / `session info` 等读取类命令的 `--format markdown` 输出。`session context` 当前主线为 JSON-only，不再默认提供 markdown 视图。
 
 ## 设计目标
 
@@ -10,7 +10,13 @@
 - **自然语言 / 代码 / diff / 输出** → tag 正文的 markdown（agent 可以直接读）
 - tag 边界本身已经表明"这是一段 X 类型的内容"，正文里**不再嵌套 ``` 壳**
 
-和 `monitor events` 的 NDJSON 互补：events 是**摘要通知**（某个 turn 完成了），要拿**详细内容**（命令输出、diff、reasoning 等）就用这套 markdown。
+和 `monitor events` 的 NDJSON/JSONL 互补：events 是**摘要通知**（某个 turn 完成了），要拿**可读 transcript**（消息正文、工具摘要、错误文本）就用这套 markdown。
+
+当前主线语义：
+
+- `message history --format markdown`：**简洁 transcript**。展示多轮 `<turn>`，保留 `<message role="user|assistant">` 正文，并展示 `<shell>` / `<file-patch>` / `tool.*` 等的**摘要**。
+- `message tail --format markdown`：**最新回复视图**。只展示 message，用户输入压成单行摘要，assistant message 保留正文；多轮时依然用 `<turn>` 分隔。
+- `session context`：**JSON-only 详情视图**。默认返回详细 thread metadata，`--full` 再展开更多冗余细节。
 
 ## 语法
 
@@ -18,16 +24,12 @@
 
 ```
 <tag-name> {"id":"...","other":"..."}
-
 tag 正文：任意 markdown，直接写，不包裹。
-
 <\tag-name>
 ```
 
 - **开始 tag 一行**：`<tag-name>` + 空格 + 单行 JSON 对象（属性）
-- 空行
 - **正文**：markdown；如果内容天然包含代码/diff，tag 类型会说明（`<shell>` 正文是命令输出、`<file-patch>` 正文是 diff），不用再额外加 ``` 壳
-- 空行（可省）
 - **结束 tag 独占一行**：`<\tag-name>`
 
 ### 内联形式
@@ -49,7 +51,7 @@ tag 正文：任意 markdown，直接写，不包裹。
 - 属性值任意 JSON 类型（string / number / bool / array / nested object）
 - 时间：ISO 8601 UTC；duration 统一 `duration_ms` 整数毫秒
 - 关闭 tag 用 `<\name>`（反斜杠），这不是合法 HTML，markdown 渲染器不会把它当标签折叠
-- Tag 之间留空行
+- Tag 之间可以留空行，但 tag 和正文之间默认不额外插空行
 - JSON 必须单行；值为长字符串时用 `\n` 转义
 - 属性空 → `{}`；也可以写 `<tag>{}` 紧贴空 JSON
 
@@ -59,12 +61,11 @@ tag 正文：任意 markdown，直接写，不包裹。
 
 | Tag | 命令 | 正文 |
 |---|---|---|
-| `<context>` | `session context --format markdown` | 嵌套 |
 | `<history>` | `message history --format markdown` | 嵌套 |
 | `<tail>` | `message tail --format markdown` | 嵌套 |
 | `<session-info>` | `session info --format markdown` | markdown 列表 |
 
-根容器常见属性：`session` / `thread_id` / `model` / `cwd` / `generated_at`。
+根容器常见属性：`session` / `thread_id` / `count` / `next_cursor` / `follow`。
 
 ### Context 专用
 
@@ -90,10 +91,11 @@ tag 正文：任意 markdown，直接写，不包裹。
 
 | Tag | 正文 | 关键属性 |
 |---|---|---|
-| `<user-input>` | prompt 正文（markdown） | `attachments`（数组，也可独立 `<attachment>` tag） |
+| `<message>` | message 正文（markdown） | `role=user|assistant` / `phase?` |
+| `<user-input>` | 旧式 prompt tag（兼容旧示例） | `attachments`（数组，也可独立 `<attachment>` tag） |
 | `<environment>` | env 说明 | — |
 | `<attachment>` | 无（内联） | `path` / `mime` / `bytes` |
-| `<agent-message>` | assistant prose（里面可自然用 ```）| `id` |
+| `<agent-message>` | 旧式 assistant tag（兼容旧示例） | `id` |
 | `<reasoning>` | reasoning prose | `id` |
 | `<plan>` | markdown checklist | `id` |
 | `<shell>` | 命令输出（stdout / 合并 stderr） | `id` / `cmd` / `exit` / `duration_ms` / `cwd` / `sandbox` / `interrupted` / `stderr`（短 stderr 单列） |
@@ -114,6 +116,11 @@ tag 正文：任意 markdown，直接写，不包裹。
 ## 示例
 
 内容虚构。
+
+说明：
+
+- 下面部分 `<context>` / `<user-input>` / `<agent-message>` 示例是**旧格式兼容示例**，保留用于说明历史 tag 词表，不代表当前主线默认输出。
+- 当前主线默认输出遵循本页上方的语义说明：`history` 是简洁 transcript，`tail` 是 message-focused 视图，`context` 为 JSON-only。
 
 ### 1 — `session context`
 
@@ -652,8 +659,8 @@ DFS 前序遍历；每条：
 - **转义**：JSON 属性值按 JSON 规则；正文不转义
 - **大内容**：>10KB 的输出 / diff 直接写进正文，daemon 不截断
 - **未知 tag**：解析器遇到未在词表中的 tag 保留原文（forward-compat）
-- **空正文**：`<tag>` 后直接空行 + `<\tag>`，或内联 `<tag>{}<\tag>` 均可
-- **正文首尾空白**：消费侧应 `.trim()`；生产侧开闭 tag 前后留空行是为了渲染，不是内容的一部分
+- **空正文**：`<tag>` 后直接换行接 `<\tag>`，或内联 `<tag>{}<\tag>` 均可
+- **正文首尾空白**：消费侧应 `.trim()`；当前主线输出不会在 tag 与正文之间额外插入空行
 - **渲染**：markdown 渲染器大概率会把 `<tag>` 当未知元素穿透、`<\tag>` 当字面量——两种都不影响正文 markdown 的渲染
 
 ## Regenerating Snapshots

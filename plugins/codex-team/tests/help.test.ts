@@ -15,7 +15,7 @@ describe("renderHelp", () => {
     expect(help).toContain("message");
     expect(help).toContain("monitor");
     expect(help).toContain("cursor");
-    expect(help).toContain("Default JSON output is concise.");
+    expect(help).toContain("Default JSON output is concise single-line JSONL.");
   });
 
   it("renders session new flags from the schema", () => {
@@ -90,7 +90,7 @@ describe("renderHelp", () => {
 
     expect(help).toContain("codex-team doctor");
     expect(help).toContain("--short");
-    expect(help).toContain("--json");
+    expect(help).not.toContain("--json");
     expect(help).toContain("node version");
     expect(help).toContain("codex binary");
     expect(help).toContain("plugin launcher");

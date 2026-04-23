@@ -170,7 +170,7 @@ describe("runCli", () => {
     );
   });
 
-  it("prints only the saved event id for cursor get", async () => {
+  it("renders cursor get as one-line JSONL by default", async () => {
     let responseHandler: ((msg: Record<string, unknown>) => void) | undefined;
     const socket = {
       end: vi.fn(),
@@ -199,7 +199,7 @@ describe("runCli", () => {
     const code = await runCli(["-b", "token-1", "cursor", "get", "audit-tail"]);
 
     expect(code).toBe(0);
-    expect(stdoutSpy).toHaveBeenCalledWith("evt-9\n");
+    expect(stdoutSpy).toHaveBeenCalledWith("{\"event_id\":\"evt-9\"}\n");
     expect(stdoutSpy).not.toHaveBeenCalledWith(expect.stringContaining("\"ok\":true"));
   });
 
@@ -245,7 +245,7 @@ describe("runCli", () => {
 
     expect(code).toBe(0);
     expect(stdoutSpy).toHaveBeenCalledWith(
-      "{\"ok\":true,\"data\":{\"token\":\"token-1\",\"live_sessions\":2,\"retained_events\":4,\"retained_limit\":10,\"pending_requests\":1,\"app_server_count\":3}}\n",
+      "{\"token\":\"token-1\",\"live_sessions\":2,\"retained_events\":4,\"retained_limit\":10,\"pending_requests\":1,\"app_server_count\":3}\n",
     );
   });
 
@@ -291,7 +291,21 @@ describe("runCli", () => {
 
     expect(code).toBe(0);
     expect(stdoutSpy).toHaveBeenCalledWith(
-      "{\"ok\":true,\"data\":{\"token\":\"token-1\",\"created_at\":\"2026-04-23T00:00:00.000Z\",\"last_active_at\":\"2026-04-23T00:01:00.000Z\",\"live_sessions\":2,\"retained_events\":4,\"retained_limit\":10,\"pending_requests\":1,\"app_server_count\":3,\"daemon\":{\"pid\":77,\"started_at\":\"2026-04-23T00:59:00.000Z\",\"data_dir\":\"/tmp/data\"}}}\n",
+      "{\n" +
+      "  \"token\": \"token-1\",\n" +
+      "  \"created_at\": \"2026-04-23T00:00:00.000Z\",\n" +
+      "  \"last_active_at\": \"2026-04-23T00:01:00.000Z\",\n" +
+      "  \"live_sessions\": 2,\n" +
+      "  \"retained_events\": 4,\n" +
+      "  \"retained_limit\": 10,\n" +
+      "  \"pending_requests\": 1,\n" +
+      "  \"app_server_count\": 3,\n" +
+      "  \"daemon\": {\n" +
+      "    \"pid\": 77,\n" +
+      "    \"started_at\": \"2026-04-23T00:59:00.000Z\",\n" +
+      "    \"data_dir\": \"/tmp/data\"\n" +
+      "  }\n" +
+      "}\n",
     );
   });
 
@@ -821,7 +835,7 @@ describe("runCli", () => {
 
     expect(code).toBe(0);
     expect(stdoutSpy).toHaveBeenCalledWith(
-      "{\"ok\":true,\"data\":{\"summary\":{\"total\":1,\"healthy\":1,\"crashed\":0,\"closed\":0,\"busy\":0,\"pending_total\":0},\"sessions\":[{\"session\":\"audit\",\"thread_id\":\"th-1\",\"state\":\"live\",\"busy\":false,\"app_server_alive\":true}]}}\n",
+      "{\"summary\":{\"total\":1,\"healthy\":1,\"crashed\":0,\"closed\":0,\"busy\":0,\"pending_total\":0},\"sessions\":[{\"session\":\"audit\",\"state\":\"live\",\"busy\":false}]}\n",
     );
   });
 

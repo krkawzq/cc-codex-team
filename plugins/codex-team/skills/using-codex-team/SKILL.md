@@ -141,15 +141,15 @@ Three output modes:
 
 | Mode | When to use |
 |---|---|
-| **default** (no flag) | Almost always. Inline JSON with only essential fields. E.g. `message send` returns `{turn_id, started, queue_id, queued_depth}`; `session new` returns `{name, thread_id, state}`; `message approval` returns an empty data envelope; `session info` returns `{name, state, thread_id, model, busy, current_turn_id, items_in_turn}`. |
-| **`--full`** | Only when you need a field the concise form omits (full config echo, timestamps, token usage breakdown, git info, etc.). Restores the pre-0.5.3 verbose shape. |
+| **default** (no flag) | Almost always. Single-line JSONL with only essential fields. E.g. `message send` returns `{"status":"started","turn_id":"..."}` or `{"status":"queued","queue_id":"...","queued_depth":N}`; `session new` returns `{name, thread_id}`; `message approval` returns `{}`; `session info` returns a compact session/thread summary. |
+| **`--full`** | Only when you need a field the concise form omits (full config echo, timestamps, token usage breakdown, git info, etc.). Prints the complete response body as multi-line JSON. |
 | **`--short`** | Dashboard / grep / log scraping. Plain-text `key=value` single line — even more compact than default, but not JSON. Available on state-heavy commands (`status`, `session list`, `session info`, `session health`, `daemon status`, `daemon user list`, `message history`, …). |
 
 Rule: **never pass `--full` preemptively.** If the default is missing a field you need, re-query with `--full`.
 
 | Need | Command (default output is enough) |
 |---|---|
-| Send a prompt and track it | `message send <s> "..."` → `{turn_id, started, queue_id, queued_depth}` |
+| Send a prompt and track it | `message send <s> "..."` → `{"status":"started","turn_id":"..."}` or `{"status":"queued","queue_id":"...","queued_depth":N}` |
 | Steer active turn | `message peer <s> "..."` |
 | Kill a turn | `message interrupt <s>` |
 | Reply to approval / input | `message approval <s> <req> <action>` / `message answer <s> <req> "..."` |
@@ -161,7 +161,7 @@ Rule: **never pass `--full` preemptively.** If the default is missing a field yo
 | Daemon / users / config | `daemon status`, `daemon user list`, `daemon config list` |
 | Recent turns summary | `message history <s>` |
 | **Agent output you plan to reason about** | `message tail <s> -n 1 --format markdown --truncate 2048` (markdown, not JSON) |
-| **Thread snapshot** | `session context <s> --format markdown` |
+| **Thread snapshot** | `session context <s>` |
 
 Combine with Monitor filters for the event stream:
 

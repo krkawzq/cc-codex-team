@@ -825,22 +825,15 @@ const sessionGroup: HelpNode = {
     }),
     leaf({
       name: "context",
-      summary: "Show the compacted session context from Codex.",
+      summary: "Show detailed JSON context for one session or thread.",
       usage: "codex-team -b <token> session context <name|thread_id> [flags]",
       positionals: [
         { ...SESSION_TARGET },
       ],
-      flags: [
-        {
-          long: "--format",
-          type: "enum",
-          default: "json",
-          required: false,
-          description: "Render output as json or markdown.",
-        },
-      ],
+      flags: [],
       examples: [
-        "codex-team -b $TOKEN session context audit --format markdown",
+        "codex-team -b $TOKEN session context audit",
+        "codex-team -b $TOKEN session context audit --full",
       ],
       needs_bearer: true,
     }),
@@ -1024,7 +1017,7 @@ const sessionGroup: HelpNode = {
           type: "bool",
           default: "false",
           required: false,
-          description: "Emit the same compact event summaries as monitor events --summary.",
+          description: "Ask the daemon to pre-summarize events; visible CLI output already uses the same concise summary shape unless you pass --full.",
         },
         {
           long: "--by-tool",
@@ -1049,7 +1042,7 @@ const sessionGroup: HelpNode = {
         "codex-team -b $TOKEN session events audit --by-tool",
       ],
       notes: [
-        "Default output is chronological oldest-to-newest NDJSON for the retained event window.",
+        "Default CLI output is chronological oldest-to-newest summary JSONL for the retained event window; pass --full to see raw event objects.",
         "Use --since to page forward from a prior event ID.",
       ],
       needs_bearer: true,
@@ -1132,7 +1125,7 @@ const sessionGroup: HelpNode = {
       ],
       notes: [
         "Use 'codex-team -b <token> session health <name|thread_id>' first to inspect crash state and pending work.",
-        "Healthy live sessions return { ok: true, note: \"already healthy\" }.",
+        "Healthy live sessions return compact JSONL like {\"name\":\"audit\",\"note\":\"already healthy\"}.",
       ],
       needs_bearer: true,
     }),
@@ -1293,7 +1286,7 @@ const messageGroup: HelpNode = {
     }),
     leaf({
       name: "history",
-      summary: "Show runtime history for a session from newest to oldest.",
+      summary: "Show a concise multi-turn transcript with message bodies and summarized tools.",
       usage: "codex-team -b <token> message history <name|thread_id> [flags]",
       positionals: [
         { ...LIVE_SESSION_TARGET, description: "Session to inspect." },
@@ -1325,7 +1318,7 @@ const messageGroup: HelpNode = {
           type: "int",
           default: "2048",
           required: false,
-          description: "Clip long markdown bodies to this many bytes; use 0 to disable clipping.",
+          description: "Clip long markdown transcript bodies to this many bytes; use 0 to disable clipping.",
         },
         {
           long: "--short",
@@ -1342,7 +1335,7 @@ const messageGroup: HelpNode = {
     }),
     leaf({
       name: "tail",
-      summary: "Show recent turns and optionally follow new ones.",
+      summary: "Show the latest message-focused turn view and optionally follow new ones.",
       usage: "codex-team -b <token> message tail <name|thread_id> [flags]",
       positionals: [
         { ...LIVE_SESSION_TARGET, description: "Session to inspect." },
@@ -1375,7 +1368,7 @@ const messageGroup: HelpNode = {
           type: "int",
           default: "2048",
           required: false,
-          description: "Clip long markdown bodies to this many bytes; use 0 to disable clipping.",
+          description: "Clip long markdown message bodies to this many bytes; use 0 to disable clipping.",
         },
       ],
       examples: [
@@ -1489,7 +1482,7 @@ const monitorGroup: HelpNode = {
           type: "bool",
           default: "false",
           required: false,
-          description: "Emit compact NDJSON lines with only id, ts, type, session, and a type-specific key.",
+          description: "Ask the daemon to emit summary objects directly; visible CLI output already uses the same concise summary shape unless you pass --full.",
         },
         {
           long: "--since",
@@ -1604,7 +1597,7 @@ const cursorGroup: HelpNode = {
     }),
     leaf({
       name: "get",
-      summary: "Print only the saved event ID for a cursor name.",
+      summary: "Resolve one cursor name to a single-line JSONL object with its saved event ID.",
       usage: "codex-team -b <token> cursor get <name>",
       positionals: [
         {
@@ -1616,6 +1609,9 @@ const cursorGroup: HelpNode = {
       flags: [],
       examples: [
         "codex-team -b $TOKEN cursor get audit-tail",
+      ],
+      notes: [
+        "Default output is {\"event_id\":\"evt-...\"} on one JSONL line. Pass --full for the same fields pretty-printed.",
       ],
       needs_bearer: true,
     }),
@@ -1682,7 +1678,7 @@ const HELP_TREE: HelpNode = {
     "codex-team -b $TOKEN session new audit --model gpt-5.4",
   ],
   notes: [
-    "Default JSON output is concise. Pass --full on any leaf command to restore the complete response body.",
+    "Default JSON output is concise single-line JSONL. Pass --full on any leaf command to print the complete response body as multi-line JSON.",
   ],
   subcommands: [
     leaf({
@@ -1709,21 +1705,13 @@ const HELP_TREE: HelpNode = {
           required: false,
           description: "Print one summary line with verdict, failed checks, and warnings.",
         },
-        {
-          long: "--json",
-          type: "bool",
-          default: "false",
-          required: false,
-          description: "Emit one JSON object with verdict, checks, and exit_code for automation.",
-        },
       ],
       examples: [
         "codex-team doctor",
-        "codex-team doctor --json",
         "codex-team doctor --short",
       ],
       notes: [
-        "Human-readable by default. Use --json for programmatic consumption; --short stays plain-text and cannot be combined with --json.",
+        "Human-readable by default. Use --short for a one-line verdict summary.",
         "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
         "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness.",
       ],

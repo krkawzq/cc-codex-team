@@ -9,7 +9,7 @@ import type { IpcMessage, IpcRequest } from "../ipc/protocol";
 import { defaultSockPath, isFilesystemSockPath, normalizeSockPath, pidFilePath, warnLegacyWindowsDataDir } from "../paths";
 import { parseArgs, commandKey, supportsShort, type ParsedArgs } from "./args";
 import { renderHelp } from "./help";
-import { err, ok } from "../result";
+import { err } from "../result";
 import { ConfigStore } from "../daemon/config";
 import { validateApprovalAction } from "./approval-validation";
 import { VERSION } from "../version";
@@ -163,7 +163,7 @@ async function runVersion(sockPath: string): Promise<number> {
     }
   }
   process.stdout.write(
-    JSON.stringify(ok({ cli_version: cliVersion, daemon_version: daemonVersion })) + "\n",
+    renderJsonResult({ cli_version: cliVersion, daemon_version: daemonVersion }, false),
   );
   return 0;
 }
@@ -216,17 +216,13 @@ async function dispatchCommand(sockPath: string, parsed: ParsedArgs, method: str
       process.stdout.write(formatShort(method, resp.result) + "\n");
       return 0;
     }
-    if (method === "cursor:get") {
-      process.stdout.write(extractCursorEventId(resp.result) + "\n");
-      return 0;
-    }
     const markdown = extractMarkdownResult(resp.result, parsed.flags.format);
     if (markdown !== null) {
       process.stdout.write(markdown + "\n");
       return exitCodeForResult(method, resp.result);
     }
     const rendered = truthy(parsed.flags.full) ? resp.result : formatCompact(method, resp.result);
-    process.stdout.write(JSON.stringify({ ok: true, data: rendered }) + "\n");
+    process.stdout.write(renderJsonResult(rendered, truthy(parsed.flags.full)));
     return exitCodeForResult(method, resp.result);
   } catch (e) {
     process.stdout.write(
@@ -379,7 +375,7 @@ async function runStream(sock: net.Socket, parsed: ParsedArgs, method: string): 
           return writeStdout(markdown + "\n", ackAfterWrite);
         } else {
           const rendered = truthy(parsed.flags.full) ? msg.data : formatCompact(method, msg.data);
-          return writeStdout(JSON.stringify(rendered) + "\n", ackAfterWrite);
+          return writeStdout(renderJsonResult(rendered, truthy(parsed.flags.full)), ackAfterWrite);
         }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
@@ -903,12 +899,6 @@ function extractMarkdownResult(result: unknown, format: unknown): string | null 
   return typeof markdown === "string" ? markdown : null;
 }
 
-function extractCursorEventId(result: unknown): string {
-  if (!result || typeof result !== "object" || Array.isArray(result)) return "";
-  const eventId = (result as { event_id?: unknown }).event_id;
-  return typeof eventId === "string" ? eventId : "";
-}
-
 function createStreamAckCallback(
   method: string,
   sock: net.Socket,
@@ -1053,8 +1043,15 @@ function writeLocalResult(method: string, result: unknown, parsed: ParsedArgs): 
   }
 
   const rendered = truthy(parsed.flags.full) ? result : formatCompact(method, result);
-  process.stdout.write(JSON.stringify(ok(rendered)) + "\n");
+  process.stdout.write(renderJsonResult(rendered, truthy(parsed.flags.full)));
   return 0;
+}
+
+function renderJsonResult(result: unknown, full: boolean): string {
+  const body = full
+    ? JSON.stringify(result, null, 2)
+    : JSON.stringify(result);
+  return `${body}\n`;
 }
 
 function asStringFlag(value: string | boolean | string[] | undefined): string | null {

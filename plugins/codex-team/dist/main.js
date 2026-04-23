@@ -1498,22 +1498,15 @@ var sessionGroup = {
     }),
     leaf({
       name: "context",
-      summary: "Show the compacted session context from Codex.",
+      summary: "Show detailed JSON context for one session or thread.",
       usage: "codex-team -b <token> session context <name|thread_id> [flags]",
       positionals: [
         { ...SESSION_TARGET }
       ],
-      flags: [
-        {
-          long: "--format",
-          type: "enum",
-          default: "json",
-          required: false,
-          description: "Render output as json or markdown."
-        }
-      ],
+      flags: [],
       examples: [
-        "codex-team -b $TOKEN session context audit --format markdown"
+        "codex-team -b $TOKEN session context audit",
+        "codex-team -b $TOKEN session context audit --full"
       ],
       needs_bearer: true
     }),
@@ -1697,7 +1690,7 @@ var sessionGroup = {
           type: "bool",
           default: "false",
           required: false,
-          description: "Emit the same compact event summaries as monitor events --summary."
+          description: "Ask the daemon to pre-summarize events; visible CLI output already uses the same concise summary shape unless you pass --full."
         },
         {
           long: "--by-tool",
@@ -1722,7 +1715,7 @@ var sessionGroup = {
         "codex-team -b $TOKEN session events audit --by-tool"
       ],
       notes: [
-        "Default output is chronological oldest-to-newest NDJSON for the retained event window.",
+        "Default CLI output is chronological oldest-to-newest summary JSONL for the retained event window; pass --full to see raw event objects.",
         "Use --since to page forward from a prior event ID."
       ],
       needs_bearer: true
@@ -1805,7 +1798,7 @@ var sessionGroup = {
       ],
       notes: [
         "Use 'codex-team -b <token> session health <name|thread_id>' first to inspect crash state and pending work.",
-        'Healthy live sessions return { ok: true, note: "already healthy" }.'
+        'Healthy live sessions return compact JSONL like {"name":"audit","note":"already healthy"}.'
       ],
       needs_bearer: true
     })
@@ -1965,7 +1958,7 @@ var messageGroup = {
     }),
     leaf({
       name: "history",
-      summary: "Show runtime history for a session from newest to oldest.",
+      summary: "Show a concise multi-turn transcript with message bodies and summarized tools.",
       usage: "codex-team -b <token> message history <name|thread_id> [flags]",
       positionals: [
         { ...LIVE_SESSION_TARGET, description: "Session to inspect." }
@@ -1997,7 +1990,7 @@ var messageGroup = {
           type: "int",
           default: "2048",
           required: false,
-          description: "Clip long markdown bodies to this many bytes; use 0 to disable clipping."
+          description: "Clip long markdown transcript bodies to this many bytes; use 0 to disable clipping."
         },
         {
           long: "--short",
@@ -2014,7 +2007,7 @@ var messageGroup = {
     }),
     leaf({
       name: "tail",
-      summary: "Show recent turns and optionally follow new ones.",
+      summary: "Show the latest message-focused turn view and optionally follow new ones.",
       usage: "codex-team -b <token> message tail <name|thread_id> [flags]",
       positionals: [
         { ...LIVE_SESSION_TARGET, description: "Session to inspect." }
@@ -2047,7 +2040,7 @@ var messageGroup = {
           type: "int",
           default: "2048",
           required: false,
-          description: "Clip long markdown bodies to this many bytes; use 0 to disable clipping."
+          description: "Clip long markdown message bodies to this many bytes; use 0 to disable clipping."
         }
       ],
       examples: [
@@ -2160,7 +2153,7 @@ var monitorGroup = {
           type: "bool",
           default: "false",
           required: false,
-          description: "Emit compact NDJSON lines with only id, ts, type, session, and a type-specific key."
+          description: "Ask the daemon to emit summary objects directly; visible CLI output already uses the same concise summary shape unless you pass --full."
         },
         {
           long: "--since",
@@ -2274,7 +2267,7 @@ var cursorGroup = {
     }),
     leaf({
       name: "get",
-      summary: "Print only the saved event ID for a cursor name.",
+      summary: "Resolve one cursor name to a single-line JSONL object with its saved event ID.",
       usage: "codex-team -b <token> cursor get <name>",
       positionals: [
         {
@@ -2286,6 +2279,9 @@ var cursorGroup = {
       flags: [],
       examples: [
         "codex-team -b $TOKEN cursor get audit-tail"
+      ],
+      notes: [
+        'Default output is {"event_id":"evt-..."} on one JSONL line. Pass --full for the same fields pretty-printed.'
       ],
       needs_bearer: true
     }),
@@ -2351,7 +2347,7 @@ var HELP_TREE = {
     "codex-team -b $TOKEN session new audit --model gpt-5.4"
   ],
   notes: [
-    "Default JSON output is concise. Pass --full on any leaf command to restore the complete response body."
+    "Default JSON output is concise single-line JSONL. Pass --full on any leaf command to print the complete response body as multi-line JSON."
   ],
   subcommands: [
     leaf({
@@ -2377,22 +2373,14 @@ var HELP_TREE = {
           default: "false",
           required: false,
           description: "Print one summary line with verdict, failed checks, and warnings."
-        },
-        {
-          long: "--json",
-          type: "bool",
-          default: "false",
-          required: false,
-          description: "Emit one JSON object with verdict, checks, and exit_code for automation."
         }
       ],
       examples: [
         "codex-team doctor",
-        "codex-team doctor --json",
         "codex-team doctor --short"
       ],
       notes: [
-        "Human-readable by default. Use --json for programmatic consumption; --short stays plain-text and cannot be combined with --json.",
+        "Human-readable by default. Use --short for a one-line verdict summary.",
         "Checks: node version, codex binary, plugin launcher, daemon.data_dir writable.",
         "Checks: local socket bind, daemon process state, daemon socket reachability, dist freshness."
       ],
@@ -2538,9 +2526,6 @@ function renderHelp(path19) {
 }
 
 // src/result.ts
-function ok(data) {
-  return { ok: true, data };
-}
 function err(code, message, data) {
   const error = { code, message };
   if (data !== void 0) {
@@ -3299,7 +3284,7 @@ function formatCompact(method, data) {
     case "daemon:start":
       return pickFields(data, ["already_running"]);
     case "daemon:stop":
-      return pickFields(data, ["stopping", "force"]);
+      return pickFields(data, ["stopping"]);
     case "daemon:restart":
       return pickFields(data, ["restarting"]);
     case "daemon:logs":
@@ -3321,30 +3306,21 @@ function formatCompact(method, data) {
     case "daemon:config:reset":
       return pickFields(data, ["reset"]);
     case "session:new":
-      return compactSessionWithFlags(data, {
-        sessionOptions: { includeCreatedAt: true }
-      });
+      return compactSessionCreated(data);
     case "session:attach":
-      return compactSessionWithFlags(data, {
-        sessionOptions: {},
-        extraKeys: ["noop"]
-      });
+      return compactSessionAttached(data);
     case "session:detach":
       return compactSessionDetach(data);
     case "session:archive":
-      return pickFields(data, ["thread_id", "archived"]);
+      return pickFields(data, ["thread_id"]);
     case "session:unarchive":
-      return pickFields(data, ["thread_id", "unarchived"]);
+      return pickFields(data, ["thread_id"]);
     case "session:fork":
-      return compactSessionWithFlags(data, {
-        sessionOptions: {}
-      });
+      return compactSessionCreated(data);
     case "session:rename":
-      return compactSessionWithFlags(data, {
-        sessionOptions: { nameOnly: true }
-      });
+      return compactSessionRenamed(data);
     case "session:rollback":
-      return pickFields(data, ["name", "forked_at_turn", "old_thread_id", "new_thread_id"]);
+      return pickFields(data, ["name", "new_thread_id"]);
     case "session:info":
       return compactSessionInfo(data);
     case "session:context":
@@ -3352,36 +3328,23 @@ function formatCompact(method, data) {
     case "session:list":
       return compactSessionList(data);
     case "session:health":
-      return pickFields(data, [
-        "session",
-        "thread_id",
-        "state",
-        "busy",
-        "current_turn_id",
-        "current_turn_elapsed_ms",
-        "current_item_type",
-        "items_done_in_turn",
-        "pending_approval_requests",
-        "pending_user_input_requests",
-        "app_server_alive",
-        "last_event_id"
-      ]);
+      return compactSessionHealth(data);
     case "session:health:all":
       return compactSessionHealthAll(data);
     case "session:events":
-      return asObject2(data);
+      return compactMonitorEvent(data);
     case "session:logs":
       return compactSessionLogs(data);
     case "session:heal":
       return compactSessionHeal(data);
     case "message:send":
-      return pickFields(data, ["turn_id", "started", "queue_id", "queued_depth"]);
+      return compactMessageSend(data);
     case "message:send-many":
-      return compactBatchResults(data, ["turn_id", "started", "queue_id", "queued_depth"]);
+      return compactMessageSendMany(data);
     case "message:peer":
-      return pickFields(data, ["turn_id", "peered"]);
+      return pickFields(data, ["turn_id"]);
     case "message:interrupt":
-      return pickFields(data, ["turn_id", "interrupted"]);
+      return compactMessageInterrupt(data);
     case "message:approval":
     case "message:answer":
       return {};
@@ -3468,6 +3431,20 @@ function compactSessionWithFlags(data, options) {
   }
   return out;
 }
+function compactSessionCreated(data) {
+  return pickFields(asObject2(data).session, ["name", "thread_id"]);
+}
+function compactSessionAttached(data) {
+  const value = asObject2(data);
+  const out = compactSessionCreated(data);
+  if (value.noop === true) out.noop = true;
+  return out;
+}
+function compactSessionRenamed(data) {
+  const value = asObject2(data);
+  const session = asObject2(value.session);
+  return pickFields(session, ["name"]);
+}
 function compactSessionInfo(data) {
   const value = asObject2(data);
   if (value.session === null) {
@@ -3480,81 +3457,70 @@ function compactSessionInfo(data) {
   return compactSessionWithFlags(data, {
     sessionOptions: {
       includeModel: true,
-      includeTurnCount: true,
-      includeCurrentTurnId: true,
-      includeItemsInTurn: true,
-      includePendingApprovals: true,
-      includePendingUserInputs: true
+      includeCurrentTurnId: true
     }
   });
 }
 function compactSessionDetach(data) {
   const value = asObject2(data);
   if (Array.isArray(value.results)) {
-    return compactBatchResults(data, ["detached", "graceful"]);
+    return compactBatchResults(data, []);
   }
-  return compactSessionWithFlags(data, {
-    sessionOptions: {},
-    extraKeys: ["noop", "graceful"],
-    allowNullSession: true
-  });
+  const out = {};
+  const session = asObject2(value.session);
+  if (Object.keys(session).length > 0) copyIfPresent(out, session, "name");
+  if (value.noop === true) out.noop = true;
+  return out;
 }
 function compactSessionContext(data) {
   const value = asObject2(data);
-  const out = pickFields(value, ["thread_id"]);
-  const thread = projectThread(value.thread);
+  const out = pickFields(value, ["session", "thread_id"]);
+  const thread = projectThread(value.thread, { includePreview: true });
   if (Object.keys(thread).length > 0) out.thread = thread;
   return out;
 }
 function compactSessionLogs(data) {
   const value = asObject2(data);
-  return pickFields(value, ["session", "state", "lines", "truncated_from"]);
+  const out = pickFields(value, ["lines"]);
+  if (value.state === "crashed") out.state = "crashed";
+  if (value.truncated_from !== null && value.truncated_from !== void 0) {
+    out.truncated_from = value.truncated_from;
+  }
+  return out;
 }
 function compactSessionList(data) {
   const value = asObject2(data);
-  const remote = value.all === true || value.loaded_only === true;
   const out = {
-    sessions: asArray(value.sessions).map((entry) => remote ? projectSession(entry, {
-      includeModel: true,
-      includeBusy: true
-    }) : projectSession(entry, {
-      includeModel: true,
-      includeTurnCount: true,
-      includeCurrentTurnId: true
-    }))
+    sessions: asArray(value.sessions).map((entry) => projectSessionListEntry(entry))
   };
-  copyIfPresent(out, value, "all");
-  if (value.loaded_only === true) copyIfPresent(out, value, "loaded_only");
-  if (remote) copyIfPresent(out, value, "next_cursor");
+  copyIfPresent(out, value, "next_cursor");
   return out;
 }
 function compactSessionHeal(data) {
   const value = asObject2(data);
   const out = {};
-  if (hasOwn2(value, "session")) out.session = projectSession(value.session, {});
-  copyIfPresent(out, value, "healed");
-  copyIfPresent(out, value, "note");
+  const session = asObject2(value.session);
+  if (Object.keys(session).length > 0) copyIfPresent(out, session, "name");
+  if (typeof value.note === "string" && value.note.length > 0) out.note = value.note;
   return out;
 }
 function compactSessionHealthAll(data) {
   const value = asObject2(data);
   return {
     summary: pickFields(value.summary, ["total", "healthy", "crashed", "closed", "busy", "pending_total"]),
-    sessions: asArray(value.sessions).map((entry) => pickFields(entry, [
-      "session",
-      "thread_id",
-      "state",
-      "busy",
-      "current_turn_id",
-      "current_turn_elapsed_ms",
-      "current_item_type",
-      "items_done_in_turn",
-      "pending_approval_requests",
-      "pending_user_input_requests",
-      "app_server_alive",
-      "last_event_id"
-    ]))
+    sessions: asArray(value.sessions).map((entry) => compactSessionHealth(entry))
   };
+}
+function compactSessionHealth(data) {
+  const value = asObject2(data);
+  const out = pickFields(value, ["session", "state", "busy"]);
+  if (value.busy === true) copyIfPresent(out, value, "current_turn_id");
+  if (value.pending_approval_requests) copyIfPresent(out, value, "pending_approval_requests");
+  if (value.pending_user_input_requests) copyIfPresent(out, value, "pending_user_input_requests");
+  if (value.app_server_alive === false || value.state !== "live") {
+    copyIfPresent(out, value, "app_server_alive");
+  }
+  return out;
 }
 function compactMessageHistory(data) {
   const value = asObject2(data);
@@ -3577,6 +3543,46 @@ function compactMessageTail(data) {
   const thread = projectThread(value.thread);
   if (Object.keys(thread).length > 0) out.thread = thread;
   return stripUndefined(out);
+}
+function compactMessageSend(data) {
+  const value = asObject2(data);
+  if (value.started === true) {
+    return stripUndefined({
+      status: "started",
+      turn_id: value.turn_id
+    });
+  }
+  return stripUndefined({
+    status: "queued",
+    queue_id: value.queue_id,
+    queued_depth: value.queued_depth
+  });
+}
+function compactMessageSendMany(data) {
+  const value = asObject2(data);
+  return {
+    results: asArray(value.results).map((entry) => compactMessageSendManyEntry(entry))
+  };
+}
+function compactMessageSendManyEntry(value) {
+  const entry = asObject2(value);
+  if (entry.ok === false) {
+    const error = asObject2(entry.error);
+    return stripUndefined({
+      session: entry.session,
+      ok: false,
+      error: Object.keys(error).length > 0 ? pickFields(error, ["code"]) : void 0
+    });
+  }
+  return stripUndefined({
+    session: entry.session,
+    ...entry.started === true ? { status: "started", turn_id: entry.turn_id } : { status: "queued", queue_id: entry.queue_id, queued_depth: entry.queued_depth }
+  });
+}
+function compactMessageInterrupt(data) {
+  const value = asObject2(data);
+  if (value.noop === true) return { noop: true };
+  return pickFields(value, ["turn_id"]);
 }
 function compactMessageWait(data) {
   const value = asObject2(data);
@@ -3601,17 +3607,10 @@ function compactMessageWait(data) {
       still_running: asArray(value.still_running)
     });
   }
-  return pickFields(data, [
-    "thread_id",
-    "turn_id",
-    "outcome",
-    "event_type",
-    "event_id",
-    "error",
-    "duration_ms",
-    "items_count",
-    "timeout_s"
-  ]);
+  const out = pickFields(data, ["outcome", "turn_id", "timeout_s"]);
+  const codexErrorInfo = extractCodexErrorInfo(value);
+  if (codexErrorInfo) out.codex_error_info = codexErrorInfo;
+  return out;
 }
 function compactBatchResults(data, successKeys) {
   const value = asObject2(data);
@@ -3627,8 +3626,8 @@ function compactMonitorEvent(data) {
       ts: value.ts,
       type: value.type,
       session: value.session,
-      thread_id: value.thread_id,
-      key: value.key
+      key: value.key,
+      ackable: value.ackable === false ? false : void 0
     });
   }
   return stripUndefined({
@@ -3636,8 +3635,8 @@ function compactMonitorEvent(data) {
     ts: value.ts,
     type: value.type,
     session: value.session,
-    thread_id: value.thread_id,
-    key: summarizeEventKey(value)
+    key: summarizeEventKey(value),
+    ackable: value.ackable === false ? false : void 0
   });
 }
 function compactCursorSave(data) {
@@ -3655,6 +3654,12 @@ function compactCursorList(data) {
     }))
   };
 }
+function projectSessionListEntry(value) {
+  const session = asObject2(value);
+  const out = pickFields(session, ["name", "state"]);
+  if (session.busy === true) out.busy = true;
+  return out;
+}
 function projectSession(value, options) {
   const session = asObject2(value);
   if (options.nameOnly) {
@@ -3671,20 +3676,16 @@ function projectSession(value, options) {
   if (options.includeBusy) copyIfPresent(out, session, "busy");
   return out;
 }
-function projectThread(value) {
+function projectThread(value, options = {}) {
   const thread = asObject2(value);
-  const out = pickFields(thread, [
-    "id",
-    "name",
-    "cwd",
-    "source",
-    "model_provider",
-    "created_at",
-    "updated_at"
-  ]);
+  const out = pickFields(thread, ["id", "name", "cwd", "source"]);
+  out.model_provider = thread.model_provider ?? thread.modelProvider;
+  out.created_at = thread.created_at ?? thread.createdAt;
+  out.updated_at = thread.updated_at ?? thread.updatedAt;
+  if (options.includePreview) copyIfPresent(out, thread, "preview");
   const status2 = extractStatus2(thread.status);
   if (status2) out.status = status2;
-  return out;
+  return stripUndefined(out);
 }
 function projectCursor(value, options) {
   const cursor = asObject2(value);
@@ -3704,6 +3705,13 @@ function projectBatchResultEntry(value, successKeys) {
     });
   }
   return pickFields(entry, ["session", ...successKeys]);
+}
+function extractCodexErrorInfo(value) {
+  if (typeof value.codex_error_info === "string" && value.codex_error_info.length > 0) {
+    return value.codex_error_info;
+  }
+  const error = asObject2(value.error);
+  return typeof error.codex_error_info === "string" && error.codex_error_info.length > 0 ? error.codex_error_info : null;
 }
 function summarizeEventKey(event) {
   const payload = asObject2(event.payload);
@@ -4025,7 +4033,7 @@ function checkNode() {
   if (!Number.isFinite(major) || major < 18) {
     return fail("node", `node version ${version2}, need >=18`);
   }
-  return ok2("node", `node=${version2}`);
+  return ok("node", `node=${version2}`);
 }
 function checkCodexBin(_ctx, deps = DEFAULT_DEPS) {
   const result = deps.spawnSync("codex", ["--version"], {
@@ -4052,7 +4060,7 @@ function checkCodexBin(_ctx, deps = DEFAULT_DEPS) {
     });
   }
   const version2 = firstLine(result.stdout) || firstLine(result.stderr) || "unknown";
-  return ok2("codex", `codex=${version2}`, {
+  return ok("codex", `codex=${version2}`, {
     name: "codex_binary",
     detail: `codex=${version2}`
   });
@@ -4060,14 +4068,14 @@ function checkCodexBin(_ctx, deps = DEFAULT_DEPS) {
 function checkLauncherOnPath(ctx, deps = DEFAULT_DEPS) {
   const bundledLauncher = resolveBundledPluginLauncher(ctx);
   if (bundledLauncher) {
-    return ok2("path", `launcher=${bundledLauncher} (plugin mode)`, {
+    return ok("path", `launcher=${bundledLauncher} (plugin mode)`, {
       name: "launcher_on_path",
       detail: `launcher=${bundledLauncher} (plugin mode)`
     });
   }
   const resolved = resolveOnPath("codex-team", ctx.pathEnv, deps.fs);
   if (resolved) {
-    return ok2("path", `codex-team=${resolved}`, {
+    return ok("path", `codex-team=${resolved}`, {
       name: "launcher_on_path",
       detail: `codex-team=${resolved}`
     });
@@ -4084,7 +4092,7 @@ function checkDataDirWritable(ctx, deps = DEFAULT_DEPS) {
     deps.fs.mkdirSync(ctx.dataDir, { recursive: true });
     deps.fs.writeFileSync(testPath, "ok");
     deps.fs.unlinkSync(testPath);
-    return ok2("data_dir", `data_dir=${ctx.dataDir} writable`, {
+    return ok("data_dir", `data_dir=${ctx.dataDir} writable`, {
       name: "data_dir_writable",
       detail: `data_dir=${ctx.dataDir} writable`
     });
@@ -4133,7 +4141,7 @@ async function checkSocketBind(ctx, deps = DEFAULT_DEPS) {
       detail: `socket_bind ${code} - listen() failed: ${result.error?.message ?? "unknown error"}`
     });
   }
-  return ok2("socket_bind", "socket_bind permitted", {
+  return ok("socket_bind", "socket_bind permitted", {
     name: "socket_bind",
     detail: "socket_bind permitted"
   });
@@ -4142,7 +4150,7 @@ function checkDaemonPid(ctx, deps = DEFAULT_DEPS) {
   const record = readPidRecord(ctx.pidPath, deps.fs);
   if (!record) {
     return {
-      ...ok2("daemon_pid", "daemon not running (will auto-spawn on first `-b` call)", {
+      ...ok("daemon_pid", "daemon not running (will auto-spawn on first `-b` call)", {
         name: "daemon_pid",
         detail: "daemon not running (will auto-spawn on first `-b` call)"
       }),
@@ -4154,7 +4162,7 @@ function checkDaemonPid(ctx, deps = DEFAULT_DEPS) {
   const isDaemon = alive && deps.isLikelyCodexTeamDaemonProcess(record.pid);
   if (isDaemon) {
     return {
-      ...ok2("daemon_pid", `daemon running, pid=${record.pid}`, {
+      ...ok("daemon_pid", `daemon running, pid=${record.pid}`, {
         name: "daemon_pid",
         detail: `daemon running, pid=${record.pid}`
       }),
@@ -4183,7 +4191,7 @@ async function checkDaemonSocket(ctx, pidResult, deps = DEFAULT_DEPS) {
   }
   const result = await connectSockOnce(ctx.sockPath, 2e3, deps.createConnection);
   if (result.ok) {
-    return ok2("daemon_socket", "daemon_socket reachable", {
+    return ok("daemon_socket", "daemon_socket reachable", {
       name: "daemon_socket",
       detail: "daemon_socket reachable"
     });
@@ -4212,7 +4220,7 @@ function checkDistFreshness(ctx, deps = DEFAULT_DEPS) {
       hint: "run `npm run build` in plugins/codex-team"
     });
   }
-  return ok2("dist", "dist current", {
+  return ok("dist", "dist current", {
     name: "dist_freshness",
     detail: "dist current"
   });
@@ -4294,7 +4302,7 @@ function renderStatus(status2) {
       return "OK";
   }
 }
-function ok2(id, message, options = {}) {
+function ok(id, message, options = {}) {
   return {
     id,
     name: options.name ?? id,
@@ -4685,7 +4693,7 @@ async function runVersion(sockPath) {
     }
   }
   process.stdout.write(
-    JSON.stringify(ok({ cli_version: cliVersion, daemon_version: daemonVersion })) + "\n"
+    renderJsonResult({ cli_version: cliVersion, daemon_version: daemonVersion }, false)
   );
   return 0;
 }
@@ -4727,17 +4735,13 @@ async function dispatchCommand(sockPath, parsed, method) {
       process.stdout.write(formatShort(method, resp.result) + "\n");
       return 0;
     }
-    if (method === "cursor:get") {
-      process.stdout.write(extractCursorEventId(resp.result) + "\n");
-      return 0;
-    }
     const markdown = extractMarkdownResult(resp.result, parsed.flags.format);
     if (markdown !== null) {
       process.stdout.write(markdown + "\n");
       return exitCodeForResult(method, resp.result);
     }
     const rendered = truthy(parsed.flags.full) ? resp.result : formatCompact(method, resp.result);
-    process.stdout.write(JSON.stringify({ ok: true, data: rendered }) + "\n");
+    process.stdout.write(renderJsonResult(rendered, truthy(parsed.flags.full)));
     return exitCodeForResult(method, resp.result);
   } catch (e) {
     process.stdout.write(
@@ -4812,8 +4816,8 @@ async function runStream(sock, parsed, method) {
       if (stdoutBlocked) return;
       while (stdoutQueue.length > 0) {
         const next = stdoutQueue[0];
-        const ok3 = process.stdout.write(next.line);
-        if (!ok3) {
+        const ok2 = process.stdout.write(next.line);
+        if (!ok2) {
           stdoutBlocked = true;
           pauseSocket();
           process.stdout.once("drain", () => {
@@ -4880,7 +4884,7 @@ async function runStream(sock, parsed, method) {
           return writeStdout(markdown + "\n", ackAfterWrite);
         } else {
           const rendered = truthy(parsed.flags.full) ? msg.data : formatCompact(method, msg.data);
-          return writeStdout(JSON.stringify(rendered) + "\n", ackAfterWrite);
+          return writeStdout(renderJsonResult(rendered, truthy(parsed.flags.full)), ackAfterWrite);
         }
       } else if (msg.kind === "stream_end" && msg.id === reqId) {
         if (msg.error) {
@@ -5291,11 +5295,6 @@ function extractMarkdownResult(result, format) {
   const markdown = result.markdown;
   return typeof markdown === "string" ? markdown : null;
 }
-function extractCursorEventId(result) {
-  if (!result || typeof result !== "object" || Array.isArray(result)) return "";
-  const eventId = result.event_id;
-  return typeof eventId === "string" ? eventId : "";
-}
 function createStreamAckCallback(method, sock, reqId, data) {
   if (method !== "monitor:events") return void 0;
   if (!isStreamChunkAckable(data)) return void 0;
@@ -5418,8 +5417,13 @@ function writeLocalResult(method, result, parsed) {
     return 0;
   }
   const rendered = truthy(parsed.flags.full) ? result : formatCompact(method, result);
-  process.stdout.write(JSON.stringify(ok(rendered)) + "\n");
+  process.stdout.write(renderJsonResult(rendered, truthy(parsed.flags.full)));
   return 0;
+}
+function renderJsonResult(result, full) {
+  const body = full ? JSON.stringify(result, null, 2) : JSON.stringify(result);
+  return `${body}
+`;
 }
 function asStringFlag(value) {
   if (Array.isArray(value)) {
@@ -6479,8 +6483,8 @@ var EventLog = class {
       });
     });
     if (!writePromise) return;
-    const ok3 = await writePromise;
-    if (!ok3) {
+    const ok2 = await writePromise;
+    if (!ok2) {
       await this.withUserLock(user, async () => {
         this.restorePendingLines(user, pendingLines, pendingBytes);
         this.scheduleFlush(user, FLUSH_RETRY_DELAY_MS, true);
@@ -6544,8 +6548,8 @@ var EventLog = class {
       });
     });
     if (!snapshotLines || !writePromise) return;
-    const ok3 = await writePromise;
-    if (!ok3) {
+    const ok2 = await writePromise;
+    if (!ok2) {
       await this.withUserLock(user, async () => {
         this.restorePendingLines(user, snapshotLines, snapshotBytes);
         this.scheduleFlush(user, FLUSH_RETRY_DELAY_MS, true);
@@ -7288,7 +7292,7 @@ var JsonRpcError = class extends AppServerError {
     this.code = code;
     this.rpcMessage = message;
     this.data = data;
-    this.codexErrorInfo = extractCodexErrorInfo(data);
+    this.codexErrorInfo = extractCodexErrorInfo2(data);
     this.additionalDetails = extractAdditionalDetails(data);
   }
 };
@@ -7369,7 +7373,7 @@ function isServerOverloaded(data) {
   }
   return false;
 }
-function extractCodexErrorInfo(data) {
+function extractCodexErrorInfo2(data) {
   if (data === void 0 || data === null || typeof data !== "object") return null;
   if (Array.isArray(data)) return null;
   const obj = data;
@@ -9295,446 +9299,6 @@ function normalizeAlias(value) {
   return value.trim().replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/[\s_]+/g, "-").toLowerCase();
 }
 
-// src/format/markdown.ts
-var INLINE_MAX_BYTES = 2048;
-function renderTag(name, attrs, body) {
-  const line = `<${name}> ${compactJson(attrs)}`;
-  const normalizedBody = stripOuterNewlines(body);
-  if (!normalizedBody) {
-    return `${line}
-
-<\\${name}>`;
-  }
-  return `${line}
-
-${normalizedBody}
-
-<\\${name}>`;
-}
-function renderInline(name, attrs) {
-  return `<${name}>${compactJson(attrs)}<\\${name}>`;
-}
-function renderHistory(input, options = {}) {
-  const ctx = createRenderContext(options);
-  const attrs = {
-    session: input.session,
-    thread_id: input.thread_id,
-    count: input.turns.length,
-    generated_at: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  if (input.nextCursor) attrs.next_cursor = input.nextCursor;
-  const body = input.turns.map((turn) => renderTurn(turn, ctx)).join("\n\n");
-  return renderTag("history", attrs, body);
-}
-function renderTail(input, options = {}) {
-  const ctx = createRenderContext(options);
-  const attrs = {
-    session: input.session,
-    thread_id: input.thread_id,
-    count: input.turns.length,
-    generated_at: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  if (input.follow) attrs.follow = true;
-  const body = input.turns.map((turn) => renderTurn(turn, ctx)).join("\n\n");
-  return renderTag("tail", attrs, body);
-}
-function renderContext(input) {
-  const ctx = createRenderContext();
-  const t = input.thread;
-  const attrs = {
-    session: input.session,
-    thread_id: input.thread_id,
-    generated_at: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  if (t) {
-    if (typeof t.model_provider === "string") attrs.model_provider = t.model_provider;
-    if (typeof t.preview === "string") attrs.preview = t.preview;
-    if (typeof t.cwd === "string") attrs.cwd = t.cwd;
-    const status2 = t.status?.type;
-    if (typeof status2 === "string") attrs.status = status2;
-    if (typeof t.created_at === "number") attrs.created_at = t.created_at;
-    if (typeof t.updated_at === "number") attrs.updated_at = t.updated_at;
-  }
-  const turns = Array.isArray(t?.turns) ? t.turns.filter((turn) => !!turn && typeof turn === "object").map((turn) => renderTurn(turn, ctx)).filter(Boolean) : [];
-  return renderTag(
-    "context",
-    attrs,
-    turns.length > 0 ? turns.join("\n\n") : "<!-- thread/read only returns thread metadata; for turn-level content use 'message history' -->"
-  );
-}
-function renderTurn(turn, ctx) {
-  const attrs = {
-    id: turn.id,
-    status: turn.status ?? null
-  };
-  if (turn.durationMs !== void 0 && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
-  if (turn.startedAt !== void 0 && turn.startedAt !== null) attrs.started_at = turn.startedAt;
-  if (turn.completedAt !== void 0 && turn.completedAt !== null) attrs.completed_at = turn.completedAt;
-  const err2 = turn.error ?? null;
-  if (err2) attrs.error = err2;
-  const items = Array.isArray(turn.items) ? turn.items : [];
-  if (items.length === 0) {
-    return renderInline("turn", attrs);
-  }
-  const body = items.filter((item) => !!item && typeof item === "object").map((item) => renderItemWithContext(item, ctx)).filter(Boolean).join("\n\n");
-  return renderTag("turn", attrs, body);
-}
-function renderItemWithContext(item, ctx) {
-  const type = normalizeItemType(item.type);
-  switch (type) {
-    case "userMessage":
-      return renderUserMessage(item, ctx);
-    case "agentMessage":
-      return renderAgentMessage(item, ctx);
-    case "commandExecution":
-      return renderCommandExecution(item, ctx);
-    case "fileChange":
-    case "file-patch":
-      return renderFileChange(item, ctx);
-    case "mcpToolCall":
-      return renderMcpToolCall(item, ctx);
-    case "autoApprovalReview":
-      return renderAutoApprovalReview(item, ctx);
-    case "reasoning":
-      return renderReasoning(item, ctx);
-    default:
-      if (type.startsWith("hook.")) return renderHook(item, type, ctx);
-      return renderInline("item", sanitizeInlineAttrs(item, ctx));
-  }
-}
-function createRenderContext(options = {}) {
-  const normalized = normalizeTruncateOption(options.truncate);
-  return {
-    inlineMaxBytes: normalized === 0 ? INLINE_MAX_BYTES : Math.min(normalized ?? INLINE_MAX_BYTES, INLINE_MAX_BYTES),
-    truncateBytes: normalized === 0 ? null : normalized ?? INLINE_MAX_BYTES
-  };
-}
-function normalizeTruncateOption(value) {
-  if (value === void 0 || value === null) return null;
-  if (!Number.isFinite(value)) return null;
-  return Math.max(0, Math.floor(value));
-}
-function compactJson(value) {
-  return JSON.stringify(value ?? {});
-}
-function renderInlineValue(name, value) {
-  return `<${name}>${compactJson(value)}<\\${name}>`;
-}
-function renderBodyTag(name, attrs, body, ctx) {
-  return renderTag(name, attrs, applyBodyTruncation(body, ctx));
-}
-function renderJsonValueTag(name, value, ctx) {
-  const compact = compactJson(value);
-  if (byteLength(compact) <= ctx.inlineMaxBytes) {
-    return renderInlineValue(name, value);
-  }
-  return renderBodyTag(name, {}, prettyJson(value), ctx);
-}
-function renderUserMessage(item, ctx) {
-  const attrs = baseItemAttrs(item, { includeType: false });
-  const text = extractMessageText(item);
-  if (!text) return renderInline("user-input", attrs);
-  if (byteLength(text) > ctx.inlineMaxBytes) {
-    return renderBodyTag("user-input", attrs, text, ctx);
-  }
-  attrs.text = text;
-  return renderInline("user-input", attrs);
-}
-function renderAgentMessage(item, ctx) {
-  const attrs = baseItemAttrs(item, { includeType: false });
-  const body = extractMessageText(item);
-  if (!body) return renderInline("agent-message", attrs);
-  return renderBodyTag("agent-message", attrs, body, ctx);
-}
-function renderCommandExecution(item, ctx) {
-  const attrs = baseItemAttrs(item, { includeType: false });
-  const cmd = extractCommand(item);
-  if (cmd) attrs.cmd = fitInlineText(cmd, ctx);
-  const cwd = asString4(item.cwd);
-  if (cwd) attrs.cwd = cwd;
-  const exit = item.exit ?? item.exitCode;
-  if (exit !== void 0) attrs.exit = exit;
-  const durationMs = item.duration_ms ?? item.durationMs;
-  if (durationMs !== void 0) attrs.duration_ms = durationMs;
-  const shellBody = extractCommandOutput(item) ?? "";
-  return renderBodyTag("shell", attrs, shellBody, ctx);
-}
-function renderFileChange(item, ctx) {
-  const attrs = baseItemAttrs(item, { includeType: false });
-  const path19 = asString4(item.path);
-  if (path19) attrs.path = path19;
-  if (item.status !== void 0) attrs.status = item.status;
-  const diffBody = extractDiff(item) ?? "";
-  return renderBodyTag("file-patch", attrs, diffBody, ctx);
-}
-function renderMcpToolCall(item, ctx) {
-  const attrs = baseItemAttrs(item, { includeType: false });
-  const server = asString4(item.server) ?? asString4(item.serverName);
-  if (server) attrs.server = server;
-  const tool = extractToolName(item);
-  attrs.tool = tool;
-  const durationMs = item.duration_ms ?? item.durationMs;
-  if (durationMs !== void 0) attrs.duration_ms = durationMs;
-  const bodyParts = [];
-  const args = extractMcpArgs(item);
-  if (args !== void 0) bodyParts.push(renderJsonValueTag("mcp-args", args, ctx));
-  const result = extractMcpResult(item);
-  if (result) bodyParts.push(renderBodyTag("mcp-result", {}, result, ctx));
-  return renderTag(`tool.${toTagSegment(tool)}`, attrs, bodyParts.join("\n\n"));
-}
-function renderHook(item, type, ctx) {
-  const run = asObject5(item.run);
-  const attrs = baseItemAttrs(item, { includeType: false });
-  const hookId = asString4(item.hook_id) ?? asString4(item.hookId) ?? asString4(run.id);
-  if (hookId) attrs.hook_id = hookId;
-  const status2 = asString4(item.status) ?? asString4(run.status);
-  if (status2) attrs.status = status2;
-  const command = extractCommand(item) ?? extractCommand(run);
-  if (command) attrs.command = fitInlineText(command, ctx);
-  const cwd = asString4(item.cwd) ?? asString4(run.cwd);
-  if (cwd) attrs.cwd = cwd;
-  const exit = item.exit ?? item.exitCode ?? run.exit ?? run.exitCode;
-  if (exit !== void 0) attrs.exit = exit;
-  const durationMs = item.duration_ms ?? item.durationMs ?? run.duration_ms ?? run.durationMs;
-  if (durationMs !== void 0) attrs.duration_ms = durationMs;
-  const output = extractHookOutput(item, run);
-  const tagName = typeToTagName(type);
-  if (!output) return renderInline(tagName, attrs);
-  return renderTag(tagName, attrs, renderBodyTag("hook-output", {}, output, ctx));
-}
-function renderAutoApprovalReview(item, ctx) {
-  const review = asObject5(item.review);
-  const attrs = baseItemAttrs(item, { includeType: false });
-  const kind = asString4(item.kind) ?? asString4(review.kind) ?? asString4(review.request_kind) ?? asString4(review.requestKind) ?? asString4(review.approval_kind) ?? asString4(review.approvalKind);
-  if (kind) attrs.kind = kind;
-  const matchedPattern = asString4(item.matched_pattern) ?? asString4(item.matchedPattern) ?? asString4(review.matched_pattern) ?? asString4(review.matchedPattern) ?? asString4(review.pattern);
-  if (matchedPattern) attrs.matched_pattern = fitInlineText(matchedPattern, ctx);
-  const commandPreview = extractCommandPreview(item, review);
-  if (commandPreview) attrs.command_preview = fitInlineText(commandPreview, ctx);
-  const decision = asString4(item.decision) ?? asString4(item.action) ?? asString4(item.decision_source) ?? asString4(item.decisionSource) ?? asString4(review.decision) ?? asString4(review.action);
-  if (decision) attrs.decision = fitInlineText(decision, ctx);
-  return renderInline("auto-approval-review", attrs);
-}
-function renderReasoning(item, ctx) {
-  const attrs = baseItemAttrs(item, { includeType: false });
-  const text = extractReasoningText(item);
-  if (!text) return renderInline("reasoning", attrs);
-  if (byteLength(text) <= ctx.inlineMaxBytes) {
-    attrs.text = text;
-    return renderInline("reasoning", attrs);
-  }
-  return renderBodyTag("reasoning", attrs, text, ctx);
-}
-function baseItemAttrs(item, options = {}) {
-  const attrs = {};
-  if (typeof item.id === "string") attrs.id = item.id;
-  if (options.includeType !== false) attrs.type = normalizeItemType(item.type);
-  if (item.phase !== void 0) attrs.phase = item.phase;
-  if (item.status !== void 0) attrs.status = item.status;
-  if (item.kind !== void 0) attrs.kind = item.kind;
-  if (item.role !== void 0) attrs.role = item.role;
-  if (item.source !== void 0) attrs.source = item.source;
-  return attrs;
-}
-function sanitizeInlineAttrs(item, ctx) {
-  const attrs = {};
-  for (const [key, value] of Object.entries(item)) {
-    if (value === void 0 || OMIT_INLINE_KEYS.has(key)) continue;
-    attrs[key] = typeof value === "string" ? fitInlineText(value, ctx) : value;
-  }
-  if (!("id" in attrs) && typeof item.id === "string") attrs.id = item.id;
-  if (!("type" in attrs)) attrs.type = normalizeItemType(item.type);
-  return attrs;
-}
-function normalizeItemType(raw) {
-  const type = typeof raw === "string" && raw ? raw : "unknown";
-  return ITEM_TYPE_ALIASES[type] ?? type;
-}
-function typeToTagName(type) {
-  return type.split(".").map(toTagSegment).join(".");
-}
-function toTagSegment(value) {
-  return value.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/_/g, "-").replace(/[^a-zA-Z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
-}
-function extractMessageText(item) {
-  return firstText(item.text, item.content);
-}
-function extractReasoningText(item) {
-  return firstText(item.text, item.summaryText, item.summary, item.content);
-}
-function extractCommand(item) {
-  const direct = asString4(item.command) ?? asString4(item.cmd);
-  if (direct) return direct;
-  const command = item.command;
-  if (Array.isArray(command)) {
-    const parts = command.map((part) => {
-      if (typeof part === "string") return part;
-      if (typeof part === "number" || typeof part === "boolean") return String(part);
-      return null;
-    }).filter((part) => !!part);
-    if (parts.length > 0) return parts.join(" ");
-  }
-  return null;
-}
-function extractCommandOutput(item) {
-  const direct = asString4(item.output);
-  if (direct) return direct;
-  const output = item.output;
-  if (output && typeof output === "object" && !Array.isArray(output)) {
-    const stdout = asString4(output.stdout);
-    const stderr = asString4(output.stderr);
-    const merged = joinText([stdout, stderr], "\n");
-    if (merged) return merged;
-  }
-  return joinText([asString4(item.stdout), asString4(item.stderr)], "\n");
-}
-function extractDiff(item) {
-  return asString4(item.diff) ?? asString4(item.patch) ?? asString4(item.changes);
-}
-function extractToolName(item) {
-  return asString4(item.tool) ?? asString4(item.toolName) ?? asString4(item.name) ?? "unknown";
-}
-function extractMcpArgs(item) {
-  const args = item.args ?? item.arguments ?? item.input ?? item.parameters;
-  return args === void 0 ? void 0 : args;
-}
-function extractMcpResult(item) {
-  return extractRichBody(item.result, item.output, item.content, item.text);
-}
-function extractHookOutput(item, run) {
-  return extractCommandOutput(item) ?? extractCommandOutput(run) ?? extractRichBody(item.result, run.result);
-}
-function extractCommandPreview(...values) {
-  for (const value of values) {
-    const preview = asString4(value.command_preview) ?? asString4(value.commandPreview) ?? extractCommand(value);
-    if (preview) return preview;
-  }
-  return null;
-}
-function extractRichBody(...values) {
-  for (const value of values) {
-    const text = extractText(value);
-    if (text) return text;
-    if (Array.isArray(value)) {
-      const serialized = compactJson(value);
-      if (serialized !== "[]") return serialized;
-      continue;
-    }
-    if (value && typeof value === "object") {
-      const serialized = JSON.stringify(value, null, 2);
-      if (serialized && serialized !== "{}") return serialized;
-      continue;
-    }
-    if (typeof value === "number" || typeof value === "boolean") {
-      return String(value);
-    }
-  }
-  return null;
-}
-function firstText(...values) {
-  for (const value of values) {
-    const text = extractText(value);
-    if (text) return text;
-  }
-  return null;
-}
-function extractText(value) {
-  if (typeof value === "string" && value.length > 0) return value;
-  if (!Array.isArray(value)) return null;
-  const parts = value.map((entry) => extractTextEntry(entry)).filter((entry) => !!entry);
-  return parts.length > 0 ? parts.join("\n\n") : null;
-}
-function extractTextEntry(entry) {
-  if (typeof entry === "string" && entry.length > 0) return entry;
-  if (!entry || typeof entry !== "object") return null;
-  const obj = entry;
-  if (typeof obj.text === "string" && obj.text.length > 0) return obj.text;
-  if (Array.isArray(obj.content)) return extractText(obj.content);
-  return null;
-}
-function applyBodyTruncation(text, ctx) {
-  if (ctx.truncateBytes === null) return text;
-  const truncated = truncateText(text, ctx.truncateBytes);
-  return truncated.truncatedBytes > 0 ? `${truncated.text}
-${buildTruncationMarker(truncated.truncatedBytes)}` : text;
-}
-function fitInlineText(text, ctx) {
-  if (ctx.truncateBytes === null) return text;
-  const truncated = truncateText(text, ctx.truncateBytes);
-  return truncated.truncatedBytes > 0 ? `${truncated.text}${buildTruncationMarker(truncated.truncatedBytes)}` : text;
-}
-function truncateText(text, maxBytes) {
-  const totalBytes = byteLength(text);
-  if (totalBytes <= maxBytes) {
-    return { text, truncatedBytes: 0 };
-  }
-  const chars = Array.from(text);
-  let low = 0;
-  let high = chars.length;
-  while (low < high) {
-    const mid = Math.ceil((low + high) / 2);
-    const candidate = chars.slice(0, mid).join("");
-    if (byteLength(candidate) <= maxBytes) {
-      low = mid;
-    } else {
-      high = mid - 1;
-    }
-  }
-  const truncatedText = chars.slice(0, low).join("");
-  return {
-    text: stripOuterNewlines(truncatedText),
-    truncatedBytes: totalBytes - byteLength(truncatedText)
-  };
-}
-function buildTruncationMarker(truncatedBytes) {
-  return `\u2026[${truncatedBytes} bytes truncated; use --truncate 0 to disable]`;
-}
-function prettyJson(value) {
-  if (value === void 0) return "{}";
-  if (typeof value === "string") return value;
-  const serialized = JSON.stringify(value, null, 2);
-  return serialized ?? String(value);
-}
-function byteLength(value) {
-  return Buffer.byteLength(value, "utf8");
-}
-function joinText(values, separator) {
-  const present = values.filter((value) => !!value);
-  return present.length > 0 ? present.join(separator) : null;
-}
-function stripOuterNewlines(value) {
-  return value.replace(/^\n+/, "").replace(/\n+$/, "");
-}
-function asString4(value) {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-function asObject5(value) {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value;
-  }
-  return {};
-}
-var ITEM_TYPE_ALIASES = {
-  agent_message: "agentMessage",
-  auto_approval_review: "autoApprovalReview",
-  command_execution: "commandExecution",
-  file_change: "fileChange",
-  mcp_tool_call: "mcpToolCall",
-  user_message: "userMessage"
-};
-var OMIT_INLINE_KEYS = /* @__PURE__ */ new Set([
-  "content",
-  "stdout",
-  "stderr",
-  "output",
-  "diff",
-  "patch",
-  "changes",
-  "result",
-  "review",
-  "run"
-]);
-
 // src/format/table.ts
 function renderTable2(rows, columns) {
   if (rows.length === 0) return `(no rows)`;
@@ -9801,7 +9365,7 @@ var sessionNew = async (ctx, req) => {
   }
   const experimentalTools = resolveExperimentalToolsForCreate(ctx, flags);
   const autoApprovePatterns = resolveAutoApprovePatternsForCreate(ctx, flags);
-  const cwd = resolveAndValidateRequestedCwd(asString5(flags["cwd"]));
+  const cwd = resolveAndValidateRequestedCwd(asString4(flags["cwd"]));
   const startParams = await buildThreadStartParams(ctx, flags, experimentalTools, cwd);
   const client = await ctx.pool.acquire(user, keyFor(user, name), buildExperimentalToolAppServerOptions(experimentalTools));
   let result;
@@ -9821,14 +9385,14 @@ var sessionNew = async (ctx, req) => {
     name,
     thread_id: threadId,
     state: "live",
-    model: asString5(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
+    model: asString4(flags["model"]) ?? resolveDefault(ctx, "codex.default_model") ?? void 0,
     cwd,
-    sandbox: asString5(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
-    approval: asString5(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
-    effort: asString5(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
-    profile: asString5(flags["profile"]) ?? void 0,
-    base_instructions: asString5(flags["base-instructions"]) ?? void 0,
-    developer_instructions: asString5(flags["developer-instructions"]) ?? void 0,
+    sandbox: asString4(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
+    approval: asString4(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
+    effort: asString4(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
+    profile: asString4(flags["profile"]) ?? void 0,
+    base_instructions: asString4(flags["base-instructions"]) ?? void 0,
+    developer_instructions: asString4(flags["developer-instructions"]) ?? void 0,
     experimental_tools: experimentalTools.length > 0 ? experimentalTools : void 0,
     autoApprovePatterns,
     created_at: now,
@@ -9916,7 +9480,7 @@ var sessionDetach = async (ctx, req) => {
   const user = req.bearer;
   const flags = asFlags(req);
   const detachAll = isTrue2(flags["all"]);
-  const match = asString5(flags["match"]);
+  const match = asString4(flags["match"]);
   const graceful = isTrue2(flags["graceful"]);
   if (!detachAll && match !== null) {
     throw invalidParams("--match requires --all");
@@ -9984,7 +9548,7 @@ var sessionFork = async (ctx, req) => {
   const identifier = asPositional(req, 0, "session");
   const newNameRaw = asPositionalOptional(req, 1);
   const flags = asFlags(req);
-  const atTurn = asString5(flags["at-turn"]);
+  const atTurn = asString4(flags["at-turn"]);
   const source = ctx.sessions.get(user, identifier);
   if (!source) throw new CodexTeamError("session_not_found", `session '${identifier}' not found in this user`);
   let newName = newNameRaw ?? generateSessionName();
@@ -10056,9 +9620,9 @@ var sessionContext = async (ctx, req) => {
   const user = req.bearer;
   const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
-  const format = asString5(flags["format"]) ?? "json";
-  if (format !== "json" && format !== "markdown") {
-    throw invalidParams(`--format must be 'json' or 'markdown'`);
+  const format = asString4(flags["format"]) ?? "json";
+  if (format !== "json") {
+    throw invalidParams(`session context supports json only`);
   }
   const rec = ctx.sessions.get(user, identifier);
   let threadId;
@@ -10075,18 +9639,9 @@ var sessionContext = async (ctx, req) => {
     client = await ctx.pool.acquireForAdhoc(user);
   }
   const result = await threadRead(client, threadId, ctx.retryOptions());
-  if (format === "json") {
-    return { thread_id: threadId, thread: result.thread };
-  }
-  const markdown = renderContext({
+  return {
     session: rec?.name ?? null,
     thread_id: threadId,
-    thread: result.thread
-  });
-  return {
-    thread_id: threadId,
-    format: "markdown",
-    markdown,
     thread: result.thread
   };
 };
@@ -10096,8 +9651,8 @@ var sessionList = async (ctx, req) => {
   const flags = asFlags(req);
   const all = isTrue2(flags["all"]);
   const loadedOnly = isTrue2(flags["loaded-only"]);
-  const sortField = asString5(flags["sort"]) ?? "last_active";
-  const format = asString5(flags["format"]) ?? "json";
+  const sortField = asString4(flags["sort"]) ?? "last_active";
+  const format = asString4(flags["format"]) ?? "json";
   const cursor = parseSessionListCursor(flags);
   const limit = parseSessionListLimit(flags);
   const archivedMode = parseArchivedMode(flags);
@@ -10277,13 +9832,13 @@ function asPositionalOptional(req, idx) {
   const v = positionals[idx];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
-function asString5(v) {
+function asString4(v) {
   if (Array.isArray(v)) return v[v.length - 1] ?? null;
   return typeof v === "string" ? v : null;
 }
 function parseSessionListLimit(flags) {
   if (!hasFlag(flags, "limit")) return DEFAULT_SESSION_LIST_LIMIT;
-  const raw = asString5(flags["limit"]);
+  const raw = asString4(flags["limit"]);
   if (!raw) throw invalidParams("--limit requires a positive integer");
   const value = Number(raw);
   if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
@@ -10293,19 +9848,19 @@ function parseSessionListLimit(flags) {
 }
 function parseSessionListCursor(flags) {
   if (!hasFlag(flags, "cursor")) return null;
-  const cursor = asString5(flags["cursor"]);
+  const cursor = asString4(flags["cursor"]);
   if (!cursor) throw invalidParams("--cursor requires a value");
   return cursor;
 }
 function parseArchivedMode(flags) {
   if (!hasFlag(flags, "archived")) return "exclude";
-  const mode = asString5(flags["archived"]);
+  const mode = asString4(flags["archived"]);
   if (mode === "only" || mode === "exclude" || mode === "include") return mode;
   throw invalidParams(`--archived must be one of: only / exclude / include`);
 }
 function parseSessionStateFilter(flags) {
   if (!hasFlag(flags, "state")) return null;
-  const raw = asString5(flags["state"]);
+  const raw = asString4(flags["state"]);
   if (!raw) throw invalidParams("--state requires a comma-separated value");
   const entries = raw.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
   if (entries.length === 0) throw invalidParams("--state requires at least one value");
@@ -10321,7 +9876,7 @@ function parseSessionStateFilter(flags) {
 }
 function parseOwnerFilter(flags) {
   if (!hasFlag(flags, "owner")) return { kind: "self" };
-  const raw = asString5(flags["owner"]);
+  const raw = asString4(flags["owner"]);
   if (!raw) throw invalidParams("--owner requires a value");
   if (raw === "self") return { kind: "self" };
   if (raw === "any") return { kind: "any" };
@@ -10389,22 +9944,22 @@ function describeFilesystemEntry(cwd, stat) {
 async function buildThreadStartParams(ctx, flags, experimentalTools, cwd) {
   const p = {};
   const config = {};
-  const model = asString5(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
+  const model = asString4(flags["model"]) ?? resolveDefault(ctx, "codex.default_model");
   if (model) p.model = model;
   if (cwd) p.cwd = cwd;
-  const sandbox = asString5(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
+  const sandbox = asString4(flags["sandbox"]) ?? resolveDefault(ctx, "codex.default_sandbox");
   if (sandbox) p.sandbox = sandbox;
-  const approval = asString5(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
+  const approval = asString4(flags["approval"]) ?? resolveDefault(ctx, "codex.default_approval");
   if (approval) p.approvalPolicy = approval;
-  const effort = asString5(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
+  const effort = asString4(flags["effort"]) ?? resolveDefault(ctx, "codex.default_effort");
   if (effort) config.model_reasoning_effort = effort;
-  const profile = asString5(flags["profile"]);
+  const profile = asString4(flags["profile"]);
   if (profile) config.profile = profile;
   const baseInstr = await readInstructionFile(flags["base-instructions"], "--base-instructions");
   if (baseInstr) p.baseInstructions = baseInstr;
   const devInstr = await readInstructionFile(flags["developer-instructions"], "--developer-instructions");
   if (devInstr) p.developerInstructions = devInstr;
-  const personality = asString5(flags["personality"]);
+  const personality = asString4(flags["personality"]);
   if (personality) p.personality = personality;
   const experimentalConfig = buildExperimentalToolThreadConfig(experimentalTools);
   if (experimentalConfig) Object.assign(config, experimentalConfig);
@@ -10424,7 +9979,7 @@ function resolveAutoApprovePatternsForCreate(ctx, flags) {
   if (!hasFlag(flags, "auto-approve")) {
     return parseConfiguredAutoApprovePatterns(ctx.config.getEffective("session.auto_approve_command_patterns"));
   }
-  const raw = asString5(flags["auto-approve"]);
+  const raw = asString4(flags["auto-approve"]);
   if (raw === null) throw invalidParams("--auto-approve requires a comma-separated value");
   const validationError = validateAutoApprovePatterns(raw);
   if (validationError) throw invalidParams(validationError);
@@ -10530,7 +10085,7 @@ async function withAttachLock(threadId, fn) {
   }
 }
 async function readInstructionFile(value, flag) {
-  const filePath = asString5(value);
+  const filePath = asString4(value);
   if (!filePath) return null;
   try {
     return await import_node_fs16.default.promises.readFile(filePath, "utf8");
@@ -10824,7 +10379,7 @@ var sessionRollback = async (ctx, req) => {
   const user = req.bearer;
   const identifier = asPositional(req, 0, "session");
   const flags = asFlags(req);
-  const toTurnId = asString5(flags["to-turn"]);
+  const toTurnId = asString4(flags["to-turn"]);
   const detachAfter = isTrue2(flags["detach-after"]);
   if (!toTurnId) {
     throw invalidParams("--to-turn requires a value");
@@ -10876,7 +10431,7 @@ function resolveRollbackDefaults(ctx, sourceRecord, sourceThread) {
   );
   return {
     model: sourceRecord?.model ?? void 0,
-    cwd: sourceRecord?.cwd ?? asString5(sourceThread.cwd) ?? process.cwd(),
+    cwd: sourceRecord?.cwd ?? asString4(sourceThread.cwd) ?? process.cwd(),
     sandbox: sourceRecord?.sandbox ?? resolveDefault(ctx, "codex.default_sandbox") ?? void 0,
     approval: sourceRecord?.approval ?? resolveDefault(ctx, "codex.default_approval") ?? void 0,
     effort: sourceRecord?.effort ?? resolveDefault(ctx, "codex.default_effort") ?? void 0,
@@ -10906,10 +10461,10 @@ async function attachRollbackThread(ctx, user, name, threadId, defaults) {
     name,
     thread_id: threadId,
     state: "live",
-    model: defaults.model ?? asString5(result.model) ?? void 0,
-    cwd: defaults.cwd ?? asString5(result.cwd) ?? asString5(result.thread.cwd) ?? process.cwd(),
+    model: defaults.model ?? asString4(result.model) ?? void 0,
+    cwd: defaults.cwd ?? asString4(result.cwd) ?? asString4(result.thread.cwd) ?? process.cwd(),
     sandbox: defaults.sandbox,
-    approval: defaults.approval ?? asString5(result.approvalPolicy) ?? void 0,
+    approval: defaults.approval ?? asString4(result.approvalPolicy) ?? void 0,
     effort: defaults.effort,
     profile: defaults.profile,
     base_instructions: defaults.baseInstructions,
@@ -10990,7 +10545,7 @@ async function resolveSessionTarget(ctx, user, identifier) {
       kind: "detached",
       thread,
       threadId: thread.id,
-      name: asString5(thread.name)
+      name: asString4(thread.name)
     };
   }
   const liveByName = ctx.sessions.findUniqueLiveByNameAnywhere(identifier);
@@ -11019,7 +10574,7 @@ async function resolveSessionTarget(ctx, user, identifier) {
     kind: "detached",
     thread: detached,
     threadId: detached.id,
-    name: asString5(detached.name)
+    name: asString4(detached.name)
   };
 }
 async function readDetachedThreadById(ctx, user, threadId) {
@@ -11042,7 +10597,7 @@ async function findDetachedThreadByName(ctx, user, name) {
       ...cursor ? { cursor } : {}
     }, ctx.retryOptions());
     for (const thread of page.data) {
-      if (asString5(thread.name) !== name) continue;
+      if (asString4(thread.name) !== name) continue;
       if (match) return "ambiguous";
       match = thread;
     }
@@ -11059,7 +10614,7 @@ var sessionHealthAll = async (ctx, req) => {
     throw invalidParams("session health --all does not take a session positional");
   }
   const onlyUnhealthy = isTrue2(flags["only-unhealthy"]);
-  const stateFilter = parseSessionHealthStates(asString5(flags["state"]));
+  const stateFilter = parseSessionHealthStates(asString4(flags["state"]));
   const sessions = ctx.sessions.listLive(user).map((record) => buildSessionHealthSnapshot(ctx, user, record)).filter((snapshot) => matchesSessionHealthState(snapshot, stateFilter)).filter((snapshot) => !onlyUnhealthy || !isQuietHealthySession(snapshot));
   return {
     summary: summarizeSessionHealthSnapshots(sessions),
@@ -11080,8 +10635,8 @@ var sessionEvents = async (ctx, req, stream) => {
   if (follow && (byTool || byItemKind)) throw invalidParams("--follow cannot be used with --by-tool or --by-item-kind");
   if (summaryMode && (byTool || byItemKind)) throw invalidParams("--summary cannot be used with --by-tool or --by-item-kind");
   const typeFilter = parseCsvFlag(flags["type"]);
-  const turnFilter = asString5(flags["turn"]);
-  const sinceId = asString5(flags["since"]);
+  const turnFilter = asString4(flags["turn"]);
+  const sinceId = asString4(flags["since"]);
   const limit = parseSessionEventsLimit(flags["limit"], 50);
   const matchesTarget = buildSessionEventMatcher(ctx, user, target);
   const listed = await ctx.events.listSince(user, sinceId, { includeDelta: true });
@@ -11216,7 +10771,7 @@ function parseSessionHealthStates(value) {
 }
 function matchesSessionHealthState(snapshot, states) {
   if (!states) return true;
-  const state = asString5(snapshot.state);
+  const state = asString4(snapshot.state);
   return state !== null && states.has(state);
 }
 function isQuietHealthySession(snapshot) {
@@ -11242,7 +10797,7 @@ function parseSessionEventsLimit(value, fallback) {
   return Math.floor(raw);
 }
 function parseCsvFlag(value) {
-  const raw = asString5(value);
+  const raw = asString4(value);
   if (!raw) return null;
   const parts = raw.split(",").map((part) => part.trim()).filter(Boolean);
   return parts.length > 0 ? parts : null;
@@ -11409,7 +10964,7 @@ function buildSessionLogsIncrement(ctx, user, rec, truncateBytes, entry) {
 }
 function parseSessionLogsIntFlag(value, fallback, label, options) {
   if (value === void 0) return fallback;
-  const raw = asString5(value);
+  const raw = asString4(value);
   if (!raw) throw invalidParams(`${label} requires a value`);
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < options.minimum) {
@@ -11420,7 +10975,7 @@ function parseSessionLogsIntFlag(value, fallback, label, options) {
 }
 function parseSessionLogsStream(value) {
   if (value === void 0) return "stderr";
-  const raw = asString5(value);
+  const raw = asString4(value);
   if (!raw) throw invalidParams("--stream requires a value");
   if (raw === "stderr" || raw === "stdout" || raw === "all") return raw;
   throw invalidParams("--stream must be one of stderr, stdout, or all");
@@ -11469,6 +11024,402 @@ function truncateTextByBytes(value, truncateBytes) {
 
 // src/daemon/handlers/message.ts
 var import_node_fs17 = __toESM(require("fs"));
+
+// src/format/markdown.ts
+var INLINE_MAX_BYTES = 2048;
+function renderTag(name, attrs, body) {
+  const line = `<${name}> ${compactJson(attrs)}`;
+  const normalizedBody = stripOuterNewlines(body);
+  if (!normalizedBody) {
+    return `${line}
+<\\${name}>`;
+  }
+  return `${line}
+${normalizedBody}
+<\\${name}>`;
+}
+function renderInline(name, attrs) {
+  return `<${name}>${compactJson(attrs)}<\\${name}>`;
+}
+function renderHistory(input, options = {}) {
+  const ctx = createRenderContext(options);
+  const attrs = {
+    session: input.session,
+    thread_id: input.thread_id,
+    count: input.turns.length
+  };
+  if (input.nextCursor) attrs.next_cursor = input.nextCursor;
+  const body = input.turns.map((turn) => renderHistoryTurn(turn, ctx)).join("\n\n");
+  return renderTag("history", attrs, body);
+}
+function renderTail(input, options = {}) {
+  const ctx = createRenderContext(options);
+  const attrs = {
+    session: input.session,
+    count: input.turns.length
+  };
+  if (input.follow) attrs.follow = true;
+  const body = input.turns.map((turn) => renderTailTurn(turn, ctx)).join("\n\n");
+  return renderTag("tail", attrs, body);
+}
+function renderHistoryTurn(turn, ctx) {
+  const attrs = historyTurnAttrs(turn);
+  const items = turnItems(turn);
+  const bodyParts = items.map((item) => renderHistoryTranscriptItem(item, ctx)).filter((entry) => Boolean(entry));
+  if (bodyParts.length === 0) {
+    const fallback = renderTurnFallback(turn, ctx);
+    return fallback ? renderTag("turn", attrs, fallback) : renderInline("turn", attrs);
+  }
+  return renderTag("turn", attrs, bodyParts.join("\n\n"));
+}
+function renderTailTurn(turn, ctx) {
+  const attrs = tailTurnAttrs(turn);
+  const items = turnItems(turn);
+  const bodyParts = items.map((item) => renderTailTranscriptItem(item, ctx)).filter((entry) => Boolean(entry));
+  if (bodyParts.length === 0) {
+    const fallback = renderTurnFallback(turn, ctx);
+    return fallback ? renderTag("turn", attrs, fallback) : renderInline("turn", attrs);
+  }
+  return renderTag("turn", attrs, bodyParts.join("\n\n"));
+}
+function historyTurnAttrs(turn) {
+  const attrs = {
+    id: turn.id,
+    status: turn.status ?? null
+  };
+  if (turn.durationMs !== void 0 && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
+  return attrs;
+}
+function tailTurnAttrs(turn) {
+  const attrs = {
+    id: turn.id,
+    status: turn.status ?? null
+  };
+  if (turn.durationMs !== void 0 && turn.durationMs !== null) attrs.duration_ms = turn.durationMs;
+  return attrs;
+}
+function turnItems(turn) {
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  return items.filter((item) => Boolean(item) && typeof item === "object");
+}
+function renderHistoryTranscriptItem(item, ctx) {
+  const type = normalizeItemType(item.type);
+  switch (type) {
+    case "userMessage":
+      return renderTranscriptMessage(item, "user", ctx, { singleLine: false });
+    case "agentMessage":
+      return renderTranscriptMessage(item, "assistant", ctx, { singleLine: false });
+    case "commandExecution":
+      return renderTranscriptCommand(item, ctx);
+    case "fileChange":
+    case "file-patch":
+      return renderTranscriptFileChange(item, ctx);
+    case "mcpToolCall":
+      return renderTranscriptMcpToolCall(item, ctx);
+    case "autoApprovalReview":
+      return renderAutoApprovalReview(item, ctx);
+    default:
+      if (type.startsWith("hook.")) return renderTranscriptHook(item, type, ctx);
+      return null;
+  }
+}
+function renderTailTranscriptItem(item, ctx) {
+  const type = normalizeItemType(item.type);
+  switch (type) {
+    case "userMessage":
+      return renderTranscriptMessage(item, "user", ctx, { singleLine: true });
+    case "agentMessage":
+      return renderTranscriptMessage(item, "assistant", ctx, { singleLine: false });
+    default:
+      return null;
+  }
+}
+function renderTranscriptMessage(item, role, ctx, options) {
+  const attrs = { role };
+  if (role === "assistant" && item.phase !== void 0) attrs.phase = item.phase;
+  const text = extractMessageText(item);
+  if (!text) return renderInline("message", attrs);
+  const body = options.singleLine ? summarizeSingleLineText(text, 160) : text;
+  return renderBodyTag("message", attrs, body, ctx);
+}
+function renderTranscriptCommand(item, ctx) {
+  const attrs = {};
+  const cmd = extractCommand(item);
+  if (cmd) attrs.cmd = fitInlineText(cmd, ctx);
+  const exit = item.exit ?? item.exitCode;
+  if (exit !== void 0) attrs.exit = exit;
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
+  const summary = summarizeBlockText(extractCommandOutput(item), 400);
+  return summary ? renderBodyTag("shell", attrs, summary, ctx) : renderInline("shell", attrs);
+}
+function renderTranscriptFileChange(item, ctx) {
+  const attrs = {};
+  const filePath = asString5(item.path);
+  if (filePath) attrs.path = filePath;
+  if (item.status !== void 0) attrs.status = item.status;
+  const summary = summarizeBlockText(extractDiff(item), 400);
+  return summary ? renderBodyTag("file-patch", attrs, summary, ctx) : renderInline("file-patch", attrs);
+}
+function renderTranscriptMcpToolCall(item, ctx) {
+  const attrs = {};
+  const server = asString5(item.server) ?? asString5(item.serverName);
+  if (server) attrs.server = server;
+  attrs.tool = extractToolName(item);
+  const durationMs = item.duration_ms ?? item.durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
+  const summary = summarizeBlockText(extractMcpResult(item), 400);
+  return summary ? renderBodyTag(`tool.${toTagSegment(String(attrs.tool))}`, attrs, summary, ctx) : renderInline(`tool.${toTagSegment(String(attrs.tool))}`, attrs);
+}
+function renderTranscriptHook(item, type, ctx) {
+  const run = asObject5(item.run);
+  const attrs = {};
+  const hookId = asString5(item.hook_id) ?? asString5(item.hookId) ?? asString5(run.id);
+  if (hookId) attrs.hook_id = hookId;
+  const status2 = asString5(item.status) ?? asString5(run.status);
+  if (status2) attrs.status = status2;
+  const command = extractCommand(item) ?? extractCommand(run);
+  if (command) attrs.command = fitInlineText(command, ctx);
+  const durationMs = item.duration_ms ?? item.durationMs ?? run.duration_ms ?? run.durationMs;
+  if (durationMs !== void 0) attrs.duration_ms = durationMs;
+  const summary = summarizeBlockText(extractHookOutput(item, run), 300);
+  const tagName = typeToTagName(type);
+  return summary ? renderBodyTag(tagName, attrs, summary, ctx) : renderInline(tagName, attrs);
+}
+function renderTurnFallback(turn, ctx) {
+  const error = asObject5(turn.error);
+  if (Object.keys(error).length === 0) return null;
+  const message = summarizeBlockText(
+    asString5(error.message) ?? asString5(error.additionalDetails) ?? prettyJson(error),
+    300
+  );
+  return message ? renderBodyTag("error", {}, message, ctx) : null;
+}
+function createRenderContext(options = {}) {
+  const normalized = normalizeTruncateOption(options.truncate);
+  return {
+    inlineMaxBytes: normalized === 0 ? INLINE_MAX_BYTES : Math.min(normalized ?? INLINE_MAX_BYTES, INLINE_MAX_BYTES),
+    truncateBytes: normalized === 0 ? null : normalized ?? INLINE_MAX_BYTES
+  };
+}
+function normalizeTruncateOption(value) {
+  if (value === void 0 || value === null) return null;
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Math.floor(value));
+}
+function compactJson(value) {
+  return JSON.stringify(value ?? {});
+}
+function renderBodyTag(name, attrs, body, ctx) {
+  return renderTag(name, attrs, applyBodyTruncation(body, ctx));
+}
+function renderAutoApprovalReview(item, ctx) {
+  const review = asObject5(item.review);
+  const attrs = baseItemAttrs(item, { includeType: false });
+  const kind = asString5(item.kind) ?? asString5(review.kind) ?? asString5(review.request_kind) ?? asString5(review.requestKind) ?? asString5(review.approval_kind) ?? asString5(review.approvalKind);
+  if (kind) attrs.kind = kind;
+  const matchedPattern = asString5(item.matched_pattern) ?? asString5(item.matchedPattern) ?? asString5(review.matched_pattern) ?? asString5(review.matchedPattern) ?? asString5(review.pattern);
+  if (matchedPattern) attrs.matched_pattern = fitInlineText(matchedPattern, ctx);
+  const commandPreview = extractCommandPreview(item, review);
+  if (commandPreview) attrs.command_preview = fitInlineText(commandPreview, ctx);
+  const decision = asString5(item.decision) ?? asString5(item.action) ?? asString5(item.decision_source) ?? asString5(item.decisionSource) ?? asString5(review.decision) ?? asString5(review.action);
+  if (decision) attrs.decision = fitInlineText(decision, ctx);
+  return renderInline("auto-approval-review", attrs);
+}
+function baseItemAttrs(item, options = {}) {
+  const attrs = {};
+  if (typeof item.id === "string") attrs.id = item.id;
+  if (options.includeType !== false) attrs.type = normalizeItemType(item.type);
+  if (item.phase !== void 0) attrs.phase = item.phase;
+  if (item.status !== void 0) attrs.status = item.status;
+  if (item.kind !== void 0) attrs.kind = item.kind;
+  if (item.role !== void 0) attrs.role = item.role;
+  if (item.source !== void 0) attrs.source = item.source;
+  return attrs;
+}
+function normalizeItemType(raw) {
+  const type = typeof raw === "string" && raw ? raw : "unknown";
+  return ITEM_TYPE_ALIASES[type] ?? type;
+}
+function typeToTagName(type) {
+  return type.split(".").map(toTagSegment).join(".");
+}
+function toTagSegment(value) {
+  return value.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/_/g, "-").replace(/[^a-zA-Z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+}
+function extractMessageText(item) {
+  return firstText(item.text, item.content);
+}
+function extractCommand(item) {
+  const direct = asString5(item.command) ?? asString5(item.cmd);
+  if (direct) return direct;
+  const command = item.command;
+  if (Array.isArray(command)) {
+    const parts = command.map((part) => {
+      if (typeof part === "string") return part;
+      if (typeof part === "number" || typeof part === "boolean") return String(part);
+      return null;
+    }).filter((part) => !!part);
+    if (parts.length > 0) return parts.join(" ");
+  }
+  return null;
+}
+function extractCommandOutput(item) {
+  const direct = asString5(item.output);
+  if (direct) return direct;
+  const output = item.output;
+  if (output && typeof output === "object" && !Array.isArray(output)) {
+    const stdout = asString5(output.stdout);
+    const stderr = asString5(output.stderr);
+    const merged = joinText([stdout, stderr], "\n");
+    if (merged) return merged;
+  }
+  return joinText([asString5(item.stdout), asString5(item.stderr)], "\n");
+}
+function extractDiff(item) {
+  return asString5(item.diff) ?? asString5(item.patch) ?? asString5(item.changes);
+}
+function extractToolName(item) {
+  return asString5(item.tool) ?? asString5(item.toolName) ?? asString5(item.name) ?? "unknown";
+}
+function extractMcpResult(item) {
+  return extractRichBody(item.result, item.output, item.content, item.text);
+}
+function extractHookOutput(item, run) {
+  return extractCommandOutput(item) ?? extractCommandOutput(run) ?? extractRichBody(item.result, run.result);
+}
+function extractCommandPreview(...values) {
+  for (const value of values) {
+    const preview = asString5(value.command_preview) ?? asString5(value.commandPreview) ?? extractCommand(value);
+    if (preview) return preview;
+  }
+  return null;
+}
+function extractRichBody(...values) {
+  for (const value of values) {
+    const text = extractText(value);
+    if (text) return text;
+    if (Array.isArray(value)) {
+      const serialized = compactJson(value);
+      if (serialized !== "[]") return serialized;
+      continue;
+    }
+    if (value && typeof value === "object") {
+      const serialized = JSON.stringify(value, null, 2);
+      if (serialized && serialized !== "{}") return serialized;
+      continue;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      return String(value);
+    }
+  }
+  return null;
+}
+function firstText(...values) {
+  for (const value of values) {
+    const text = extractText(value);
+    if (text) return text;
+  }
+  return null;
+}
+function extractText(value) {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (!Array.isArray(value)) return null;
+  const parts = value.map((entry) => extractTextEntry(entry)).filter((entry) => !!entry);
+  return parts.length > 0 ? parts.join("\n\n") : null;
+}
+function extractTextEntry(entry) {
+  if (typeof entry === "string" && entry.length > 0) return entry;
+  if (!entry || typeof entry !== "object") return null;
+  const obj = entry;
+  if (typeof obj.text === "string" && obj.text.length > 0) return obj.text;
+  if (Array.isArray(obj.content)) return extractText(obj.content);
+  return null;
+}
+function applyBodyTruncation(text, ctx) {
+  if (ctx.truncateBytes === null) return text;
+  const truncated = truncateText(text, ctx.truncateBytes);
+  return truncated.truncatedBytes > 0 ? `${truncated.text}
+${buildTruncationMarker(truncated.truncatedBytes)}` : text;
+}
+function fitInlineText(text, ctx) {
+  if (ctx.truncateBytes === null) return text;
+  const truncated = truncateText(text, ctx.truncateBytes);
+  return truncated.truncatedBytes > 0 ? `${truncated.text}${buildTruncationMarker(truncated.truncatedBytes)}` : text;
+}
+function summarizeSingleLineText(text, maxBytes) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  return truncateText(normalized, maxBytes).text;
+}
+function summarizeBlockText(text, maxBytes) {
+  if (!text) return null;
+  const normalized = stripOuterNewlines(text);
+  if (!normalized) return null;
+  return truncateText(normalized, maxBytes).text;
+}
+function truncateText(text, maxBytes) {
+  const totalBytes = byteLength(text);
+  if (totalBytes <= maxBytes) {
+    return { text, truncatedBytes: 0 };
+  }
+  const chars = Array.from(text);
+  let low = 0;
+  let high = chars.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidate = chars.slice(0, mid).join("");
+    if (byteLength(candidate) <= maxBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  const truncatedText = chars.slice(0, low).join("");
+  return {
+    text: stripOuterNewlines(truncatedText),
+    truncatedBytes: totalBytes - byteLength(truncatedText)
+  };
+}
+function buildTruncationMarker(truncatedBytes) {
+  return `\u2026[${truncatedBytes} bytes truncated; use --truncate 0 to disable]`;
+}
+function prettyJson(value) {
+  if (value === void 0) return "{}";
+  if (typeof value === "string") return value;
+  const serialized = JSON.stringify(value, null, 2);
+  return serialized ?? String(value);
+}
+function byteLength(value) {
+  return Buffer.byteLength(value, "utf8");
+}
+function joinText(values, separator) {
+  const present = values.filter((value) => !!value);
+  return present.length > 0 ? present.join(separator) : null;
+}
+function stripOuterNewlines(value) {
+  return value.replace(/^\n+/, "").replace(/\n+$/, "");
+}
+function asString5(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+function asObject5(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  return {};
+}
+var ITEM_TYPE_ALIASES = {
+  agent_message: "agentMessage",
+  auto_approval_review: "autoApprovalReview",
+  command_execution: "commandExecution",
+  file_change: "fileChange",
+  mcp_tool_call: "mcpToolCall",
+  user_message: "userMessage"
+};
+
+// src/daemon/handlers/message.ts
+var RECENT_TERMINAL_WAIT_EVENT_WINDOW_MS = 3e4;
 var messageSend = async (ctx, req) => {
   const { user, rec, client } = await resolveLive(ctx, req);
   const prompt = await readPromptInput(req);
@@ -12145,6 +12096,17 @@ async function createWaitObserver(ctx, user, rec, requestedTurnId) {
   } else if (targetTurnId) {
     const historical = await findTerminalEvent(ctx, user, rec.name, targetTurnId);
     if (historical) return immediateWaitObserver(terminalWaitResult(rec.name, rec.thread_id, targetTurnId, historical));
+  } else {
+    const recent = latestRecentTerminalEvent(ctx, user, rec.name, rec.thread_id);
+    if (recent) {
+      const recentTurnId = eventTurnId(recent) ?? eventCrashTurnId(recent);
+      if (recentTurnId) {
+        return immediateWaitObserver(terminalWaitResult(rec.name, rec.thread_id, recentTurnId, recent));
+      }
+      if (recent.type === SESSION_CRASHED_EVENT_TYPE || recent.type === SESSION_CLOSED_EVENT_TYPE) {
+        return immediateWaitObserver(waitErrorResult(rec, null, recent.type, recent.id, recent.payload));
+      }
+    }
   }
   let settled = false;
   let sub = null;
@@ -12233,9 +12195,20 @@ function timeoutWaitResult(rec, turnId, timeoutSeconds) {
 function isTurnTerminalEvent(event) {
   return event.type === "turn.completed" || event.type === "turn.error" || event.type === "turn.interrupted";
 }
+function latestRecentTerminalEvent(ctx, user, session, threadId) {
+  const event = ctx.events.latestEvent(user, {
+    session,
+    thread_id: threadId,
+    types: ["turn.completed", "turn.error", "turn.interrupted", SESSION_CRASHED_EVENT_TYPE, SESSION_CLOSED_EVENT_TYPE]
+  });
+  if (!event) return null;
+  const ageMs = Date.now() - Date.parse(event.ts);
+  if (!Number.isFinite(ageMs) || ageMs < 0) return null;
+  return ageMs <= RECENT_TERMINAL_WAIT_EVENT_WINDOW_MS ? event : null;
+}
 function projectBatchWaitOutcome(result) {
   const projected = pickDefined(result, ["session", "outcome", "turn_id"]);
-  const codexErrorInfo = extractCodexErrorInfo2(result);
+  const codexErrorInfo = extractCodexErrorInfo3(result);
   if (codexErrorInfo) projected.codex_error_info = codexErrorInfo;
   return projected;
 }
@@ -12244,12 +12217,12 @@ function timeoutBatchWaitOutcome(rec, observer, timeoutSeconds) {
 }
 function projectAnyWaitResult(result, stillRunning) {
   const projected = pickDefined(result, ["session", "outcome", "turn_id", "timeout_s"]);
-  const codexErrorInfo = extractCodexErrorInfo2(result);
+  const codexErrorInfo = extractCodexErrorInfo3(result);
   if (codexErrorInfo) projected.codex_error_info = codexErrorInfo;
   projected.still_running = stillRunning;
   return projected;
 }
-function extractCodexErrorInfo2(result) {
+function extractCodexErrorInfo3(result) {
   const error = result.error;
   if (!error || typeof error !== "object" || Array.isArray(error)) return null;
   const info = error.codex_error_info;

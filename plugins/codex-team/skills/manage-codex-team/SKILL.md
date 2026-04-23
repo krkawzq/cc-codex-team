@@ -33,24 +33,24 @@ description: >-
 
 ## Output modes (0.5.3+)
 
-**Default output is concise** — inline JSON with only the fields Claude needs to act. You don't pass any flag to get it.
+**Default output is concise** — single-line JSONL with only the fields Claude needs to act. You don't pass any flag to get it.
 
 ```bash
 # default — no flag, concise JSON
 codex-team -b $TOK message send audit "..."
-# → {"ok":true,"data":{"turn_id":"...","started":true,"queue_id":null,"queued_depth":0}}
+# → {"status":"started","turn_id":"..."}
 
 codex-team -b $TOK session new audit --cwd /repo
-# → {"ok":true,"data":{"name":"audit","thread_id":"th-...","state":"live"}}
+# → {"name":"audit","thread_id":"th-..."}
 
 codex-team -b $TOK session health audit
-# → {"ok":true,"data":{"name":"audit","state":"live","busy":true,"current_turn_id":"...","pending_approvals":0,"app_server_alive":true}}
+# → {"session":"audit","state":"live","busy":true,"current_turn_id":"..."}
 ```
 
 Opt in to the verbose shape only when you need a field that's not in the default:
 
 ```bash
-# --full — pre-0.5.3 verbose shape (full record, timestamps, config echo, etc.)
+# --full — multi-line JSON with the full record, timestamps, config echo, etc.
 codex-team -b $TOK session new audit --cwd /repo --full
 codex-team -b $TOK session info audit --full   # includes created_at, last_active_at, auto_approve patterns, …
 ```
@@ -59,7 +59,7 @@ codex-team -b $TOK session info audit --full   # includes created_at, last_activ
 
 ```bash
 codex-team -b $TOK session list --short      # audit  live  gpt-5.4  busy=y
-codex-team -b $TOK session health audit --short  # audit state=live busy=y turn=... items=2
+codex-team -b $TOK session health audit --short  # audit state=live busy=y pending=0 app_server=y turn=...
 ```
 
 Rule: **never use `--full` preemptively.** If the default is missing a field, re-query with `--full`. `--short` and `--full` are mutually exclusive.
@@ -234,7 +234,7 @@ Default output on these read-only commands is already concise (post-0.5.3). Pass
 | `codex-team -b <TOK> session info <s>` | Session metadata: state, model, busy, turn id, items |
 | `codex-team -b <TOK> session health <s>` | Live runtime snapshot: busy, current turn, pending approvals, app-server liveness |
 | `codex-team -b <TOK> session heal <s> [--force]` | Re-attach a crashed/dead live session to a fresh app-server |
-| `codex-team -b <TOK> session context <s> --format markdown` | Latest compact-context snapshot from codex |
+| `codex-team -b <TOK> session context <s>` | Latest detailed JSON thread snapshot from codex |
 | `codex-team -b <TOK> message history <s>` | Last N turns (ids, status, duration, item counts) |
 
 All are read-only. `session health` is the first check when you receive `session.crashed` — if it shows `state=crashed` or `app_server_alive=false`, follow up with `session heal`.

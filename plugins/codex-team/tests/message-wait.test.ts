@@ -167,6 +167,128 @@ describe("messageWait", () => {
     });
   });
 
+  it("returns a recent terminal event immediately when the session already went idle", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2025-01-01T00:00:10.000Z"));
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const sessions = new SessionRegistry(dir);
+    const events = new EventLog(100, null);
+
+    sessions.add("user-1", {
+      name: "sess-1",
+      thread_id: "th-1",
+      state: "live",
+      created_at: "2025-01-01T00:00:00.000Z",
+      last_active_at: "2025-01-01T00:00:00.000Z",
+      turn_count: 1,
+      ...sessionRuntimeDefaults(),
+    });
+    await sessions.flush();
+
+    await events.append("user-1", {
+      type: "turn.completed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: {
+        turn_id: "turn-2",
+        status: "completed",
+        duration_ms: 900,
+        items_count: 1,
+        token_usage: { prompt: 4, completion: 2, total: 6 },
+        ended_at: "2025-01-01T00:00:09.000Z",
+        turn_items_included: false,
+      },
+    });
+
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions,
+      events,
+      queues: {
+        getCurrentTurn: vi.fn().mockReturnValue(null),
+      },
+    };
+
+    await expect(messageWait(ctx as never, makeReq() as never)).resolves.toMatchObject({
+      session: "sess-1",
+      thread_id: "th-1",
+      turn_id: "turn-2",
+      outcome: "completed",
+      event_type: "turn.completed",
+    });
+  });
+
+  it("does not reuse stale terminal events when the session has been idle for a while", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2025-01-01T00:00:00.000Z"));
+    const dir = mkTmpDir();
+    dirs.push(dir);
+    const sessions = new SessionRegistry(dir);
+    const events = new EventLog(100, null);
+
+    sessions.add("user-1", {
+      name: "sess-1",
+      thread_id: "th-1",
+      state: "live",
+      created_at: "2025-01-01T00:00:00.000Z",
+      last_active_at: "2025-01-01T00:00:00.000Z",
+      turn_count: 1,
+      ...sessionRuntimeDefaults(),
+    });
+    await sessions.flush();
+
+    await events.append("user-1", {
+      type: "turn.completed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: {
+        turn_id: "turn-stale",
+        status: "completed",
+      },
+    });
+
+    vi.setSystemTime(new Date("2025-01-01T00:01:00.000Z"));
+    const ctx = {
+      users: {
+        has: vi.fn().mockReturnValue(true),
+      },
+      sessions,
+      events,
+      queues: {
+        getCurrentTurn: vi.fn().mockReturnValue(null),
+      },
+    };
+
+    const waiting = messageWait(ctx as never, makeReq({ timeout: "5" }) as never);
+    await Promise.resolve();
+
+    await events.append("user-1", {
+      type: "turn.started",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: {
+        turn_id: "turn-fresh",
+      },
+    });
+    await events.append("user-1", {
+      type: "turn.completed",
+      session: "sess-1",
+      thread_id: "th-1",
+      payload: {
+        turn_id: "turn-fresh",
+        status: "completed",
+      },
+    });
+
+    await expect(waiting).resolves.toMatchObject({
+      turn_id: "turn-fresh",
+      outcome: "completed",
+    });
+  });
+
   it("returns timeout when no matching terminal event arrives", async () => {
     vi.useFakeTimers();
     const dir = mkTmpDir();

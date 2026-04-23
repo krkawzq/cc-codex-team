@@ -26,7 +26,7 @@ codex-team daemon user create $TOKEN
 Daemon auto-spawns if it wasn't running. Response (concise default):
 
 ```json
-{"ok":true,"data":{"token":"claude-..."}}
+{"token":"claude-..."}
 ```
 
 Pass `--full` to also see `created_at`. If the user already exists (e.g. you reused a token from a prior conversation), you get `{"ok":false,"error":{"code":"user_already_exists",...}}` — treat as success.
@@ -45,10 +45,10 @@ codex-team -b $TOKEN session new demo \
 Response (concise default):
 
 ```json
-{"ok":true,"data":{"session":{"name":"demo","thread_id":"019db...","state":"live","model":"gpt-5.4","turn_count":0,"current_turn_id":null,"items_in_turn":0,"pending_approvals":0,"pending_user_inputs":0}}}
+{"name":"demo","thread_id":"019db..."}
 ```
 
-The session is now **live** (owned by the daemon and ready for turns). Pass `--full` to also see `cwd`, `sandbox`, `approval`, `effort`, `autoApprovePatterns`, `created_at`, and `last_active_at`.
+The session is now **live** (owned by the daemon and ready for turns). Pass `--full` to also see the full session record including `state`, `cwd`, `sandbox`, `approval`, `effort`, `autoApprovePatterns`, `created_at`, and `last_active_at`.
 
 Pick defaults consciously:
 
@@ -77,7 +77,7 @@ Monitor({
 })
 ```
 
-Events arrive as NDJSON lines. Every event has `id`, `ts`, `type`, `session`, `thread_id`, `payload`. Delta events (token-level stream) are filtered out by default — good.
+Events arrive as JSONL summary lines by default. Each line includes `id`, `ts`, `type`, `session`, and a type-specific `key`. Pass `--full` if you need raw event objects with `thread_id` and `payload`. Delta events (token-level stream) are filtered out by default — good.
 
 ## 5. Send your first prompt
 
@@ -88,20 +88,20 @@ codex-team -b $TOKEN message send demo "Review src/auth.ts and list every risky 
 Response (concise default — only the fields you need to correlate the turn or decide if it queued):
 
 ```json
-{"ok":true,"data":{"turn_id":"...","started":true,"queue_id":null,"queued_depth":0}}
+{"status":"started","turn_id":"..."}
 ```
 
-Pass `--full` to also see `session` and `thread_id` echo.
+If the session was already busy, the default response becomes `{"status":"queued","queue_id":"...","queued_depth":N}`. Pass `--full` to also see `session` and `thread_id` echo.
 
 The turn is now running. Your cli returned immediately. Watch the events panel:
 
 ```
-{"id":"evt-3","type":"turn.started","session":"demo",...}
-{"id":"evt-4","type":"item.started","payload":{"type":"reasoning",...}}
-{"id":"evt-5","type":"item.completed","payload":{"type":"reasoning","status":"completed"}}
-{"id":"evt-6","type":"item.started","payload":{"type":"agent_message",...}}
-{"id":"evt-7","type":"item.completed","payload":{"type":"agent_message","status":"completed"}}
-{"id":"evt-8","type":"turn.completed","payload":{"turn_id":"...","status":"completed","duration_ms":18420,"items_count":4,"token_usage":{...},"ended_at":1714300000,"turn_items_included":false}}
+{"id":"evt-3","ts":"...","type":"turn.started","session":"demo","key":"turn-1"}
+{"id":"evt-4","ts":"...","type":"item.started","session":"demo","key":"reasoning"}
+{"id":"evt-5","ts":"...","type":"item.completed","session":"demo","key":"reasoning"}
+{"id":"evt-6","ts":"...","type":"item.started","session":"demo","key":"agent_message"}
+{"id":"evt-7","ts":"...","type":"item.completed","session":"demo","key":"agent_message"}
+{"id":"evt-8","ts":"...","type":"turn.completed","session":"demo","key":"turn-1"}
 ```
 
 ## 6. Fetch the turn content
